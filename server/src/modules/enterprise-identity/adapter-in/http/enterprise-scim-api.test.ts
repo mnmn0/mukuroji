@@ -15,6 +15,9 @@ const {
 import {
   createEnterpriseScimGroupJobWorkerHandler,
 } from '../../../../handlers/enterprise-scim-group-job-worker-handler'
+import {
+  createInMemoryDeveloperPlatformAdapters,
+} from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type {
   ReconcileDirectoryWorkspaceMemberInput,
   WorkspaceAccessClient,
@@ -706,6 +709,61 @@ test('keeps a SCIM credential from taking over members it does not provision', a
         [],
       ),
     ).toMatchObject({ directoryManaged: false, deprovisioned: false })
+  })
+})
+
+test('revokes old API keys before SCIM reactivates a deactivated member (ADR 0095)', async () => {
+  await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    const workspaceId = 'workspace-scim-reactivation'
+    const scenario = await configureEnterpriseScimGuestRoleScenario(workspaceId)
+    const scimBaseUrl = `/api/scim/v2/${encodeURIComponent(workspaceId)}`
+    const scimHeaders = {
+      Authorization: `Bearer ${scenario.scimToken}`,
+      'Content-Type': 'application/scim+json',
+    }
+    const created = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers: { ...scimHeaders, 'Idempotency-Key': 'create-managed-user' },
+      body: JSON.stringify({
+        externalId: 'managed-user',
+        userName: 'managed@example.com',
+        displayName: 'Managed user',
+        emails: [{ value: 'managed@example.com', primary: true }],
+        active: true,
+      }),
+    })
+    expect(created.status).toBe(201)
+    const user = await created.json()
+    const member = scenario.members.get('managed@example.com')
+    if (!member) throw new Error('Expected the SCIM user to be provisioned.')
+    // The access expiry job deactivated the member without revoking their API key.
+    scenario.members.set('managed@example.com', { ...member, status: 'deactivated' })
+    const platform = createInMemoryDeveloperPlatformAdapters()
+    const apiKey = await platform.apiKeys.createApiKey({
+      workspaceId,
+      createdByUserId: 'managed@example.com',
+      input: { name: 'Old key', scopes: ['work-items:read'], expiresAt: '2027-01-01T00:00:00.000Z' },
+    })
+    setTestAppDependencies({ apiKeys: platform.apiKeys, oauthCredentials: platform.oauthCredentials })
+
+    const reapplied = await app.request(`${scimBaseUrl}/Users/${user.id}`, {
+      method: 'PATCH',
+      headers: { ...scimHeaders, 'Idempotency-Key': 'rename-managed-user', 'If-Match': 'W/"1"' },
+      body: JSON.stringify({
+        Operations: [{ op: 'replace', path: 'displayName', value: 'Managed user again' }],
+      }),
+    })
+
+    expect(reapplied.status).toBe(200)
+    expect(scenario.members.get('managed@example.com')?.status).toBe('active')
+    const keys = await platform.apiKeys.listApiKeys(workspaceId)
+    expect(keys.find((key) => key.id === apiKey.apiKey.id)?.status).toBe('revoked')
   })
 })
 

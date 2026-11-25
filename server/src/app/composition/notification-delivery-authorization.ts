@@ -3,6 +3,7 @@ import {
   authorizeNotificationDelivery,
   createNotificationDeliveryAuthorizationCache,
   isCurrentPlanningMilestoneNotification,
+  readMemberAccessExpiryNoticeFence,
   readTimesheetReminderFence,
   readWeeklyReportReminderFence,
   type AuditProjectionEvent,
@@ -62,6 +63,8 @@ export function createProductionNotificationDeliveryAuthorizer(
     if (!(await readTimesheetReminderFence(event, tables.timesheetReminders)).current) return false
     // Likewise the author may have submitted the weekly report since the schedule scanned the week.
     if (!(await readWeeklyReportReminderFence(event, tables.weeklyReportReminders)).current) return false
+    // An admin may have cleared or moved the member's access expiry since the notice was queued.
+    if (!(await readMemberAccessExpiryNoticeFence(event)).current) return false
     // A Milestone may have been archived or moved, or the recipient may have stopped watching it.
     if (!await isCurrentPlanningMilestoneNotification(event, tables.planningMilestones, delivery.memberKey)) return false
     return authorizeNotificationDelivery(event, delivery.memberKey, enterpriseIdentity, createNotificationDeliveryAuthorizationCache(),
@@ -72,7 +75,7 @@ export function createProductionNotificationDeliveryAuthorizer(
 /**
  * Rebuilds the projection event a queued delivery was saved from, for the delivery-time rechecks.
  * @param delivery - Queued external-channel delivery.
- * @returns The event fields the authorization and the timesheet and weekly report fences read.
+ * @returns The event fields the authorization and the timesheet, weekly report, and access expiry fences read.
  */
 export function toDeliveryProjectionEvent(delivery: ChannelDelivery): AuditProjectionEvent {
   const notification = delivery.notification
@@ -86,6 +89,8 @@ export function toDeliveryProjectionEvent(delivery: ChannelDelivery): AuditProje
     workItemReopenedAt: delivery.workItemReopenedAt,
     weeklyReportAuthorMemberKey: delivery.weeklyReportAuthorMemberKey,
     weeklyReportWeekStart: delivery.weeklyReportWeekStart,
+    accessExpiryMemberKey: delivery.accessExpiryMemberKey,
+    accessExpiresAt: delivery.accessExpiresAt,
     timeEntryIds: delivery.timeEntryIds,
     timesheetDueBefore: delivery.timesheetDueBefore,
     targetId: delivery.targetId,

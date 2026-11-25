@@ -1,6 +1,13 @@
 /** Developer Platform module public application and domain surface. */
 export * from './application/ports'
 export type { DeveloperPlatformPorts } from './application/developer-platform-ports'
+export {
+  listMemberActiveCredentials,
+  revokeMemberCredentials,
+  type MemberActiveCredentials,
+  type MemberCredentialRevocationPorts,
+  type MemberCredentialRevocationResult,
+} from './application/member-credential-revocation'
 export type { IdempotencyCompletionTransactWrite } from './adapter-out/dynamodb/developer-platform-transaction-port'
 export { API_SCOPES } from './domain/credential-policy'
 export { DeveloperPlatformError } from './errors'

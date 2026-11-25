@@ -57,6 +57,10 @@ describe('Email notification composition', () => {
     expect(await reader({ status: 'active' }, { UserAttributes: [attributes[0]] }).read(delivery, AbortSignal.timeout(5_000))).toEqual({ kind: 'unverified' })
     expect(await reader({ status: 'active' }, { Enabled: false, UserAttributes: attributes }).read(delivery, AbortSignal.timeout(5_000))).toEqual({ kind: 'missing' })
     expect(await reader({ status: 'removed' }, { UserAttributes: attributes }).read(delivery, AbortSignal.timeout(5_000))).toEqual({ kind: 'missing' })
+    // An expired member gets no mail even while a pending handover keeps the row active (ADR 0095).
+    const expired = reader({ status: 'active', accessExpiresAt: '2020-01-01T00:00:00.000Z' }, { Enabled: true, UserAttributes: attributes })
+    expect(await expired.read(delivery, AbortSignal.timeout(5_000))).toEqual({ kind: 'missing' })
+    expect(expired.usernames).toEqual([])
     expect(await reader({ status: 'active' }, Object.assign(new Error('gone'), { name: 'UserNotFoundException' })).read(delivery, AbortSignal.timeout(5_000))).toEqual({ kind: 'missing' })
     await expect(reader({ status: 'active' }, new Error('Cognito down')).read(delivery, AbortSignal.timeout(5_000))).rejects.toThrow('Cognito down')
   })

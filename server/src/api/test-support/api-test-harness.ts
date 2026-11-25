@@ -728,6 +728,9 @@ function createWorkspaceAccessFake(
     reconcileAuthenticatedMember: unsupported,
     updateMember: unsupported,
     updateMemberName: unsupported,
+    updateMemberAccessExpiry: unsupported,
+    listMembersWithAccessExpiringBefore: unsupported,
+    expireMember: unsupported,
     recordMemberCredentialAction: unsupported,
     markMemberCredentialActionApplying: async () => undefined,
     readMemberCredentialActionProgress: async () => 'none',
@@ -735,6 +738,8 @@ function createWorkspaceAccessFake(
     revokeMemberSignIns: async () => undefined,
     recordMemberSignIn: async () => undefined,
     reconcileDirectoryMember: unsupported,
+    findMemberCredentialRevocation: async () => undefined,
+    recordMemberCredentialRevocation: async () => undefined,
     deprovisionDirectoryMember: unsupported,
     ...overrides,
   } satisfies Required<WorkspaceAccessClient>
@@ -3784,6 +3789,8 @@ async function configureEnterpriseScimGuestRoleScenario(
   ])
   const reconciledRoles: WorkspaceRole[] = []
   const reconcileAuditContexts: MutationAuditContext[] = []
+  /** Credential revocations the SCIM group worker asked for, as `memberKey:actorId`. */
+  const credentialRevocations: string[] = []
   let reconcileFailures = 0
   let afterNextDirectoryReconcile: (() => Promise<void>) | undefined
   const planningClient = new InMemoryPlanningClient()
@@ -3910,9 +3917,14 @@ async function configureEnterpriseScimGuestRoleScenario(
           return undefined
         },
       },
+      async revokeMemberCredentials(_workspaceId, memberKey, actorId) {
+        credentialRevocations.push(`${memberKey}:${actorId}`)
+        return { revokedApiKeyIds: [], revokedOAuthAppIds: [] }
+      },
     }),
   )
   return {
+    credentialRevocations,
     identity,
     members,
     reconcileAuditContexts,

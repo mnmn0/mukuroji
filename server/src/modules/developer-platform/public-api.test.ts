@@ -259,6 +259,8 @@ function createTestRouter(input: {
   authenticateManagement?: PublicApiDependencies['authenticateManagement']
   /** Workspace lifecycle guard used by the focused router test. */
   enforceActiveWorkspace?: PublicApiDependencies['enforceActiveWorkspace']
+  /** Credential owner membership guard used by the deactivated-owner test. */
+  requireActiveCredentialSubject?: PublicApiDependencies['requireActiveCredentialSubject']
   /** Credential request limiter used by admission-order tests. */
   rateLimits?: PublicApiDependencies['rateLimits']
   platform?: InMemoryDeveloperPlatformStorage
@@ -275,6 +277,9 @@ function createTestRouter(input: {
     authenticateManagement: input.authenticateManagement ??
       (async () => input.managementPrincipal ?? managementPrincipal),
     enforceActiveWorkspace: input.enforceActiveWorkspace ?? (async () => undefined),
+    ...(input.requireActiveCredentialSubject
+      ? { requireActiveCredentialSubject: input.requireActiveCredentialSubject }
+      : {}),
     workItems: input.workItems ?? createDefaultWorkItemService(),
     ...(input.agentRuns ? { agentRuns: input.agentRuns } : {}),
     ...(input.agentTelemetry ? { agentTelemetry: input.agentTelemetry } : {}),
@@ -543,6 +548,30 @@ describe('public API router', () => {
       detail: 'This Workspace is closing.',
     })
     expect(observations).toEqual(['workspace-1'])
+  })
+
+  test('refuses a credential whose owner is no longer an active member', async () => {
+    const subjects: string[] = []
+    let ownerActive = true
+    const { platform, router } = createTestRouter({
+      async requireActiveCredentialSubject(credential) {
+        subjects.push(`${credential.workspaceId}/${credential.subjectUserId}`)
+        if (!ownerActive) {
+          throw new PublicApiServiceError(403, 'forbidden', 'The credential owner is not an active Workspace member.')
+        }
+      },
+    })
+    const apiKey = await createApiKey(platform, ['work-items:read'])
+    const request = () => router.request('http://localhost/v1/work-items?teamId=team-1', {
+      headers: { Authorization: `Bearer ${apiKey.secret}` },
+    })
+
+    expect((await request()).status).toBe(200)
+    ownerActive = false
+    const refused = await request()
+    expect(refused.status).toBe(403)
+    expect(await refused.json()).toMatchObject({ code: 'forbidden' })
+    expect(subjects).toEqual(['workspace-1/user-1', 'workspace-1/user-1'])
   })
 
   test('returns canonical schedules, including explicitly unscheduled Work Items', async () => {
