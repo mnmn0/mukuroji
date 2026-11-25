@@ -4,6 +4,7 @@ import {
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEMA_VERSION,
   type AgentRun,
+  type AgentRunReport,
   type ApiScope,
   type CanonicalWorkItem,
   type CustomFieldDefinition,
@@ -4155,6 +4156,34 @@ describe('public Agent Run routes', () => {
     ])
     expect((await router.request('/v1/agent-runs?teamId=team-1&state=stalled', { headers })).status).toBe(400)
     expect((await router.request('/v1/agent-runs?teamId=team-1&state=finished&workItemId=work-item-1', { headers })).status).toBe(400)
+  })
+
+  test('lists a Work Item\'s agent questions with their answers without caching them', async () => {
+    const question = {
+      schemaVersion: 1, runId: agentRunFixture.runId, teamId: 'team-1', workItemId: 'work-item-1', sequence: 2, kind: 'blocker',
+      commentId: 'cmt_2', verifications: [], artifacts: [], createdAt: NOW.toISOString(),
+      answer: { body: 'Use staging.', answeredBy: 'user-1', answeredAt: NOW.toISOString(), commentId: 'cmt_3' },
+    } satisfies AgentRunReport
+    const { platform, router } = createTestRouter({ agentRuns: createAgentRunService({
+      async listWorkItemQuestions(_credential, teamId, workItemId) {
+        expect([teamId, workItemId]).toEqual(['team-1', 'work-item-1'])
+        return { items: [question], hasMore: false }
+      },
+    }) })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const listed = await router.request('/v1/work-items/work-item-1/agent-run-questions?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    expect(listed.status).toBe(200)
+    expect(listed.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(await listed.json()).toEqual({ items: [question], hasMore: false })
+    expect((await router.request('/v1/work-items/work-item-1/agent-run-questions', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })).status).toBe(400)
+    const unconfigured = createTestRouter({ platform, agentRuns: createAgentRunService() })
+    expect((await unconfigured.router.request('/v1/work-items/work-item-1/agent-run-questions?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })).status).toBe(503)
   })
 
   test('passes Agent Run fences to updates and comments without changing the patch', async () => {

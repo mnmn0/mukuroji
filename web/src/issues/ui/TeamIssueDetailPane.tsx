@@ -383,8 +383,10 @@ function IssueDetailContent({
   }, [issue.id, onCommentDraftDirtyChange])
   const agentRunReports = useAgentRunReportCommentDetails({
     accessToken: softwareFactoryEnabled ? accessToken : undefined,
+    canAnswer: collaboration?.capabilities.canComment ?? false,
     commentCount: collaboration?.comments.length ?? 0,
     locale,
+    onAnswered: collaboration?.refresh,
     teamId: issue.teamId,
     workItemId: issue.id,
   })

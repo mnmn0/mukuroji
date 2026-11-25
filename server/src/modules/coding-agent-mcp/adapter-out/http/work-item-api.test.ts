@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { createAgentWorkItemApi } from './work-item-api'
 import { createAgentTasks } from '../../application/agent-tasks'
 import type { AgentDocument } from '../../application/work-item-api'
-import type { PublicProjectCharter } from '@mukuroji/contracts'
+import type { AgentRunReport, PublicProjectCharter } from '@mukuroji/contracts'
 
 const config = { origin: 'https://mukuroji.example.test', token: 'secret-test-token', teamId: 'team' }
 const validTask = { id: 'task', teamId: 'team', revision: 1, title: 'Task', assigneeUserId: 'agent',
@@ -284,6 +284,36 @@ test('reads linked Documents from their endpoints and treats an older server as 
   await expect(api.document('task', 'other')).rejects.toMatchObject({ code: 'invalid_response' })
   await expect(api.document('task', 'board')).rejects.toMatchObject({ code: 'invalid_response' })
   await expect(api.document('task', 'missing')).rejects.toMatchObject({ code: 'not_found' })
+})
+
+test('reads a task\'s agent questions with their answers and treats an older server as having none', async () => {
+  const paths: string[] = []
+  const answer = { body: 'Ship it.', answeredBy: 'member', answeredAt: '2026-09-01T00:10:00.000Z', commentId: 'cmt_3' }
+  const question: AgentRunReport = {
+    schemaVersion: 1, runId: 'run_00000000-0000-4000-8000-000000000001', teamId: 'team', workItemId: 'task', sequence: 2,
+    kind: 'handoff', commentId: 'cmt_2', verifications: [], artifacts: [], createdAt: '2026-09-01T00:00:00.000Z',
+    answer,
+  }
+  // An answer comment edited to the comment limit stays readable.
+  const edited: AgentRunReport = { ...question, workItemId: 'edited', answer: { ...answer, body: 'a'.repeat(20_000) } }
+  const api = createAgentWorkItemApi(config, async (url) => {
+    paths.push(`${url.pathname}${url.search}`)
+    switch (url.pathname) {
+      case '/api/v1/work-items/task/agent-run-questions':
+        return Response.json({ items: [question], hasMore: false })
+      case '/api/v1/work-items/other/agent-run-questions':
+        return Response.json({ items: [question], hasMore: false })
+      case '/api/v1/work-items/edited/agent-run-questions':
+        return Response.json({ items: [edited], hasMore: false })
+      default:
+        return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
+    }
+  })
+  expect(await api.questions('task')).toEqual({ items: [question], hasMore: false })
+  expect(paths[0]).toBe('/api/v1/work-items/task/agent-run-questions?teamId=team')
+  expect(await api.questions('legacy')).toBeUndefined()
+  await expect(api.questions('other')).rejects.toMatchObject({ code: 'invalid_response' })
+  expect((await api.questions('edited'))?.items[0]?.answer?.body).toHaveLength(20_000)
 })
 
 test('reads task attachments from their endpoints and treats an older server as having none', async () => {

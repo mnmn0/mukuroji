@@ -305,6 +305,12 @@ export interface AgentWorkItemApi {
    */
   relatedDocuments(id: string, cursor?: string, limit?: number): Promise<AgentPage<AgentTaskDocument> | undefined>
   /**
+   * Lists the newest blocker and handoff reports of a task with the answers people recorded.
+   * @param id - Task ID.
+   * @returns The questions, or `undefined` when the server predates the endpoint.
+   */
+  questions(id: string): Promise<AgentTaskQuestions | undefined>
+  /**
    * Reads the charter and lifecycle state of a Project of the configured Team.
    * @param projectId - Project ID.
    * @returns The charter, or `undefined` when the server predates the endpoint.
@@ -331,6 +337,14 @@ export interface AgentWorkItemApi {
    * @returns The download URL and its expiry.
    */
   attachmentDownload(id: string, fileId: string): Promise<AgentAttachmentDownload>
+}
+
+/** Newest blocker and handoff reports of a task, with the answers people recorded, as get_task shows them. */
+export type AgentTaskQuestions = {
+  /** Questions, newest first. */
+  items: AgentRunReport[]
+  /** True when older questions were left out. */
+  hasMore: boolean
 }
 
 /** File attached to a task, as get_task and list_task_attachments show it. The name is user data. */

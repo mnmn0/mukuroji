@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(653)
-  expect(new Set(inventory).size).toBe(649)
+  expect(inventory).toHaveLength(656)
+  expect(new Set(inventory).size).toBe(652)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -147,6 +147,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-item-keys/:key')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-runs')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-run-reports')
+  expect(inventory).toContain('POST /api/teams/:teamId/work-items/:workItemId/agent-runs/:runId/reports/:sequence/answer')
+  expect(inventory).toContain('GET /api/v1/work-items/:workItemId/agent-run-questions')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-runs')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-runs/analytics')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-runs/history')
@@ -212,6 +214,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '3b596839416cb15e6623178a139ff0379b9032e78a72549a602c0a5b80315c16',
+    '446f461042ea5caaf5a33ced43322cae5123aab9988b822d0bf390b5bb3c2ded',
   )
 })

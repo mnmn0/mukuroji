@@ -10,6 +10,7 @@ import {
   type AgentRunHistoryFilters,
   type AgentRunOutcome,
   type AgentRunReport,
+  type AgentRunReportAnswer,
   type AgentRunRuntime,
   type AgentRunUsage,
   type AgentRunVerification,
@@ -553,6 +554,41 @@ export async function releaseAgentRun(
 }
 
 /**
+ * Records a member's answer to a blocker or handoff report. The server saves it on the report and as
+ * the member's comment on the Work Item, so the answer reaches the agent and the conversation.
+ *
+ * @param accessToken - Session access token.
+ * @param teamId - Team that owns the Work Item.
+ * @param report - Report being answered.
+ * @param body - Answer text.
+ * @param mutationContext - Idempotency and correlation identifiers shared by retries.
+ * @returns The answered report.
+ */
+export async function answerAgentRunReport(
+  accessToken: string,
+  teamId: string,
+  report: Pick<AgentRunReport, 'runId' | 'sequence' | 'workItemId'>,
+  body: string,
+  mutationContext: MutationRequestContext,
+): Promise<AgentRunReport> {
+  const data = await requestJson(
+    `${apiBaseUrl}/teams/${encodeURIComponent(teamId)}/work-items/${encodeURIComponent(report.workItemId)}` +
+      `/agent-runs/${encodeURIComponent(report.runId)}/reports/${report.sequence}/answer`,
+    accessToken,
+    {
+      method: 'POST',
+      headers: { ...createMutationHeaders(mutationContext), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    },
+  )
+  const answered = isRecord(data) ? readAgentRunReport(data.report) : undefined
+  if (!answered?.answer || answered.runId !== report.runId || answered.sequence !== report.sequence) {
+    throw new WorkItemConfigurationApiError(502, 'The report answer returned an unexpected response.')
+  }
+  return answered
+}
+
+/**
  * Validates one run from an untrusted response.
  *
  * @param value - Unknown JSON value.
@@ -654,6 +690,8 @@ function readAgentRunReport(value: unknown): AgentRunReport | undefined {
   const validVerifications = verifications.filter((item): item is AgentRunVerification => item !== undefined)
   const validArtifacts = artifacts.filter((item): item is AgentRunArtifact => item !== undefined)
   if (validVerifications.length !== verifications.length || validArtifacts.length !== artifacts.length) return undefined
+  const answer = value.answer === undefined ? undefined : readReportAnswer(value.answer)
+  if (value.answer !== undefined && !answer) return undefined
   return {
     schemaVersion: 1,
     runId,
@@ -666,7 +704,27 @@ function readAgentRunReport(value: unknown): AgentRunReport | undefined {
     artifacts: validArtifacts,
     ...(value.changedFileCount === undefined ? {} : { changedFileCount: value.changedFileCount }),
     createdAt,
+    ...(answer === undefined ? {} : { answer }),
   }
+}
+
+/**
+ * Validates a person's answer saved on a report.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The answer, or undefined when the shape is not supported.
+ */
+function readReportAnswer(value: unknown): AgentRunReportAnswer | undefined {
+  if (!isRecord(value)) return undefined
+  const { body, answeredBy, answeredAt, commentId } = value
+  if (
+    typeof body !== 'string' || body === '' || typeof answeredBy !== 'string' || answeredBy === '' ||
+    typeof answeredAt !== 'string' || !Number.isFinite(Date.parse(answeredAt)) ||
+    typeof commentId !== 'string' || commentId === ''
+  ) {
+    return undefined
+  }
+  return { body, answeredBy, answeredAt, commentId }
 }
 
 /**

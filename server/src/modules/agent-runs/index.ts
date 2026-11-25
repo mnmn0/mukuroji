@@ -47,6 +47,8 @@ export {
 } from './domain/agent-run-analytics'
 export {
   createAgentRunReportCommentBody,
+  isAgentRunQuestionReport,
+  readAnswerAgentRunReportRequest,
   readAgentRunArtifactUrl,
   readReportAgentRunRequest,
   toAgentRunReport,

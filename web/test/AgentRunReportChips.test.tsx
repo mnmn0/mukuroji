@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { listWorkItemAgentRunReports } from '../src/work-items/api/agentRuns'
+import { answerAgentRunReport, listWorkItemAgentRunReports } from '../src/work-items/api/agentRuns'
 import { agentRunHandoffReportFixture, agentRunReportFixture } from '../src/work-items/agentRunFixtures'
 import {
   indexAgentRunReportsByComment,
@@ -54,6 +54,60 @@ describe('Agent Run report API', () => {
       answerWith({ items, hasMore: false })
       await expect(listWorkItemAgentRunReports('token', 'core', 'task-1')).rejects.toMatchObject({ status: 502 })
     }
+  })
+})
+
+describe('Agent Run report answers', () => {
+  const answer = { body: 'Use staging.', answeredBy: 'member', answeredAt: '2026-10-22T00:10:00.000Z', commentId: 'comment-3' }
+
+  test('posts the answer with its idempotency key and reads the answered report', async () => {
+    const requests: { url: string; init?: RequestInit }[] = []
+    globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(input), init })
+      return new Response(JSON.stringify({ report: { ...agentRunHandoffReportFixture, answer } }), {
+        status: 201, headers: { 'Content-Type': 'application/json' },
+      })
+    }, { preconnect: originalFetch.preconnect })
+    const answered = await answerAgentRunReport('token', 'core', agentRunHandoffReportFixture, 'Use staging.', {
+      idempotencyKey: 'key-1', correlationId: 'correlation-1',
+    })
+    expect(answered.answer).toEqual(answer)
+    expect(requests[0]?.url).toEndWith(
+      `/teams/core/work-items/${encodeURIComponent(agentRunHandoffReportFixture.workItemId)}/agent-runs/` +
+        `${agentRunHandoffReportFixture.runId}/reports/${agentRunHandoffReportFixture.sequence}/answer`,
+    )
+    expect(requests[0]?.init?.method).toBe('POST')
+    expect(requests[0]?.init?.body).toBe(JSON.stringify({ body: 'Use staging.' }))
+    expect(new Headers(requests[0]?.init?.headers).get('Idempotency-Key')).toBe('key-1')
+  })
+
+  test('reads a saved answer with its report and rejects a malformed one', async () => {
+    answerWith({ items: [{ ...agentRunHandoffReportFixture, answer }], hasMore: false })
+    expect((await listWorkItemAgentRunReports('token', 'core', 'task-1')).items[0]?.answer).toEqual(answer)
+    answerWith({ items: [{ ...agentRunHandoffReportFixture, answer: { ...answer, body: '' } }], hasMore: false })
+    await expect(listWorkItemAgentRunReports('token', 'core', 'task-1')).rejects.toMatchObject({ status: 502 })
+    answerWith({ report: agentRunHandoffReportFixture })
+    await expect(answerAgentRunReport('token', 'core', agentRunHandoffReportFixture, 'x', {
+      idempotencyKey: 'key-2', correlationId: 'correlation-2',
+    })).rejects.toMatchObject({ status: 502 })
+  })
+
+  test('offers the answer form only on a waiting question and marks an answered one', () => {
+    const onAnswer = async () => 'saved' as const
+    const waiting = renderToStaticMarkup(<AgentRunReportChips labels={labels} onAnswer={onAnswer} report={agentRunHandoffReportFixture} />)
+    expect(waiting).toContain(`>${labels.answer.open}</button>`)
+    const readOnly = renderToStaticMarkup(<AgentRunReportChips labels={labels} report={agentRunHandoffReportFixture} />)
+    expect(readOnly).not.toContain(`>${labels.answer.open}</button>`)
+    const answered = renderToStaticMarkup(
+      <AgentRunReportChips labels={labels} onAnswer={onAnswer} report={{ ...agentRunHandoffReportFixture, answer }} />,
+    )
+    expect(answered).toContain(`<span>${labels.answer.answered}</span>`)
+    expect(answered).not.toContain(labels.decisionNeeded)
+    expect(answered).not.toContain(`>${labels.answer.open}</button>`)
+    expect(answered).not.toContain('workbench-badge-warning')
+    const progress = renderToStaticMarkup(<AgentRunReportChips labels={labels} onAnswer={onAnswer} report={agentRunReportFixture} />)
+    expect(progress).not.toContain(`>${labels.answer.open}</button>`)
+    expect(createAgentRunReportChipsLabels('ja').answer.open).toBe('回答する')
   })
 })
 
