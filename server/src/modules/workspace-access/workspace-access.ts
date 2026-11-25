@@ -2747,10 +2747,12 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
    * @param targetMemberKey - Member whose expiry changes.
    * @param input - New expiry (undefined clears it) and the member version read before the change.
    * @param auditContext - Audit context of the request.
-   * @returns The updated member, or the unchanged member when the expiry is the same.
+   * @returns The updated member, the unchanged member when the expiry is the same, or the current
+   *   member when a retry finds that the same request already committed.
    * @throws WorkspaceAccessError 403 `WorkspaceRoleDenied` when the actor may not manage the
    *   target, 409 `WorkspaceMemberAccessExpiryNotAllowed` for an owner, a deactivated member, or
-   *   the actor, and 409 `WorkspaceVersionConflict` when the member changed since it was read.
+   *   the actor, 409 `WorkspaceVersionConflict` when the member changed since it was read, and 409
+   *   `WorkspaceIdempotencyConflict` when the idempotency key was used for another change.
    */
   async updateMemberAccessExpiry(
     workspaceId: string,
@@ -2779,6 +2781,14 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       )
     }
     if (target.version !== input.expectedVersion) {
+      const replayed = await this.findReplayedMemberUpdate(
+        normalizedWorkspaceId,
+        target,
+        'member.access-expiry-changed',
+        input.expectedVersion,
+        auditContext,
+      )
+      if (replayed) return replayed
       throw new WorkspaceAccessError(
         409,
         'WorkspaceVersionConflict',
@@ -2846,6 +2856,18 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       return nextMember
     } catch (error) {
       if (isConditionalTransactionCancellation(error)) {
+        // A concurrent send of the same request may have committed first.
+        const current = await this.getMember(normalizedWorkspaceId, target.memberKey)
+        const replayed = current
+          ? await this.findReplayedMemberUpdate(
+            normalizedWorkspaceId,
+            current,
+            'member.access-expiry-changed',
+            input.expectedVersion,
+            auditContext,
+          )
+          : undefined
+        if (replayed) return replayed
         await this.classifyMemberUpdateConflict(
           normalizedWorkspaceId,
           actor,
@@ -3089,7 +3111,13 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
     const name = normalizeOptional(input.name)
     if (target.version !== input.expectedVersion) {
-      const replayed = await this.findReplayedMemberRename(normalizedWorkspaceId, target, input, auditContext)
+      const replayed = await this.findReplayedMemberUpdate(
+        normalizedWorkspaceId,
+        target,
+        'member.renamed',
+        input.expectedVersion,
+        auditContext,
+      )
       if (replayed) return replayed
       throw new WorkspaceAccessError(
         409,
@@ -3169,7 +3197,14 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         const current = await this.getMember(normalizedWorkspaceId, target.memberKey)
         // The event can exist at the expected version when the key was first used for an unchanged name.
         const replayed = current
-          ? await this.findReplayedMemberRename(normalizedWorkspaceId, current, input, auditContext, true)
+          ? await this.findReplayedMemberUpdate(
+            normalizedWorkspaceId,
+            current,
+            'member.renamed',
+            input.expectedVersion,
+            auditContext,
+            true,
+          )
           : undefined
         if (replayed) return replayed
         await this.classifyMemberUpdateConflict(
@@ -3241,7 +3276,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       if (isConditionalTransactionCancellation(error)) {
         const current = await this.getMember(workspaceId, target.memberKey)
         const replayed = current
-          ? await this.findReplayedMemberRename(workspaceId, current, input, auditContext, true)
+          ? await this.findReplayedMemberUpdate(workspaceId, current, 'member.renamed', input.expectedVersion, auditContext, true)
           : undefined
         if (replayed) return replayed
         await this.classifyMemberUpdateConflict(workspaceId, actor, target, input.expectedVersion, false)
@@ -3251,31 +3286,34 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   }
 
   /**
-   * Recognizes a retry of a rename that already committed, so that a lost response does not turn
-   * a saved name into a version conflict. The rename's audit event has an ID derived from the
-   * request's idempotency key and records the version the change started from; finding it proves
-   * that this request, not a concurrent edit, moved the member past the expected version.
+   * Recognizes a retry of a member update, such as a rename or an access expiry change, that
+   * already committed, so that a lost response does not turn a saved change into a version
+   * conflict. The update's audit event has an ID derived from the request's idempotency key and
+   * records the version the change started from; finding it proves that this request, not a
+   * concurrent edit, moved the member past the expected version.
    *
    * @param workspaceId - Normalized Workspace ID.
    * @param current - Member row as it is now.
-   * @param input - Requested change, with the version it was based on.
+   * @param eventType - Audit event type the update writes, such as `member.renamed`.
+   * @param expectedVersion - Member version the request was based on.
    * @param auditContext - Audit context of the request, carrying its idempotency key.
    * @param atAnyVersion - Also look when the member is still at the expected version, which only an
-   *   unchanged-name request leaves behind; otherwise such a member cannot have been renamed yet.
+   *   unchanged-name request leaves behind; otherwise such a member cannot have been updated yet.
    * @returns The current member when the request already committed, otherwise undefined.
    * @throws WorkspaceAccessError 409 when the same idempotency key was used for another change.
    */
-  private async findReplayedMemberRename(
+  private async findReplayedMemberUpdate(
     workspaceId: string,
     current: WorkspaceMember,
-    input: UpdateWorkspaceMemberNameInput,
+    eventType: 'member.renamed' | 'member.access-expiry-changed',
+    expectedVersion: number,
     auditContext: MutationAuditContext | undefined,
     atAnyVersion = false,
   ): Promise<WorkspaceMember | undefined> {
     if (!this.auditTableName || !auditContext) return undefined
-    if (!atAnyVersion && current.version <= input.expectedVersion) return undefined
+    if (!atAnyVersion && current.version <= expectedVersion) return undefined
     const entityId = this.createMemberAuditEntityId(workspaceId, current.memberKey)
-    const eventId = createAuditEventId(auditContext, 'member.renamed', { type: 'member', id: entityId }, 0)
+    const eventId = createAuditEventId(auditContext, eventType, { type: 'member', id: entityId }, 0)
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.auditTableName,
       Key: { directoryId: workspaceId, eventId },
@@ -3283,13 +3321,13 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }))
     if (!response.Item) return undefined
     const event = normalizeAuditEvent(response.Item)
-    if (event.eventType !== 'member.renamed' || event.entity.id !== entityId) return undefined
-    // The request fingerprint covers the requested name and version, so the same key sent with
+    if (event.eventType !== eventType || event.entity.id !== entityId) return undefined
+    // The request fingerprint covers the requested change and version, so the same key sent with
     // another change is refused whatever happened to the member since.
     if (
       event.requestFingerprint !== auditContext.requestFingerprint ||
       event.actor.id !== auditContext.actor.id ||
-      event.metadata?.expectedVersion !== input.expectedVersion
+      event.metadata?.expectedVersion !== expectedVersion
     ) {
       throw new WorkspaceAccessError(
         409,

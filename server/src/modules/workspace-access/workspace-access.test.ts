@@ -3806,6 +3806,81 @@ test('binds the idempotency key of an unchanged-name request to its input', asyn
   )).rejects.toMatchObject({ status: 409, code: 'WorkspaceIdempotencyConflict' })
 })
 
+/**
+ * Builds the audit context of an access expiry request whose fingerprint covers the requested change.
+ *
+ * @param idempotencyKey - Idempotency key of the request.
+ * @param accessExpiresAt - Requested expiry, or null to clear it.
+ * @returns Audit context of the request.
+ */
+function createAccessExpiryAuditContext(idempotencyKey: string, accessExpiresAt: string | null) {
+  return createMutationAuditContext({
+    workspaceId,
+    actor: { id: 'sub-demo', kind: 'user', displayName: 'demo@example.com' },
+    idempotencyKey,
+    occurredAt: now.toISOString(),
+    request: {
+      method: 'PUT',
+      path: '/api/workspace/members/guest@example.com/access-expiry',
+      body: { expectedVersion: 1, memberKey: 'guest@example.com', accessExpiresAt },
+    },
+    source: { kind: 'api' },
+  })
+}
+
+test('returns the saved member when a committed access expiry change is retried with the same idempotency key', async () => {
+  const owner = createWorkspaceMember('demo@example.com', 'owner')
+  const guest = createWorkspaceMember('guest@example.com', 'guest')
+  const expiry = '2026-08-01T00:00:00.000Z'
+  const first = createMemberNameClient([owner, guest])
+  await first.client.updateMemberAccessExpiry(
+    workspaceId,
+    owner.memberKey,
+    guest.memberKey,
+    { accessExpiresAt: expiry, expectedVersion: 1 },
+    createAccessExpiryAuditContext('expiry-retry', expiry),
+  )
+  const transactItems = first.inputs[0]?.TransactItems
+  const auditPut = Array.isArray(transactItems) ? transactItems[2] : undefined
+  const auditItem = typeof auditPut === 'object' && auditPut !== null && 'Put' in auditPut
+    ? auditPut.Put.Item
+    : undefined
+  expect(auditItem).toMatchObject({
+    eventType: 'member.access-expiry-changed',
+    metadata: { expectedVersion: 1 },
+  })
+  const saved = { ...guest, accessExpiresAt: expiry, version: 2 }
+  const retry = createMemberNameClient([owner, saved], auditItem ? [auditItem] : [])
+
+  // The response was lost; the same request again returns the saved member without writing.
+  await expect(retry.client.updateMemberAccessExpiry(
+    workspaceId,
+    owner.memberKey,
+    guest.memberKey,
+    { accessExpiresAt: expiry, expectedVersion: 1 },
+    createAccessExpiryAuditContext('expiry-retry', expiry),
+  )).resolves.toEqual(saved)
+  expect(retry.inputs).toEqual([])
+
+  // Another key at the old version is still a version conflict.
+  await expect(retry.client.updateMemberAccessExpiry(
+    workspaceId,
+    owner.memberKey,
+    guest.memberKey,
+    { accessExpiresAt: expiry, expectedVersion: 1 },
+    createAccessExpiryAuditContext('expiry-other', expiry),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceVersionConflict' })
+  // The same key with another expiry is refused rather than taken as saved.
+  await expect(retry.client.updateMemberAccessExpiry(
+    workspaceId,
+    owner.memberKey,
+    guest.memberKey,
+    { expectedVersion: 1 },
+    createAccessExpiryAuditContext('expiry-retry', null),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceIdempotencyConflict' })
+  expect(retry.inputs).toEqual([])
+})
+
 test('lists every member row, deactivated members included, for name readers', async () => {
   const active = createWorkspaceMember('sato@example.com', 'member')
   const deactivated = { ...createWorkspaceMember('suzuki@example.com', 'member', 'deactivated'), name: '鈴木 改名' }
