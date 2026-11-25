@@ -10,12 +10,14 @@ import {
 } from './document-content'
 
 /**
- * Stands in for the Markdown parser in pages without raw HTML or open blocks; the export escaping
- * itself is tested with the real parser next to the DynamoDB client.
+ * Stands in for the Markdown parser in pages without raw HTML, open blocks, or references; the
+ * export escaping itself is tested with the real parser next to the DynamoDB client.
  */
 const plainMarkdownInspector: MarkdownInspector = {
   findHtml: () => [],
   findOpenBlock: () => undefined,
+  localizeReferences: (text) => text,
+  startsBlockAt: () => true,
 }
 
 test('reduces independent stale-base operations without mutating the input snapshot', () => {

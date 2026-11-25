@@ -6008,6 +6008,84 @@ test('exports the text of an HTML node as literal Markdown that imports back unc
   expect(renderDocumentExport(imported, 'markdown', markdownInspector).content).toBe(exported)
 })
 
+test('keeps each paragraph block\'s references, footnotes, and indentation to itself in the export', () => {
+  const page = createPage({
+    blocks: [
+      { id: 'block-1', type: 'paragraph', text: '[guide][ref]\n\n[ref]: https://example.com/a' },
+      { id: 'block-2', type: 'paragraph', text: '[guide][ref]\n\n[ref]: https://example.com/b "B & \\"t\\""' },
+      { id: 'block-3', type: 'paragraph', text: '[ref][] and [ref] and [![pic][img]][ref]\n\n[ref]: </c d>\n[img]: /i.png' },
+      { id: 'block-4', type: 'paragraph', text: 'text [nodef] here' },
+      { id: 'block-5', type: 'paragraph', text: '[nodef]: https://example.com/leak' },
+      { id: 'block-6', type: 'paragraph', text: 'note[^n]\n\n[^n]: first' },
+      { id: 'block-7', type: 'paragraph', text: 'other[^n]\n\n[^n]: second' },
+      { id: 'block-8', type: 'paragraph', text: '- item' },
+      { id: 'block-9', type: 'paragraph', text: '[unused]: /u' },
+      { id: 'block-10', type: 'paragraph', text: '  continued' },
+    ],
+  })
+  const exported = renderDocumentExport(page, 'markdown', markdownInspector).content
+  // A link or image that used a definition of its block becomes inline, and the definitions go,
+  // so the first definition of a label in the file no longer wins for every block.
+  const expectedBlocks = [
+    '[guide](<https://example.com/a>)',
+    '[guide](<https://example.com/b> "B \\& \\"t\\"")',
+    '[ref](</c d>) and [ref](</c d>) and [![pic](</i.png>)](</c d>)',
+    'text [nodef] here',
+    // The block that held only a definition shows nothing and is left out.
+    'note[^5-1]\n\n[^5-1]: first',
+    'other[^6-1]\n\n[^6-1]: second',
+    '- item',
+    '&#32;&#32;continued',
+  ]
+  expect(exported).toBe(`# Document\n\n${expectedBlocks.join('\n\n')}\n`)
+  const links = readMarkdownNodes(exported)
+    .filter((node) => node.type === 'link' || node.type === 'image')
+    .map((node) => [node.type, node.url, node.title ?? null])
+  expect(links).toEqual([
+    ['link', 'https://example.com/a', null],
+    ['link', 'https://example.com/b', 'B & "t"'],
+    ['link', '/c d', null],
+    ['link', '/c d', null],
+    ['link', '/c d', null],
+    ['image', '/i.png', null],
+  ])
+  // A label with no definition in its block stays text, as the app shows it.
+  expect(readMarkdownNodes(exported).some((node) => node.type === 'linkReference')).toBe(false)
+  // Each block's footnote points at its own definition.
+  expect(readMarkdownNodes(exported)
+    .filter((node) => node.type === 'footnoteDefinition')
+    .map((node) => node.identifier)).toEqual(['5-1', '6-1'])
+  // The indented block starts its own paragraph instead of continuing the list item.
+  expect(readMarkdownNodes(exported).filter((node) => node.type === 'listItem')).toHaveLength(1)
+  expect(readMarkdownText('&#32;&#32;continued')).toBe('  continued')
+  expect(findMarkdownHtml(exported)).toEqual([])
+
+  // Exporting the exported blocks again gives the same file: inline links need no rewriting, and
+  // the footnote labels of a block are renamed to the same labels.
+  const imported = createPage({
+    blocks: expectedBlocks.map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
+  })
+  expect(renderDocumentExport(imported, 'markdown', markdownInspector).content).toBe(exported)
+})
+
+/**
+ * Lists every node of parsed Markdown, outermost first.
+ *
+ * @param markdown - Markdown text.
+ * @returns The nodes with their fields, depth first.
+ */
+function readMarkdownNodes(markdown: string): Array<Record<string, unknown>> {
+  const nodes: Array<Record<string, unknown>> = []
+  const pending: unknown[] = [fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })]
+  while (pending.length > 0) {
+    const node = pending.shift()
+    if (typeof node !== 'object' || node === null) continue
+    nodes.push(Object.fromEntries(Object.entries(node)))
+    if ('children' in node && Array.isArray(node.children)) pending.unshift(...node.children)
+  }
+  return nodes
+}
+
 /**
  * Lists the distinct node types of parsed Markdown, outermost first.
  *
@@ -6127,9 +6205,9 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
   expect(markdown.content).toContain('\n| \\<b\\>x\\<\\/b\\> `<c>` |\n')
   // A fence left open is closed inside its own paragraph, so it cannot pair with the next one.
   expect(markdown.content).toContain('\n```\n```\n\n```\n<img src=x onerror=alert(1)>\n```\n')
-  // A list's open fence is closed by the next paragraph's fence only once joined; the check of
-  // the whole file escapes the HTML that the joined text exposes.
-  expect(markdown.content).toContain('\\<img src\\=x onerror\\=alert\\(2\\)\\>')
+  // An indented paragraph after a list would continue the list item and close its open fence once
+  // joined, so it is written as plain text that starts its own block.
+  expect(markdown.content).toContain('\n- ```\n\n&#32;&#32;\\`\\`\\`\n  \\<img src=x onerror=alert(2)\\>\n')
   expect(markdown.content).toContain('\n## After\n')
   // The exported file has no raw HTML for any Markdown renderer.
   expect(findMarkdownHtml(markdown.content)).toEqual([])

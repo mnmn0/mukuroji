@@ -1205,11 +1205,25 @@ function renderMarkdown(
   const parts = [`# ${escapeMarkdownText(title)}`]
   for (const block of blocks) {
     switch (block.type) {
-      case 'paragraph':
+      case 'paragraph': {
         // Paragraph text is Markdown already, so only raw HTML is escaped: the file never carries
         // runnable HTML, and the page imports back with the same rendering.
-        parts.push(renderMarkdownParagraph(block.text, markdown))
+        // Footnote labels are named by the block's place in the file, which an export of the
+        // exported file keeps, so exporting it again gives the same labels.
+        const rendered = renderMarkdownParagraph(block.text, markdown, String(parts.length))
+        // An empty paragraph, such as one that held only definitions, shows nothing and is left out.
+        if (rendered === '') break
+        // An indented first line can continue the list or footnote of the block before it; such a
+        // paragraph is written as plain text that starts its own block. Only the block before needs
+        // checking, since no block before it is let continue into the next one.
+        const previous = `${parts.at(-1) ?? ''}\n\n`
+        parts.push(
+          /^[ \t]/u.test(rendered) && !markdown.startsBlockAt(`${previous}${rendered}`, previous.length)
+            ? renderPlainMarkdownParagraph(block.text)
+            : rendered,
+        )
         break
+      }
       case 'heading':
         parts.push(`${'#'.repeat(block.level + 1)} ${escapeMarkdownText(block.text)}`)
         break
@@ -1587,6 +1601,25 @@ export type MarkdownInspector = {
    * @returns `undefined` when the next block stays its own block; otherwise what is left open.
    */
   findOpenBlock: (text: string) => MarkdownOpenBlock | undefined
+  /**
+   * Rewrites the references of one block so they keep their meaning once the blocks are joined
+   * into one file: links and images that use a reference definition become inline, the
+   * definitions are dropped, and footnote labels are renamed to labels of this block.
+   *
+   * @param text - Markdown of one block.
+   * @param scope - Name of the block, unique in the file, used in its footnote labels.
+   * @returns The rewritten Markdown, or `undefined` when a reference cannot be rewritten safely.
+   */
+  localizeReferences: (text: string, scope: string) => string | undefined
+  /**
+   * Tells whether Markdown starts a new top-level block at an offset, so nothing before it
+   * continues into the text from there.
+   *
+   * @param text - Markdown text.
+   * @param offset - Offset to look at.
+   * @returns Whether no top-level block spans the offset.
+   */
+  startsBlockAt: (text: string, offset: number) => boolean
 }
 
 /**
@@ -1596,16 +1629,35 @@ export type MarkdownInspector = {
  *
  * @param text - Paragraph Markdown.
  * @param markdown - Reads Markdown with the app's Markdown grammar.
+ * @param scope - Name of the block, unique in the file.
  * @returns Markdown for the paragraph.
  */
-function renderMarkdownParagraph(text: string, markdown: MarkdownInspector): string {
-  let rendered = escapeMarkdownHtml(text, markdown.findHtml)
+function renderMarkdownParagraph(text: string, markdown: MarkdownInspector, scope: string): string {
+  // Each block is rendered on its own in the app, so its reference definitions and footnotes must
+  // not reach the other blocks of the joined file.
+  const localized = markdown.localizeReferences(text, scope)
+  if (localized === undefined) return renderPlainMarkdownParagraph(text)
+  let rendered = escapeMarkdownHtml(localized, markdown.findHtml)
   let open = markdown.findOpenBlock(rendered)
   if (open?.closingFence !== undefined) {
     rendered = `${rendered}${rendered.endsWith('\n') ? '' : '\n'}${open.closingFence}`
     open = markdown.findOpenBlock(rendered)
   }
-  return open === undefined ? rendered : escapeMarkdownText(text).replaceAll('~', '\\~')
+  return open === undefined ? rendered : renderPlainMarkdownParagraph(text)
+}
+
+/**
+ * Writes paragraph text as plain Markdown text, for a paragraph whose Markdown cannot be kept
+ * without changing another block. Leading spaces and tabs of the first line become character
+ * references, so the text cannot continue a list or code block before it.
+ *
+ * @param text - Paragraph Markdown.
+ * @returns Escaped plain text.
+ */
+function renderPlainMarkdownParagraph(text: string): string {
+  return escapeMarkdownText(text)
+    .replaceAll('~', '\\~')
+    .replace(/^[ \t]+/u, (indent) => indent.replaceAll(' ', '&#32;').replaceAll('\t', '&#9;'))
 }
 
 /**
