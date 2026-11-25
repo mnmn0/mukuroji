@@ -732,6 +732,21 @@ function IssueDetailContent({
   }
 
   /**
+   * Saves only a new workflow status for the handoff Ready action, under the same pending lock as the editor form.
+   *
+   * @param workflowStatusId - Target workflow status ID.
+   */
+  const moveToWorkflowStatus = async (workflowStatusId: string) => {
+    if (!onUpdateIssue || isAiSummaryOperationPending || isIssueUpdatePending) return
+    setIssueUpdatePending(true)
+    try {
+      await onUpdateIssue(issue.id, { workflowStatusId })
+    } finally {
+      setIssueUpdatePending(false)
+    }
+  }
+
+  /**
    * Saves the estimate, remaining effort, and manual progress on their own, outside the editor form.
    *
    * @param change - Validated effort and progress change.
@@ -1053,7 +1068,7 @@ function IssueDetailContent({
                 className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
                 defaultValue={isWorkItemTypeChangeRequested ? selectedTypeWorkflowStatusId : currentWorkflowStatusId}
                 form={editorFormId}
-                key={editorIdentity + ':workflow:' + selectedWorkItemTypeId}
+                key={editorIdentity + ':workflow:' + selectedWorkItemTypeId + ':' + currentWorkflowStatusId}
                 name="workflowStatusId"
               >
                 {workflowStatuses.map((status) => (
@@ -1267,7 +1282,14 @@ function IssueDetailContent({
           </div>
         </div>
         {softwareFactoryEnabled ? (
-          <TaskHandoffPanel accessToken={accessToken} configuration={configuration} includeDescription={hasDescriptionSection} t={t} task={issue} />
+          <TaskHandoffPanel
+            accessToken={accessToken}
+            configuration={configuration}
+            includeDescription={hasDescriptionSection}
+            onMoveToStatus={onUpdateIssue && !isIssueUpdatePending && !isAiSummaryOperationPending ? moveToWorkflowStatus : undefined}
+            t={t}
+            task={issue}
+          />
         ) : null}
         <div className="grid min-w-0 gap-4">
           {!hasOverviewSection ? renderWorkItemTypeControl() : null}
@@ -1327,7 +1349,8 @@ function pickTeamIssueDraftFields(item: TeamIssue): unknown {
     item.assignedProjectId,
     item.assigneeUserId,
     item.priority,
-    item.workflowStatusId,
+    // The status select is keyed by the saved status instead, so a status-only save, such as the
+    // Ready action, refreshes that select without discarding the other unsaved input.
     item.workItemTypeId,
     item.customFieldValues,
     item.contributorAssignments,

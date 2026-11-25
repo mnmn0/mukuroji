@@ -19,6 +19,7 @@ import type {
 } from './domain/scim-group-job-reference'
 import {
   WorkspaceAccessError,
+  reconcileDirectoryMemberAccess,
   type WorkspaceRole,
 } from '../workspace-access'
 import type {
@@ -95,21 +96,30 @@ export async function applyEnterpriseScimGroupJobUser(
             memberKey,
           )
         : undefined
-    await dependencies.workspaceAccess.reconcileDirectoryMember(
-      user.workspaceId,
+    // A reactivation revokes the credentials the member had before (ADR 0095).
+    await reconcileDirectoryMemberAccess(
       {
-        memberKey,
-        email: user.emails[0] ?? user.userName,
-        name: user.displayName,
-        role: workspaceRole,
-        externalIdentityId: user.userId,
-        expectedVersion: existing?.version,
-        expectedPlanningRevision,
-        ...(expectedDocumentAuthorizationRevision === undefined
-          ? {}
-          : { expectedDocumentAuthorizationRevision }),
+        reconcileDirectoryMember: (workspaceId, member, context) =>
+          dependencies.workspaceAccess.reconcileDirectoryMember(workspaceId, member, context),
+        revokeMemberCredentials: dependencies.revokeMemberCredentials,
       },
-      auditContext,
+      {
+        workspaceId: user.workspaceId,
+        existing,
+        member: {
+          memberKey,
+          email: user.emails[0] ?? user.userName,
+          name: user.displayName,
+          role: workspaceRole,
+          externalIdentityId: user.userId,
+          expectedVersion: existing?.version,
+          expectedPlanningRevision,
+          ...(expectedDocumentAuthorizationRevision === undefined
+            ? {}
+            : { expectedDocumentAuthorizationRevision }),
+        },
+        auditContext,
+      },
     )
     await dependencies.cognito.enableWorkspaceUser(memberKey)
     return

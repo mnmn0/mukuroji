@@ -300,6 +300,12 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/workspace/members/sign-in-security',
     permission: 'members.manage',
   },
+  // What a departing member manages, owns, and created is for administrators (ADR 0095).
+  {
+    method: 'GET',
+    pathPattern: '/api/workspace/members/:memberKey/offboarding',
+    permission: 'members.manage',
+  },
   // Applying or previewing a Workspace calendar change rewrites Work Item schedules (ADR 0058).
   {
     method: '*',
@@ -907,26 +913,44 @@ const enterpriseRoutePermissionRules = [
 ] as const satisfies readonly EnterpriseRoutePermissionRule[]
 
 /**
- * Refuses a locally verified access token whose sign-in began before the member was signed out.
+ * Refuses an access token whose sign-in began before the member was signed out.
  *
- * Directory deprovisioning signs the member out everywhere in Cognito, which only reaches tokens
- * Cognito itself checks. Enterprise SSO tokens are verified by the API, so a sign-in started
- * before that sign-out stays refused here, also after the member is reactivated.
+ * Directory deprovisioning and the access expiry job record a sign-in cutoff on the member row
+ * (ADR 0095). Cognito global sign-out, where it runs, only reaches tokens Cognito itself checks,
+ * and the expiry job does not call it at all, so the cutoff is what keeps a sign-in started before
+ * it refused, also after the member is reactivated. It applies to every Cognito session: an
+ * enterprise SSO token verified by the API and a password token Cognito accepted through GetUser
+ * alike. The sign-in time is the token's `auth_time`, which a refresh keeps, so a refresh token
+ * issued before the cutoff cannot mint a usable access token either; a token without a readable
+ * sign-in time fails closed.
  *
- * @param accessToken - Access token whose signature was already verified.
+ * @param accessToken - Access token whose signature was already verified, locally or by Cognito.
  * @param signInsRevokedAt - When the member was signed out everywhere (ISO 8601), if ever.
+ * @param ssoSession - Whether the token is an attested enterprise SSO session, which keeps the
+ *   SSO-specific error code; a password session gets `WorkspaceSessionRevoked`.
+ * @throws WorkspaceAccessError 401 when the sign-in began at or before the cutoff.
  */
-function requireSignInAfterMemberSignOut(accessToken: string, signInsRevokedAt: string | undefined) {
+function requireSignInAfterMemberSignOut(
+  accessToken: string,
+  signInsRevokedAt: string | undefined,
+  ssoSession: boolean,
+) {
   if (!signInsRevokedAt) return
   const revokedAt = Date.parse(signInsRevokedAt)
   const claims = decodeJwtPayload<CognitoAccessTokenClaims>(accessToken)
   const signedInAt = readNumericClaim(claims?.auth_time) ?? readNumericClaim(claims?.iat)
   if (Number.isNaN(revokedAt) || signedInAt === undefined || signedInAt * 1_000 <= revokedAt) {
-    throw new WorkspaceAccessError(
-      401,
-      'EnterpriseSsoSessionRequired',
-      'Single sign-on is required for this Workspace account.',
-    )
+    throw ssoSession
+      ? new WorkspaceAccessError(
+        401,
+        'EnterpriseSsoSessionRequired',
+        'Single sign-on is required for this Workspace account.',
+      )
+      : new WorkspaceAccessError(
+        401,
+        'WorkspaceSessionRevoked',
+        'This sign-in was ended. Sign in again.',
+      )
   }
 }
 
@@ -990,9 +1014,11 @@ export async function authenticateWorkspacePrincipal(
   if (!workspaceMember) {
     throw new WorkspaceAccessError(403, 'WorkspaceAccessDenied', 'Workspace access is denied.')
   }
-  if (ssoSessionAuthenticationMethods) {
-    requireSignInAfterMemberSignOut(accessToken, workspaceMember.signInsRevokedAt)
-  }
+  requireSignInAfterMemberSignOut(
+    accessToken,
+    workspaceMember.signInsRevokedAt,
+    ssoSessionAuthenticationMethods !== undefined,
+  )
 
   const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
   const recoveryAccount = snapshot.breakGlassAccounts.find((account) =>

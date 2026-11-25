@@ -23,8 +23,11 @@ import {
 import {
   requirePrivateDocumentManagerContinuity,
 } from '../../modules/workspace-access/document-manager-lifecycle'
+import { updateMemberMembership } from '../../modules/workspace-access'
+import { createMemberMembershipUpdatePorts } from '../../app/composition/member-membership-update'
 import {
   authenticationDependencies,
+  developerPlatformDependencies,
   workItemDependencies,
   workspaceDependencies,
 } from '../shared/app-dependencies'
@@ -920,23 +923,30 @@ export function registerWorkspaceRoutes(routeApp: Hono): void {
             )
           : undefined
 
-      const member = await workspaceDependencies.workspaceAccess.updateMember(
-        principal.directoryId,
-        principal.userKey,
-        memberKey,
+      const member = await updateMemberMembership(
+        createMemberMembershipUpdatePorts({
+          workspace: workspaceDependencies,
+          developerPlatform: developerPlatformDependencies,
+        }),
         {
-          role,
-          status,
-          expectedVersion,
-          expectedPlanningRevision,
-          ...(authorizationConditionChecks.length === 0 ? {} : { authorizationConditionChecks }),
-          ...(expectedDocumentAuthorizationRevision === undefined
-            ? {}
-            : {
-                expectedDocumentAuthorizationRevision,
-              }),
+          workspaceId: principal.directoryId,
+          actorMemberKey: principal.userKey,
+          actorRole: principal.workspaceRole,
+          memberKey,
+          update: {
+            role,
+            status,
+            expectedVersion,
+            expectedPlanningRevision,
+            ...(authorizationConditionChecks.length === 0 ? {} : { authorizationConditionChecks }),
+            ...(expectedDocumentAuthorizationRevision === undefined
+              ? {}
+              : {
+                  expectedDocumentAuthorizationRevision,
+                }),
+          },
+          auditContext,
         },
-        auditContext,
       )
 
       return c.json({ member })

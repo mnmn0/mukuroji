@@ -356,6 +356,17 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
   expect(actionsForTable('AuditEventsTable0723963E')).toEqual([
     'dynamodb:PutItem',
   ]);
+  // A directory reactivation revokes the member's old API keys and OAuth apps
+  // (ADR 0095); revocation needs no KMS key.
+  expect(actionsForTable('DeveloperPlatformTable772E085C')).toEqual([
+    'dynamodb:ConditionCheckItem',
+    'dynamodb:DeleteItem',
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+    'dynamodb:Query',
+    'dynamodb:UpdateItem',
+  ]);
+  expect(serializedPolicies).not.toContain('kms:');
   expect(actionsForTable('TenantAdministrationTable621D59EB')).toEqual([
     'dynamodb:ConditionCheckItem',
     'dynamodb:GetItem',
