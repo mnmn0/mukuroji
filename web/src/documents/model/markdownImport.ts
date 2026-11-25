@@ -143,6 +143,9 @@ const DELIMITER_CELL = /^:?-+:?$/u
  */
 const MAY_SPAN_BLOCKS = /^ {0,3}\[|\[\^|^[ \t]*(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/mu
 
+/** A link destination that reads back as written without `<>` or escapes. */
+const PLAIN_DESTINATION = /^[^\s()<>\\&]+$/u
+
 /** Code-fence language identifiers the server accepts. */
 const SAFE_LANGUAGE = /^[A-Za-z0-9][A-Za-z0-9_+.-]{0,99}$/u
 
@@ -182,7 +185,7 @@ export function convertMarkdownToDocument(
     const checked = scanBlocks(sourceLines, () => 'unused', options.resolveLink)
     if (!checked.ok) return checked
   }
-  const structure = spans ? readMarkdownImportStructure(text) : undefined
+  const structure = spans ? readMarkdownImportStructure(text, options.resolveLink) : undefined
   const scanned = scanBlocks(structure?.text.split('\n') ?? sourceLines, options.createId, options.resolveLink)
   if (!scanned.ok) return scanned
   let body = structure === undefined
@@ -274,8 +277,9 @@ function scanBlocks(
     const range = { first: paragraphFirstLine, last: paragraphFirstLine + paragraph.length - 1 }
     paragraph = []
     const link = readStandaloneLink(raw)
+    // A target in `<>` may hold spaces, so only a target the resolver rewrites becomes an embed.
     const url = link
-      ? (resolveLink?.(link.href) ?? (isEmbeddableUrl(link.href) ? link.href : undefined))
+      ? (resolveLink?.(link.href) ?? (!link.angle && isEmbeddableUrl(link.href) ? link.href : undefined))
       : undefined
     if (link && url) {
       const title = unescapeMarkdown(link.label).trim()
@@ -439,17 +443,37 @@ function keepFileBlocksTogether(
     const range = lines.get(block.id)
     return range !== undefined && range.first <= line && line <= range.last
   })
+  /**
+   * Finds the definition of a footnote; as with the renderer, the first one counts.
+   *
+   * @param identifier - Normalized footnote label.
+   * @returns The definition, or `undefined` when the file has none.
+   */
+  const definitionOf = (identifier: string) =>
+    structure.footnoteDefinitions.find((candidate) => candidate.identifier === identifier)
+  /** Whether a block starts with a footnote definition, so it moves to the blocks that use it. */
+  const holdsDefinition = (range: MarkdownLineRange) =>
+    structure.footnoteDefinitions.some(({ first }) => first === range.first)
   const attachments = new Map<string, string[]>()
   const moved = new Set<string>()
   for (const block of paragraphs) {
     const range = lines.get(block.id)
-    if (!range) continue
-    const used = new Set(structure.footnoteReferences
+    if (!range || holdsDefinition(range)) continue
+    // A definition may use other footnotes, so every definition the block reaches through its
+    // references moves with it; each label is followed once, so a cycle ends.
+    const pending = structure.footnoteReferences
       .filter(({ line }) => range.first <= line && line <= range.last)
-      .map(({ identifier }) => identifier))
-    for (const identifier of used) {
-      const definition = structure.footnoteDefinitions.find((candidate) => candidate.identifier === identifier)
-      if (!definition || (range.first <= definition.first && definition.first <= range.last)) continue
+      .map(({ identifier }) => identifier)
+    const followed = new Set<string>()
+    while (pending.length > 0) {
+      const identifier = pending.shift() ?? ''
+      if (followed.has(identifier)) continue
+      followed.add(identifier)
+      const definition = definitionOf(identifier)
+      if (!definition) continue
+      pending.push(...structure.footnoteReferences
+        .filter(({ line }) => definition.first <= line && line <= definition.last)
+        .map((reference) => reference.identifier))
       const holder = paragraphAt(definition.first)
       if (!holder || holder === block) continue
       const attached = attachments.get(block.id) ?? []
@@ -460,7 +484,7 @@ function keepFileBlocksTogether(
   const textOf = new Map(paragraphs.map((block) => [block.id, block.text]))
   return joined.flatMap((block): ScannedBlock[] => {
     if (block.type !== 'paragraph') return [block]
-    if (moved.has(block.id) && !attachments.has(block.id)) return []
+    if (moved.has(block.id)) return []
     const attached = (attachments.get(block.id) ?? []).map((id) => textOf.get(id) ?? '')
     return [{ ...block, text: [block.text, ...attached].join('\n\n') }]
   })
@@ -731,15 +755,17 @@ function splitTableRow(line: string, rewrite: LinkRewriter = (raw) => raw): stri
 }
 
 /**
- * Reads a paragraph that consists of exactly one inline link, `[label](href)`.
+ * Reads a paragraph that consists of exactly one inline link, `[label](href)` or
+ * `[label](<href>)`.
  *
  * @param raw - Raw paragraph text, before escapes are removed.
- * @returns The raw label and target, or undefined when the paragraph holds
- *   anything else, spans lines, or the link has a title.
+ * @returns The raw label, the target with its escapes removed, and whether it was written in
+ *   `<>`, or undefined when the paragraph holds anything else, spans lines, or the link has a
+ *   title.
  */
 function readStandaloneLink(
   raw: string,
-): { label: string; href: string } | undefined {
+): { label: string; href: string; angle: boolean } | undefined {
   const text = raw.trim()
   if (!text.startsWith('[') || !text.endsWith(')') || text.includes('\n')) {
     return undefined
@@ -756,9 +782,78 @@ function readStandaloneLink(
     position += 1
   }
   if (text[position] !== ']' || text[position + 1] !== '(') return undefined
-  const href = text.slice(position + 2, -1)
-  if (href === '' || /[\s()]/u.test(href)) return undefined
-  return { label: text.slice(1, position), href }
+  const destination = readLinkDestination(text, position + 2)
+  if (!destination || destination.titled || destination.close !== text.length - 1) return undefined
+  return { label: text.slice(1, position), href: destination.href, angle: destination.angle }
+}
+
+/** Where the destination of an inline link is and what it says. */
+type LinkDestination = {
+  /** Offset of the destination, including its `<` when it has one. */
+  start: number
+  /** Offset after the destination, including its `>` when it has one. */
+  end: number
+  /** Offset of the `)` that closes the link. */
+  close: number
+  /** The destination with its `<>` and backslash escapes removed. */
+  href: string
+  /** Whether the destination is written in `<>`. */
+  angle: boolean
+  /** Whether a title follows the destination. */
+  titled: boolean
+}
+
+/**
+ * Reads the destination and optional title of an inline link, from just after its `(` up to the
+ * closing `)`. A destination is either written in `<>`, which may hold spaces, or is a run
+ * without spaces or parentheses. The scan is linear.
+ *
+ * @param text - Raw Markdown text.
+ * @param open - Offset just after the `(`.
+ * @returns The destination, or undefined when the text there is not a destination this import
+ *   rewrites.
+ */
+function readLinkDestination(text: string, open: number): LinkDestination | undefined {
+  /**
+   * Skips spaces and tabs.
+   *
+   * @param from - Offset to start at.
+   * @returns The offset of the next other character.
+   */
+  const skipSpace = (from: number) => {
+    let index = from
+    while (text[index] === ' ' || text[index] === '\t') index += 1
+    return index
+  }
+  const start = skipSpace(open)
+  let end = start
+  const angle = text[start] === '<'
+  if (angle) {
+    end += 1
+    while (end < text.length && text[end] !== '>') {
+      const character = text[end]
+      if (character === '\n' || character === '<') return undefined
+      end += character === '\\' ? 2 : 1
+    }
+    if (text[end] !== '>') return undefined
+    end += 1
+  } else {
+    while (end < text.length && !/[\s()]/u.test(text[end] ?? '')) end += text[end] === '\\' ? 2 : 1
+    if (end === start) return undefined
+  }
+  const href = unescapeMarkdown(angle ? text.slice(start + 1, end - 1) : text.slice(start, end))
+  let close = skipSpace(end)
+  let titled = false
+  const quote = text[close]
+  if (close > end && (quote === '"' || quote === "'" || quote === '(')) {
+    const closing = quote === '(' ? ')' : quote
+    let index = close + 1
+    while (index < text.length && text[index] !== closing) index += text[index] === '\\' ? 2 : 1
+    if (text[index] !== closing) return undefined
+    titled = true
+    close = skipSpace(index + 1)
+  }
+  return text[close] === ')' ? { start, end, close, href, angle, titled } : undefined
 }
 
 /**
@@ -780,8 +875,8 @@ function isEmbeddableUrl(href: string): boolean {
 }
 
 /**
- * Rewrites the targets of inline links, `[label](href)`, in raw Markdown text.
- * Escaped brackets and code spans are left alone. The scan is linear, so long
+ * Rewrites the targets of inline links, `[label](href)`, `[label](<href>)`, and either with a
+ * title, in raw Markdown text. Escaped brackets and code spans are left alone. The scan is linear, so long
  * text cannot make it backtrack.
  *
  * @param raw - Raw text, before escapes are removed.
@@ -816,12 +911,15 @@ function rewriteLinkTargets(
     if (codeFence === 0 && character === '[') labelOpen = true
     if (codeFence === 0 && labelOpen && character === ']' && raw[position + 1] === '(') {
       labelOpen = false
-      let end = position + 2
-      while (end < raw.length && !/[\s()]/u.test(raw[end] ?? '')) end += 1
-      if (raw[end] === ')' && end > position + 2) {
-        const href = raw.slice(position + 2, end)
-        result += `](${resolveLink(href) ?? href})`
-        position = end + 1
+      const destination = readLinkDestination(raw, position + 2)
+      const target = destination ? resolveLink(destination.href) : undefined
+      if (destination && target !== undefined) {
+        // A page link is written without `<>`, as the text of table cells and checklist items only
+        // recognizes `[label](/documents/<id>)`.
+        result += raw.slice(position, destination.start) +
+          (PLAIN_DESTINATION.test(target) ? target : `<${target.replace(/[\\<>&]/gu, '\\$&')}>`) +
+          raw.slice(destination.end, destination.close + 1)
+        position = destination.close + 1
         continue
       }
     }

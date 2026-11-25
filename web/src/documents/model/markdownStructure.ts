@@ -67,9 +67,15 @@ type ReferenceEdit = {
  * its top-level blocks and footnotes are listed so split blocks can be put back together.
  *
  * @param source - Markdown file with `\n` line endings.
+ * @param resolveLink - Optional rewriter of a link target, given the destination as the parser
+ *   read it, with escapes and character references decoded; it returns the new target, or
+ *   `undefined` to keep the target.
  * @returns The rewritten text and the structure of the file.
  */
-export function readMarkdownImportStructure(source: string): MarkdownImportStructure {
+export function readMarkdownImportStructure(
+  source: string,
+  resolveLink?: (href: string) => string | undefined,
+): MarkdownImportStructure {
   const root = parseMarkdown(source)
   const lineStarts = [0]
   for (let index = source.indexOf('\n'); index !== -1; index = source.indexOf('\n', index + 1)) {
@@ -114,7 +120,7 @@ export function readMarkdownImportStructure(source: string): MarkdownImportStruc
     }
   }
   return {
-    text: inlineMarkdownReferences(source, nodes) ?? source,
+    text: inlineMarkdownReferences(source, nodes, resolveLink) ?? source,
     topLevelBlocks,
     footnoteDefinitions,
     footnoteReferences,
@@ -128,9 +134,15 @@ export function readMarkdownImportStructure(source: string): MarkdownImportStruc
  *
  * @param source - Markdown file.
  * @param nodes - Every node of its parse.
+ * @param resolveLink - Optional rewriter of a definition's destination, which is resolved before
+ *   it is written, since the written form is wrapped in `<>` and escaped.
  * @returns The rewritten file, or `undefined` when a reference's source is not as expected.
  */
-function inlineMarkdownReferences(source: string, nodes: readonly MarkdownNode[]): string | undefined {
+function inlineMarkdownReferences(
+  source: string,
+  nodes: readonly MarkdownNode[],
+  resolveLink?: (href: string) => string | undefined,
+): string | undefined {
   const definitions = new Map<string, { url: string; title: string | null }>()
   for (const node of nodes) {
     // CommonMark uses the first definition of a label.
@@ -139,6 +151,18 @@ function inlineMarkdownReferences(source: string, nodes: readonly MarkdownNode[]
     definitions.set(node.identifier, { url: node.url, title: typeof node.title === 'string' ? node.title : null })
   }
   if (definitions.size === 0) return source
+  /** Destinations the resolver rewrote, by the destination as read; only used ones are resolved. */
+  const resolved = new Map<string, string | undefined>()
+  /**
+   * Resolves the destination of a definition a reference uses.
+   *
+   * @param url - Destination as the parser read it.
+   * @returns The new destination, or `undefined` when the resolver keeps it.
+   */
+  const resolve = (url: string) => {
+    if (!resolved.has(url)) resolved.set(url, resolveLink?.(url))
+    return resolved.get(url)
+  }
   const edits: ReferenceEdit[] = []
   for (const node of nodes) {
     if (node.type !== 'linkReference' && node.type !== 'imageReference' && node.type !== 'definition') continue
@@ -159,7 +183,7 @@ function inlineMarkdownReferences(source: string, nodes: readonly MarkdownNode[]
       start,
       end,
       keepEnd: end - labelSource.length,
-      suffix: renderInlineDestination(definition) + lineBreaksOf(labelSource),
+      suffix: renderInlineDestination(definition, resolve(definition.url)) + lineBreaksOf(labelSource),
     })
   }
   return applyReferenceEdits(source, 0, source.length, edits.sort((left, right) => left.start - right.start))
@@ -175,17 +199,25 @@ function lineBreaksOf(text: string): string {
   return '\n'.repeat(text.split('\n').length - 1)
 }
 
+/** A destination that reads back as written without `<>` or escapes. */
+const PLAIN_DESTINATION = /^[^\s()<>\\&]+$/u
+
 /**
  * Writes the inline destination and title of a link or image that used a definition.
  *
  * @param definition - The definition the reference used.
+ * @param resolved - The destination the resolver gave it, if any. It is written without `<>`
+ *   when it can be, as an inline link to a page is, so the link reads the same in text that
+ *   only recognizes `[label](/documents/<id>)`, such as table cells and checklist items.
  * @returns `(<url> "title")`, escaped so it reads back as the same destination and title.
  */
-function renderInlineDestination(definition: { url: string; title: string | null }): string {
-  const url = definition.url.replace(/[\\<>&]/gu, '\\$&')
-  if (definition.title === null) return `(<${url}>)`
+function renderInlineDestination(definition: { url: string; title: string | null }, resolved?: string): string {
+  const url = resolved !== undefined && PLAIN_DESTINATION.test(resolved)
+    ? resolved
+    : `<${(resolved ?? definition.url).replace(/[\\<>&]/gu, '\\$&')}>`
+  if (definition.title === null) return `(${url})`
   const title = definition.title.replace(/[\\"&]/gu, '\\$&').replace(/\r\n?|\n/gu, ' ')
-  return `(<${url}> "${title}")`
+  return `(${url} "${title}")`
 }
 
 /**

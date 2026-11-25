@@ -426,6 +426,22 @@ describe('Markdown import of a file whose blocks reference each other', () => {
     ])
   })
 
+  test('moves the footnotes a footnote uses along with it, once each and through cycles', () => {
+    expect(blocksOf('Text[^a]\n\n[^a]: First[^b]\n\n[^b]: Second')).toEqual([
+      { id: 'block-1', text: 'Text[^a]\n\n[^a]: First[^b]\n\n[^b]: Second', type: 'paragraph' },
+    ])
+    expect(blocksOf('One[^a]\n\nTwo[^b]\n\n[^a]: A[^b]\n\n[^b]: B[^a]')).toEqual([
+      { id: 'block-1', text: 'One[^a]\n\n[^a]: A[^b]\n\n[^b]: B[^a]', type: 'paragraph' },
+      { id: 'block-2', text: 'Two[^b]\n\n[^b]: B[^a]\n\n[^a]: A[^b]', type: 'paragraph' },
+    ])
+    const [chained] = blocksOf('Text[^a]\n\n[^a]: First[^b]\n\n[^b]: Second')
+    const html = chained?.type === 'paragraph' ? renderParagraph(chained.text) : ''
+    // Both notes are listed, so the reference inside the first note is a link, not literal text.
+    expect(html).toContain('First<sup><a')
+    expect(html).toContain('Second')
+    expect(html).not.toContain('[^b]')
+  })
+
   test('keeps a loose list in one block and drops the block boundary of an export', () => {
     expect(blocksOf('- a\n\n- b\n\n[mukuroji-block-boundary]: #\n\n- c')).toEqual([
       { id: 'block-1', text: '- a\n\n- b', type: 'paragraph' },

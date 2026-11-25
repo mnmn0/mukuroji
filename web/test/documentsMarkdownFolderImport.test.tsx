@@ -140,6 +140,55 @@ describe('folder Markdown import', () => {
     ])
   })
 
+  test('points links that use a reference definition or an angle-bracket target at the imported pages', () => {
+    const planned = plan([
+      {
+        path: 'a.md',
+        source: [
+          '[Guide][g]',
+          '',
+          'See [the guide][g], [spaced][s], [encoded](my%20file.md), and [titled](<my file.md> "T").',
+          '',
+          '[Other](<other.md>)',
+          '',
+          '| Page |',
+          '| --- |',
+          '| [cell][g] and [cell 2](<my file.md>) |',
+          '',
+          '- [ ] read [item][g]',
+          '',
+          '[Outside][x] and [kept](<missing file.md>)',
+          '',
+          '[g]: other.md',
+          '[s]: <my file.md>',
+          '[x]: https://example.com',
+        ].join('\n'),
+      },
+      { path: 'other.md', source: '# Other' },
+      { path: 'my file.md', source: '# Mine' },
+    ])
+
+    expect(resolvedBlocks(planned, 'a.md')).toMatchObject([
+      { type: 'embed', url: '/documents/id%3Aother.md', title: 'Guide' },
+      {
+        type: 'paragraph',
+        text: 'See [the guide](/documents/id%3Aother.md), [spaced](/documents/id%3Amy%20file.md), ' +
+          '[encoded](/documents/id%3Amy%20file.md), and [titled](/documents/id%3Amy%20file.md "T").',
+      },
+      { type: 'embed', url: '/documents/id%3Aother.md', title: 'Other' },
+      {
+        type: 'table',
+        rows: [{ cells: [{ text: '[cell](/documents/id%3Aother.md) and [cell 2](/documents/id%3Amy%20file.md)' }] }],
+      },
+      { type: 'checklist', items: [{ text: 'read [item](/documents/id%3Aother.md)' }] },
+      { type: 'paragraph', text: '[Outside](<https://example.com>) and [kept](<missing file.md>)' },
+    ])
+    const html = renderToStaticMarkup(
+      <DocumentLinkedText text="[cell](/documents/id%3Aother.md) and [cell 2](/documents/id%3Amy%20file.md)" />,
+    )
+    expect(html.match(/<a /gu)).toHaveLength(2)
+  })
+
   test('creates linked pages first and leaves links in cycles for later', () => {
     const planned = plan([
       { path: 'a.md', source: '[B](b.md)' },
