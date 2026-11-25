@@ -6,6 +6,7 @@ import {
   mergeRunHistories,
   readRunHistoryPeriodDays,
   runDurationMinutes,
+  runHistoryProjectKey,
   toRunHistoryCsv,
 } from '../src/features/factory-board/model/runHistory'
 import { RunHistoryView, type RunHistoryFilterState } from '../src/features/factory-board/ui/RunHistoryView'
@@ -90,7 +91,7 @@ describe('Run history model', () => {
   test('writes quoted CSV that a spreadsheet cannot run as a formula', () => {
     const labels = createRunHistoryLabels('ja')
     const { rows } = mergeRunHistories([response('team-a', [entry('team-a', 1, { workItemTitle: '=HYPERLINK("x")', projectId: 'p1', outcome: 'failed' })])], { 'team-a': 'Alpha' })
-    const csv = toRunHistoryCsv(rows, labels, { p1: 'Refero' }, { 'member-1': 'Shinji' })
+    const csv = toRunHistoryCsv(rows, labels, { [runHistoryProjectKey('team-a', 'p1')]: 'Refero', [runHistoryProjectKey('team-b', 'p1')]: 'Other' }, { 'member-1': 'Shinji' })
     const [header, line] = csv.trimEnd().split('\r\n')
     expect(header).toContain('"終了日時"')
     expect(line).toContain(`"'=HYPERLINK(""x"")"`)
@@ -99,6 +100,18 @@ describe('Run history model', () => {
     expect(line).toContain(`"${labels.outcomes.failed}"`)
     expect(line).toContain('"90"')
     expect(csv.endsWith('\r\n')).toBe(true)
+  })
+
+  test('names a Project by its own Team when two Teams share a Project ID', () => {
+    const labels = createRunHistoryLabels('ja')
+    const { rows } = mergeRunHistories([
+      response('team-a', [entry('team-a', 1, { projectId: 'p1' })]),
+      response('team-b', [entry('team-b', 2, { projectId: 'p1' })]),
+    ], { 'team-a': 'Alpha', 'team-b': 'Beta' })
+    const names = { [runHistoryProjectKey('team-a', 'p1')]: 'Refero', [runHistoryProjectKey('team-b', 'p1')]: 'Other' }
+    const lines = toRunHistoryCsv(rows, labels, names, {}).trimEnd().split('\r\n').slice(1)
+    expect(lines.find((line) => line.includes('"Alpha"'))).toContain('"Refero"')
+    expect(lines.find((line) => line.includes('"Beta"'))).toContain('"Other"')
   })
 })
 
@@ -144,8 +157,8 @@ describe('RunHistoryView', () => {
         onFiltersChange={() => undefined}
         onNavigate={() => undefined}
         onRetry={() => undefined}
-        projectNames={{ p1: 'Refero' }}
-        projects={[{ id: 'p1', name: 'Refero' }]}
+        projectNames={{ [runHistoryProjectKey('team-a', 'p1')]: 'Refero', [runHistoryProjectKey('team-b', 'p1')]: 'Other' }}
+        projects={[{ id: runHistoryProjectKey('team-a', 'p1'), name: 'Refero' }]}
         teams={[{ id: 'team-a', name: 'Alpha' }]}
         {...overrides}
       />,

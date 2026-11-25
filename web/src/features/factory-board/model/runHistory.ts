@@ -24,6 +24,30 @@ export type RunHistory = {
   hasMore: boolean
 }
 
+/**
+ * Builds the key of a Project inside its Team. Project IDs are unique only within a Team, so names and
+ * filter choices are keyed by both IDs.
+ *
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project ID.
+ * @returns Team-qualified Project key.
+ */
+export function runHistoryProjectKey(teamId: string, projectId: string): string {
+  return JSON.stringify([teamId, projectId])
+}
+
+/**
+ * Looks up the display name of a row's Project.
+ *
+ * @param row - Run history row.
+ * @param projectNames - Project names by Team-qualified key.
+ * @returns The name, the raw ID for an unknown Project, or empty text when the run has no Project.
+ */
+export function runHistoryProjectName(row: RunHistoryRow, projectNames: Readonly<Record<string, string>>): string {
+  if (row.projectId === undefined) return ''
+  return projectNames[runHistoryProjectKey(row.teamId, row.projectId)] ?? row.projectId
+}
+
 /** Column headings and value names the CSV uses. */
 export type RunHistoryCsvLabels = {
   /** Column headings, in column order. */
@@ -121,7 +145,7 @@ function toCsvCell(value: string): string {
  *
  * @param rows - Rows in display order.
  * @param labels - Headings and value names.
- * @param projectNames - Project names by ID; the ID is written for an unknown Project.
+ * @param projectNames - Project names by Team-qualified key; the ID is written for an unknown Project.
  * @param memberNames - Member names by ID; the ID is written for an unknown member.
  * @returns CSV text with CRLF line endings.
  */
@@ -141,7 +165,7 @@ export function toRunHistoryCsv(
     row.teamName,
     row.workItemTitle,
     row.workItemId,
-    row.projectId === undefined ? '' : projectNames[row.projectId] ?? row.projectId,
+    runHistoryProjectName(row, projectNames),
     memberNames[row.assigneeUserId] ?? row.assigneeUserId,
     row.agentName,
     labels.runtimes[row.runtime],

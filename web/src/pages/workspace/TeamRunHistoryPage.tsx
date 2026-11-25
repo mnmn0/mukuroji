@@ -1,7 +1,7 @@
 import type { AgentRunHistoryFilters } from '@mukuroji/contracts'
 import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { DEFAULT_RUN_HISTORY_PERIOD_DAYS, toRunHistoryCsv } from '../../features/factory-board/model/runHistory'
+import { DEFAULT_RUN_HISTORY_PERIOD_DAYS, runHistoryProjectKey, toRunHistoryCsv } from '../../features/factory-board/model/runHistory'
 import { useAgentRunHistory } from '../../features/factory-board/queries/useFactoryBoard'
 import { RunHistoryView, type RunHistoryFilterState } from '../../features/factory-board/ui/RunHistoryView'
 import { createRunHistoryLabels } from '../../features/factory-board/ui/runHistoryLabels'
@@ -69,26 +69,42 @@ function TeamRunHistoryContent({ teamId }: TeamRunHistoryContentProps) {
   const labels = useMemo(() => createRunHistoryLabels(workspace.locale), [workspace.locale])
   const teams = useMemo(() => workspace.teams.map((team) => ({ id: team.id, name: team.name })), [workspace.teams])
   const teamNames = useMemo(() => Object.fromEntries(teams.map((team) => [team.id, team.name])), [teams])
-  const projectNames = useMemo(
-    () => Object.fromEntries(workspace.teams.flatMap((team) => (team.projects ?? []).map((project) => [project.id, project.name]))),
+  const projectChoices = useMemo(
+    () => workspace.teams.flatMap((team) => (team.projects ?? []).map((project) => ({
+      key: runHistoryProjectKey(team.id, project.id),
+      teamId: team.id,
+      teamName: team.name,
+      projectId: project.id,
+      name: project.name,
+    }))),
     [workspace.teams],
   )
+  const projectNames = useMemo(
+    () => Object.fromEntries(projectChoices.map((project) => [project.key, project.name])),
+    [projectChoices],
+  )
   const projects = useMemo(
-    () => workspace.teams
-      .filter((team) => filters.teamId === '' || team.id === filters.teamId)
-      .flatMap((team) => (team.projects ?? []).map((project) => ({ id: project.id, name: project.name }))),
-    [workspace.teams, filters.teamId],
+    () => projectChoices
+      .filter((project) => filters.teamId === '' || project.teamId === filters.teamId)
+      // Across Teams the same Project name can repeat, so each choice names its Team.
+      .map((project) => ({ id: project.key, name: filters.teamId === '' ? `${project.name} (${project.teamName})` : project.name })),
+    [projectChoices, filters.teamId],
   )
-  const teamIds = useMemo(
-    () => filters.teamId === '' ? teams.map((team) => team.id) : [filters.teamId],
-    [teams, filters.teamId],
+  const selectedProject = useMemo(
+    () => projectChoices.find((project) => project.key === filters.projectId),
+    [projectChoices, filters.projectId],
   )
+  const teamIds = useMemo(() => {
+    // A selected Project belongs to one Team, so only that Team's runs are read.
+    if (selectedProject !== undefined) return [selectedProject.teamId]
+    return filters.teamId === '' ? teams.map((team) => team.id) : [filters.teamId]
+  }, [teams, filters.teamId, selectedProject])
   const requestFilters = useMemo<AgentRunHistoryFilters>(() => ({
     ...(filters.outcome === '' ? {} : { outcome: filters.outcome }),
     ...(filters.runtime === '' ? {} : { runtime: filters.runtime }),
-    ...(filters.projectId === '' ? {} : { projectId: filters.projectId }),
+    ...(selectedProject === undefined ? {} : { projectId: selectedProject.projectId }),
     ...(filters.mineOnly && workspace.userKey ? { assigneeUserId: workspace.userKey } : {}),
-  }), [filters, workspace.userKey])
+  }), [filters, selectedProject, workspace.userKey])
   const accessToken = workspace.canLoadWorkspaceData ? workspace.accessToken : undefined
   const history = useAgentRunHistory(accessToken, teamIds, filters.days, requestFilters, teamNames)
   const formatDateTime = useMemo(() => {

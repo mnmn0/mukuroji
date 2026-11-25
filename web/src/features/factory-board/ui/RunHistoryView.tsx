@@ -1,5 +1,5 @@
 import { AGENT_RUN_OUTCOMES, AGENT_RUN_RUNTIMES, type AgentRunOutcome, type AgentRunRuntime } from '@mukuroji/contracts'
-import { RUN_HISTORY_PERIOD_DAYS, runDurationMinutes, type RunHistory, type RunHistoryPeriodDays, type RunHistoryRow } from '../model/runHistory'
+import { RUN_HISTORY_PERIOD_DAYS, runDurationMinutes, runHistoryProjectName, type RunHistory, type RunHistoryPeriodDays, type RunHistoryRow } from '../model/runHistory'
 import type { RunHistoryLabels } from './runHistoryLabels'
 
 /** Filter values of the Run history. */
@@ -12,7 +12,7 @@ export type RunHistoryFilterState = {
   outcome: AgentRunOutcome | ''
   /** One runtime, or empty for every runtime. */
   runtime: AgentRunRuntime | ''
-  /** One Project, or empty for every Project. */
+  /** Team-qualified key of one Project, or empty for every Project. */
   projectId: string
   /** Whether only the viewer's own runs are shown. */
   mineOnly: boolean
@@ -34,7 +34,7 @@ export type RunHistoryViewProps = {
   filters: RunHistoryFilterState
   /** Teams the viewer can view. */
   teams: readonly RunHistoryOption[]
-  /** Projects of the selected Team, or of every Team. */
+  /** Projects of the selected Team, or of every Team, identified by Team-qualified key. */
   projects: readonly RunHistoryOption[]
   /** Merged history, once loaded. */
   history?: RunHistory
@@ -42,7 +42,7 @@ export type RunHistoryViewProps = {
   isLoading: boolean
   /** Failure message of the last read. */
   errorMessage?: string
-  /** Project names by ID. */
+  /** Project names by Team-qualified key. */
   projectNames: Readonly<Record<string, string>>
   /** Formats a timestamp for display. */
   formatDateTime: (value: string) => string
@@ -239,7 +239,7 @@ export function RunHistoryView({
                         {row.workItemTitle}
                       </a>
                     </td>
-                    <td className="px-3 py-2">{row.projectId === undefined ? '' : projectNames[row.projectId] ?? row.projectId}</td>
+                    <td className="px-3 py-2">{runHistoryProjectName(row, projectNames)}</td>
                     <td className="px-3 py-2">{row.agentName}</td>
                     <td className="px-3 py-2">{labels.runtimes[row.runtime]}</td>
                     <td className="px-3 py-2">{row.outcome === undefined ? '' : labels.outcomes[row.outcome]}</td>
