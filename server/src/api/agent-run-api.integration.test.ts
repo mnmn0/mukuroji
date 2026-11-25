@@ -1924,8 +1924,18 @@ describe('Web Agent Run routes', () => {
       })
     }
     const comments: Parameters<CollaborationClient['createComment']>[0][] = []
+    const storedComments = new Map<string, Awaited<ReturnType<CollaborationClient['createComment']>>>()
     setTestAppDependencies({
       collaboration: createCollaborationStub({
+        /**
+         * Reads a comment the answers wrote.
+         *
+         * @param input - Comment to read.
+         * @returns The comment as it now stands.
+         */
+        async getCommentSnapshot(input) {
+          return storedComments.get(input.commentId)
+        },
         /**
          * Commits the answer's co-writes with the comment, failing like the real writer on a cancelled condition.
          *
@@ -1944,11 +1954,13 @@ describe('Web Agent Run routes', () => {
           }
           comments.push(input)
           const id = deriveAuditedCommentId(input.entityKey, input.auditContext)
-          return {
+          const comment = {
             id, rootCommentId: id, authorMemberKey: input.actorMemberKey, bodyMarkdown: input.bodyMarkdown, version: 1,
             mentionMemberKeys: [], reactions: [], acceptedResolutions: [],
             createdAt: input.auditContext.occurredAt, updatedAt: input.auditContext.occurredAt,
           }
+          storedComments.set(id, comment)
+          return comment
         },
       }),
     })
@@ -1989,6 +2001,28 @@ describe('Web Agent Run routes', () => {
 
     const listed = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-run-reports', { headers })
     expect((await listed.json()).items[0]).toMatchObject({ sequence: 2, answer: { body: 'Use the staging bucket.' } })
+
+    // The answer comment carries the answer: an edit changes what the questions show, and a deletion
+    // withdraws the answer so the report can be answered again.
+    const { listWorkItemQuestions } = createCanonicalPublicAgentRunService()
+    if (!listWorkItemQuestions) throw new Error('The Public API service must list questions.')
+    /**
+     * Lists the Work Item's questions as `get_task` reads them.
+     *
+     * @returns The questions, newest first.
+     */
+    const questions = async () => (await runWithTestAppDependencies(() => listWorkItemQuestions(credential, 'core-team', 'task-1'))).items
+    const answerComment = storedComments.get(saved.report.answer.commentId)
+    if (!answerComment) throw new Error('The answer comment was not stored.')
+    storedComments.set(answerComment.id, { ...answerComment, bodyMarkdown: 'Use the backup bucket.', editedAt: '2026-10-22T01:00:00.000Z' })
+    expect((await questions())[0]).toMatchObject({ sequence: 2, answer: { body: 'Use the backup bucket.' } })
+    storedComments.set(answerComment.id, { ...answerComment, bodyMarkdown: '', deletedAt: '2026-10-22T02:00:00.000Z' })
+    expect((await questions())[0]).toMatchObject({ sequence: 2 })
+    expect((await questions())[0]?.answer).toBeUndefined()
+    const again = await answer(2, { body: 'Use production.' }, 'answer-9')
+    expect(again.status).toBe(201)
+    expect((await again.json()).report.answer).toMatchObject({ body: 'Use production.' })
+    expect((await questions())[0]).toMatchObject({ sequence: 2, answer: { body: 'Use production.' } })
   })
 
   test('refuses an answer from a viewer', async () => {

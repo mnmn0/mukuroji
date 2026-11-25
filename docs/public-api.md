@@ -218,6 +218,8 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   残るときは `hasMore` が `true` です。scope は `work-items:read` で、
   Work Item を閲覧できる credential が読めます。応答は `Cache-Control: private, no-store` です。回答は Web の
   会話から member が 1 つの report に 1 つだけ保存し、同じ transaction で回答者の comment と監査 event を保存します。
+  `answer.body` は回答 comment の今の本文です。comment が編集されれば編集後の本文を返し、削除されれば
+  `answer` を返さず、その report には改めて回答できます。
 - `POST /api/v1/work-items/{workItemId}/agent-runs/{runId}/take-over` は `Idempotency-Key` を
   要求し、同じメンバーの別 instance が持つ停滞 Run（lease 切れ）を `superseded` にして、呼び出し元
   instance の新しい Run を開始します。body は `runtime`、`agentName`、`instanceId` です。Team の

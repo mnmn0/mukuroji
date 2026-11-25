@@ -82,7 +82,7 @@ async function requireWorkItemReport(
 /**
  * Explains why an answer is refused once the report has been read.
  *
- * @param report - Report as read.
+ * @param report - Report as read, with its answer as the answer comment now stands.
  * @param principal - Caller.
  * @param body - Requested answer text.
  * @returns The recorded answer when the same member already saved the same text, so a retried
@@ -99,10 +99,53 @@ function recordedAnswer(report: StoredAgentRunReport, principal: WorkspacePrinci
 }
 
 /**
+ * Reads the answer of a report as its comment now stands. The comment carries the answer in the
+ * discussion, so editing the comment changes the answer and deleting the comment withdraws it.
+ *
+ * @param entityKey - Collaboration entity key of the Work Item.
+ * @param answer - Answer saved on the report.
+ * @returns The answer with the comment's current text, or undefined when there is no answer or its
+ * comment was deleted.
+ */
+async function readCurrentAnswer(entityKey: string, answer: AgentRunReportAnswer | undefined): Promise<AgentRunReportAnswer | undefined> {
+  if (answer === undefined) return undefined
+  const comment = await workItemDependencies.collaboration.getCommentSnapshot({ entityKey, commentId: answer.commentId })
+  if (!comment || comment.deletedAt) return undefined
+  return comment.bodyMarkdown === answer.body ? answer : { ...answer, body: comment.bodyMarkdown }
+}
+
+/**
+ * Replaces the answer of a report with the one its comment now holds.
+ *
+ * @param report - Report as stored.
+ * @param answer - Current answer, or undefined when it was withdrawn.
+ * @returns The report with that answer.
+ */
+function withAnswer(report: StoredAgentRunReport, answer: AgentRunReportAnswer | undefined): StoredAgentRunReport {
+  const { answer: _stored, ...rest } = report
+  return answer === undefined ? rest : { ...rest, answer }
+}
+
+/**
+ * Reads a report's answer as its comment now stands, so every report read shows an edited answer's
+ * text and no answer once its comment is deleted.
+ *
+ * @param directoryId - Workspace ID.
+ * @param report - Report as stored.
+ * @returns The report with its current answer.
+ */
+export async function withCurrentAnswer(directoryId: string, report: StoredAgentRunReport): Promise<StoredAgentRunReport> {
+  if (report.answer === undefined) return report
+  const entityKey = createWorkItemCollaborationEntityKey(directoryId, report.teamId, report.workItemId)
+  return withAnswer(report, await readCurrentAnswer(entityKey, report.answer))
+}
+
+/**
  * Records a person's answer to a `blocker` or `handoff` report. The answer is saved on the report and
  * as a Work Item comment of the person in one transaction, with an audit event, so the discussion,
  * the Work Item history, and the audit log all show it. A report has at most one answer; a retry of
- * the same answer by the same member returns the saved answer.
+ * the same answer by the same member returns the saved answer. Editing the answer comment changes the
+ * answer, and deleting it withdraws the answer so the report can be answered again.
  *
  * @param principal - Member who answers.
  * @param teamId - Team ID.
@@ -123,11 +166,14 @@ export async function answerWebAgentRunReport(
   requireWorkspaceBusinessWrite(principal)
   const { context: permissionContext, detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
   const { report, run } = await requireWorkItemReport(principal, teamId, workItemId, reference)
-  const replay = recordedAnswer(report, principal, body)
-  if (replay) return { report: toAgentRunReport(report) }
   const store = workItemDependencies.agentRuns
   const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, workItemId)
   const commentId = deriveAuditedCommentId(entityKey, auditContext)
+  const current = withAnswer(report, await readCurrentAnswer(entityKey, report.answer))
+  // A retry of the request whose answer comment was since deleted reads the withdrawn answer.
+  if (report.answer?.commentId === commentId && current.answer === undefined) return { report: toAgentRunReport(current) }
+  const replay = recordedAnswer(current, principal, body)
+  if (replay) return { report: toAgentRunReport(current) }
   const answer: AgentRunReportAnswer = {
     body,
     answeredBy: principal.userKey,
@@ -179,7 +225,8 @@ export async function answerWebAgentRunReport(
 
 /**
  * Lists the newest `blocker` and `handoff` reports of a Work Item with their answers, for anyone who can
- * view the Work Item.
+ * view the Work Item. Each answer is read as its comment now stands: an edited comment gives the edited
+ * text, and a deleted one leaves the report unanswered.
  *
  * @param principal - Viewer.
  * @param teamId - Team ID.
@@ -202,7 +249,7 @@ export async function listWorkItemAgentRunQuestions(
       if (report.workItemId !== workItemId) throw createAgentRunIntegrityError()
       if (!isAgentRunQuestionReport(report)) continue
       if (items.length === AGENT_RUN_QUESTIONS_MAX_ITEMS) return { items, hasMore: true }
-      const item = toAgentRunReport(report)
+      const item = toAgentRunReport(await withCurrentAnswer(principal.directoryId, report))
       const itemBytes = Buffer.byteLength(JSON.stringify(item))
       // The newest question is always returned; later ones stop at the byte budget.
       if (items.length > 0 && bytes + itemBytes > questionsResponseByteBudget) return { items, hasMore: true }

@@ -407,7 +407,9 @@ export interface AgentRunStore {
   createReportItems(run: StoredAgentRun, report: StoredAgentRunReport, now: Date): AgentRunTransactItem[]
   /**
    * Builds the write that records a person's answer on a `blocker` or `handoff` report. It fails when
-   * the report is gone or already answered, so two people never overwrite each other's answer.
+   * the report is gone or its answer changed since it was read, so two people never overwrite each
+   * other's answer. A report read with an answer is answered again only in place of that answer, whose
+   * comment the caller found deleted.
    * @param report - Report as read.
    * @param answer - Answer to record.
    * @returns The conditional report update.
@@ -1715,17 +1717,24 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
 
   /** @inheritdoc */
   createReportAnswerItems(report: StoredAgentRunReport, answer: AgentRunReportAnswer): AgentRunTransactItem[] {
-    if (!isAgentRunQuestionReport(report) || report.answer !== undefined) {
-      throw new TypeError('createReportAnswerItems requires an unanswered blocker or handoff report.')
+    if (!isAgentRunQuestionReport(report)) {
+      throw new TypeError('createReportAnswerItems requires a blocker or handoff report.')
     }
+    const previous = report.answer
     return [{
       Update: {
         TableName: this.#tableName,
         Key: { directoryTeamId: createAgentRunPartition(report.directoryId, report.teamId), recordKey: reportRecordKey(report) },
         UpdateExpression: 'SET #answer = :answer',
-        ConditionExpression: 'attribute_exists(#recordKey) AND #commentId = :commentId AND attribute_not_exists(#answer)',
+        ConditionExpression: previous === undefined
+          ? 'attribute_exists(#recordKey) AND #commentId = :commentId AND attribute_not_exists(#answer)'
+          : 'attribute_exists(#recordKey) AND #commentId = :commentId AND #answer.#commentId = :previousCommentId',
         ExpressionAttributeNames: { '#answer': 'answer', '#recordKey': 'recordKey', '#commentId': 'commentId' },
-        ExpressionAttributeValues: { ':answer': { ...answer }, ':commentId': report.commentId },
+        ExpressionAttributeValues: {
+          ':answer': { ...answer },
+          ':commentId': report.commentId,
+          ...(previous === undefined ? {} : { ':previousCommentId': previous.commentId }),
+        },
       },
     }]
   }

@@ -434,7 +434,7 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
       this.#register(reportUpdate, {
         check: (state) => {
           const current = state.reports.get(reportKey)
-          return current !== undefined && current.commentId === report.commentId && current.answer === undefined
+          return current !== undefined && current.commentId === report.commentId && current.answer?.commentId === report.answer?.commentId
         },
         apply: (state) => {
           const current = state.reports.get(reportKey)
