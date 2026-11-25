@@ -70,6 +70,7 @@ import {
   PROJECT_QUICK_ACCESS_MAX_REVISION,
   type DirectoryAdministrationResponse,
   type MemberPreferences,
+  type OrgStructure,
   type MemberPreferenceValues,
   type ProjectCharter,
   type ProjectCharterState,
@@ -92,6 +93,19 @@ import {
   PLANNING_STORAGE_SCHEMA_VERSION,
 } from '../../../planning'
 import { createDirectoryResourceId } from '../../domain/resource-id'
+import {
+  EMPTY_ORG_STRUCTURE,
+  listUnknownOrgStructureTeamIds,
+  readReplaceOrgStructureCommand,
+  readStoredOrgStructure,
+  type ReplaceOrgStructureCommand,
+} from '../../domain/org-structure'
+import {
+  createOrgStructureItem,
+  createOrgStructureKey,
+  isOrgStructureItem,
+  ORG_STRUCTURE_ENTRY_TYPE,
+} from './org-structure-item'
 import {
   createEmptyProjectCharter,
   isStoredProjectCharter,
@@ -564,10 +578,11 @@ export type CreateTeamResponse = {
 }
 
 /**
- * Most authorization condition checks a directory change carries: the caller's membership and the
- * Enterprise control row.
+ * Most authorization condition checks a directory change carries: the caller's membership, the
+ * Enterprise control row, and the OrgUnit structure revision that expanded OrgUnit scopes
+ * (ADR 0097). Archiving a Team keeps this room free so its restore still fits one transaction.
  */
-const DIRECTORY_RESTORE_AUTHORIZATION_RESERVE = 2
+const DIRECTORY_RESTORE_AUTHORIZATION_RESERVE = 3
 
 /** Condition checks proving the caller is still authorized when a directory change commits. */
 export type DirectoryAuthorizationConditionChecks = NonNullable<
@@ -768,6 +783,18 @@ export type UpdateProjectMemberRequestBody = {
   role?: unknown
 }
 
+/** Options of a Project member role update. */
+export type UpdateProjectMemberOptions = {
+  /**
+   * Refuses the update unless the member already holds a higher role in the Project, so the
+   * update never creates a membership or raises a role.
+   */
+  demotionOnly?: boolean
+}
+
+/** Rank of each Project role, higher for more access. */
+const projectRoleRank: Readonly<Record<ProjectRole, number>> = { viewer: 1, member: 2, manager: 3 }
+
 /**
  * プロジェクトメンバー更新 API が返す response body です。
  */
@@ -942,6 +969,10 @@ export type ProjectDirectoryClient = {
   ): Promise<ProjectMembersResponse>
   /**
    * DynamoDB の project member role を作成または更新します。
+   *
+   * With `options.demotionOnly`, only lowers the role of an existing Project member, so a member
+   * who may no longer be given anything, such as one whose access expired, can still hand over
+   * a manager role (ADR 0095).
    */
   updateProjectMember(
     directoryId: string,
@@ -950,6 +981,7 @@ export type ProjectDirectoryClient = {
     input: UpdateProjectMemberRequestBody,
     expectedWorkspaceMemberVersion: number,
     auditContext?: MutationAuditContext,
+    options?: UpdateProjectMemberOptions,
   ): Promise<UpdateProjectMemberResponse>
   /**
    * Grants a Project role only when the member has none, so an existing role is never changed.
@@ -1236,6 +1268,29 @@ export type ProjectDirectoryClient = {
     auditContext?: MutationAuditContext,
     authorizationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ): Promise<ProjectCharterState>
+  /**
+   * Reads the OrgUnit tree and Team memberships of a Workspace.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param consistentRead - Whether to read the row strongly consistently.
+   * @returns The structure, empty with revision 0 before the first save.
+   */
+  getOrgStructure(directoryId: string, consistentRead?: boolean): Promise<OrgStructure>
+  /**
+   * Replaces the OrgUnit tree and Team memberships of a Workspace with compare-and-swap.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param input - Untrusted request body.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized at commit.
+   * @returns The committed structure.
+   */
+  replaceOrgStructure(
+    directoryId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
+  ): Promise<OrgStructure>
 }
 
 /**
@@ -1561,6 +1616,213 @@ export class DynamoDbProjectDirectoryClient {
           ':role': member.role,
         },
       },
+    }
+  }
+
+  /**
+   * Reads the OrgUnit tree and Team memberships of a Workspace from its sidecar row.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param consistentRead - Whether to read the row strongly consistently.
+   * @returns The structure, empty with revision 0 before the first save.
+   */
+  async getOrgStructure(directoryId: string, consistentRead = false): Promise<OrgStructure> {
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        ConsistentRead: consistentRead,
+        Key: createOrgStructureKey(directoryId),
+      }))
+      if (response.Item === undefined) return EMPTY_ORG_STRUCTURE
+      if (!isOrgStructureItem(response.Item, directoryId)) {
+        throw new ProjectDataError(503, 'OrgStructureUnavailable', 'The stored OrgUnit structure is invalid.')
+      }
+      return readStoredOrgStructure(response.Item)
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Replaces the OrgUnit tree and Team memberships of a Workspace.
+   *
+   * Every Team named must exist in the Workspace, archived Teams included. The row is written
+   * only when its stored revision still equals the expected one, together with the audit event,
+   * the caller's authorization guards, and a receipt that binds the request's idempotency key to
+   * its input. A retry of a committed save under the same key and input, whose response was lost,
+   * is answered with the structure it saved instead of a conflict with itself; the same key with
+   * another input is refused.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param input - Untrusted request body.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized at commit.
+   * @returns The committed structure.
+   */
+  async replaceOrgStructure(
+    directoryId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
+  ): Promise<OrgStructure> {
+    const command = readReplaceOrgStructureCommand(input)
+    await this.ensureLocalAuditTable()
+    const requestKey: TeamGrantRequest | undefined = auditContext
+      ? { idempotencyKeyHash: auditContext.idempotencyKeyHash, requestFingerprint: auditContext.requestFingerprint }
+      : undefined
+    if (requestKey) {
+      const replayed = await this.readOrgStructureReplay(directoryId, command, requestKey)
+      if (replayed) return replayed
+    }
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const teamIds = new Set(items.flatMap((item) => item.entryType === 'team' ? [item.teamId] : []))
+    if (listUnknownOrgStructureTeamIds(command.teamAssignments, teamIds).length > 0) {
+      throw new ProjectDataError(409, 'OrgStructureTeamNotFound', 'A Team in the OrgUnit structure does not exist.')
+    }
+    const current = await this.getOrgStructure(directoryId, true)
+    if (current.revision !== command.expectedRevision) {
+      // The same request may have committed after the receipt check above: only its receipt
+      // tells that success apart from a save by someone else.
+      if (requestKey) {
+        const replayed = await this.readOrgStructureReplay(directoryId, command, requestKey)
+        if (replayed) return replayed
+      }
+      throw createOrgStructureConflictError()
+    }
+    const updatedAt = new Date().toISOString()
+    const next: OrgStructure = {
+      orgUnits: command.orgUnits,
+      teamAssignments: command.teamAssignments,
+      revision: command.expectedRevision + 1,
+      updatedAt,
+    }
+    const isFirstSave = command.expectedRevision === 0
+    // The Put below already conditions the structure row, and a transaction may name a row once,
+    // so a caller fence on the same row is dropped. Replacing it needs Workspace administration,
+    // which no OrgUnit-derived permission grants.
+    const structureKey = createOrgStructureKey(directoryId)
+    const callerChecks = authorizationConditionChecks.filter((item) =>
+      item.ConditionCheck?.TableName !== this.tableName ||
+      item.ConditionCheck.Key?.directoryId !== structureKey.directoryId ||
+      item.ConditionCheck.Key?.entryKey !== structureKey.entryKey
+    )
+    try {
+      await this.sendDirectoryAdministrationTransaction(callerChecks, [
+        {
+          Put: {
+            TableName: this.tableName,
+            Item: createOrgStructureItem(directoryId, next),
+            ConditionExpression: isFirstSave
+              ? 'attribute_not_exists(entryKey)'
+              : '#revision = :expectedRevision AND #entryType = :entryType',
+            ...(isFirstSave
+              ? {}
+              : {
+                  ExpressionAttributeNames: { '#revision': 'revision', '#entryType': 'entryType' },
+                  ExpressionAttributeValues: {
+                    ':expectedRevision': command.expectedRevision,
+                    ':entryType': ORG_STRUCTURE_ENTRY_TYPE,
+                  },
+                }),
+          },
+        },
+        // The receipt commits with the structure, so a retry finds it only after the save did.
+        ...(requestKey
+          ? [{
+              Put: {
+                TableName: this.tableName,
+                Item: createTeamGrantRequestItem(directoryId, requestKey, updatedAt),
+                ConditionExpression: 'attribute_not_exists(#entryKey)',
+                ExpressionAttributeNames: { '#entryKey': 'entryKey' },
+              },
+            }]
+          : []),
+        ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+          directoryId,
+          eventType: 'org-structure.updated',
+          entityType: 'org-structure',
+          entityId: 'org-structure',
+          action: 'updated',
+          // Counts keep the event small; a full structure can exceed the audit row size.
+          changes: createAuditFieldChanges(
+            {
+              orgUnitCount: current.orgUnits.length,
+              teamAssignmentCount: current.teamAssignments.length,
+            },
+            {
+              orgUnitCount: next.orgUnits.length,
+              teamAssignmentCount: next.teamAssignments.length,
+            },
+            ['orgUnitCount', 'teamAssignmentCount'],
+          ),
+          metadata: { revision: next.revision },
+        }),
+      ])
+    } catch (error) {
+      if (error instanceof ProjectDataError && error.code === 'ConditionalCheckFailedException') {
+        // The same request sent twice at once: one commits, the other loses its conditions. Only a
+        // receipt of this key and input proves the save committed; anything else stays a conflict.
+        if (requestKey) {
+          const replayed = await this.readOrgStructureReplay(directoryId, command, requestKey)
+          if (replayed) return replayed
+        }
+        throw createOrgStructureConflictError()
+      }
+      throw error
+    }
+    return next
+  }
+
+  /**
+   * Reads the receipt of an OrgUnit structure save under the request's idempotency key.
+   *
+   * The receipt is written in the transaction that saves the structure, so finding it with the
+   * same request fingerprint proves that this request already committed. The fingerprint covers
+   * the expected revision and the whole structure, so the saved structure is rebuilt from the
+   * command and the receipt time.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param command - Validated request.
+   * @param requestKey - Idempotency key hash and request fingerprint of the request.
+   * @returns The structure the earlier request saved, or undefined when the key was never used.
+   * @throws ProjectDataError 409 `IdempotencyKeyConflict` when the key was used with another request.
+   * @throws ProjectDataError 503 `OrgStructureUnavailable` when the stored receipt is malformed.
+   */
+  private async readOrgStructureReplay(
+    directoryId: string,
+    command: ReplaceOrgStructureCommand,
+    requestKey: TeamGrantRequest,
+  ): Promise<OrgStructure | undefined> {
+    let receipt: unknown
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        ConsistentRead: true,
+        Key: createTeamGrantRequestKey(directoryId, requestKey.idempotencyKeyHash),
+      }))
+      receipt = response.Item
+    } catch (error) {
+      throw toProjectDataError(error)
+    }
+    if (receipt === undefined) return undefined
+    if (
+      !isRecord(receipt) ||
+      receipt.entryType !== 'team-grant-request' ||
+      receipt.workspaceId !== directoryId ||
+      typeof receipt.requestFingerprint !== 'string' ||
+      typeof receipt.createdAt !== 'string'
+    ) {
+      throw new ProjectDataError(503, 'OrgStructureUnavailable', 'The stored OrgUnit structure receipt is invalid.')
+    }
+    if (receipt.requestFingerprint !== requestKey.requestFingerprint) {
+      throw new ProjectDataError(409, 'IdempotencyKeyConflict', 'The key was used with another request.')
+    }
+    return {
+      orgUnits: command.orgUnits,
+      teamAssignments: command.teamAssignments,
+      revision: command.expectedRevision + 1,
+      updatedAt: receipt.createdAt,
     }
   }
 
@@ -1951,6 +2213,7 @@ export class DynamoDbProjectDirectoryClient {
     input: UpdateProjectMemberRequestBody,
     expectedWorkspaceMemberVersion: number,
     auditContext?: MutationAuditContext,
+    options: UpdateProjectMemberOptions = {},
   ) {
     await this.ensureLocalAuditTable()
     const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
@@ -1971,6 +2234,17 @@ export class DynamoDbProjectDirectoryClient {
         isActiveDirectoryItem(item),
       )
       existingMemberExpected = existingMember !== undefined
+      // The member Put is conditioned on the row this read returned, so the check holds at write.
+      if (
+        options.demotionOnly &&
+        (!existingMember || projectRoleRank[role] >= projectRoleRank[existingMember.role])
+      ) {
+        throw new ProjectDataError(
+          409,
+          'ProjectMemberDemotionOnly',
+          'Only a lower Project role can be given to a member who is not an active Workspace member.',
+        )
+      }
 
       const guardManager = (
         existingMember?.role === 'manager' &&
@@ -2264,14 +2538,7 @@ export class DynamoDbProjectDirectoryClient {
    * @param grantRequest - Idempotency key hash and request fingerprint of the request.
    */
   private async bindTeamRequestKey(directoryId: string, grantRequest: TeamGrantRequest): Promise<void> {
-    const item: TeamGrantRequestItem = {
-      directoryId: createTeamGrantRequestDirectoryId(directoryId),
-      entryKey: `KEY#${grantRequest.idempotencyKeyHash}`,
-      entryType: 'team-grant-request',
-      workspaceId: directoryId,
-      requestFingerprint: grantRequest.requestFingerprint,
-      createdAt: new Date().toISOString(),
-    }
+    const item = createTeamGrantRequestItem(directoryId, grantRequest, new Date().toISOString())
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [{
@@ -5327,6 +5594,42 @@ function createTeamGrantRequestDirectoryId(workspaceId: string) {
 }
 
 /**
+ * Creates the primary key of the receipt that binds one idempotency key of a Workspace.
+ *
+ * @param workspaceId - Workspace that owns the receipt.
+ * @param idempotencyKeyHash - Hash of the caller's idempotency key.
+ * @returns The partition and sort key.
+ */
+function createTeamGrantRequestKey(workspaceId: string, idempotencyKeyHash: string) {
+  return {
+    directoryId: createTeamGrantRequestDirectoryId(workspaceId),
+    entryKey: `KEY#${idempotencyKeyHash}`,
+  }
+}
+
+/**
+ * Builds the receipt row that binds an administration request's idempotency key to its input.
+ *
+ * @param workspaceId - Workspace that owns the receipt.
+ * @param request - Idempotency key hash and request fingerprint.
+ * @param createdAt - ISO 8601 time the key was accepted.
+ * @returns The receipt row.
+ */
+function createTeamGrantRequestItem(
+  workspaceId: string,
+  request: TeamGrantRequest,
+  createdAt: string,
+): TeamGrantRequestItem {
+  return {
+    ...createTeamGrantRequestKey(workspaceId, request.idempotencyKeyHash),
+    entryType: 'team-grant-request',
+    workspaceId,
+    requestFingerprint: request.requestFingerprint,
+    createdAt,
+  }
+}
+
+/**
  * Tells whether a transaction item is a condition check on one Workspace member row.
  *
  * @param check - Transaction item to inspect.
@@ -5462,6 +5765,15 @@ function createProjectCharterRevisionConflictError() {
     'ProjectCharterRevisionConflict',
     'The Project charter changed. Reload and try again.',
   )
+}
+
+/**
+ * Creates the conflict answered when the OrgUnit structure changed since the caller read it.
+ *
+ * @returns The 409 error with code `OrgStructureConflict`.
+ */
+function createOrgStructureConflictError() {
+  return new ProjectDataError(409, 'OrgStructureConflict', 'The OrgUnit structure changed. Reload and try again.')
 }
 
 function createProjectDataConflictError() {

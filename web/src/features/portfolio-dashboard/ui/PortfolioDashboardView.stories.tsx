@@ -177,3 +177,21 @@ export const Default: Story = {}
 export const English: Story = {
   args: { locale: 'en', t: createTranslator('en') },
 }
+
+/** Projects rolled up by OrgUnit, with a Team outside every OrgUnit. */
+export const ByOrgUnit: Story = {
+  args: {
+    orgStructure: {
+      orgUnits: [
+        { id: 'eng', name: '開発本部' },
+        { id: 'platform', name: '基盤部', parentId: 'eng' },
+      ],
+      teamAssignments: [{ teamId: 'core', orgUnitId: 'platform' }],
+    },
+  },
+}
+
+/** OrgUnits failed to load, so the roll-up is missing and the notice offers a retry. */
+export const OrgUnitsUnavailable: Story = {
+  args: { isOrgStructureUnavailable: true },
+}

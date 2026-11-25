@@ -13,6 +13,7 @@ import {
 } from '../../features/portfolio-dashboard/queries/usePortfolioDashboard'
 import { PortfolioDashboardView } from '../../features/portfolio-dashboard/ui/PortfolioDashboardView'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
+import { useOrgStructure } from '../../projects/queries/useOrgStructure'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createProjectOverviewPath } from '../../shared/routing/paths'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
@@ -102,6 +103,9 @@ export function PortfolioDashboardPage() {
   const snapshots = usePortfolioSnapshots(accessToken, teamIds, compareMonth)
   const planning = usePlanningSnapshot(workspace.accessToken, workspace.canLoadWorkspaceData)
   const workload = usePortfolioWorkload(accessToken, calendar.month)
+  // A reader who may not see the structure, or a Workspace without OrgUnits, gets no OrgUnit roll-up.
+  // Any other failure is shown with the page's retry, so it is not mistaken for having no OrgUnits.
+  const orgStructure = useOrgStructure(accessToken)
   const model = useMemo(
     () => createPortfolioDashboardModel({
       teams: workspace.teams,
@@ -130,12 +134,13 @@ export function PortfolioDashboardPage() {
     : snapshotResult.failedTeamIds.length > 0
       ? t('portfolioDashboard.snapshot.failed').replace('{teams}', snapshotResult.failedTeamIds.map(teamName).join(', '))
       : t('portfolioDashboard.snapshot.saved').replace('{count}', String(snapshotResult.savedTeamIds.length))
-  /** Reads every Team, the compared snapshots, and Planning health again after a failure. */
+  /** Reads every Team, the compared snapshots, Planning health, and OrgUnits again after a failure. */
   const retry = () => {
     void reads.mutate()
     if (compareMonth) void snapshots.mutate()
     if (planning.error) void planning.mutate()
     if (workload.error) void workload.mutate()
+    if (orgStructure.error) void orgStructure.mutate()
   }
 
   const sessionErrors = [
@@ -143,6 +148,7 @@ export function PortfolioDashboardPage() {
     planning.error,
     snapshots.error,
     workload.error,
+    orgStructure.error,
     ...listPortfolioDashboardErrors(reads.data?.teams ?? [], snapshots.data ?? []),
     ...snapshotSave.errors,
   ]
@@ -166,6 +172,7 @@ export function PortfolioDashboardPage() {
         <PortfolioDashboardView
           canSaveSnapshot={capturableTeamIds.length > 0}
           compareMonthOptions={compareMonthOptions}
+          isOrgStructureUnavailable={orgStructure.error !== undefined}
           isPlanningUnavailable={Boolean(planning.error)}
           isSavingSnapshot={snapshotSave.isSaving}
           locale={workspace.locale}
@@ -177,6 +184,7 @@ export function PortfolioDashboardPage() {
           onOpenProject={(teamId, projectId) => navigate(createProjectOverviewPath(projectId, teamId))}
           onRetry={retry}
           onSaveSnapshot={() => void snapshotSave.save(capturableTeamIds)}
+          {...(orgStructure.data ? { orgStructure: orgStructure.data } : {})}
           {...(compareMonth ? { compareMonth } : {})}
           {...(snapshotMessage ? { snapshotMessage } : {})}
         />

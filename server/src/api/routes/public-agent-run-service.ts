@@ -80,11 +80,13 @@ import { projectPublicWorkItem, resolveStableWorkItemAuthorization, updateCanoni
  *
  * @param current - Caller resolved again after the transaction was cancelled.
  * @param snapshot - Access observed when the mutation was authorized.
- * @returns True when the membership, Planning, or Enterprise Identity revision differs.
+ * @returns True when the membership, Planning, Enterprise Identity, or OrgUnit structure revision
+ * differs.
  */
 async function hasAuthorizationChanged(current: WorkspacePrincipal, snapshot: WorkItemAuthorizationSnapshot): Promise<boolean> {
   return current.workspaceMember.version !== snapshot.workspaceMemberVersion ||
     current.enterpriseIdentityControlRevision !== snapshot.enterpriseControlRevision ||
+    current.enterpriseOrgStructureRevision !== snapshot.orgStructureRevision ||
     await workItemDependencies.planning.getAuthorizationRevision(snapshot.workspaceId) !== snapshot.planningRevision
 }
 

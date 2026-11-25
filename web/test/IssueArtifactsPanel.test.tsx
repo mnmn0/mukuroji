@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { FileAttachment } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { MemoryRouter } from 'react-router'
 import { IssueArtifactsPanel } from '../src/files/ui/IssueArtifactsPanel'
 import {
   blockedVideoFileFixture,
@@ -205,5 +206,40 @@ describe('IssueArtifactsPanel', () => {
     expect(html).toContain('Approve')
     expect(html).not.toContain('undefined')
     expect(html).not.toContain('Cancel request')
+  })
+
+  test('shows a Document version approval with a link to its version review', () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <IssueArtifactsPanel
+          controller={{
+            ...fileArtifactsControllerFixture,
+            approvals: [{
+              id: 'approval-document-1',
+              subjectType: 'document-version',
+              documentId: 'doc-1',
+              versionId: 'doc-1:4',
+              revision: 2,
+              status: 'approved',
+              reviewers: [{ memberKey: 'demo@example.com', status: 'approved' }],
+              dueAt: '2026-07-17T00:00:00.000Z',
+              requestedByMemberKey: 'sato@example.com',
+              requestedByKind: 'member',
+              createdAt: '2026-07-16T00:00:00.000Z',
+              updatedAt: '2026-07-16T00:00:00.000Z',
+              capabilities: { canCancel: false, canDecide: false },
+            }],
+            files: [],
+          }}
+          currentMemberKey="demo@example.com"
+          locale="en"
+          members={collaborationWorkspaceMemberFixtures}
+        />
+      </MemoryRouter>,
+    )
+
+    expect(html).toContain('Document version')
+    expect(html).toContain('href="/documents/doc-1?context=versions&amp;versionId=doc-1%3A4"')
+    expect(html).toContain('Approved')
   })
 })

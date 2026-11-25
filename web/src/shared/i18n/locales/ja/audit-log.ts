@@ -116,6 +116,7 @@ export const auditLogMessages = {
   'auditLog.resource.import': '取り込み',
   'auditLog.resource.invitation': '招待',
   'auditLog.resource.member': 'メンバー',
+  'auditLog.resource.org-structure': '部門',
   'auditLog.resource.work-item-key-prefix': 'Work Item key の prefix',
   'auditLog.resource.notification-reminders': '通知リマインダー',
   'auditLog.resource.auth': 'サインイン',

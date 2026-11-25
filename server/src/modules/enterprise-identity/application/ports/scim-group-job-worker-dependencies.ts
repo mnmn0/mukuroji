@@ -1,6 +1,7 @@
 import type { DocumentClient } from '../../../documents'
 import type { PlanningClient } from '../../../planning'
 import type {
+  MemberCredentialRevoker,
   WorkspaceAccessClient,
 } from '../../../workspace-access'
 import type {
@@ -78,4 +79,6 @@ export type EnterpriseScimGroupJobWorkerDependencies = {
   projectManagerGuard: EnterpriseScimGroupJobProjectManagerGuard
   /** Cognito user の認証 lifecycle を収束させます。 */
   cognito: EnterpriseScimGroupJobCognitoClient
+  /** Revokes the API keys and OAuth applications a member created, before a reactivation. */
+  revokeMemberCredentials: MemberCredentialRevoker
 }

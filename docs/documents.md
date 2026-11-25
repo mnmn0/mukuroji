@@ -47,6 +47,51 @@ Batch は DynamoDB transaction と backlink 更新を常に atomic に収める�
 - Restore が再導入する relation / Whiteboard Work Item target は current source of truth で
   再認可し、権限を失った target を過去 snapshot から復活させません。
 
+### 履歴の保持期間と名前付き version
+
+自動保存の version（metadata、delta、snapshot）は作成から **180 日** で DynamoDB TTL により
+削除されます（`DOCUMENT_VERSION_RETENTION_DAYS`。full snapshot は delta を復元する base として
+さらに 1 日長く残します）。保持期間を過ぎた version は履歴・preview・復元に出ません。
+Operation receipt は 30 日です。保持期間は現在 Workspace ごとには変えられません。
+
+名前を付けて固定した version（例: 「v1.0 承認版」）は保持期間の対象外です。固定すると
+metadata row の `expiresAtEpoch` を外し、その revision の full snapshot を TTL なしで書きます。
+後続の delta が期限切れで消えても、固定した version は単独の snapshot から preview・比較・復元
+できます。固定には Document の編集権限が要り、名前は 1〜120 文字です。同じ version を再度固定
+すると名前を付け替えます。`Idempotency-Key` 付きの固定は actor・version・名前に束縛した receipt
+（`VERSION_PIN_RECEIPT#<documentId>#<digest>`、30 日）を残し、同じ key の再送には書き直さずに
+確定済みの結果を返します。後から別の key で付け替えた名前を、遅れて届いた再送が上書きすることは
+ありません。同じ key で別の version や名前を送ると `409 IdempotencyKeyReused` です。
+
+### Version の承認
+
+固定した version は承認の対象（`ApprovalRequest.subjectType: 'document-version'`）にできます。
+承認依頼は成果物として link する Work Item に作り、file version の承認と同じ approval row、
+reviewer の Inbox、判断と取消、Work Item の承認集計（完了 Gate を含む）を使います。
+依頼には Document の編集権限（固定と同じ。Enterprise role では `documents.write` 以上）、その
+version が固定済みであること、Work Item の編集権限と Enterprise role の `files.approve` が要り、
+reviewer は Work Item を閲覧できる active member に限ります（guest は reviewer にできません）。
+依頼画面は Workspace のメンバー一覧から reviewer を選ばせますが、一覧の取得には `members.read` が
+要り、依頼の権限には含まれません。そのため member key（メール）を直接入力して reviewer に足せ、
+その member が active で Work Item を閲覧できるかは依頼時に server が確かめます。reviewer 候補を
+返す API は足さず、`members.read` のない依頼者に member の一覧を見せることはしません。
+Reviewer が Document を閲覧できるかは確かめません（ADR 0091）。Document を読めない reviewer は
+承認カードから版を開けませんが、判断はできます。
+承認の保存 transaction は、依頼者の Document 編集権限の判定に使った認可 row、version が固定済み
+であること、Work Item が認可時と同じ Project に属することを condition check で再確認します。
+検証後にこれらが変わった場合は `409 ApprovalAuthorizationChanged` で、承認も通知も作りません。
+同じ `Idempotency-Key` の再送は、期限が過ぎていても保存済みの承認を返します。
+承認の状態は Work Item 側で変わるため、承認一覧は window が focus を戻したときと版の確認画面を
+開いたときに読み直します（版の snapshot は変わらないので読み直しません）。
+Document 側の表示用に、file proofing table の `WORKSPACE#<workspaceId>#DOCUMENT#<documentId>`
+partition へ `APPROVAL#<createdAt>#<approvalId>` の pointer row を書き、承認一覧はそこから main
+approval row を読み、閲覧者が Work Item を見られる承認だけを返します。
+Work Item 側の認可は Document の route の scope ではなく、その Work Item の route
+（依頼は `POST /api/teams/{teamId}/issues/{issueId}/approvals`、一覧は Work Item ごとに
+`GET /api/teams/{teamId}/issues/{issueId}/files`）として Enterprise permission を評価します。
+そのため Document の権限を Project A、Work Item の権限を Project B で持つ member も依頼でき、
+B の承認も一覧に出ます。
+
 ### Link の上限
 
 1 つの Document は relation と Whiteboard の Work Item object を合わせて最大 500 件の link を
@@ -130,7 +175,11 @@ Document 最大 payload の末尾まで検索対象になります。
 - `POST /api/documents/{documentId}/restore`
 - `POST /api/documents/{templateId}/instantiate`
 - `GET /api/documents/{documentId}/versions`
+- `GET /api/documents/{documentId}/versions/{versionId}`（read-only snapshot）
+- `POST /api/documents/{documentId}/versions/{versionId}/pin`
 - `POST /api/documents/{documentId}/versions/{versionId}/restore`
+- `POST /api/documents/{documentId}/versions/{versionId}/approvals`
+- `GET /api/documents/{documentId}/approvals`
 - `GET|POST /api/documents/{documentId}/comments`
 - `POST /api/documents/{documentId}/comments/{commentId}/resolve`
 - `GET|PUT /api/documents/{documentId}/presence`
@@ -164,6 +213,12 @@ Team ID と Issue ID から `team/<teamId>/issue/<issueId>` を生成するた�
 同じ canonical ID を使います。Whiteboard は canvas を広く保つため toolbar を floating control
 にし、public share 画面では編集 control を表示しません。Mention 通知の deep link は対象 thread
 を cursor 越しに取得し、対象 comment を drawer 内で強調・focus します。
+
+右 panel の version 一覧では各 version の「確認・比較・承認」から dialog を開き、read-only の
+preview、別の version または現在の内容との block 単位の差分（追加・削除・変更・移動）、
+名前を付けた固定、Work Item への承認依頼と結果の確認ができます。Work Item の承認一覧の
+「Document の版を開く」は `/documents/{documentId}?context=versions&versionId=...` で同じ dialog
+を開きます。
 
 ### Markdown の取り込み
 

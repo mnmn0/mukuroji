@@ -999,6 +999,12 @@ export type PublicApiDependencies = {
   rateLimits: RateLimitPort
   /** Rejects public access to a closing or closed Workspace. */
   enforceActiveWorkspace(workspaceId: string): Promise<void>
+  /**
+   * Rejects a credential whose owner is no longer an active Workspace member, for example a
+   * deactivated member or one whose access expired (ADR 0095). Every route checks it before its
+   * own authorization; omitted only by tests that do not exercise membership.
+   */
+  requireActiveCredentialSubject?(credential: AuthenticatedDeveloperCredential): Promise<void>
   /** Cognito bearer token と request metadata を current Workspace principal へ解決します。 */
   authenticateManagement(
     authorization: string,
@@ -3211,6 +3217,7 @@ async function authenticatePublicRequest(
   }
   await validatePublicApiRequestBody(c)
   await dependencies.enforceActiveWorkspace(credential.workspaceId)
+  await dependencies.requireActiveCredentialSubject?.(credential)
   return credential
 }
 
