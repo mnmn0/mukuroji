@@ -49,6 +49,7 @@ import {
   type PublicAgentTelemetryService,
   type PublicAttachmentService,
   type PublicDocumentService,
+  type PublicWorkItemRelationService,
   type PublicDirectoryService,
   type PublicWorkItemService,
 } from './public-api'
@@ -248,6 +249,8 @@ function createTestRouter(input: {
   agentTelemetry?: PublicAgentTelemetryService
   /** Document service used by Document route tests. */
   documents?: PublicDocumentService
+  /** Relation service used by relation route tests. */
+  workItemRelations?: PublicWorkItemRelationService
   /** Attachment service used by attachment route tests. */
   attachments?: PublicAttachmentService
   /** Directory service used by Team, Project member, and key route tests. */
@@ -287,6 +290,7 @@ function createTestRouter(input: {
     ...(input.agentRuns ? { agentRuns: input.agentRuns } : {}),
     ...(input.agentTelemetry ? { agentTelemetry: input.agentTelemetry } : {}),
     ...(input.documents ? { documents: input.documents } : {}),
+    ...(input.workItemRelations ? { workItemRelations: input.workItemRelations } : {}),
     ...(input.attachments ? { attachments: input.attachments } : {}),
     ...(input.directory ? { directory: input.directory } : {}),
     openApiDocument: { openapi: '3.1.0' },
@@ -726,6 +730,77 @@ describe('public API router', () => {
     expect(denied.status).toBe(403)
     expect(missingTeam.status).toBe(400)
     expect(reads).toEqual(['team-1/work-item-1'])
+  })
+
+  test('reads and changes Work Item relations with the matching scopes and replays an idempotent create', async () => {
+    const calls: string[] = []
+    const { platform, router } = createTestRouter({
+      workItemRelations: {
+        async listRelations(_credential, teamId, workItemId) {
+          calls.push(`list ${teamId}/${workItemId}`)
+          return { schemaVersion: 1, teamId, workItemId, relations: [{ type: 'blockedBy', targetWorkItemId: 'task-2' }] }
+        },
+        async authorizeRelationChange(_credential, teamId, workItemId, targetWorkItemId) {
+          calls.push(`authorize ${teamId}/${workItemId}->${targetWorkItemId}`)
+        },
+        async createRelation(_credential, teamId, workItemId, input, context) {
+          calls.push(`create ${teamId}/${workItemId} ${input.type} ${input.targetWorkItemId} ${context.idempotencyKey}`)
+          return { schemaVersion: 1, teamId, workItemId, relation: { type: input.type, targetWorkItemId: input.targetWorkItemId } }
+        },
+        async deleteRelation(_credential, teamId, workItemId, targetWorkItemId, type) {
+          calls.push(`delete ${teamId}/${workItemId} ${type} ${targetWorkItemId}`)
+          return { schemaVersion: 1, teamId, workItemId, relation: { type, targetWorkItemId } }
+        },
+      },
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+    const write = (path: string, method: string, key: string, body?: unknown) => router.request(`http://localhost${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${writer.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+
+    const listed = await router.request('http://localhost/v1/work-items/task-1/relations?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const listDenied = await router.request('http://localhost/v1/work-items/task-1/relations?teamId=team-1', {
+      headers: { Authorization: `Bearer ${writer.secret}` },
+    })
+    const created = await write('/v1/work-items/task-1/relations?teamId=team-1', 'POST', 'relation-key', { type: 'child', targetWorkItemId: 'task-3' })
+    const replayed = await write('/v1/work-items/task-1/relations?teamId=team-1', 'POST', 'relation-key', { type: 'child', targetWorkItemId: 'task-3' })
+    const invalidType = await write('/v1/work-items/task-1/relations?teamId=team-1', 'POST', 'invalid-key', { type: 'sibling', targetWorkItemId: 'task-3' })
+    const extraField = await write('/v1/work-items/task-1/relations?teamId=team-1', 'POST', 'extra-key', { type: 'related', targetWorkItemId: 'task-3', expectedGraphRevision: 2 })
+    const createDenied = await router.request('http://localhost/v1/work-items/task-1/relations?teamId=team-1', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${reader.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'reader-key' },
+      body: JSON.stringify({ type: 'related', targetWorkItemId: 'task-3' }),
+    })
+    const deleted = await write('/v1/work-items/task-1/relations/task-2/blockedBy?teamId=team-1', 'DELETE', 'delete-key')
+    const deleteInvalid = await write('/v1/work-items/task-1/relations/task-2/sibling?teamId=team-1', 'DELETE', 'delete-invalid-key')
+
+    expect(listed.status).toBe(200)
+    expect(await listed.json()).toEqual({
+      schemaVersion: 1, teamId: 'team-1', workItemId: 'task-1', relations: [{ type: 'blockedBy', targetWorkItemId: 'task-2' }],
+    })
+    expect(listDenied.status).toBe(403)
+    expect(created.status).toBe(201)
+    expect(replayed.status).toBe(201)
+    expect(replayed.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(await replayed.json()).toEqual({
+      schemaVersion: 1, teamId: 'team-1', workItemId: 'task-1', relation: { type: 'child', targetWorkItemId: 'task-3' },
+    })
+    expect(invalidType.status).toBe(400)
+    expect(extraField.status).toBe(400)
+    expect(createDenied.status).toBe(403)
+    expect(deleted.status).toBe(200)
+    expect(deleteInvalid.status).toBe(400)
+    expect(calls).toEqual([
+      'list team-1/task-1',
+      'create team-1/task-1 child task-3 relation-key',
+      'authorize team-1/task-1->task-3',
+      'delete team-1/task-1 blockedBy task-2',
+    ])
   })
 
   test('lists Documents linked to a Work Item with the read scope and signs the continuation', async () => {

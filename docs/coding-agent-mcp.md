@@ -107,11 +107,17 @@ Software factory が無効な環境でも使えます（Agent Run の API を呼
 | `list_comments` | Work Item のコメントを新しい順にページ取得。key だけでも指せる |
 | `save_issue` | `id` なしで Work Item を作成（`teamId` と `title` が必須、担当者の既定は `me`）。`id`（key か ID と `teamId`）ありで更新し、渡した項目だけを変える。更新には `get_issue` で読んだ `expectedRevision` が要る。`dueDate` は作成時だけ。`description` は作成時 100000 文字、更新時 4096 文字まで |
 | `save_comment` | Work Item にコメント（4096 文字まで）を追加。key だけでも指せる |
+| `list_relations` | Work Item の親・子（兄弟の順）・WBS 番号と、blocks / blockedBy / related / duplicate の link を読む。読めない相手の link は返さない |
+| `save_relation` | 同じ Team の 2 つの Work Item を link する。`type` は 1 つ目から見た向き（`parent` は相手が親になる、`blockedBy` は相手に止められる）。`remove: true` で解除。親は 1 つだけで、親の Work Item Type が子の Type を許さない link と循環する link は競合で失敗する |
+| `create_subtasks` | 親の下に、親と同じ Project で最大 20 件の子を作る（担当者の既定は `me`）。1 件ずつ作って親に付け、途中で失敗したら同じ引数と `idempotencyKey` で再試行すると、済んだ子を作り直さずに残りを作る |
 
 書き込みのツールは、毎回新しい UUID の `idempotencyKey` を要求します。応答が不確かなときは、同じ引数と key で再試行します。
 更新が revision の競合で失敗したら、`get_issue` で読み直してから改めて判断します。権限の判定は Web と同じで、
 token の持ち主が編集できない Work Item は変えられません。
 同じ MCP クライアントに tasks profile と並べて登録する場合は、サーバー名を分けます（例: `mukuroji` と `mukuroji-tasks`）。
+
+作業の分解（`create_subtasks`）は、分け方を人が確認してから行う運用にします。WBS 番号は server が木から導くので、
+title に番号を書かせません。schedule の依存関係（Gantt の矢印）と Document の link はまだ MCP から作れないため、Web で設定します。
 
 ### 自分用token
 

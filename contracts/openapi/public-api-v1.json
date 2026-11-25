@@ -1603,6 +1603,33 @@
         ],
         "type": "object"
       },
+      "CreatePublicWorkItemRelationInput": {
+        "additionalProperties": false,
+        "properties": {
+          "targetWorkItemId": {
+            "description": "Other Work Item, in the same Team.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": {
+            "description": "Relation type from the Work Item in the path: parent makes the target its parent, child makes the target its child, blockedBy means the target blocks it.",
+            "enum": [
+              "parent",
+              "child",
+              "blocks",
+              "blockedBy",
+              "related",
+              "duplicate"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "targetWorkItemId"
+        ],
+        "type": "object"
+      },
       "CreatePublicWorkItemRequest": {
         "additionalProperties": false,
         "properties": {
@@ -5050,6 +5077,90 @@
           "teamId",
           "workItemId",
           "createdAt"
+        ],
+        "type": "object"
+      },
+      "WorkItemRelation": {
+        "description": "One relation of a Work Item, from that Work Item's point of view. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "createdAt": {
+            "description": "When the relation was created; absent for relations stored before the time was recorded.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "targetWorkItemId": {
+            "description": "Other Work Item of the relation, in the same Team.",
+            "type": "string"
+          },
+          "type": {
+            "description": "Relation type from the named Work Item's point of view. child and blockedBy are the reverse of parent and blocks.",
+            "enum": [
+              "parent",
+              "child",
+              "blocks",
+              "blockedBy",
+              "related",
+              "duplicate"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "targetWorkItemId"
+        ],
+        "type": "object"
+      },
+      "WorkItemRelationList": {
+        "description": "Relations of a Work Item except children, whose other Work Item the client may read. Children are listed by the hierarchy endpoint. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "relations": {
+            "items": {
+              "$ref": "#/components/schemas/WorkItemRelation"
+            },
+            "type": "array"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "workItemId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "teamId",
+          "workItemId",
+          "relations"
+        ],
+        "type": "object"
+      },
+      "WorkItemRelationMutation": {
+        "description": "Relation created or removed, from the named Work Item's point of view. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "relation": {
+            "$ref": "#/components/schemas/WorkItemRelation"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "workItemId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "teamId",
+          "workItemId",
+          "relation"
         ],
         "type": "object"
       },
@@ -14112,6 +14223,338 @@
           }
         ],
         "summary": "Read the short immutable key of a Work Item",
+        "tags": [
+          "Work Items"
+        ]
+      }
+    },
+    "/api/v1/work-items/{workItemId}/relations": {
+      "get": {
+        "operationId": "listPublicWorkItemRelations",
+        "parameters": [
+          {
+            "description": "Work Item ID です。",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Work Item を所有する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkItemRelationList"
+                }
+              }
+            },
+            "description": "Work Item relations",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "List the relations of a Work Item except children",
+        "tags": [
+          "Work Items"
+        ]
+      },
+      "post": {
+        "operationId": "createPublicWorkItemRelation",
+        "parameters": [
+          {
+            "description": "Work Item ID です。",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Work Item を所有する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePublicWorkItemRelationInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkItemRelationMutation"
+                }
+              }
+            },
+            "description": "The relation was created.",
+            "headers": {
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:write"
+            ]
+          }
+        ],
+        "summary": "Link two Work Items of one Team",
+        "tags": [
+          "Work Items"
+        ]
+      }
+    },
+    "/api/v1/work-items/{workItemId}/relations/{targetWorkItemId}/{relationType}": {
+      "delete": {
+        "operationId": "deletePublicWorkItemRelation",
+        "parameters": [
+          {
+            "description": "Work Item ID です。",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Other Work Item of the relation.",
+            "in": "path",
+            "name": "targetWorkItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Relation type from the Work Item in the path.",
+            "in": "path",
+            "name": "relationType",
+            "required": true,
+            "schema": {
+              "enum": [
+                "parent",
+                "child",
+                "blocks",
+                "blockedBy",
+                "related",
+                "duplicate"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Work Item を所有する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkItemRelationMutation"
+                }
+              }
+            },
+            "description": "The relation was removed.",
+            "headers": {
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:write"
+            ]
+          }
+        ],
+        "summary": "Remove a relation between two Work Items",
         "tags": [
           "Work Items"
         ]

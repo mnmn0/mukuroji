@@ -69,3 +69,24 @@ test('sends writes with the idempotency key and rejects a Work Item saved in ano
   await expect(api.updateIssue('team', 'another-task', { expectedRevision: 1, title: 'Renamed' }, key))
     .rejects.toMatchObject({ code: 'invalid_response' })
 })
+
+test('sends relation writes to the named Work Item and rejects relations of another Work Item', async () => {
+  const seen: { url: string, method: string | undefined, key: string | null, body: unknown }[] = []
+  const api = createWorkspaceApi(config, async (url, init) => {
+    seen.push({
+      url: url.href, method: init.method, key: new Headers(init.headers).get('Idempotency-Key'),
+      body: typeof init.body === 'string' ? JSON.parse(init.body) : undefined,
+    })
+    return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', relation: { type: 'blocks', targetWorkItemId: 'other' } })
+  })
+
+  await api.createRelation('team', 'task', { type: 'blocks', targetWorkItemId: 'other' }, 'link-key')
+  await api.deleteRelation('team', 'task', 'other', 'blocks', 'unlink-key')
+  await expect(api.createRelation('team', 'another-task', { type: 'blocks', targetWorkItemId: 'other' }, 'link-key'))
+    .rejects.toMatchObject({ code: 'invalid_response' })
+
+  expect(seen.slice(0, 2)).toEqual([
+    { url: 'https://mukuroji.example.test/api/v1/work-items/task/relations?teamId=team', method: 'POST', key: 'link-key', body: { type: 'blocks', targetWorkItemId: 'other' } },
+    { url: 'https://mukuroji.example.test/api/v1/work-items/task/relations/other/blocks?teamId=team', method: 'DELETE', key: 'unlink-key', body: undefined },
+  ])
+})

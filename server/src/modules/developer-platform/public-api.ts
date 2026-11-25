@@ -17,6 +17,11 @@ import {
   type PublicWorkItemEffort,
   type PublicWorkItemKey,
   type PublicWorkItemHierarchy,
+  type CreatePublicWorkItemRelationRequest,
+  isPublicWorkItemRelationType,
+  type PublicWorkItemRelationList,
+  type PublicWorkItemRelationMutation,
+  type PublicWorkItemRelationType,
   type PublicDocumentContent,
   type PublicWorkItemAttachmentDownload,
   type PublicWorkItemAttachmentList,
@@ -630,6 +635,73 @@ export interface PublicAttachmentService {
   ): Promise<PublicWorkItemAttachmentDownload>
 }
 
+/**
+ * Work Item relation adapter of the Public API. Every call re-checks the credential owner's current
+ * Team and Project permissions, as the signed-in relation routes do.
+ */
+export interface PublicWorkItemRelationService {
+  /**
+   * Lists the relations of a Work Item, except children, whose other Work Item the owner can read.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The readable relations.
+   */
+  listRelations(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<PublicWorkItemRelationList>
+  /**
+   * Checks that the owner may change relations of both Work Items, without changing anything.
+   * An idempotent replay calls it before returning the stored response.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns both Work Items.
+   * @param workItemId - Work Item named in the path.
+   * @param targetWorkItemId - Other Work Item.
+   */
+  authorizeRelationChange(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    targetWorkItemId: string,
+  ): Promise<void>
+  /**
+   * Links two Work Items of one Team, checking the parent's allowed child Types for a parent link.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns both Work Items.
+   * @param workItemId - Work Item named in the path.
+   * @param input - Relation type from that Work Item's point of view and the other Work Item.
+   * @param context - Request, correlation, and idempotency identifiers for the audit events.
+   * @returns The created relation.
+   */
+  createRelation(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    input: CreatePublicWorkItemRelationRequest,
+    context: PublicMutationContext,
+  ): Promise<PublicWorkItemRelationMutation>
+  /**
+   * Removes a relation between two Work Items of one Team.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns both Work Items.
+   * @param workItemId - Work Item named in the path.
+   * @param targetWorkItemId - Other Work Item.
+   * @param type - Relation type from the named Work Item's point of view.
+   * @param context - Request, correlation, and idempotency identifiers for the audit events.
+   * @returns The removed relation.
+   */
+  deleteRelation(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    targetWorkItemId: string,
+    type: PublicWorkItemRelationType,
+    context: PublicMutationContext,
+  ): Promise<PublicWorkItemRelationMutation>
+}
+
 export interface PublicDocumentService {
   /**
    * Lists one page of Documents linked to a Work Item that the credential owner can view.
@@ -1075,6 +1147,8 @@ export type PublicApiDependencies = {
   agentTelemetry?: PublicAgentTelemetryService
   /** Read-only Document adapter; Document routes report unavailable when it is not configured. */
   documents?: PublicDocumentService
+  /** Work Item relation adapter; relation routes report unavailable when it is not configured. */
+  workItemRelations?: PublicWorkItemRelationService
   /** Read-only attachment adapter; attachment routes report unavailable when it is not configured. */
   attachments?: PublicAttachmentService
   /** Read-only directory adapter; directory routes report unavailable when it is not configured. */
@@ -1517,6 +1591,44 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),
     ))
+  })
+
+  router.get('/v1/work-items/:workItemId/relations', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await requireRelationService(dependencies).listRelations(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    ))
+  })
+
+  router.post('/v1/work-items/:workItemId/relations', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const relations = requireRelationService(dependencies)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const body = readCreatePublicWorkItemRelationRequest(await readJson(c))
+    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, ...body }, async (context) => ({
+      status: 201,
+      body: await relations.createRelation(credential, teamId, workItemId, body, context),
+    }), {
+      authorizeReplay: () => relations.authorizeRelationChange(credential, teamId, workItemId, body.targetWorkItemId),
+    })
+  })
+
+  router.delete('/v1/work-items/:workItemId/relations/:targetWorkItemId/:relationType', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const relations = requireRelationService(dependencies)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const targetWorkItemId = readRouteId(c.req.param('targetWorkItemId'), 'Target Work Item ID')
+    const type = readPublicWorkItemRelationType(c.req.param('relationType'))
+    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, targetWorkItemId, type }, async (context) => ({
+      status: 200,
+      body: await relations.deleteRelation(credential, teamId, workItemId, targetWorkItemId, type, context),
+    }), {
+      authorizeReplay: () => relations.authorizeRelationChange(credential, teamId, workItemId, targetWorkItemId),
+    })
   })
 
   router.get('/v1/work-items/:workItemId/comments', async (c) => {
@@ -5685,6 +5797,49 @@ function requireAttachmentService(dependencies: PublicApiDependencies): PublicAt
     throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Attachments are not configured.', true)
   }
   return dependencies.attachments
+}
+
+/**
+ * Returns the configured relation service or reports that relations are unavailable.
+ *
+ * @param dependencies - Router dependencies.
+ * @returns Relation service.
+ */
+function requireRelationService(dependencies: PublicApiDependencies): PublicWorkItemRelationService {
+  if (!dependencies.workItemRelations) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Work Item relations are not configured.', true)
+  }
+  return dependencies.workItemRelations
+}
+
+/**
+ * Reads a relation type from a request.
+ *
+ * @param value - Untrusted relation type.
+ * @returns The relation type.
+ */
+function readPublicWorkItemRelationType(value: unknown): PublicWorkItemRelationType {
+  if (isPublicWorkItemRelationType(value)) return value
+  throw new PublicApiServiceError(
+    400,
+    'validation_failed',
+    'Relation type must be parent, child, blocks, blockedBy, related, or duplicate.',
+  )
+}
+
+/**
+ * Reads the body of a relation create request.
+ *
+ * @param value - Untrusted JSON body.
+ * @returns The relation type and the other Work Item.
+ */
+function readCreatePublicWorkItemRelationRequest(value: unknown): CreatePublicWorkItemRelationRequest {
+  const body = requireRecord(value, 'Relation body is required.')
+  assertAllowedFields(body, ['type', 'targetWorkItemId'], 'Relation body')
+  return {
+    type: readPublicWorkItemRelationType(body.type),
+    targetWorkItemId: readIdentifier(body.targetWorkItemId, 'targetWorkItemId'),
+  }
 }
 
 /**

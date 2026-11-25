@@ -24,6 +24,14 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Added
 
+- Workspace profile に `list_relations`（親・子・WBS 番号と blocks / blockedBy / related / duplicate の link）、
+  `save_relation`（同じ Team の Work Item を link、`remove: true` で解除）、`create_subtasks`（親の下に親の Project で最大 20 件の
+  子を作る。途中で失敗したら同じ引数と `idempotencyKey` の再試行で残りだけを作る）を追加しました（#360）。
+- server API: `GET /api/v1/work-items/{workItemId}/relations`（scope `work-items:read`）、
+  `POST /api/v1/work-items/{workItemId}/relations` と
+  `DELETE /api/v1/work-items/{workItemId}/relations/{targetWorkItemId}/{relationType}`（scope `work-items:write`、
+  `Idempotency-Key` 必須）を追加しました。権限は Web の relation 操作と同じで、親の Work Item Type が子の Type を
+  許さない link、2 つ目の親、循環する link は `409` です（#360）。
 - server API: `GET /api/v1/work-items/{workItemId}/agent-run-questions?teamId=` を追加しました。Work Item の
   `blocker`・`handoff` report を新しい順に最大 20 件、人の回答（`answer`）付きで返します。scope は既存の
   `work-items:read` です。質問は新しい `AgentRunQuestion` で返し、既存の `AgentRunReport` は変えていません（#411）。
@@ -76,6 +84,8 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   server が古いと警告し、`create_task` は失敗します。
 - MCP API revision を 4 に上げました。server は revision 1〜4 を受け付けます。revision 3 以前の server に接続した新しい MCP は
   server が古いと警告し、Workspace profile のツールは使えません。
+- MCP API revision を 5 に上げました。server は revision 1〜5 を受け付けます。revision 4 以前の server に接続した新しい MCP は
+  server が古いと警告し、`list_relations`・`save_relation`・`create_subtasks` は使えません（#360）。
 - server API: Software factory が off の deploy でも、本人用 token の確認・発行・再発行
   （`/api/developer/me/agent-connection`、`POST /api/developer/me/api-keys`、`.../rotate`）と、管理者による本人用 token の
   rotate を `503` で断らないようにしました。Web の「agent を接続」は off では Workspace profile の設定例を出します。

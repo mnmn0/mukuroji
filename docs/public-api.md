@@ -74,6 +74,10 @@ v1 の schema は `calendarSource` を持たないので、応答の `calendarPo
 
 `GET /api/v1/work-items/{workItemId}/hierarchy?teamId={teamId}` は Work Item の親と子を `{ schemaVersion, teamId, workItemId, parentWorkItemId, childWorkItemIds, wbsNumber? }` で返します（`WorkItemHierarchy`）。`childWorkItemIds` は読める子だけを兄弟の順に並べます。`wbsNumber` は Team の木の中の番号（`1.2.3`）です。`parentWorkItemId` は、親がない場合と、credential が親を読めない場合に `null` です。Team の Work Item が階層の上限（1,000 件）を超える場合は木を作らず、この Work Item の relation から親と子を返します。このときは `wbsNumber` を省き、`childWorkItemIds` は ID 順です。archive 済みの Work Item は、どちらの場合も階層の外として親 `null`・子なしを返します。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。
 
+`GET /api/v1/work-items/{workItemId}/relations?teamId={teamId}` は Work Item の子以外の relation（`parent` / `blocks` / `blockedBy` / `related` / `duplicate`）を `{ schemaVersion, teamId, workItemId, relations: [{ type, targetWorkItemId, createdAt? }] }` で返します（`WorkItemRelationList`）。credential が読めない相手の relation は含めません。子は件数に上限がないため含めず、`.../hierarchy` で読みます。scope は `work-items:read` です。
+
+`POST /api/v1/work-items/{workItemId}/relations?teamId={teamId}` は body `{ type, targetWorkItemId }` で同じ Team の Work Item を link し、`201` と `{ schemaVersion, teamId, workItemId, relation }` を返します（`WorkItemRelationMutation`）。`type` は path の Work Item から見た向きで、`parent`（相手が親）、`child`（相手が子）、`blocks`、`blockedBy`、`related`、`duplicate` のどれかです。`DELETE /api/v1/work-items/{workItemId}/relations/{targetWorkItemId}/{relationType}?teamId={teamId}` は同じ向きで指定した relation を外し、`200` と同じ形を返します。どちらも `work-items:write` scope と `Idempotency-Key` が要り、両方の Work Item の Project に member 以上の権限が要ります。2 つ目の親、親の Work Item Type が子の Type を許さない親子、循環する親子・依存、既にある relation は `409`、ない relation の削除は `404` です。Team の relation は他の変更と同時に書かれることがあるため、server は revision の競合を読み直して数回まで自動で再試行します。
+
 ## Work Item Type catalog
 
 `GET /api/v1/work-item-types?teamId={teamId}` は権限内の作成用schemaを返します。
