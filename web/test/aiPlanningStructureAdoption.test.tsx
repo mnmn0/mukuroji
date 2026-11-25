@@ -215,8 +215,11 @@ describe('AI planning structure adoption', () => {
   test('a retry after a failed parent link links the existing children without creating them again', async () => {
     const fake = createFakeApi({ failParentOnce: true })
     const session = createAiPlanningStructureAdoptionSession(fake.api)
+    expect(session.writtenGenerations.has(input.generationId)).toBe(false)
     await expect(adoptAiPlanningStructure(session, 'token', parent, input)).rejects.toThrow('network')
     expect(fake.created).toHaveLength(2)
+    // The session's own writes moved the revisions the approval checks, so it resumes without one.
+    expect(session.writtenGenerations.has(input.generationId)).toBe(true)
 
     // The reviewer edits a title before retrying; the child already created is reused.
     const edited = { ...input, children: [{ ...input.children[0], title: 'Edited' }, input.children[1]] }
@@ -320,6 +323,25 @@ describe('AI planning structure adoption section', () => {
 
     expect(html).not.toContain('ai-planning-structure-adoption')
     expect(html).not.toContain('Verify keyboard navigation findings')
+  })
+
+  test('keeps applying the fields available after the structure was approved', () => {
+    const html = renderToStaticMarkup(
+      <AiWorkItemPlanningAssistantView
+        generation={{
+          ...aiPlanningGenerationFixture,
+          decision: { decidedAt: '2026-08-26T00:00:00.000Z', outcome: 'approved' },
+        }}
+        locale="en"
+        onAdopt={() => undefined}
+        onDecide={async () => undefined}
+        onGenerate={() => undefined}
+        structureAdoption={{ childTypes: [{ id: 'task', name: 'Task' }], parent }}
+        t={t}
+      />,
+    )
+
+    expect(html).toContain('Use supported fields in form')
   })
 
   test('keeps the section away from read-only routes', () => {

@@ -172,6 +172,12 @@ export type AiPlanningStructureAdoptionSession = {
    * first attempt do not reach the child.
    */
   attemptedChildren: Map<string, CreateWorkItemInput>
+  /**
+   * Generations this session already sent a write for. Those writes move the source and Planning
+   * revisions the generation was checked against, so the server would refuse to approve it again;
+   * a retry or a further selection in the same session continues without a second approval.
+   */
+  writtenGenerations: Set<string>
   /** API calls to make. */
   api: AiPlanningStructureApi
 }
@@ -185,7 +191,13 @@ export type AiPlanningStructureAdoptionSession = {
 export function createAiPlanningStructureAdoptionSession(
   api: AiPlanningStructureApi = defaultAiPlanningStructureApi,
 ): AiPlanningStructureAdoptionSession {
-  return { api, attemptedChildren: new Map(), createdChildren: new Map(), runner: createMutationRequestRunner() }
+  return {
+    api,
+    attemptedChildren: new Map(),
+    createdChildren: new Map(),
+    runner: createMutationRequestRunner(),
+    writtenGenerations: new Set(),
+  }
 }
 
 /**
@@ -262,7 +274,15 @@ export function useAiPlanningStructureAdoption({
     }
   }
 
-  return { adopt, isPending }
+  /**
+   * Tells whether this session already sent a write for the generation.
+   *
+   * @param generationId - Generation of the draft.
+   * @returns Whether a write was sent, so approving again is not needed.
+   */
+  const hasWritten = (generationId: string) => session.writtenGenerations.has(generationId)
+
+  return { adopt, hasWritten, isPending }
 }
 
 /**
@@ -289,7 +309,7 @@ function isDefinitiveCreateRejection(error: unknown): boolean {
  * @returns Child Work Item IDs by row ID.
  */
 async function createChildren(
-  { api, attemptedChildren, createdChildren, runner }: AiPlanningStructureAdoptionSession,
+  { api, attemptedChildren, createdChildren, runner, writtenGenerations }: AiPlanningStructureAdoptionSession,
   token: string,
   parent: AiPlanningStructureParent,
   input: AiPlanningStructureAdoptionInput,
@@ -325,6 +345,7 @@ async function createChildren(
       ...(backlogStatus ? { quickCapture: true, workflowStatusId: backlogStatus.id } : {}),
     }
     attemptedChildren.set(createdKey, request)
+    writtenGenerations.add(input.generationId)
     let issue: Awaited<ReturnType<AiPlanningStructureApi['createTeamIssue']>>
     try {
       issue = await runner.run(
@@ -349,6 +370,7 @@ async function createChildren(
       relation.type === 'parent' && relation.targetWorkItemId === parent.workItemId) ?? false
     if (hasParent) continue
     const expectedGraphRevision = detail.relationGraphRevision ?? 0
+    writtenGenerations.add(input.generationId)
     await runner.run(
       `ai-planning:${input.generationId}:parent:${childWorkItemId}`,
       JSON.stringify([parent.workItemId, expectedGraphRevision]),
@@ -373,7 +395,7 @@ async function createChildren(
  * @returns Dependency row IDs that exist afterwards.
  */
 async function createDependencies(
-  { api, runner }: AiPlanningStructureAdoptionSession,
+  { api, runner, writtenGenerations }: AiPlanningStructureAdoptionSession,
   token: string,
   input: AiPlanningStructureAdoptionInput,
 ): Promise<string[]> {
@@ -382,6 +404,7 @@ async function createDependencies(
   for (const dependency of input.dependencies) {
     if (!hasDependency(snapshot, dependency)) {
       const expectedRevision = snapshot.revision
+      writtenGenerations.add(input.generationId)
       snapshot = await runner.run(
         `ai-planning:${input.generationId}:dependency:${dependency.rowId}`,
         JSON.stringify([expectedRevision, dependency]),

@@ -210,6 +210,9 @@ export function AiWorkItemPlanningAssistantView({
   const hasAdoptableDraft = availableDraft !== undefined &&
     (canAdoptDraft?.(availableDraft) ?? hasSupportedWorkItemPlanningFields(availableDraft))
   const [isStructureAdoptionPending, setIsStructureAdoptionPending] = useState(false)
+  // The generation whose children or dependencies this screen already wrote. Those writes move the
+  // revisions an approval checks, so applying its fields afterwards does not ask the server again.
+  const [structureWrittenGenerationId, setStructureWrittenGenerationId] = useState<string>()
   const isOperationPending = isGenerating || isDecisionPending || isFeedbackPending || isMutationPending ||
     isStructureAdoptionPending
   const isAdoptionConfirmationVisible = confirmationGenerationId !== undefined &&
@@ -282,7 +285,10 @@ export function AiWorkItemPlanningAssistantView({
   /** Records approval before copying any supported value into local editor state. */
   const approveAndAdoptDraft = async (replacementConfirmed = false) => {
     if (!onAdopt || !hasAdoptableDraft || isOperationPending) return
-    const reviewedGeneration = await handleDecide('approved')
+    const reviewedGeneration = generation?.decision?.outcome === 'approved' &&
+      generation.id === structureWrittenGenerationId
+      ? generation
+      : await handleDecide('approved')
     const reviewedDraft = getAvailableWorkItemPlanningDraft(reviewedGeneration)
     if (
       reviewedGeneration?.decision?.outcome !== 'approved' ||
@@ -344,6 +350,7 @@ export function AiWorkItemPlanningAssistantView({
         />
       ) : generation && (availableDraft || generation.content.availability === 'withheld') ? (
         <AiAssistanceReview
+          adoptAfterApproval={structureAdoption !== undefined}
           adoptLabel={t('ai.planning.workItem.adopt')}
           errorKind={error?.kind}
           feedbackRating={feedbackRating}
@@ -395,6 +402,7 @@ export function AiWorkItemPlanningAssistantView({
             generationId={generation.id}
             key={generation.id}
             onPendingChange={handleStructureAdoptionPendingChange}
+            onWritten={() => setStructureWrittenGenerationId(generation.id)}
             resolveWorkItemLabel={resolveWorkItemLabel}
             t={t}
           />

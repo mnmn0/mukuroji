@@ -1309,6 +1309,14 @@ function IssueDetailContent({
             key={createAiAssistantSessionKey(aiSummarySource)}
             locale={locale}
             onAuthenticatedApiError={onAuthenticatedApiError}
+            // Decisions and structure adoption hold the same save guard as the Summary assistant,
+            // so a save cannot change the source revision and remount this assistant mid-way.
+            onOperationPendingChange={(pending) => {
+              onAiSummaryOperationPendingChange?.(
+                createTaskViewItemKey(issue.teamId, issue.id),
+                pending,
+              )
+            }}
             resolveWorkItemLabel={(endpoint) => planningSnapshot?.workItems.find(
               (workItem) => workItem.teamId === endpoint.teamId && workItem.id === endpoint.workItemId,
             )?.title ?? `${endpoint.teamId} / ${endpoint.workItemId}`}

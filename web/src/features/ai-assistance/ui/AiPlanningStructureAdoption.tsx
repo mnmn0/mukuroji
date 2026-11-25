@@ -37,8 +37,15 @@ export type AiPlanningStructureAdoptionProps = {
   approve: () => Promise<boolean>
   /** Creates the selected rows. */
   adopt: (input: AiPlanningStructureAdoptionInput) => Promise<AiPlanningStructureAdoptionResult>
+  /**
+   * Tells whether this session already wrote rows of the generation. Those writes change the
+   * revisions the approval checks, so a later run in the same session skips the approval.
+   */
+  hasWritten?: (generationId: string) => boolean
   /** Whether the adoption is in flight. */
   isPending: boolean
+  /** Reports that this session wrote rows of the generation, after a run that sent a write. */
+  onWritten?: () => void
   /** Reports when an adoption run, approval included, starts and ends. */
   onPendingChange?: (pending: boolean) => void
   /** Refreshes the Work Item views after rows were created. */
@@ -76,9 +83,11 @@ export function AiPlanningStructureAdoption({
   disabled = false,
   draft,
   generationId,
+  hasWritten,
   isPending,
   onAdopted,
   onPendingChange,
+  onWritten,
   resolveWorkItemLabel,
   t,
 }: AiPlanningStructureAdoptionProps) {
@@ -139,7 +148,9 @@ export function AiPlanningStructureAdoption({
     setIsRunning(true)
     onPendingChange?.(true)
     try {
-      if (!await approve()) {
+      // Rows this session already wrote moved the revisions the approval checks, so the server
+      // would now refuse it; the session that wrote them continues without approving again.
+      if (!hasWritten?.(generationId) && !await approve()) {
         setNotice('decision-required')
         return
       }
@@ -164,6 +175,7 @@ export function AiPlanningStructureAdoption({
         ? 'child-type-denied'
         : 'error')
     } finally {
+      if (hasWritten?.(generationId)) onWritten?.()
       setIsRunning(false)
       onPendingChange?.(false)
     }
@@ -372,7 +384,7 @@ export type AiPlanningStructureAdoptionContext = {
 /** Props for the stateful adoption section. */
 export type AiPlanningStructureAdoptionContainerProps = Omit<
   AiPlanningStructureAdoptionProps,
-  'adopt' | 'childTypes' | 'isPending' | 'onAdopted'
+  'adopt' | 'childTypes' | 'hasWritten' | 'isPending' | 'onAdopted'
 > & {
   /** Workspace member bearer token. */
   accessToken?: string
@@ -391,12 +403,16 @@ export function AiPlanningStructureAdoptionContainer({
   context,
   ...props
 }: AiPlanningStructureAdoptionContainerProps) {
-  const { adopt, isPending } = useAiPlanningStructureAdoption({ accessToken, parent: context.parent })
+  const { adopt, hasWritten, isPending } = useAiPlanningStructureAdoption({
+    accessToken,
+    parent: context.parent,
+  })
   return (
     <AiPlanningStructureAdoption
       {...props}
       adopt={adopt}
       childTypes={context.childTypes}
+      hasWritten={hasWritten}
       isPending={isPending}
       onAdopted={context.onAdopted}
     />

@@ -40,6 +40,11 @@ export type AiAssistanceAvailableReview = {
 export type AiAssistanceReviewProps = {
   /** Label for the workflow-specific adopt action. */
   adoptLabel?: string
+  /**
+   * Keeps the Adopt action next to an approved decision, for a workflow that can approve a draft
+   * without adopting it, so its values can still be applied afterwards.
+   */
+  adoptAfterApproval?: boolean
   /** Safe error category selected by the controller. */
   errorKind?: AiAssistanceErrorKind
   /** Feedback already accepted by the server. */
@@ -82,6 +87,7 @@ export type AiAssistanceReviewProps = {
  * @returns A flat proposal rail, or null while idle.
  */
 export function AiAssistanceReview({
+  adoptAfterApproval = false,
   adoptLabel,
   errorKind,
   feedbackRating,
@@ -215,7 +221,20 @@ export function AiAssistanceReview({
                 )}
                 {t(decision.outcome === 'approved' ? 'ai.review.approved' : 'ai.review.rejected')}
               </p>
-            ) : onAdopt || onReject ? (
+            ) : null}
+            {decision?.outcome === 'approved' && adoptAfterApproval && onAdopt ? (
+              <div className="flex flex-wrap justify-end gap-2 max-[520px]:grid max-[520px]:grid-cols-1">
+                <button
+                  className="workbench-button-primary min-h-[44px] px-4 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={isDecisionPending || isFeedbackPending}
+                  onClick={() => void onAdopt()}
+                  type="button"
+                >
+                  {adoptLabel ?? t('ai.review.adopt')}
+                </button>
+              </div>
+            ) : null}
+            {!decision && (onAdopt || onReject) ? (
               <div className="flex flex-wrap justify-end gap-2 max-[520px]:grid max-[520px]:grid-cols-1">
                 {onReject ? (
                   <button
