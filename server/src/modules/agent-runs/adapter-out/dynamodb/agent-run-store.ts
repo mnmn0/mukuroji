@@ -34,6 +34,9 @@ import {
   createAgentRunNotActiveError,
 } from '../../domain/agent-run-error'
 
+/** How far before a run's start the lookup of one of its reports begins, in milliseconds. */
+const reportLookupStartMarginMilliseconds = 60_000
+
 /** One item of a DynamoDB write transaction. */
 export type AgentRunTransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number]
 
@@ -1684,6 +1687,9 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
     // Report keys sort by creation time, and every report of the run was written between its start and
     // its last report, so only that range is read. '~' sorts after every run ID character.
     const lastReportAt = run.lastReportAt ?? run.startedAt
+    // A resumed run's start can sit a few milliseconds after the clock when its predecessor started
+    // late, so the range starts a margin earlier; the filter keeps only this run's report.
+    const from = new Date(Date.parse(run.startedAt) - reportLookupStartMarginMilliseconds).toISOString()
     let next: Record<string, unknown> | undefined
     do {
       const response = await this.#client.send(new QueryCommand({
@@ -1698,7 +1704,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
         },
         ExpressionAttributeValues: {
           ':partition': partition,
-          ':from': `${prefix}${run.startedAt}`,
+          ':from': `${prefix}${from}`,
           ':to': `${prefix}${lastReportAt}#~`,
           ':runId': run.runId,
           ':sequence': sequence,

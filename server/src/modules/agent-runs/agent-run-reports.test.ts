@@ -366,7 +366,8 @@ describe('DynamoDB Agent Run report lookup', () => {
       FilterExpression: '#runId = :runId AND #sequence = :sequence',
       ExpressionAttributeValues: {
         ':partition': 'workspace-1#team#core',
-        ':from': `${reportPrefix('task-1')}${run.startedAt}`,
+        // A resumed run's start can sit just after the clock, so the range starts a minute earlier.
+        ':from': `${reportPrefix('task-1')}${new Date(Date.parse(run.startedAt) - 60_000).toISOString()}`,
         ':to': `${reportPrefix('task-1')}${now.toISOString()}#~`,
         ':runId': run.runId,
         ':sequence': 1,
