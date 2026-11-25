@@ -155,6 +155,8 @@ export function createCanonicalPublicAttachmentService(): PublicAttachmentServic
           attachment.versionId,
           'attachment',
           auditContext,
+          // Only the current version is offered; a replacement that completed after the listing is a conflict.
+          { requireCurrentVersion: true },
         )
         return {
           fileId,

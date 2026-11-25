@@ -214,7 +214,7 @@ describe('public attachment service', () => {
 
   test('issues an audited download URL for a clean current version and hides the rest', async () => {
     configureViewer()
-    const accesses: { fileId: string; versionId: string; disposition: string; auditContext?: MutationAuditContext }[] = []
+    const accesses: { fileId: string; versionId: string; disposition: string; auditContext?: MutationAuditContext; requireCurrentVersion?: boolean }[] = []
     let failAfterListing: FileProofingError | undefined
     setTestAppDependencies({
       fileProofing: createFileProofingStub({
@@ -225,9 +225,12 @@ describe('public attachment service', () => {
             capabilities: { canUpload: false, canRequestApproval: false, canGrantGuestAccess: false },
           }
         },
-        async createAccess(_scope, _actor, fileId, versionId, disposition, auditContext) {
+        async createAccess(_scope, _actor, fileId, versionId, disposition, auditContext, options) {
           if (failAfterListing) throw failAfterListing
-          accesses.push({ fileId, versionId, disposition, ...(auditContext ? { auditContext } : {}) })
+          accesses.push({
+            fileId, versionId, disposition, ...(auditContext ? { auditContext } : {}),
+            ...(options?.requireCurrentVersion !== undefined ? { requireCurrentVersion: options.requireCurrentVersion } : {}),
+          })
           return { url: 'https://files.example.test/spec?signature=redacted', expiresAt: '2026-07-18T00:05:00.000Z' }
         },
       }),
@@ -250,7 +253,7 @@ describe('public attachment service', () => {
       expiresAt: '2026-07-18T00:05:00.000Z',
     })
     expect(accesses).toHaveLength(1)
-    expect(accesses[0]).toMatchObject({ fileId: 'spec', versionId: 'spec-v2', disposition: 'attachment' })
+    expect(accesses[0]).toMatchObject({ fileId: 'spec', versionId: 'spec-v2', disposition: 'attachment', requireCurrentVersion: true })
     expect(accesses[0]?.auditContext).toMatchObject({ workspaceId, correlationId: 'corr-1', source: { kind: 'api', requestId: 'request-1' } })
     await expect(download('pending')).rejects.toMatchObject({ status: 404 })
     await expect(download('missing')).rejects.toMatchObject({ status: 404 })

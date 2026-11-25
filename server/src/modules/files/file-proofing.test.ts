@@ -1409,6 +1409,18 @@ describe('file proofing domain', () => {
     )
     expect(completed.version.scanStatus).toBe('blocked')
     expect(completed.file.currentVersion.id).toBe(replacement.version.id)
+    // A caller that offers only the current version is refused the replaced one; history access still works.
+    await expect(client.createAccess(
+      scope,
+      manager,
+      session.file.id,
+      session.version.id,
+      'attachment',
+      undefined,
+      { requireCurrentVersion: true },
+    )).rejects.toMatchObject({ code: 'FileVersionConflict', status: 409 })
+    await expect(client.createAccess(scope, manager, session.file.id, session.version.id, 'attachment'))
+      .resolves.toMatchObject({ url: expect.any(String) })
     await expect(client.createAccess(
       scope,
       manager,
