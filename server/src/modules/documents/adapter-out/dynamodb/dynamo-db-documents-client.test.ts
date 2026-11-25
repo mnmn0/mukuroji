@@ -6162,6 +6162,37 @@ test('keeps each paragraph block\'s references, footnotes, and structure to itse
   expect(renderDocumentExport(imported, 'markdown', markdownInspector).content).toBe(exported)
 })
 
+test('keeps a literal footnote token from naming the footnote another block gets in the export', () => {
+  const page = createPage({
+    blocks: [
+      'See[^2-1]',
+      'Note[^n]\n\n[^n]: detail',
+      'Link [^2-1](https://example.com/x) and \\[^2-1] and `[^2-1]`',
+    ].map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
+  })
+  const exported = renderDocumentExport(page, 'markdown', markdownInspector).content
+  // The second block's footnote is renamed to `2-1`; the literal `[^2-1]` of the other blocks has
+  // its `^` escaped, so it stays text and does not point at that footnote.
+  expect(exported).toBe([
+    '# Document',
+    'See[\\^2-1]',
+    'Note[^2-1]',
+    '[^2-1]: detail',
+    'Link [\\^2-1](https://example.com/x) and \\[^2-1] and `[^2-1]`',
+  ].join('\n\n') + '\n')
+  const nodes = readMarkdownNodes(exported)
+  expect(nodes.filter((node) => node.type === 'footnoteReference').map((node) => node.identifier))
+    .toEqual(['2-1'])
+  expect(nodes.filter((node) => node.type === 'link').map((node) => node.url)).toEqual(['https://example.com/x'])
+  expect(nodes.find((node) => node.type === 'text' && node.value === 'See[^2-1]')).toBeDefined()
+  // Exporting the exported text again gives the same file.
+  const reexported = createPage({
+    blocks: ['See[\\^2-1]', 'Note[^2-1]\n\n[^2-1]: detail', 'Link [\\^2-1](https://example.com/x) and \\[^2-1] and `[^2-1]`']
+      .map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
+  })
+  expect(renderDocumentExport(reexported, 'markdown', markdownInspector).content).toBe(exported)
+})
+
 /** Markdown export of the page in the block-scoped export test; the web import test reads it too. */
 const BLOCK_SCOPED_EXPORT = [
   '# Document',

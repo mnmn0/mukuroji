@@ -232,6 +232,10 @@ function localizeMarkdownReferences(text: string, scope: string): string | undef
       if (isReferenceNodeType(node.type)) return undefined
       continue
     }
+    if (node.type === 'text') {
+      edits.push(...escapeLiteralFootnoteCarets(text, start, end))
+      continue
+    }
     const source = text.slice(start, end)
     const label = typeof node.label === 'string' ? node.label : undefined
     const identifier = typeof node.identifier === 'string' ? node.identifier : undefined
@@ -255,6 +259,29 @@ function localizeMarkdownReferences(text: string, scope: string): string | undef
   const localized = applyReferenceEdits(text, 0, text.length, edits.sort((left, right) => left.start - right.start))
   // A definition removed at the end leaves its blank lines behind; they show nothing.
   return definitions.size === 0 ? localized : localized?.replace(/(?:\n[ \t]*)+$/u, '')
+}
+
+/**
+ * Escapes the `^` of every literal `[^` in one text node. Such text is not a footnote in its own
+ * block, but once the blocks are joined a footnote label given to another block, such as `2-1`,
+ * would make `[^2-1]` a reference to that block's footnote. `[\^` shows the same text and is never
+ * a footnote, so the export keeps the text as the app shows it.
+ *
+ * @param text - Markdown of one block.
+ * @param start - Offset of the text node's first character.
+ * @param end - Offset after the text node's last character.
+ * @returns Edits that insert a backslash before each such `^`.
+ */
+function escapeLiteralFootnoteCarets(text: string, start: number, end: number): ReferenceEdit[] {
+  const edits: ReferenceEdit[] = []
+  for (let index = Math.max(start, 1); index < end; index += 1) {
+    if (text[index] !== '^' || text[index - 1] !== '[') continue
+    // A `[` after an odd number of backslashes is escaped already and opens no footnote.
+    let backslashes = 0
+    while (text[index - 2 - backslashes] === '\\') backslashes += 1
+    if (backslashes % 2 === 0) edits.push({ start: index, end: index, keepEnd: index, suffix: '\\' })
+  }
+  return edits
 }
 
 /**
