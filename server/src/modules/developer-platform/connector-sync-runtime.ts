@@ -4,6 +4,7 @@ import type {
   ConnectorInstallation,
   ExternalWorkItemLink,
   ResolveWorkItemSyncConflictInput,
+  WorkItemSchedule,
   WorkItemSyncConflict,
   WorkItemSyncConflictField,
 } from '@mukuroji/contracts'
@@ -20,6 +21,7 @@ import {
   ConnectorRegistry,
   createConnectorOriginMarker,
   decideConnectorInboundSync,
+  type ConnectorEventSchedule,
   type ConnectorExternalRecord,
   type ConnectorOutboundMutation,
   type ConnectorSyncState,
@@ -31,12 +33,13 @@ import {
   serializeConnectorCredential,
 } from './connector-oauth'
 
-/** Work Item link で同期できる source-control resource type です。 */
+/** Work Item link で同期できる resource type です（calendar events: ADR 0089）。 */
 export type ConnectorWorkItemResourceType =
   | 'issue'
   | 'merge-request'
   | 'commit'
   | 'deploy'
+  | 'calendar-event'
 
 /** Sync engine が Work Item から利用する normalized snapshot です。 */
 export type ConnectorWorkItemSnapshot = {
@@ -52,6 +55,13 @@ export type ConnectorWorkItemSnapshot = {
   description?: string
   /** Provider adapter が理解する normalized status です。 */
   status?: string
+  /** All-day dates of the Work Item schedule; absent while it is unscheduled. */
+  schedule?: ConnectorEventSchedule
+  /**
+   * Mode of the Work Item schedule, which tells which day of a multi-day event a deadline or a
+   * milestone keeps; absent while it is unscheduled.
+   */
+  scheduleMode?: 'due-date' | 'milestone' | 'date-range'
 }
 
 /** External record から Work Item へ適用する canonical fields です。 */
@@ -62,6 +72,16 @@ export type ConnectorWorkItemPatch = {
   description?: string
   /** External status が存在する場合の normalized status です。 */
   status?: string
+  /**
+   * Calendar event dates to move the Work Item to; the gateway keeps the schedule mode and
+   * calendar policy.
+   */
+  schedule?: {
+    /** First day, inclusive. */
+    startDate: string
+    /** Last day, inclusive. */
+    endDate: string
+  }
 }
 
 /** CAS 付き external patch の結果です。 */
@@ -78,6 +98,20 @@ export type ConnectorWorkItemApplyResult =
     /** Current Work Item snapshot です。 */
     workItem: ConnectorWorkItemSnapshot
   }
+  | {
+    /** The Work Item cannot take the patch, so nothing was written. */
+    kind: 'rejected'
+    /** Current Work Item snapshot. */
+    workItem: ConnectorWorkItemSnapshot
+    /**
+     * Why the patch was refused: the event dates hold no working day of the Work Item calendar,
+     * or the Work Item has schedule dependencies that a direct date move would break.
+     */
+    reason: ConnectorWorkItemRejection
+  }
+
+/** Reasons the Work Item gateway refuses an external patch without writing it. */
+export type ConnectorWorkItemRejection = 'calendar-dates-invalid' | 'schedule-dependency'
 
 /** Connector worker と canonical Work Item service の境界です。 */
 export interface ConnectorWorkItemGateway {
@@ -169,6 +203,18 @@ export type StoredConnectorSyncConflict = {
   resolutionOperationId?: string
   /** Resolution claim を取得した日時です。 */
   resolutionStartedAt?: string
+  /** Resolution claim を取得した試行ごとに一意な ID です。 */
+  resolutionClaimId?: string
+}
+
+/** Newer snapshots an open conflict takes when its resolution found the resource changed. */
+export type ConnectorConflictSnapshotRefresh = {
+  /** External record read after the conditional write failed. */
+  externalRecord: ConnectorExternalRecord
+  /** Work Item as it is now, which a merge may already have changed. */
+  localWorkItem: ConnectorWorkItemSnapshot
+  /** Fields that differ between the two snapshots. */
+  fields: WorkItemSyncConflictField[]
 }
 
 /** Conflict cursor page です。 */
@@ -234,13 +280,22 @@ export interface ConnectorSyncPersistence {
       operationId: string
       /** Claim timestamp です。 */
       startedAt: string
+      /** この試行だけを表す claim ID です。解放時に照合します。 */
+      claimId?: string
     },
   ): Promise<'claimed' | 'same-operation' | 'busy' | undefined>
-  /** Side effect 前に失敗した current resolution claim を解放します。 */
+  /**
+   * Side effect 前に失敗した current resolution claim を解放します。`refresh` を渡すと、
+   * conflict の snapshot と revision も同じ書き込みで新しい値に置き換えます。
+   * `claimId` を渡すと、その ID で取得した claim だけを解放します。lease が切れた後に
+   * 同じ operation の別の試行が取り直した claim は解放しません。
+   */
   releaseConflictResolution(
     workspaceId: string,
     conflictId: string,
     operationId: string,
+    refresh?: ConnectorConflictSnapshotRefresh,
+    claimId?: string,
   ): Promise<boolean>
   /** Open conflict を一度だけ resolved/ignored へ遷移させます。 */
   completeConflict(
@@ -299,6 +354,12 @@ export type ProcessConnectorInboundInput = {
   record: ConnectorExternalRecord
   /** Pending link を安全に acknowledge できる poll inventory generation です。 */
   pollGeneration?: string
+  /**
+   * Sync state revision read before the provider snapshot was fetched (0 when the link had no
+   * state). When the state has changed since, an outbound write may be newer than the record, so
+   * the record is skipped as stale and the next poll reads the resource again.
+   */
+  expectedStateRevision?: number
 }
 
 /** Outbound sync worker input です。 */
@@ -336,6 +397,7 @@ export type ConnectorSyncResult =
       | 'stale'
       | 'paused'
       | 'conflict'
+      | 'unscheduled'
   }
   | {
     /** User-visible conflict を保存しました。 */
@@ -343,6 +405,46 @@ export type ConnectorSyncResult =
     /** 保存した public conflict です。 */
     conflict: WorkItemSyncConflict
   }
+
+/** Provider resource created for a new link, with the Work Item revision it was created from. */
+export type ConnectorLinkedResource = {
+  /** Created provider resource. */
+  record: ConnectorExternalRecord
+  /** Work Item revision whose contents the resource holds. */
+  workItemRevision: number
+  /**
+   * Whether the resource shows the Work Item's dates. A retried create can return the resource
+   * the first attempt made from older dates; such a resource is not recorded as synchronized, so
+   * the first poll records a conflict instead of overwriting either side.
+   */
+  datesMatch: boolean
+}
+
+/** Input of {@link ConnectorSyncEngine.initializeLinkedResourceSync}. */
+export type InitializeConnectorLinkedResourceSyncInput = {
+  /** Workspace of the link. */
+  workspaceId: string
+  /** Link just created for the resource. */
+  link: ExternalWorkItemLink
+  /** Resource and Work Item revision returned by `createLinkedResource`. */
+  resource: ConnectorLinkedResource
+}
+
+/** Input of {@link ConnectorSyncEngine.createLinkedResource}. */
+export type CreateConnectorLinkedResourceInput = {
+  /** Workspace of the installation. */
+  workspaceId: string
+  /** Installation that owns the resource. */
+  installationId: string
+  /** Team of the Work Item. */
+  teamId: string
+  /** Work Item the resource mirrors. */
+  workItemId: string
+  /** Resource type to create. */
+  resourceType: ConnectorWorkItemResourceType
+  /** Stable operation ID; a retry with it returns the same resource. */
+  operationId: string
+}
 
 /** Installation polling input です。 */
 export type PollConnectorInstallationInput = {
@@ -478,14 +580,40 @@ export class ConnectorSyncEngine {
       input.workspaceId,
       link.id,
     )
+    if (
+      input.expectedStateRevision !== undefined &&
+      (persisted?.storageRevision ?? 0) !== input.expectedStateRevision
+    ) {
+      return { kind: 'skipped', linkId: link.id, reason: 'stale' }
+    }
+    if (link.resourceType === 'calendar-event' && !persisted) {
+      // The link has no state yet: its first state was not recorded, or the event a retried create
+      // returned did not show the Work Item's dates. An event that shows them becomes the
+      // baseline. Otherwise either side may have moved since the event was created, so nothing is
+      // overwritten and someone chooses the dates to keep. A Work Item whose dates were cleared
+      // also counts as moved, since the event may have moved too.
+      if (hasSameDates(input.record.schedule, workItem.schedule)) {
+        await this.commitSyncedState(
+          input.workspaceId,
+          link,
+          undefined,
+          workItem.revision,
+          input.record,
+          input.eventId,
+          true,
+        )
+        return { kind: 'skipped', linkId: link.id, reason: 'stale' }
+      }
+      return this.persistConflict(
+        input.workspaceId,
+        link,
+        installation,
+        workItem,
+        input.record,
+        input.eventId,
+      )
+    }
     const state = persisted ?? createInitialSyncState(link, workItem.revision)
-    const operationId = createSyncOperationId(
-      'inbound',
-      input.workspaceId,
-      link.id,
-      input.eventId,
-      input.record.externalVersion,
-    )
     const decision = decideConnectorInboundSync({
       state,
       eventId: requireStableValue(input.eventId, 'Connector event ID'),
@@ -495,6 +623,8 @@ export class ConnectorSyncEngine {
       actualWorkItemRevision: workItem.revision,
       originSigningSecret: this.originSigningSecret,
       previousOriginSigningSecrets: this.previousOriginSigningSecrets,
+      // Calendar versions are ETags, which say only whether the event changed.
+      versionOrdering: link.resourceType === 'calendar-event' ? 'opaque' : 'ordered',
     })
     const pollGeneration = input.pollGeneration
     const isCurrentExactPoll =
@@ -537,6 +667,55 @@ export class ConnectorSyncEngine {
       }
       return { kind: 'skipped', linkId: link.id, reason: decision.kind }
     }
+    const patch = recordToPatch(input.record)
+    if (isUnchangedCalendarPatch(link, patch, workItem)) {
+      // An event that already shows the Work Item dates, such as one Mukuroji just created,
+      // only records the provider version.
+      await this.commitSyncedState(
+        input.workspaceId,
+        link,
+        persisted,
+        workItem.revision,
+        input.record,
+        input.eventId,
+        !isCurrentExactPoll,
+      )
+      return { kind: 'skipped', linkId: link.id, reason: 'stale' }
+    }
+    const lastSyncedDates = link.resourceType === 'calendar-event'
+      ? persisted?.lastExternalRecord?.schedule
+      : undefined
+    if (lastSyncedDates && hasSameDates(input.record.schedule, lastSyncedDates)) {
+      // Only something other than the dates changed in the event, such as its title. The event
+      // keeps the dates last synchronized, so the Work Item revision of that sync stays the
+      // baseline, and Work Item dates changed since then are written to the event again.
+      await this.commitSyncedState(
+        input.workspaceId,
+        link,
+        persisted,
+        state.workItemRevision,
+        input.record,
+        input.eventId,
+        !isCurrentExactPoll,
+      )
+      return this.pushChangedCalendarDates(input.workspaceId, link, workItem, input.record)
+    }
+    // A Work Item whose dates are still the dates last synchronized only changed elsewhere, such
+    // as its title; the event's dates apply on the condition that it has not changed since read.
+    const expectedRevision = lastSyncedDates && keepsSyncedDates(workItem, lastSyncedDates)
+      ? workItem.revision
+      : state.workItemRevision
+    // The gateway keys its receipt on the expected revision too. A write conditional on the Work
+    // Item as read names that revision in its operation, so a retry that chooses the synchronized
+    // revision instead is another operation, not a mismatching replay.
+    const operationId = createSyncOperationId(
+      'inbound',
+      input.workspaceId,
+      link.id,
+      input.eventId,
+      input.record.externalVersion,
+      ...(expectedRevision === state.workItemRevision ? [] : [`as-read-${expectedRevision}`]),
+    )
     // A revision conflict intentionally reaches the idempotent gateway. If a
     // previous attempt applied the same operation but crashed before the sync
     // state commit, its receipt wins over the now-stale revision snapshot.
@@ -545,11 +724,13 @@ export class ConnectorSyncEngine {
       teamId: link.teamId,
       workItemId: link.workItemId,
       actorUserId: installation.installedByUserId,
-      expectedRevision: state.workItemRevision,
-      patch: recordToPatch(input.record),
+      expectedRevision,
+      patch,
       operationId,
     })
-    if (applied.kind === 'conflict') {
+    if (applied.kind === 'conflict' || applied.kind === 'rejected') {
+      // Dates the Work Item cannot take become a conflict too: the link stops retrying the same
+      // event, other events keep synchronizing, and someone chooses which dates to keep.
       return this.persistConflict(
         input.workspaceId,
         link,
@@ -607,23 +788,78 @@ export class ConnectorSyncEngine {
       link.teamId,
       link.workItemId,
     )
+    if (link.resourceType === 'calendar-event' && !workItem.schedule) {
+      // A Work Item without dates keeps its event as it was; the next dated change moves it.
+      return { kind: 'skipped', linkId: link.id, reason: 'unscheduled' }
+    }
     const persisted = await this.persistence.getLinkState(
       input.workspaceId,
       link.id,
     )
-    const mutation = createOutboundMutation(
+    if (link.resourceType === 'calendar-event' && link.syncDirection === 'bidirectional' && !persisted) {
+      // Without a recorded state the write would have no event version to condition on, and the
+      // event may hold dates someone chose after it was created. The poll records the state, or a
+      // conflict when the dates differ, before any write. An outbound-only link is never read
+      // back, so the Work Item stays the source of its event.
+      return { kind: 'skipped', linkId: link.id, reason: 'stale' }
+    }
+    if (persisted && persisted.workItemRevision > workItem.revision) {
+      // A newer revision is already synchronized; this read is older than it.
+      return { kind: 'skipped', linkId: link.id, reason: 'stale' }
+    }
+    let mutation = createOutboundMutation(
       link,
       workItem,
       input.operationId,
       this.originSigningSecret,
       persisted?.lastExternalVersion,
     )
-    const record = await this.withConnectorCredential(
+    const push = (next: ConnectorOutboundMutation) => this.withConnectorCredential(
       input.workspaceId,
       installation,
       installationSnapshot.lifecycleRevision,
-      async (adapter, credential) => adapter.push(credential, mutation),
+      async (adapter, credential) => adapter.push(credential, next),
     )
+    let record: ConnectorExternalRecord
+    try {
+      record = await push(mutation)
+    } catch (error) {
+      if (!isExternalVersionChanged(error)) throw error
+      const lastSyncedDates = link.resourceType === 'calendar-event'
+        ? persisted?.lastExternalRecord?.schedule
+        : undefined
+      const latest = lastSyncedDates
+        ? await this.withConnectorCredential(
+            input.workspaceId,
+            installation,
+            installationSnapshot.lifecycleRevision,
+            async (adapter, credential) =>
+              adapter.read ? adapter.read(credential, link.resourceType, link.externalId) : undefined,
+          )
+        : undefined
+      // The event moved since the last read. Nothing is written; the next poll reads the move and
+      // records a conflict because the Work Item changed too. An event that changed only
+      // elsewhere, such as its title, still shows the synchronized dates and takes the new ones.
+      if (!latest || !hasSameDates(latest.schedule, lastSyncedDates)) {
+        return { kind: 'skipped', linkId: link.id, reason: 'stale' }
+      }
+      validateLinkRecordBinding(link, latest)
+      mutation = createOutboundMutation(
+        link,
+        workItem,
+        input.operationId,
+        this.originSigningSecret,
+        latest.externalVersion,
+      )
+      try {
+        record = await push(mutation)
+      } catch (retryError) {
+        if (isExternalVersionChanged(retryError)) {
+          return { kind: 'skipped', linkId: link.id, reason: 'stale' }
+        }
+        throw retryError
+      }
+    }
     validateLinkRecordBinding(link, record)
     await this.commitSyncedState(
       input.workspaceId,
@@ -641,6 +877,106 @@ export class ConnectorSyncEngine {
       workItemRevision: workItem.revision,
       externalVersion: record.externalVersion,
     }
+  }
+
+  /**
+   * Creates the provider resource a new link points to, such as the calendar event of a Work
+   * Item (ADR 0089). The installer must still be able to change the Work Item, and the Work Item
+   * must have dates. Retrying the same operation returns the same resource.
+   *
+   * @param input - Workspace, installation, Work Item, resource type, and stable operation ID.
+   * @returns The created resource.
+   */
+  async createLinkedResource(input: CreateConnectorLinkedResourceInput): Promise<ConnectorLinkedResource> {
+    requireStableValue(input.operationId, 'Connector create operation ID')
+    if (input.resourceType !== 'calendar-event') {
+      throw new ConnectorRuntimeError(
+        'ConnectorCapabilityUnsupported',
+        'Only calendar events can be created for a Work Item link.',
+      )
+    }
+    const installationSnapshot = await this.requireInstallationSnapshot(
+      input.workspaceId,
+      input.installationId,
+    )
+    const installation = installationSnapshot.installation
+    await this.workItems.authorize(
+      input.workspaceId,
+      installation.installedByUserId,
+      input.teamId,
+      input.workItemId,
+      true,
+    )
+    const workItem = await this.workItems.get(input.workspaceId, input.teamId, input.workItemId)
+    if (!workItem.schedule) {
+      throw new ConnectorRuntimeError(
+        'ConnectorCalendarScheduleRequired',
+        'Set a due date or dates on the Work Item before adding it to a calendar.',
+      )
+    }
+    const record = await this.withConnectorCredential(
+      input.workspaceId,
+      installation,
+      installationSnapshot.lifecycleRevision,
+      async (adapter, credential) => {
+        if (!adapter.create) {
+          throw new ConnectorRuntimeError(
+            'ConnectorCapabilityUnsupported',
+            'Connector cannot create provider resources.',
+          )
+        }
+        return adapter.create(credential, {
+          resourceType: input.resourceType,
+          workItemRevision: workItem.revision,
+          title: workItem.title,
+          ...(workItem.description === undefined ? {} : { description: workItem.description }),
+          ...(workItem.schedule ? { schedule: workItem.schedule } : {}),
+          originMarker: createConnectorOriginMarker(
+            installation.id,
+            `create-${createHash('sha256').update(input.operationId).digest('hex').slice(0, 40)}`,
+            workItem.revision,
+            input.operationId,
+            this.originSigningSecret,
+          ),
+          operationId: input.operationId,
+        })
+      },
+    )
+    if (record.resourceType !== input.resourceType) {
+      throw new ConnectorRuntimeError(
+        'ConnectorExternalRecordMismatch',
+        'Connector created a resource of another type.',
+      )
+    }
+    return {
+      record,
+      workItemRevision: workItem.revision,
+      datesMatch: hasSameDates(record.schedule, workItem.schedule),
+    }
+  }
+
+  /**
+   * Records the created resource and the Work Item revision it came from as the link's first
+   * synchronized state. Without it, the first poll would take the Work Item's current revision as
+   * the baseline and move the Work Item back to the dates the event was created with.
+   *
+   * @param input - New link and the resource created for it.
+   * @returns Nothing; a link that already has a state, for example from a poll, keeps it, and a
+   *   resource that does not show the Work Item's dates gets its state from the first poll.
+   */
+  async initializeLinkedResourceSync(input: InitializeConnectorLinkedResourceSyncInput): Promise<void> {
+    validateLinkRecordBinding(input.link, input.resource.record)
+    if (!input.resource.datesMatch) return
+    const persisted = await this.persistence.getLinkState(input.workspaceId, input.link.id)
+    if (persisted) return
+    await this.persistence.commitLinkState({
+      workspaceId: input.workspaceId,
+      link: input.link,
+      workItemRevision: input.resource.workItemRevision,
+      externalRecord: createPersistedConnectorExternalRecord(input.resource.record),
+      syncedAt: this.clock().toISOString(),
+      deferLinkStatus: true,
+    })
   }
 
   /** Provider pages を bounded に poll し、既存 links だけを inbound sync します。 */
@@ -678,6 +1014,14 @@ export class ConnectorSyncEngine {
       )
     }
     if (linkByExternalId.size === 0) return { results: [] }
+    // Calendar versions are ETags with no order, so a record fetched before an outbound write
+    // would look new. Fence each record with the state revision read before fetching.
+    const stateRevisions = input.resourceType === 'calendar-event'
+      ? new Map(await Promise.all([...linkByExternalId.values()].map(async (link) => [
+          link.id,
+          (await this.persistence.getLinkState(input.workspaceId, link.id))?.storageRevision ?? 0,
+        ] as const)))
+      : undefined
     let cursor = input.cursor
     const results: ConnectorSyncResult[] = []
     for (let pageNumber = 0; pageNumber < maximumPages; pageNumber += 1) {
@@ -697,6 +1041,9 @@ export class ConnectorSyncEngine {
           record,
           ...(link.syncStatus === 'pending'
             ? { pollGeneration: link.updatedAt }
+            : {}),
+          ...(stateRevisions?.has(link.id)
+            ? { expectedStateRevision: stateRevisions.get(link.id) }
             : {}),
           eventId: createSyncOperationId(
             'poll',
@@ -754,10 +1101,12 @@ export class ConnectorSyncEngine {
       true,
     )
     const resolvedAt = this.clock().toISOString()
+    // Retries of one resolution share the operation ID, so each attempt names its own claim.
+    const claimId = randomUUID()
     const claim = await this.persistence.claimConflictResolution(
       actor.workspaceId,
       conflictId,
-      { operationId, startedAt: resolvedAt },
+      { operationId, startedAt: resolvedAt, claimId },
     )
     if (claim === 'busy') {
       throw new ConnectorRuntimeError(
@@ -773,6 +1122,35 @@ export class ConnectorSyncEngine {
         latest.conflict.status !== 'open'
       ) return structuredClone(latest.conflict)
       throw conflictResolutionRace()
+    }
+    // A retry of the same operation goes on while the first attempt may still hold the claim, so
+    // only the attempt that took the claim releases it, and only the claim it took: after the lease
+    // expires, another attempt of the same operation can take a newer one.
+    const ownsClaim = claim === 'claimed'
+    const release = async (refresh?: ConnectorConflictSnapshotRefresh) => {
+      if (ownsClaim) {
+        await this.persistence.releaseConflictResolution(
+          actor.workspaceId,
+          conflictId,
+          operationId,
+          refresh,
+          claimId,
+        )
+      }
+    }
+    const claimed = await this.persistence.getConflict(actor.workspaceId, conflictId)
+    if (
+      !claimed ||
+      claimed.conflict.externalRevision !== stored.conflict.externalRevision ||
+      claimed.conflict.localRevision !== stored.conflict.localRevision
+    ) {
+      // Another resolution refreshed the conflict between the read and the claim; this request
+      // chose from snapshots the conflict no longer shows.
+      await release()
+      throw new ConnectorRuntimeError(
+        'ConnectorSyncConflictChanged',
+        'This sync conflict changed while it was being resolved.',
+      )
     }
     if (resolution.resolution === 'ignore') {
       const ignored = await this.persistence.completeConflict(
@@ -796,6 +1174,7 @@ export class ConnectorSyncEngine {
         actor.workspaceId,
         stored.conflict.externalLinkId,
       )
+      if (resolution.resolution === 'merge') requireMergeFitsLink(link, resolution.mergedValues)
       installationSnapshot = await this.requireInstallationSnapshot(
         actor.workspaceId,
         stored.installationId,
@@ -806,11 +1185,7 @@ export class ConnectorSyncEngine {
         stored.conflict.workItemId,
       )
     } catch (error) {
-      await this.persistence.releaseConflictResolution(
-        actor.workspaceId,
-        conflictId,
-        operationId,
-      )
+      await release()
       throw error
     }
     const installation = installationSnapshot.installation
@@ -818,11 +1193,8 @@ export class ConnectorSyncEngine {
       resolution.resolution === 'use-local' &&
       current.revision !== stored.conflict.localRevision
     ) {
-      await this.persistence.releaseConflictResolution(
-        actor.workspaceId,
-        conflictId,
-        operationId,
-      )
+      // The conflict takes the Work Item as it is now, so choosing again works.
+      await release(createLocalConflictRefresh(stored.externalRecord, current))
       throw new ConnectorRuntimeError(
         'ConnectorSyncConflictChanged',
         'Work Item changed after this sync conflict was detected.',
@@ -842,43 +1214,75 @@ export class ConnectorSyncEngine {
         actorUserId: actor.userId,
         expectedRevision: stored.conflict.localRevision,
         patch,
+        // The expected revision and the dates are part of the operation, so choosing again after
+        // the conflict took a newer Work Item, or merging other dates, is not a mismatching replay.
         operationId: createSyncOperationId(
           'resolve-local',
           actor.workspaceId,
           conflictId,
           resolution.resolution,
           stored.externalRecord.externalVersion,
+          String(stored.conflict.localRevision),
+          JSON.stringify(patch),
         ),
       })
       if (applied.kind === 'conflict') {
-        await this.persistence.releaseConflictResolution(
-          actor.workspaceId,
-          conflictId,
-          operationId,
-        )
+        await release(createLocalConflictRefresh(stored.externalRecord, applied.workItem))
         throw new ConnectorRuntimeError(
           'ConnectorSyncConflictChanged',
           'Work Item changed while resolving this sync conflict.',
         )
       }
+      if (applied.kind === 'rejected') {
+        await release()
+        throw new ConnectorRuntimeError(
+          'ConnectorSyncConflictDatesRejected',
+          applied.reason === 'schedule-dependency'
+            ? 'The Work Item has schedule dependencies, so its dates cannot be moved from the calendar.'
+            : 'The chosen dates hold no working day of the Work Item calendar.',
+        )
+      }
       synchronizedWorkItem = applied.workItem
     }
-    if (resolution.resolution === 'use-local' || resolution.resolution === 'merge') {
+    const keepsUndatedLocal = link.resourceType === 'calendar-event' &&
+      resolution.resolution === 'use-local' &&
+      !synchronizedWorkItem.schedule
+    // Keeping a Work Item without dates leaves its event as it is, like an outbound sync does.
+    if (!keepsUndatedLocal && (resolution.resolution === 'use-local' || resolution.resolution === 'merge')) {
       const mutation = createOutboundMutation(
         link,
         synchronizedWorkItem,
         operationId,
         this.originSigningSecret,
         stored.externalRecord.externalVersion,
+        true,
       )
       outboundOriginMarker = mutation.originMarker
-      synchronizedRecord = await this.withConnectorCredential(
-        actor.workspaceId,
-        installation,
-        installationSnapshot.lifecycleRevision,
-        async (adapter, credential) =>
-          adapter.push(credential, mutation),
-      )
+      try {
+        synchronizedRecord = await this.withConnectorCredential(
+          actor.workspaceId,
+          installation,
+          installationSnapshot.lifecycleRevision,
+          async (adapter, credential) =>
+            adapter.push(credential, mutation),
+        )
+      } catch (error) {
+        if (!isExternalVersionChanged(error)) throw error
+        // The resource changed after the conflict was detected. Polling skips a link in conflict,
+        // so the conflict takes the newer resource here and the user resolves it again.
+        const refresh = await this.readConflictRefresh(
+          actor.workspaceId,
+          installation,
+          installationSnapshot.lifecycleRevision,
+          link,
+          stored,
+        )
+        await release(refresh)
+        throw new ConnectorRuntimeError(
+          'ConnectorSyncConflictChanged',
+          'The external resource changed after this sync conflict was detected.',
+        )
+      }
     }
     const persisted = await this.persistence.getLinkState(
       actor.workspaceId,
@@ -1101,6 +1505,91 @@ export class ConnectorSyncEngine {
     }
   }
 
+  /**
+   * Writes the Work Item's dates to its event when they differ from the event's and the link
+   * syncs both ways.
+   *
+   * @param workspaceId - Workspace of the link.
+   * @param link - Calendar link whose state was just recorded.
+   * @param workItem - Work Item as it was read.
+   * @param record - Event as it was read.
+   * @returns The outbound result, or `stale` when nothing is written.
+   */
+  private async pushChangedCalendarDates(
+    workspaceId: string,
+    link: ExternalWorkItemLink,
+    workItem: ConnectorWorkItemSnapshot,
+    record: ConnectorExternalRecord,
+  ): Promise<ConnectorSyncResult> {
+    if (
+      link.syncDirection !== 'bidirectional' ||
+      !workItem.schedule ||
+      !record.schedule ||
+      // A deadline or milestone synchronized from a multi-day event holds one of its days.
+      keepsSyncedDates(workItem, record.schedule)
+    ) {
+      return { kind: 'skipped', linkId: link.id, reason: 'stale' }
+    }
+    return this.processOutbound({
+      workspaceId,
+      link,
+      operationId: createSyncOperationId(
+        'calendar-dates',
+        workspaceId,
+        link.id,
+        String(workItem.revision),
+        record.externalVersion,
+      ),
+    })
+  }
+
+  /**
+   * Reads the linked resource again after a conditional write failed, so the open conflict shows
+   * what the resource holds now.
+   *
+   * @param workspaceId - Workspace of the link.
+   * @param installation - Installation of the link.
+   * @param lifecycleRevision - Installation lifecycle revision read for the resolution.
+   * @param link - Link whose resource changed.
+   * @param stored - Conflict being resolved.
+   * @returns The resource, read again when the provider can, with the Work Item as it is now; or
+   *   `undefined` when the Work Item cannot be read, and the claim is released with the old
+   *   snapshots.
+   */
+  private async readConflictRefresh(
+    workspaceId: string,
+    installation: ConnectorInstallation,
+    lifecycleRevision: number,
+    link: ExternalWorkItemLink,
+    stored: StoredConnectorSyncConflict,
+  ): Promise<ConnectorConflictSnapshotRefresh | undefined> {
+    let record = stored.externalRecord
+    try {
+      const latest = await this.withConnectorCredential(
+        workspaceId,
+        installation,
+        lifecycleRevision,
+        async (adapter, credential) =>
+          adapter.read
+            ? adapter.read(credential, link.resourceType, link.externalId)
+            : undefined,
+      )
+      if (latest) {
+        validateLinkRecordBinding(link, latest)
+        record = latest
+      }
+    } catch {
+      // The conflict keeps the resource it showed and still takes the Work Item as it is now.
+    }
+    try {
+      // Read after the resource, so a Work Item change made while it was read is not lost.
+      const workItem = await this.workItems.get(workspaceId, stored.teamId, stored.conflict.workItemId)
+      return createLocalConflictRefresh(record, workItem)
+    } catch {
+      return undefined
+    }
+  }
+
   /** User-visible conflict を deterministic ID で保存します。 */
   private async persistConflict(
     workspaceId: string,
@@ -1299,6 +1788,8 @@ export class InMemoryConnectorSyncPersistence implements ConnectorSyncPersistenc
       operationId: string
       /** Claim timestamp です。 */
       startedAt: string
+      /** この試行だけを表す claim ID です。 */
+      claimId?: string
     },
   ) {
     const key = conflictKey(workspaceId, conflictId)
@@ -1313,6 +1804,7 @@ export class InMemoryConnectorSyncPersistence implements ConnectorSyncPersistenc
       ...current,
       resolutionOperationId: input.operationId,
       resolutionStartedAt: input.startedAt,
+      ...(input.claimId === undefined ? {} : { resolutionClaimId: input.claimId }),
     })
     return 'claimed' as const
   }
@@ -1322,17 +1814,21 @@ export class InMemoryConnectorSyncPersistence implements ConnectorSyncPersistenc
     workspaceId: string,
     conflictId: string,
     operationId: string,
+    refresh?: ConnectorConflictSnapshotRefresh,
+    claimId?: string,
   ) {
     const key = conflictKey(workspaceId, conflictId)
     const current = this.conflicts.get(key)
     if (
       !current ||
       current.conflict.status !== 'open' ||
-      current.resolutionOperationId !== operationId
+      current.resolutionOperationId !== operationId ||
+      (claimId !== undefined && current.resolutionClaimId !== claimId)
     ) return false
-    const next = { ...current }
+    const next = refresh ? applyConflictSnapshotRefresh(current, refresh) : { ...current }
     delete next.resolutionOperationId
     delete next.resolutionStartedAt
+    delete next.resolutionClaimId
     this.conflicts.set(key, next)
     return true
   }
@@ -1393,6 +1889,29 @@ export function createConnectorWorkItemSnapshot(
     title: workItem.title,
     description: workItem.description,
     status: workItem.workflowStatusId,
+    ...toConnectorEventScheduleField(workItem.schedule),
+  }
+}
+
+/**
+ * Converts a Work Item schedule to the all-day dates of its calendar event.
+ *
+ * @param schedule - Work Item schedule.
+ * @returns `{ schedule }` with inclusive dates and the calendar time zone, or `{}` when the
+ *   Work Item has no dates.
+ */
+export function toConnectorEventScheduleField(
+  schedule: WorkItemSchedule,
+): { schedule?: ConnectorEventSchedule } {
+  const timeZone = schedule.calendarPolicy.timeZone
+  switch (schedule.mode) {
+    case 'unscheduled':
+      return {}
+    case 'due-date':
+      return { schedule: { startDate: schedule.dueDate, endDate: schedule.dueDate, timeZone } }
+    case 'date-range':
+    case 'milestone':
+      return { schedule: { startDate: schedule.startDate, endDate: schedule.endDate, timeZone } }
   }
 }
 
@@ -1419,20 +1938,35 @@ function createPersistedConnectorExternalRecord(
   return persisted
 }
 
+/**
+ * Builds the write of a Work Item to its linked resource.
+ *
+ * @param link - Link of the resource.
+ * @param workItem - Work Item contents to write.
+ * @param operationId - Stable operation ID of the write.
+ * @param originSigningSecret - Secret that signs the origin marker.
+ * @param expectedExternalVersion - Resource version the write is conditional on.
+ * @param alwaysConditional - Whether a calendar write is conditional whatever the link direction,
+ *   as when someone resolves a conflict against the event version they were shown.
+ * @returns The mutation for the provider protocol.
+ */
 function createOutboundMutation(
   link: ExternalWorkItemLink,
   workItem: ConnectorWorkItemSnapshot,
   operationId: string,
   originSigningSecret: string,
   expectedExternalVersion?: string,
+  alwaysConditional = false,
 ): ConnectorOutboundMutation {
+  const calendar = link.resourceType === 'calendar-event'
   return {
     externalId: link.externalId,
     resourceType: readWorkItemResourceType(link.resourceType),
     workItemRevision: workItem.revision,
     title: workItem.title,
     description: workItem.description,
-    status: workItem.status,
+    ...(calendar ? {} : { status: workItem.status }),
+    ...(calendar && workItem.schedule ? { schedule: workItem.schedule } : {}),
     originMarker: createConnectorOriginMarker(
       link.installationId,
       link.id,
@@ -1441,7 +1975,13 @@ function createOutboundMutation(
       originSigningSecret,
     ),
     operationId,
-    ...(expectedExternalVersion ? { expectedExternalVersion } : {}),
+    // A calendar write is conditional only when both sides sync: an outbound-only link is meant to
+    // overwrite the event, and a refused write would never be read back. A conflict resolution
+    // always is, so it does not overwrite an event moved after the conflict was shown.
+    ...(expectedExternalVersion &&
+        (!calendar || alwaysConditional || link.syncDirection === 'bidirectional')
+      ? { expectedExternalVersion }
+      : {}),
   }
 }
 
@@ -1482,14 +2022,53 @@ function createStoredConflict(
   }
 }
 
+/**
+ * Returns a conflict that shows newer snapshots and no longer holds a resolution claim.
+ *
+ * @param stored - Open conflict.
+ * @param refresh - Newer snapshots.
+ * @returns The conflict with the snapshots, fields and revisions replaced.
+ */
+export function applyConflictSnapshotRefresh(
+  stored: StoredConnectorSyncConflict,
+  refresh: ConnectorConflictSnapshotRefresh,
+): StoredConnectorSyncConflict {
+  const next: StoredConnectorSyncConflict = {
+    ...stored,
+    externalRecord: structuredClone(refresh.externalRecord),
+    localWorkItem: structuredClone(refresh.localWorkItem),
+    conflict: {
+      ...stored.conflict,
+      localRevision: refresh.localWorkItem.revision,
+      externalRevision: refresh.externalRecord.externalVersion,
+      fields: structuredClone(refresh.fields),
+    },
+  }
+  delete next.resolutionOperationId
+  delete next.resolutionStartedAt
+  delete next.resolutionClaimId
+  return next
+}
+
 function createConflictFields(
   workItem: ConnectorWorkItemSnapshot,
   record: ConnectorExternalRecord,
 ) {
   const fields: WorkItemSyncConflictField[] = []
-  appendConflictField(fields, 'title', workItem.title, record.title)
-  appendConflictField(fields, 'description', workItem.description, record.description)
-  appendConflictField(fields, 'status', workItem.status, record.status)
+  if (record.resourceType === 'calendar-event') {
+    // Only the dates sync back from a calendar.
+    const local = workItem.schedule
+      ? { startDate: workItem.schedule.startDate, endDate: workItem.schedule.endDate }
+      : null
+    const external = recordToPatch(record).schedule
+    if (external && (local?.startDate !== external.startDate || local.endDate !== external.endDate)) {
+      fields.push({ field: 'schedule', localValue: local, externalValue: external })
+    }
+  } else {
+    appendConflictField(fields, 'title', workItem.title, record.title)
+    appendConflictField(fields, 'description', workItem.description, record.description)
+    appendConflictField(fields, 'status', workItem.status, record.status)
+  }
   if (fields.length === 0) {
     fields.push({
       field: 'revision',
@@ -1512,6 +2091,12 @@ function appendConflictField(
 }
 
 function recordToPatch(record: ConnectorExternalRecord): ConnectorWorkItemPatch {
+  if (record.resourceType === 'calendar-event') {
+    // A calendar owns only the dates; its title and notes never rename the Work Item.
+    return record.schedule
+      ? { schedule: { startDate: record.schedule.startDate, endDate: record.schedule.endDate } }
+      : {}
+  }
   return {
     ...(record.title !== undefined ? { title: record.title } : {}),
     ...(record.description !== undefined ? { description: record.description } : {}),
@@ -1552,6 +2137,12 @@ function validateConflictResolution(
     )
   }
   const keys = Object.keys(input.mergedValues)
+  if (keys.length === 1 && keys[0] === 'schedule') {
+    return {
+      resolution: 'merge',
+      mergedValues: { schedule: readMergedSchedule(input.mergedValues.schedule) },
+    }
+  }
   if (
     keys.length === 0 ||
     keys.some((key) => !['title', 'description', 'status'].includes(key))
@@ -1570,9 +2161,153 @@ function validateConflictResolution(
         'Merged connector field value is invalid.',
       )
     }
-    mergedValues[key as keyof ConnectorWorkItemPatch] = value
+    if (key === 'title' || key === 'description' || key === 'status') mergedValues[key] = value
   }
   return { resolution: 'merge', mergedValues }
+}
+
+/**
+ * Validates the dates of a calendar conflict merge.
+ *
+ * @param value - Merged `schedule` value from the request.
+ * @returns Inclusive dates with the start on or before the end.
+ * @throws {ConnectorRuntimeError} When the value is not a pair of real dates in order.
+ */
+function readMergedSchedule(value: unknown): { startDate: string; endDate: string } {
+  if (
+    !isPlainRecord(value) ||
+    Object.keys(value).some((key) => key !== 'startDate' && key !== 'endDate') ||
+    typeof value.startDate !== 'string' ||
+    typeof value.endDate !== 'string' ||
+    !isCalendarDate(value.startDate) ||
+    !isCalendarDate(value.endDate) ||
+    value.startDate > value.endDate
+  ) {
+    throw new ConnectorRuntimeError(
+      'ConnectorSyncResolutionInvalid',
+      'Merged schedule must have a start date on or before its end date.',
+    )
+  }
+  return { startDate: value.startDate, endDate: value.endDate }
+}
+
+/**
+ * Checks a `YYYY-MM-DD` string names a real date.
+ *
+ * @param value - Candidate date.
+ * @returns Whether the value round-trips through UTC.
+ */
+function isCalendarDate(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
+}
+
+/**
+ * Narrows a value to a plain object.
+ *
+ * @param value - Candidate value.
+ * @returns Whether the value is a non-array object.
+ */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Requires a merge to name only the fields the link's resource syncs: dates for a calendar
+ * event, and title, description and status for other resources.
+ *
+ * @param link - Link of the conflict.
+ * @param patch - Validated merge values.
+ * @throws {ConnectorRuntimeError} When the merge names fields of the other kind.
+ */
+function requireMergeFitsLink(link: ExternalWorkItemLink, patch: ConnectorWorkItemPatch) {
+  const calendar = link.resourceType === 'calendar-event'
+  if (calendar !== (patch.schedule !== undefined)) {
+    throw new ConnectorRuntimeError(
+      'ConnectorSyncResolutionInvalid',
+      'Merge resolution contains unsupported fields.',
+    )
+  }
+}
+
+/**
+ * Returns whether a calendar patch would leave the Work Item dates as they are.
+ *
+ * @param link - Link of the record.
+ * @param patch - Patch from the record.
+ * @param workItem - Current Work Item.
+ * @returns Whether applying the patch can be skipped.
+ */
+function isUnchangedCalendarPatch(
+  link: ExternalWorkItemLink,
+  patch: ConnectorWorkItemPatch,
+  workItem: ConnectorWorkItemSnapshot,
+) {
+  if (link.resourceType !== 'calendar-event') return false
+  if (!patch.schedule) return true
+  return workItem.schedule?.startDate === patch.schedule.startDate &&
+    workItem.schedule.endDate === patch.schedule.endDate
+}
+
+/**
+ * Compares two inclusive date ranges.
+ *
+ * @param left - One range, if any.
+ * @param right - Other range, if any.
+ * @returns Whether both are present and hold the same dates.
+ */
+function hasSameDates(
+  left: { startDate: string; endDate: string } | undefined,
+  right: { startDate: string; endDate: string } | undefined,
+) {
+  return left !== undefined &&
+    right !== undefined &&
+    left.startDate === right.startDate &&
+    left.endDate === right.endDate
+}
+
+/**
+ * Tells whether Work Item dates are still the dates an inbound sync of the event dates produced.
+ * A date range takes the event dates as they are, a deadline takes the last day, and a milestone
+ * takes the first day.
+ *
+ * @param workItem - Work Item as read.
+ * @param synced - Event dates last synchronized.
+ * @returns Whether the Work Item dates have not changed since that sync.
+ */
+function keepsSyncedDates(
+  workItem: ConnectorWorkItemSnapshot,
+  synced: { startDate: string; endDate: string },
+) {
+  const schedule = workItem.schedule
+  if (!schedule) return false
+  switch (workItem.scheduleMode) {
+    case 'due-date':
+      return schedule.endDate === synced.endDate
+    case 'milestone':
+      return schedule.startDate === synced.startDate
+    default:
+      return hasSameDates(schedule, synced)
+  }
+}
+
+/**
+ * Builds conflict snapshots from a resource record and the Work Item as it is now.
+ *
+ * @param record - Resource record the conflict shows.
+ * @param workItem - Work Item as it is now.
+ * @returns The snapshots and the fields that differ.
+ */
+function createLocalConflictRefresh(
+  record: ConnectorExternalRecord,
+  workItem: ConnectorWorkItemSnapshot,
+): ConnectorConflictSnapshotRefresh {
+  return {
+    externalRecord: record,
+    localWorkItem: workItem,
+    fields: createConflictFields(workItem, record),
+  }
 }
 
 function validateLinkRecordBinding(
@@ -1608,10 +2343,21 @@ function isConnectorCredentialCasConflict(error: unknown) {
     )
 }
 
+/**
+ * Returns whether a provider refused a conditional write because the resource changed.
+ *
+ * @param error - Thrown error.
+ * @returns Whether the error is `ConnectorExternalVersionChanged`.
+ */
+function isExternalVersionChanged(error: unknown) {
+  return error instanceof ConnectorRuntimeError && error.code === 'ConnectorExternalVersionChanged'
+}
+
 function readSupportedProvider(provider: ConnectorInstallation['provider']) {
   const definition = BUILT_IN_CONNECTOR_CATALOG.find(
     (candidate) =>
-      candidate.id === provider && candidate.category === 'source-control',
+      candidate.id === provider &&
+      (candidate.category === 'source-control' || candidate.category === 'calendar'),
   )
   if (definition) return definition.id
   throw new ConnectorRuntimeError(
@@ -1625,7 +2371,8 @@ function readWorkItemResourceType(value: ExternalResourceType) {
     value === 'issue' ||
     value === 'merge-request' ||
     value === 'commit' ||
-    value === 'deploy'
+    value === 'deploy' ||
+    value === 'calendar-event'
   ) {
     return value
   }

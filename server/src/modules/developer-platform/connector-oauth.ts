@@ -5,6 +5,7 @@ import {
   validateConnectorDefinition,
   type ConnectorAdapter,
   type ConnectorAuthorizationInput,
+  type ConnectorCreateMutation,
   type ConnectorCredential,
   type ConnectorDefinition,
   type ConnectorExternalRecord,
@@ -13,6 +14,16 @@ import {
   type ConnectorProviderId,
   type ExternalResourceType,
 } from './connectors'
+
+import { createBuiltInConnectorResourceProtocol } from './calendar-event-protocols'
+import { ConnectorRuntimeError } from './connector-runtime-error'
+import type {
+  ConnectorProviderRequest,
+  ConnectorProviderRequester,
+  ConnectorResourceProtocol,
+} from './connector-resource-protocol'
+
+export { ConnectorRuntimeError } from './connector-runtime-error'
 
 const defaultRevocationTimeoutMilliseconds = 5_000
 const minimumRevocationTimeoutMilliseconds = 100
@@ -132,8 +143,13 @@ export type ConfiguredOAuthConnectorOptions = {
   token: ConnectorOAuthTokenMapping
   /** Account endpoint response field mapping です。 */
   account?: ConnectorOAuthAccountMapping
-  /** Provider resource type ごとの REST binding です。 */
-  resources: Partial<Record<ExternalResourceType, ConnectorOAuthResourceBinding>>
+  /**
+   * Provider resource type ごとの REST binding です。Omitted, or empty, when a built-in
+   * `resourceProtocol` serves the resources.
+   */
+  resources?: Partial<Record<ExternalResourceType, ConnectorOAuthResourceBinding>>
+  /** Built-in provider resource API that replaces the configured REST bindings (ADR 0089). */
+  resourceProtocol?: ConnectorResourceProtocol
   /** Trusted configuration でも接続を許す host を限定する allowlist です。 */
   allowedHosts: readonly string[]
   /** Test または egress 制御付き runtime が注入する fetch です。 */
@@ -175,39 +191,6 @@ export interface ConnectorOAuthAdapter extends ConnectorAdapter {
   ): Promise<void>
 }
 
-/** Connector runtime が外部 provider 失敗を分類する stable error です。 */
-export class ConnectorRuntimeError extends Error {
-  /** Stable internal error code です。 */
-  readonly code: string
-  /** Retry により回復する可能性です。 */
-  readonly retryable: boolean
-  /** Credential 再認証が必要かどうかです。 */
-  readonly authorizationRequired: boolean
-  /** Secret を含まない provider HTTP status です。 */
-  readonly providerStatus?: number
-
-  /** Secret-safe connector runtime error を作成します。 */
-  constructor(
-    code: string,
-    message: string,
-    options: {
-      /** Retry により回復する可能性です。 */
-      retryable?: boolean
-      /** Credential 再認証が必要かどうかです。 */
-      authorizationRequired?: boolean
-      /** Secret を含まない provider HTTP status です。 */
-      providerStatus?: number
-    } = {},
-  ) {
-    super(message)
-    this.name = 'ConnectorRuntimeError'
-    this.code = code
-    this.retryable = options.retryable ?? false
-    this.authorizationRequired = options.authorizationRequired ?? false
-    this.providerStatus = options.providerStatus
-  }
-}
-
 /** HTTPS OAuth と normalized REST mapping を実装する configurable adapter です。 */
 export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
   /** Adapter が実装する built-in provider metadata です。 */
@@ -242,6 +225,8 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
   private readonly resources: Partial<
     Record<ExternalResourceType, ConnectorOAuthResourceBinding>
   >
+  /** Built-in provider resource API, when the provider has one. */
+  private readonly resourceProtocol?: ConnectorResourceProtocol
   /** Network transport です。 */
   private readonly fetcher: typeof fetch
   /** Token expiry 計算に使う clock です。 */
@@ -297,7 +282,16 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
     this.defaultScopes = validateScopes(options.defaultScopes)
     this.tokenMapping = validateTokenMapping(options.token)
     this.accountMapping = options.account
-    this.resources = validateResourceBindings(options.resources, this.definition)
+    if (options.resourceProtocol) {
+      this.resourceProtocol = validateResourceProtocol(
+        options.resourceProtocol,
+        options.resources,
+        this.definition,
+      )
+      this.resources = {}
+    } else {
+      this.resources = validateResourceBindings(options.resources ?? {}, this.definition)
+    }
     if (
       !this.accountEndpoint &&
       !this.tokenMapping.externalAccountId
@@ -474,6 +468,14 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
     resourceType: ExternalResourceType,
     cursor?: string,
   ): Promise<ConnectorPage<ConnectorExternalRecord>> {
+    if (this.resourceProtocol) {
+      this.requireResourceCapability(resourceType)
+      return this.resourceProtocol.pull(
+        this.createProviderRequester(credential),
+        resourceType,
+        cursor === undefined ? undefined : requireNonEmpty(cursor, 'Connector cursor'),
+      )
+    }
     const binding = this.requireResourceBinding(resourceType)
     const url = resolveApiPath(this.apiBaseUrl, binding.collectionPath)
     if (cursor) {
@@ -506,6 +508,10 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
     credential: ConnectorCredential,
     mutation: ConnectorOutboundMutation,
   ) {
+    if (this.resourceProtocol) {
+      this.requireResourceCapability(mutation.resourceType)
+      return this.resourceProtocol.push(this.createProviderRequester(credential), mutation)
+    }
     const binding = this.requireResourceBinding(mutation.resourceType)
     const path = binding.itemPath.replaceAll(
       '{externalId}',
@@ -544,6 +550,108 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
       },
     })
     return mapExternalRecord(payload, mutation.resourceType, binding.record)
+  }
+
+  /**
+   * Reads one provider resource through the built-in resource protocol.
+   *
+   * @param credential - Installation credential.
+   * @param resourceType - Resource type of the link.
+   * @param externalId - Provider resource ID.
+   * @returns The resource as it is now.
+   */
+  async read(
+    credential: ConnectorCredential,
+    resourceType: ExternalResourceType,
+    externalId: string,
+  ) {
+    if (!this.resourceProtocol) {
+      throw new ConnectorRuntimeError(
+        'ConnectorCapabilityUnsupported',
+        'Connector cannot read a single provider resource.',
+      )
+    }
+    this.requireResourceCapability(resourceType)
+    return this.resourceProtocol.read(
+      this.createProviderRequester(credential),
+      resourceType,
+      requireNonEmpty(externalId, 'External resource ID'),
+    )
+  }
+
+  /**
+   * Creates a provider resource for a Work Item through the built-in resource protocol.
+   *
+   * @param credential - Installation credential.
+   * @param mutation - Work Item contents and the stable operation ID.
+   * @returns The created resource.
+   */
+  async create(
+    credential: ConnectorCredential,
+    mutation: ConnectorCreateMutation,
+  ) {
+    if (!this.resourceProtocol) {
+      throw new ConnectorRuntimeError(
+        'ConnectorCapabilityUnsupported',
+        'Connector cannot create provider resources.',
+      )
+    }
+    this.requireResourceCapability(mutation.resourceType)
+    return this.resourceProtocol.create(this.createProviderRequester(credential), mutation)
+  }
+
+  /**
+   * Binds the hardened provider request path to one credential for a resource protocol.
+   *
+   * @param credential - Installation credential whose access token authorizes the requests.
+   * @returns A requester limited to the configured API origin.
+   */
+  private createProviderRequester(credential: ConnectorCredential): ConnectorProviderRequester {
+    return async (request: ConnectorProviderRequest) => {
+      if (request.path.includes('?') || request.path.includes('#')) {
+        throw new ConnectorRuntimeError(
+          'ConnectorResourcePathInvalid',
+          'Connector API path must not contain a query string.',
+        )
+      }
+      const url = resolveApiPath(this.apiBaseUrl, request.path)
+      for (const [name, value] of Object.entries(request.query ?? {})) {
+        url.searchParams.set(name, value)
+      }
+      const response = await this.fetchWithTimeout(url, {
+        method: request.method,
+        redirect: 'error',
+        headers: {
+          Accept: 'application/json',
+          ...request.headers,
+          Authorization: `Bearer ${requireNonEmpty(
+            credential.accessToken,
+            'Connector access token',
+          )}`,
+          ...(request.body ? { 'Content-Type': 'application/json' } : {}),
+        },
+        ...(request.body ? { body: JSON.stringify(request.body) } : {}),
+      })
+      if (!response.ok && !(request.allowedStatuses ?? []).includes(response.status)) {
+        await response.body?.cancel().catch(() => undefined)
+        throw createProviderHttpError(response.status, 'request provider resource')
+      }
+      if (response.status === 204 || response.headers.get('Content-Length') === '0') {
+        await response.body?.cancel().catch(() => undefined)
+        return { status: response.status, payload: undefined }
+      }
+      return { status: response.status, payload: await readBoundedJson(response) }
+    }
+  }
+
+  /** Rejects a resource type outside the provider capabilities. */
+  private requireResourceCapability(resourceType: ExternalResourceType) {
+    if (!this.definition.resourceTypes.includes(resourceType)) {
+      throw new ConnectorRuntimeError(
+        'ConnectorCapabilityUnsupported',
+        `Connector does not support ${resourceType} resources.`,
+      )
+    }
   }
 
   /** OAuth token request を実行します。 */
@@ -901,6 +1009,35 @@ function validateTokenMapping(value: ConnectorOAuthTokenMapping) {
   if (value.externalAccountId) requireJsonPath(value.externalAccountId, 'Account ID path')
   if (value.externalAccountName) requireJsonPath(value.externalAccountName, 'Account name path')
   return value
+}
+
+/**
+ * Checks that a built-in resource protocol serves exactly the provider capabilities and that the
+ * configuration does not also map REST bindings.
+ *
+ * @param protocol - Built-in resource protocol.
+ * @param resources - Configured REST bindings, which must be empty.
+ * @param definition - Catalog entry of the provider.
+ * @returns The protocol.
+ */
+function validateResourceProtocol(
+  protocol: ConnectorResourceProtocol,
+  resources: ConfiguredOAuthConnectorOptions['resources'],
+  definition: ConnectorDefinition,
+) {
+  const types = new Set(protocol.resourceTypes)
+  if (
+    Object.keys(resources ?? {}).length > 0 ||
+    types.size !== protocol.resourceTypes.length ||
+    types.size !== definition.resourceTypes.length ||
+    definition.resourceTypes.some((resourceType) => !types.has(resourceType))
+  ) {
+    throw new ConnectorRuntimeError(
+      'ConnectorResourceBindingMismatch',
+      'Connector resource protocol must serve exactly the declared capabilities without REST bindings.',
+    )
+  }
+  return protocol
 }
 
 function validateResourceBindings(
@@ -1437,10 +1574,12 @@ export function createOAuthConnectorRegistryFromEnvironment(
         'Connector provider is not supported by this runtime.',
       )
     }
+    const resourceProtocol = createBuiltInConnectorResourceProtocol(entry.provider)
     return new ConfiguredOAuthConnectorAdapter({
       ...entry,
       definition,
       clientSecret: secret,
+      ...(resourceProtocol ? { resourceProtocol } : {}),
       ...(options.fetch ? { fetch: options.fetch } : {}),
       ...(options.clock ? { clock: options.clock } : {}),
     })

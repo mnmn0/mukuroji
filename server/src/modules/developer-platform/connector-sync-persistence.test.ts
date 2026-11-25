@@ -1095,4 +1095,74 @@ describe('DynamoDbConnectorSyncPersistence', () => {
       },
     )).resolves.toBe('claimed')
   })
+
+  test('keeps a claim the same operation took again after the first attempt lease expired', async () => {
+    const memory = createMemoryDocumentClient()
+    const link = createLink()
+    seedLinkAndConnector(memory, link)
+    let now = new Date('2026-07-18T00:00:00.000Z')
+    const persistence = new DynamoDbConnectorSyncPersistence({
+      tableName: 'DeveloperPlatformTable',
+      auditTableName: 'AuditEventsTable',
+      documentClient: memory.documentClient,
+      clock: () => now,
+      resolutionLeaseSeconds: 60,
+    })
+    await persistence.createConflict(createConflict())
+    const firstStartedAt = now.toISOString()
+    await expect(persistence.claimConflictResolution('workspace-1', 'conflict-1', {
+      operationId: 'resolution-operation-1',
+      startedAt: firstStartedAt,
+      claimId: 'claim-first',
+    })).resolves.toBe('claimed')
+    // The first attempt stalls past its lease, and a retry of the same operation claims again.
+    now = new Date('2026-07-18T00:01:31.000Z')
+    // A retry that read the clock together with the first attempt cannot take over the claim
+    // under the same start time, which would let the first attempt release it.
+    await expect(persistence.claimConflictResolution('workspace-1', 'conflict-1', {
+      operationId: 'resolution-operation-1',
+      startedAt: firstStartedAt,
+      claimId: 'claim-stalled',
+    })).resolves.toBe('busy')
+    const retryStartedAt = now.toISOString()
+    await expect(persistence.claimConflictResolution('workspace-1', 'conflict-1', {
+      operationId: 'resolution-operation-1',
+      startedAt: retryStartedAt,
+      claimId: 'claim-retry',
+    })).resolves.toBe('claimed')
+
+    // The stalled attempt fails and must not release the retry's claim.
+    await expect(persistence.releaseConflictResolution(
+      'workspace-1',
+      'conflict-1',
+      'resolution-operation-1',
+      undefined,
+      'claim-first',
+    )).resolves.toBe(false)
+    await expect(persistence.claimConflictResolution('workspace-1', 'conflict-1', {
+      operationId: 'resolution-operation-2',
+      startedAt: now.toISOString(),
+    })).resolves.toBe('busy')
+    await expect(persistence.releaseConflictResolution(
+      'workspace-1',
+      'conflict-1',
+      'resolution-operation-1',
+      undefined,
+      'claim-retry',
+    )).resolves.toBe(true)
+    // After that release, an attempt that read the first claim's time takes a claim again. The
+    // first attempt still cannot release it, because the claim names the attempt that took it.
+    await expect(persistence.claimConflictResolution('workspace-1', 'conflict-1', {
+      operationId: 'resolution-operation-1',
+      startedAt: firstStartedAt,
+      claimId: 'claim-stalled',
+    })).resolves.toBe('claimed')
+    await expect(persistence.releaseConflictResolution(
+      'workspace-1',
+      'conflict-1',
+      'resolution-operation-1',
+      undefined,
+      'claim-first',
+    )).resolves.toBe(false)
+  })
 })

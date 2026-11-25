@@ -1,5 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import {
+  type ExternalWorkItemLink,
   isWorkItemProgressPercent,
   measureWorkItemImportContentBytes,
   WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH,
@@ -113,6 +114,7 @@ import type {
   WebhookDeliveryPort,
   WebhookSubscriptionPort,
 } from './application/ports'
+import type { ConnectorLinkedResource } from './connector-sync-runtime'
 import { readCredentialPrincipalKey } from './credential-principal'
 import { DeveloperPlatformError } from './errors'
 import {
@@ -936,6 +938,43 @@ export interface ConnectorAuthorizationService {
     conflictId: string,
     input: ResolveWorkItemSyncConflictInput,
   ): Promise<WorkItemSyncConflict>
+  /**
+   * Creates the provider resource of a new link, such as the calendar event of a Work Item
+   * (ADR 0089). Retrying the same operation ID returns the same resource.
+   */
+  createLinkedResource?(input: {
+    /** Workspace of the installation. */
+    workspaceId: string
+    /** Installation that owns the resource. */
+    installationId: string
+    /** Team of the Work Item. */
+    teamId: string
+    /** Work Item. */
+    workItemId: string
+    /** Resource type to create. */
+    resourceType: 'calendar-event'
+    /** Stable operation ID derived from the request's idempotency key. */
+    operationId: string
+  }): Promise<{
+    /** Provider resource ID. */
+    externalId: string
+    /** Provider URL of the resource. */
+    externalUrl: string
+    /** First synchronized state, passed back to `initializeLinkedResourceSync`. */
+    baseline?: ConnectorLinkedResource
+  }>
+  /**
+   * Records the first synchronized state of a link whose resource `createLinkedResource` just
+   * created, so the first poll compares against the Work Item the resource was created from.
+   */
+  initializeLinkedResourceSync?(input: {
+    /** Workspace of the link. */
+    workspaceId: string
+    /** Created link. */
+    link: ExternalWorkItemLink
+    /** `baseline` returned by `createLinkedResource`. */
+    baseline: ConnectorLinkedResource
+  }): Promise<void>
 }
 
 /** External ports and request-bound services required by the management and public API router. */
@@ -1753,12 +1792,16 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
     const body = readExternalLinkInput(await readJson(c))
     await dependencies.workItems.authorizeExternalLink(credential, teamId, workItemId, true)
-    return executeIdempotentJson(c, dependencies, credential, body, async () => ({
+    return executeIdempotentJson(c, dependencies, credential, body, async (_context, idempotency) => ({
       status: 201,
-      body: await dependencies.externalLinks.createExternalWorkItemLink({
-        workspaceId: credential.workspaceId,
-        input: { ...body, teamId, workItemId },
-      }),
+      body: await createExternalLinkWithTarget(
+        dependencies,
+        credential.workspaceId,
+        teamId,
+        workItemId,
+        body,
+        idempotency,
+      ),
     }))
   })
 
@@ -2628,12 +2671,16 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       workItemId,
       true,
     )
-    return executeManagementIdempotentJson(c, dependencies, principal, body, async () => ({
+    return executeManagementIdempotentJson(c, dependencies, principal, body, async (_context, idempotency) => ({
       status: 201,
-      body: await dependencies.externalLinks.createExternalWorkItemLink({
-        workspaceId: principal.workspaceId,
-        input: { ...body, workItemId },
-      }),
+      body: await createExternalLinkWithTarget(
+        dependencies,
+        principal.workspaceId,
+        body.teamId,
+        workItemId,
+        body,
+        idempotency,
+      ),
     }))
   })
 
@@ -4183,23 +4230,159 @@ function readExternalLinkInput(value: unknown, includeTeamId = false) {
 }
 
 function readExternalLinkFields(body: Record<string, unknown>) {
-  const resourceType = readRequiredString(body.resourceType, 'resourceType')
-  if (!['issue', 'merge-request', 'commit', 'deploy'].includes(resourceType)) {
-    throw new PublicApiServiceError(400, 'validation_failed', 'resourceType is invalid.')
-  }
+  const resourceType = readExternalLinkResourceType(body.resourceType)
   const syncDirection = readRequiredString(body.syncDirection, 'syncDirection')
   if (!['inbound', 'outbound', 'bidirectional', 'none'].includes(syncDirection)) {
     throw new PublicApiServiceError(400, 'validation_failed', 'syncDirection is invalid.')
   }
+  // Mukuroji creates the event of a calendar link (ADR 0089). It finds its events by a private
+  // property, so an existing event linked by ID would never sync.
+  const createsResource = resourceType === 'calendar-event'
+  if (createsResource && (body.externalId !== undefined || body.externalUrl !== undefined)) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      'Omit externalId and externalUrl for calendar-event; Mukuroji creates the event.',
+    )
+  }
   return {
     installationId: readIdentifier(body.installationId, 'installationId'),
-    resourceType: resourceType as 'issue' | 'merge-request' | 'commit' | 'deploy',
-    externalId: readIdentifier(body.externalId, 'externalId'),
-    externalUrl: readHttpsUrl(body.externalUrl, 'externalUrl'),
+    resourceType,
+    ...(createsResource
+      ? {}
+      : {
+          externalId: readIdentifier(body.externalId, 'externalId'),
+          externalUrl: readHttpsUrl(body.externalUrl, 'externalUrl'),
+        }),
     ...(body.displayKey !== undefined
       ? { displayKey: readRequiredString(body.displayKey, 'displayKey') }
       : {}),
     syncDirection: syncDirection as 'inbound' | 'outbound' | 'bidirectional' | 'none',
+  }
+}
+
+/**
+ * Validates the resource type of a new link.
+ *
+ * @param value - Untrusted `resourceType`.
+ * @returns A linkable resource type.
+ */
+function readExternalLinkResourceType(
+  value: unknown,
+): 'issue' | 'merge-request' | 'commit' | 'deploy' | 'calendar-event' {
+  const resourceType = readRequiredString(value, 'resourceType')
+  if (
+    resourceType === 'issue' ||
+    resourceType === 'merge-request' ||
+    resourceType === 'commit' ||
+    resourceType === 'deploy' ||
+    resourceType === 'calendar-event'
+  ) return resourceType
+  throw new PublicApiServiceError(400, 'validation_failed', 'resourceType is invalid.')
+}
+
+/**
+ * Creates an external link, first creating its provider resource when the request names none,
+ * and records that resource as the link's first synchronized state.
+ *
+ * @param dependencies - Router dependencies.
+ * @param workspaceId - Workspace of the request.
+ * @param teamId - Team of the Work Item.
+ * @param workItemId - Work Item.
+ * @param body - Validated link fields.
+ * @param idempotency - Request idempotency token.
+ * @returns The created link.
+ */
+async function createExternalLinkWithTarget<
+  TBody extends ReturnType<typeof readExternalLinkFields>,
+>(
+  dependencies: PublicApiDependencies,
+  workspaceId: string,
+  teamId: string,
+  workItemId: string,
+  body: TBody,
+  idempotency: IdempotencyMutationToken,
+) {
+  const target = await resolveExternalLinkTarget(dependencies, workspaceId, teamId, workItemId, body, idempotency)
+  const link = await dependencies.externalLinks.createExternalWorkItemLink({
+    workspaceId,
+    input: { ...target.fields, teamId, workItemId },
+  })
+  const initialize = dependencies.connectorAuthorization?.initializeLinkedResourceSync
+  if (target.baseline && initialize) {
+    await initialize.call(dependencies.connectorAuthorization, {
+      workspaceId,
+      link,
+      baseline: target.baseline,
+    })
+  }
+  return link
+}
+
+/**
+ * Returns the provider resource a new link points to, creating the calendar event first when the
+ * request leaves it out.
+ *
+ * @param dependencies - Router dependencies.
+ * @param workspaceId - Workspace of the request.
+ * @param teamId - Team of the Work Item.
+ * @param workItemId - Work Item.
+ * @param body - Validated link fields.
+ * @param idempotency - Request idempotency token; it makes the provider create idempotent.
+ * @returns The link fields with the resource ID and URL, and the first synchronized state of a
+ * resource created here.
+ */
+async function resolveExternalLinkTarget<
+  TBody extends ReturnType<typeof readExternalLinkFields>,
+>(
+  dependencies: PublicApiDependencies,
+  workspaceId: string,
+  teamId: string,
+  workItemId: string,
+  body: TBody,
+  idempotency: IdempotencyMutationToken,
+) {
+  const { externalId, externalUrl, ...rest } = body
+  if (externalId !== undefined && externalUrl !== undefined) {
+    return { fields: { ...rest, externalId, externalUrl }, baseline: undefined }
+  }
+  if (body.resourceType !== 'calendar-event') {
+    throw new PublicApiServiceError(400, 'validation_failed', 'externalId and externalUrl are required.')
+  }
+  const create = dependencies.connectorAuthorization?.createLinkedResource
+  if (!create) {
+    throw new PublicApiServiceError(
+      503,
+      'temporarily_unavailable',
+      'Calendar connectors are not configured.',
+      true,
+    )
+  }
+  const resource = await create.call(dependencies.connectorAuthorization, {
+    workspaceId,
+    installationId: body.installationId,
+    teamId,
+    workItemId,
+    resourceType: 'calendar-event',
+    // Idempotency reservations are scoped by credential, so the provider operation is too: two
+    // credentials sending the same key create separate events. The credential ID is not a secret.
+    operationId: createHash('sha256')
+      .update(
+        `connector-linked-resource-v2\0${workspaceId}\0${teamId}\0${workItemId}` +
+        `\0${body.installationId}\0${idempotency.credentialId}` +
+        `\0${idempotency.idempotencyKey}\0${idempotency.requestFingerprint}`,
+      )
+      .digest('hex'),
+  })
+  return {
+    fields: {
+      ...rest,
+      // Provider IDs, such as Microsoft Graph's, use characters a client-sent ID may not; the link
+      // store still bounds their length and characters.
+      externalId: resource.externalId,
+      externalUrl: readHttpsUrl(resource.externalUrl, 'externalUrl'),
+    },
+    baseline: resource.baseline,
   }
 }
 
