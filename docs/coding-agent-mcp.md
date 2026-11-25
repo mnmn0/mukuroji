@@ -75,7 +75,7 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 Team が1つだけなら、ツールと結果は従来と同じです。Project は1つの Team に属するため、`MUKUROJI_MCP_PROJECT_ID` は Team が1つのときだけ指定できます。
 
 - `get_configuration` は、各Teamの設定・brief・catalog を `teams` に並べて返します。
-- `get_next_task` は全Teamを調べ、自分の実行中Run、再開、新しい作業の順に選びます。同じ順位なら先に書いたTeamを優先し、選んだタスクのTeamを `teamId` で返します。
+- `get_next_task` は全Teamを調べ、自分の実行中Run、再開、新しい作業の順に選びます。同じ順位なら新しいRunを受け付けているTeam、次に先に書いたTeamを優先し、選んだタスクのTeamを `teamId` で返します。`acceptingNewRuns: false` は、すべてのTeamが新しいRunの受付を止めているときだけ返します。
 - `list_tasks` は指定した順にTeamを続けて読みます。`nextCursor` には次に読むTeamが含まれます。
 - `get_work_status` は全Teamの件数を足し、進行中のタスクに `teamId` を付けます。
 - タスクIDやRun IDを受け取るツールは、そのタスクやRunを持つTeamを自分で探します。ステータスIDは、そのタスクのTeamのcatalogから選んでください。

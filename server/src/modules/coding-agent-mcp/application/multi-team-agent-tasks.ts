@@ -74,6 +74,16 @@ function actionRank(action: string): number {
 }
 
 /**
+ * Tells whether a Team's selection says it has stopped accepting new Agent Runs.
+ *
+ * @param selection - The Team's next-task selection.
+ * @returns True when the Team stopped intake.
+ */
+function stopsIntake(selection: object) {
+  return 'acceptingNewRuns' in selection && selection.acceptingNewRuns === false
+}
+
+/**
  * Creates task operations for one assignee across several Teams. Each Team keeps its own port,
  * workflow, and Agent settings; a task or run is routed to the Team that the server reports it in,
  * and selection and listings cover the Teams in the configured order.
@@ -298,7 +308,10 @@ export function createMultiTeamAgentTasks(teams: readonly TeamWorkItemApi[], sco
       const selections = await Promise.all(bound.map(async (team) => ({ team, selection: await team.tasks.next(input) })))
       let chosen = selections[0]
       for (const candidate of selections) {
-        if (actionRank(candidate.selection.action) < actionRank(chosen.selection.action)) chosen = candidate
+        const rank = actionRank(candidate.selection.action) - actionRank(chosen.selection.action)
+        // On a tie, a Team that accepts new runs wins, so intake is reported stopped only when every
+        // Team has stopped it.
+        if (rank < 0 || (rank === 0 && stopsIntake(chosen.selection) && !stopsIntake(candidate.selection))) chosen = candidate
       }
       for (const { team, selection } of selections) {
         rememberTasks(team, [
