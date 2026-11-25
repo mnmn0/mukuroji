@@ -24,7 +24,7 @@ export const codingAgentMessages = {
   'agents.handoff.ready.blocked.activeRun': 'An agent run is working on it.',
   'agents.handoff.ready.blocked.noAcceptanceCriteria': 'Agent settings require acceptance criteria, and the task has none.',
   'agents.handoff.ready.blocked.noTransition': 'No workflow transition leads from the current status to a Ready status in Agent settings.',
-  'agents.handoff.ready.blockedByNote': 'The task has {count} blockedBy relations. It is not a get_next_task candidate until they are resolved.',
+  'agents.handoff.ready.blockedByNote': 'The task has {count} blockedBy relations. While any of those blockers is not completed, it is not a get_next_task candidate.',
   'agents.handoff.brief.title': 'mukuroji task handoff',
   'agents.handoff.brief.scope': 'This is a snapshot of the visible saved task. No assignment change or task start has been recorded.',
   'agents.handoff.brief.task': 'Task',

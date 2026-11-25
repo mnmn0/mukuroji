@@ -24,7 +24,7 @@ export const codingAgentMessages = {
   'agents.handoff.ready.blocked.activeRun': 'エージェントの Run が作業中です。',
   'agents.handoff.ready.blocked.noAcceptanceCriteria': 'エージェント設定で受け入れ条件が必須ですが、未設定です。',
   'agents.handoff.ready.blocked.noTransition': '今の状態から、エージェント設定の Ready status へ移せる遷移がありません。',
-  'agents.handoff.ready.blockedByNote': 'blocker（blockedBy）が {count} 件あります。解消するまで get_next_task の候補になりません。',
+  'agents.handoff.ready.blockedByNote': 'blocker（blockedBy）の関係が {count} 件あります。そのうち完了していない blocker が残っている間は、get_next_task の候補になりません。',
   'agents.handoff.brief.title': 'mukuroji 作業引き継ぎ',
   'agents.handoff.brief.scope': 'これは表示中の保存済みタスクのスナップショットです。担当の変更や着手の記録は行っていません。',
   'agents.handoff.brief.task': 'タスク',
