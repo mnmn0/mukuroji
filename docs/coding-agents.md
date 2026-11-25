@@ -99,4 +99,5 @@ Codex と Kiro の設定例は [Coding Agent MCP](coding-agent-mcp.md#クライ�
 
 `CLAUDE.md`、`.kiro/steering/mukuroji.md`、`scripts/sync-review-skill.sh` は、`AGENTS.md` と同じく
 agent の規則やレビュー手順を決めるため、`review-skill.yml` の trust root（変更に maintainer の
-`review-ok:<head SHA>` label が要る path）に含めます。workflow の変更は maintainer が手で反映します。
+`review-ok:<head SHA>` label が要る path）の対象です。workflow への追加は maintainer が手で反映するため、
+反映されるまではこれらを変える PR で maintainer が差分を直接確認します。
