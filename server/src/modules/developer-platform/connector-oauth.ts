@@ -130,6 +130,11 @@ export type ConfiguredOAuthConnectorOptions = {
   tokenEndpoint: string
   /** RFC 7009 compatible revocation endpoint です。 */
   revocationEndpoint?: string
+  /**
+   * Provider-specific grant revocation used when no RFC 7009 endpoint is configured.
+   * `github-oauth-app` deletes the GitHub OAuth App grant through `DELETE /applications/{client_id}/grant`.
+   */
+  grantRevocation?: 'github-oauth-app'
   /** Provider account profile endpoint です。 */
   accountEndpoint?: string
   /** Provider resource API の base URL です。 */
@@ -208,6 +213,8 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
   private readonly tokenEndpoint: URL
   /** Provider revocation endpoint です。 */
   private readonly revocationEndpoint?: URL
+  /** GitHub OAuth App grant endpoint used when no RFC 7009 endpoint is configured. */
+  private readonly gitHubGrantEndpoint?: URL
   /** Provider account endpoint です。 */
   private readonly accountEndpoint?: URL
   /** Provider resource API base URL です。 */
@@ -262,6 +269,13 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
           options.revocationEndpoint,
           options.allowedHosts,
           'OAuth revocation endpoint',
+        )
+      : undefined
+    this.gitHubGrantEndpoint = !options.revocationEndpoint && options.grantRevocation === 'github-oauth-app'
+      ? validateHttpsEndpoint(
+          new URL(`applications/${encodeURIComponent(this.clientId)}/grant`, options.apiBaseUrl).toString(),
+          options.allowedHosts,
+          'GitHub grant revocation endpoint',
         )
       : undefined
     this.accountEndpoint = options.accountEndpoint
@@ -409,7 +423,7 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
     credential: ConnectorCredential,
     request?: ConnectorRevocationRequest,
   ) {
-    if (!this.revocationEndpoint) {
+    if (!this.revocationEndpoint && !this.gitHubGrantEndpoint) {
       throw new ConnectorRuntimeError(
         'ConnectorRevocationUnsupported',
         'Connector provider does not have a configured revocation endpoint.',
@@ -429,6 +443,11 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
       this.revocationTimeoutMilliseconds,
       requestTimeoutMilliseconds,
     ))
+    if (this.gitHubGrantEndpoint) {
+      // Deleting the OAuth App grant revokes every token GitHub issued for it.
+      await this.revokeGitHubGrant(this.gitHubGrantEndpoint, accessToken, signal)
+      return
+    }
     const revocations: Promise<void>[] = []
     if (refreshToken && refreshToken !== accessToken) {
       revocations.push(this.revokeToken(refreshToken, 'refresh_token', signal))
@@ -439,6 +458,30 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
       (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
     )
     if (failure) throw failure.reason
+  }
+
+  /**
+   * Deletes the GitHub OAuth App grant of an access token, authenticating with the client ID and
+   * secret. A grant GitHub no longer knows (404) is already revoked.
+   *
+   * @param endpoint - `applications/{client_id}/grant` endpoint.
+   * @param accessToken - Access token whose grant is deleted.
+   * @param signal - Shared revocation deadline.
+   */
+  private async revokeGitHubGrant(endpoint: URL, accessToken: string, signal: AbortSignal) {
+    const response = await this.fetchWithTimeout(endpoint, {
+      method: 'DELETE',
+      redirect: 'error',
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        Authorization: `Basic ${Buffer.from(`${this.clientId}:${this.clientSecret}`).toString('base64')}`,
+      },
+      body: JSON.stringify({ access_token: accessToken }),
+    }, signal)
+    if (!response.ok && response.status !== 404) {
+      throw createProviderHttpError(response.status, 'revoke credential')
+    }
   }
 
   /** Refresh/access token を共有deadline内で revoke し、成功 response だけを受理します。 */
@@ -1623,6 +1666,7 @@ function applyBundledProviderSettings(entry: ConnectorOAuthEnvironmentEntry): Co
     token: entry.token ?? { ...defaults.token },
     account: entry.account ?? { ...defaults.account },
     allowedHosts: entry.allowedHosts ?? [...defaults.allowedHosts, ...readRedirectHost(entry.redirectUri)],
+    ...(entry.revocationEndpoint === undefined ? { grantRevocation: defaults.grantRevocation } : {}),
   }
 }
 

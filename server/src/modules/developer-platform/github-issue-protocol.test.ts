@@ -44,12 +44,13 @@ function issue(overrides: Record<string, unknown> = {}) {
 describe('GitHub issue protocol', () => {
   test('lists issues across repositories without pull requests and pages by number', async () => {
     const protocol = new GitHubIssueProtocol()
-    const fullPage: unknown[] = Array.from({ length: 100 }, (_, index) => issue({ number: index + 1 }))
+    // Pages hold eight issues, so the largest bodies stay within the 2 MiB response limit.
+    const fullPage: unknown[] = Array.from({ length: 8 }, (_, index) => issue({ number: index + 1 }))
     fullPage[1] = issue({ number: 2, pull_request: { url: 'https://api.github.com/repos/acme/app/pulls/2' } })
     const { request, requests } = createRequester([{ status: 200, payload: fullPage }, { status: 200, payload: [issue()] }])
 
     const first = await protocol.pull(request, 'issue')
-    expect(first.items).toHaveLength(99)
+    expect(first.items).toHaveLength(7)
     expect(first.items[0]).toMatchObject({
       externalId: 'acme/app#1',
       displayKey: 'acme/app#1',
@@ -58,7 +59,7 @@ describe('GitHub issue protocol', () => {
       description: 'Steps to reproduce',
     })
     expect(first.nextCursor).toBe('2')
-    expect(requests[0]).toMatchObject({ method: 'GET', path: 'issues', query: { filter: 'all', state: 'all', page: '1' } })
+    expect(requests[0]).toMatchObject({ method: 'GET', path: 'issues', query: { filter: 'all', state: 'all', per_page: '8', page: '1' } })
 
     const second = await protocol.pull(request, 'issue', first.nextCursor)
     expect(second.nextCursor).toBeUndefined()
@@ -121,6 +122,22 @@ describe('GitHub issue protocol', () => {
     expect(requests[0]).toMatchObject({ method: 'PATCH', path: 'repos/acme/app/issues/12' })
   })
 
+  test('refuses a description longer than an issue can take instead of shortening it', async () => {
+    const protocol = new GitHubIssueProtocol()
+    const { request, requests } = createRequester([])
+    await expect(protocol.push(request, {
+      externalId: 'acme/app#12',
+      resourceType: 'issue',
+      workItemRevision: 4,
+      title: 'Fix login',
+      description: 'x'.repeat(60_001),
+      originMarker: 'v1.payload.signature',
+      operationId: 'operation-1',
+      statusCategory: 'started',
+    })).rejects.toMatchObject({ code: 'ConnectorRecordTooLarge' })
+    expect(requests).toHaveLength(0)
+  })
+
   test('refuses to overwrite an issue edited since its expected version', async () => {
     const protocol = new GitHubIssueProtocol()
     const current = issue()
@@ -167,6 +184,40 @@ describe('bundled GitHub connector settings', () => {
     expect(url.origin + url.pathname).toBe('https://github.com/login/oauth/authorize')
     expect(url.searchParams.get('scope')).toBe('repo')
     expect(url.searchParams.get('client_id')).toBe('github-client')
+  })
+
+  test('disconnects by deleting the GitHub OAuth App grant with client credentials', async () => {
+    const calls: { url: string, init?: RequestInit }[] = []
+    let status = 204
+    const registry = createOAuthConnectorRegistryFromEnvironment({
+      environment: {
+        MUKUROJI_CONNECTOR_PROVIDERS_JSON: JSON.stringify([{
+          provider: 'github',
+          clientId: 'github-client',
+          clientSecretEnvironmentVariable: 'MUKUROJI_CONNECTOR_GITHUB_SECRET',
+          redirectUri: 'https://app.example.test/api/developer/connector-oauth/callback',
+        }]),
+        MUKUROJI_CONNECTOR_GITHUB_SECRET: 'secret',
+      },
+      fetch: Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(input), ...(init ? { init } : {}) })
+        return new Response(null, { status })
+      }, { preconnect: () => undefined }),
+    })
+    const adapter = registry.get('github')
+    if (!isConnectorOAuthAdapter(adapter)) throw new Error('GitHub adapter must support OAuth.')
+    const credential = { accessToken: 'gho_token', externalAccountId: '1', scopes: ['repo'] }
+    await adapter.disconnect(credential)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.url).toBe('https://api.github.com/applications/github-client/grant')
+    expect(calls[0]?.init?.method).toBe('DELETE')
+    expect(new Headers(calls[0]?.init?.headers).get('Authorization')).toBe(`Basic ${Buffer.from('github-client:secret').toString('base64')}`)
+    expect(calls[0]?.init?.body).toBe(JSON.stringify({ access_token: 'gho_token' }))
+    // A grant GitHub no longer has is already revoked; other failures are reported.
+    status = 404
+    await adapter.disconnect(credential)
+    status = 500
+    await expect(adapter.disconnect(credential)).rejects.toBeDefined()
   })
 
   test('keeps operator REST mappings for GitHub instead of the bundled issue sync', () => {

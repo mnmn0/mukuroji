@@ -12,11 +12,15 @@ import type {
 /** Resource types of the GitHub catalog entry; only issues are read and written. */
 const GITHUB_RESOURCE_TYPES: readonly ExternalResourceType[] = ['issue', 'merge-request', 'commit', 'deploy']
 
-/** Issues GitHub returns per page; a full page means there may be another. */
-const PAGE_SIZE = 100
+/**
+ * Issues GitHub returns per page; a full page means there may be another. An issue body can hold
+ * 65,536 characters (about 200 KB of UTF-8), so eight issues stay within the provider requester's
+ * 2 MiB response limit whatever their bodies hold.
+ */
+const PAGE_SIZE = 8
 
-/** Highest page number Mukuroji asks for, which bounds one inventory walk. */
-const MAX_PAGE = 1_000
+/** Highest page number Mukuroji asks for, which bounds one inventory walk to 10,000 issues. */
+const MAX_PAGE = 1_250
 
 /** Longest issue title GitHub accepts. */
 const TITLE_MAX_LENGTH = 256
@@ -44,6 +48,7 @@ export const GITHUB_CONNECTOR_DEFAULTS = {
   token: { accessToken: 'access_token' },
   account: { externalAccountId: 'id', externalAccountName: 'login' },
   allowedHosts: ['github.com', 'api.github.com'],
+  grantRevocation: 'github-oauth-app',
 } as const
 
 /**
@@ -271,6 +276,7 @@ function readBody(value: unknown): { description: string; originMarker?: string 
 
 /**
  * Writes the description with the origin marker as a trailing HTML comment, which GitHub hides.
+ * A description longer than {@link BODY_MAX_LENGTH} is refused rather than shortened.
  * The description is written as it is: the marker opens its own comment, and reading the issue
  * back takes only a marker at the very end, so comments in the description keep working.
  *
@@ -280,7 +286,14 @@ function readBody(value: unknown): { description: string; originMarker?: string 
  */
 function writeBody(description: string | undefined, originMarker: string) {
   if (!/^[A-Za-z0-9._~:-]{1,1024}$/u.test(originMarker)) throw malformed('Connector origin marker is invalid.')
-  const text = (description ?? '').slice(0, BODY_MAX_LENGTH)
+  const text = description ?? ''
+  // A shortened copy would read back as the Work Item's description, so a longer one is refused.
+  if (text.length > BODY_MAX_LENGTH) {
+    throw new ConnectorRuntimeError(
+      'ConnectorRecordTooLarge',
+      `The Work Item description is longer than the ${BODY_MAX_LENGTH} characters a GitHub issue can take with the sync marker.`,
+    )
+  }
   return `${text}\n\n<!-- mukuroji-origin:${originMarker} -->`
 }
 
