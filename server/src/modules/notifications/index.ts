@@ -60,7 +60,12 @@ export type { PushDevice, PushDeviceDirectory } from './application/ports/push-d
 /** Exposes the shared delivery ports the Email composition implements. */
 export type { ChannelDelivery, NotificationLocaleReader } from './application/channel-delivery'
 /** Exposes the verified-address Email transport factory. */
-export { createEmailNotificationSender, type EmailRecipientLookup } from './adapter-out/email/email-sender'
+export { createEmailNotificationSender, createEmailDigestSender, type EmailMessage, type EmailRecipientLookup } from './adapter-out/email/email-sender'
+/** Exposes the bounce and complaint feedback drain, its ports, and its adapters. */
+export { drainEmailFeedback, type EmailFeedbackQueue } from './application/email-feedback'
+export { createEmailFeedbackTelemetry } from './adapter-out/email/email-feedback-telemetry'
+export { DynamoDbEmailSuppressionStore } from './adapter-out/dynamodb/email-suppression-store'
+export { EMAIL_RECIPIENT_TAG, encodeEmailRecipientTag } from './domain/email-suppression'
 /** Exposes safe per-channel delivery logs and backlog metrics. */
 export { createChannelDeliveryTelemetry } from './adapter-out/channel-delivery-telemetry'
 /** Exposes the DynamoDB due queue for one external channel. */
@@ -107,3 +112,35 @@ export {
   type PlanningUpdateTargetReference,
   type PlanningUpdateTargetScheduleProjection,
 } from './adapter-in/schedules/notification-schedule'
+/** Exposes Team and Project channel posts: queuing from the projection and the scheduled sender. */
+export {
+  deliverDueChannelPosts,
+  enqueueChannelPost,
+  type ChannelPostEnqueueDependencies,
+  type ChannelPostFailure,
+} from './application/channel-posts'
+export { DynamoDbChannelPostStore, channelPostShards } from './adapter-out/dynamodb/channel-post-store'
+export { createSlackChannelPostSender, createSlackTestMessageSender } from './adapter-out/slack/slack-channel-post-sender'
+/** Exposes the destination settings use cases the HTTP routes call. */
+export {
+  deleteChannelDestination,
+  deletePersonalSlackDestination,
+  readChannelDestinationSaveBody,
+  readExpectedRevision,
+  readPersonalSlackWebhookUrl,
+  saveChannelDestination,
+  savePersonalSlackDestination,
+  testNotificationDestination,
+  toPublicChannelDestination,
+} from './application/notification-destinations'
+export type { ChannelDestinationRecord, ChannelDestinationTarget } from './domain/channel-destination'
+export type {
+  ChannelDestinationStore,
+  DeleteChannelDestinationInput,
+  SaveChannelDestinationInput,
+} from './application/ports/channel-posts'
+export {
+  SecretsManagerSlackDestinationSecretStore,
+  slackChannelDestinationSecretId,
+} from './adapter-out/secrets-manager/slack-destination-secret-store'
+export { slackNotificationSecretId } from './adapter-out/slack/slack-sender'

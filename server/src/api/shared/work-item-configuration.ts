@@ -6,6 +6,8 @@ import {
   type ResolvedWorkItemConfiguration,
   type WorkItemConfiguration,
   type WorkItemTypeChangeResolution,
+  type WorkflowRuleActor,
+  type WorkflowRuleWorkItemState,
 } from '@mukuroji/contracts'
 import { type WorkItemDependencies } from '../../app/composition/app-dependencies'
 import {
@@ -18,6 +20,7 @@ import {
 } from '../../modules/work-items'
 import {
   WorkItemConfigurationError,
+  assertWorkflowRules,
   assertWorkItemChildTypeAllowed,
   createWorkItemConfigurationGuardConditionChecks,
   createWorkItemRelationGraphRevisionIncrementTransactionItem,
@@ -31,7 +34,168 @@ import {
 import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { getEnv } from './runtime-config'
 import { isRecord } from './value-guards'
-import { requireActiveWorkspaceAssignee } from './workspace-access'
+import { createPlanningCallerAuthorizationConditionChecks } from './planning-access'
+import { principalManagesTeamWorkItem, type WorkspacePrincipal } from './project-access'
+import { readNewWorkItemAcceptanceCriteria } from './work-item-acceptance-criteria'
+import { requireActiveWorkspaceAssignee, type TeamPermissionContext } from './workspace-access'
+
+/**
+ * Who is changing a Work Item status, before it is judged against one Work Item.
+ *
+ * - `person`: a signed-in person acting directly in the Web.
+ * - `automation`: an Automation rule, a Project template, or another app-owned job.
+ * - `credential`: a developer credential, which Public API clients, MCP, and agents use.
+ */
+export type WorkflowRulePrincipal =
+  | {
+    /** A person acting directly. */
+    kind: 'person'
+    /** Member key compared with the Work Item assignee. */
+    userKey: string
+    /** Tells whether the person manages a Project of the Team, or the Team when `undefined`. */
+    managesProject: (projectId: string | undefined) => boolean
+    /**
+     * Checks that fail the write when the person's member row or enterprise roles change after the
+     * rules were judged.
+     */
+    roleConditionChecks: NonNullable<CreateTeamIssueRequestBody['authorizationConditionChecks']>
+  }
+  | {
+    /** An app-owned job, never a person. */
+    kind: 'automation'
+  }
+  | {
+    /** A developer credential, never a person acting directly. */
+    kind: 'credential'
+  }
+
+/** Rule principal of an Automation rule or another app-owned job. */
+export const AUTOMATION_WORKFLOW_RULE_PRINCIPAL: WorkflowRulePrincipal = { kind: 'automation' }
+
+/** Rule principal of a developer credential used by Public API clients, MCP, and agents. */
+export const CREDENTIAL_WORKFLOW_RULE_PRINCIPAL: WorkflowRulePrincipal = { kind: 'credential' }
+
+/**
+ * Creates the rule principal of a principal signed in to a Team route.
+ *
+ * An enterprise service account authenticates on the same routes as a person but is not one, so it
+ * is judged like a developer credential. Without a Team permission context, only a system admin
+ * counts as a manager.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Team permission context of the principal, if the principal has one.
+ * @returns A rule principal that reads the person's manager roles from the context.
+ */
+export function createPersonWorkflowRulePrincipal(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext | undefined,
+): WorkflowRulePrincipal {
+  if (principal.principalKind === 'service-account') return CREDENTIAL_WORKFLOW_RULE_PRINCIPAL
+  return {
+    kind: 'person',
+    userKey: principal.userKey,
+    managesProject: (projectId) => context
+      ? principalManagesTeamWorkItem(principal, context, projectId)
+      : principal.isSystemAdmin,
+    roleConditionChecks: createPlanningCallerAuthorizationConditionChecks(principal),
+  }
+}
+
+/**
+ * Adds a person's role checks to a write that was judged against their transition actor roles.
+ *
+ * Only a person can satisfy a restricted transition, so a write by anyone else, or one no role
+ * restricted, gets no extra check. A service account never becomes a person, so its synthetic
+ * member row is never checked.
+ *
+ * @param body - Write body whose caller checks the role checks join.
+ * @param body.authorizationConditionChecks - Caller checks the body already carries.
+ * @param rulePrincipal - Who made the change.
+ * @param judgedActorRoles - Whether the workflow rules judged the change against actor roles.
+ * @returns The caller checks to spread into the body, or nothing to add.
+ */
+export function withWorkflowRoleConditionChecks(
+  body: { authorizationConditionChecks?: CreateTeamIssueRequestBody['authorizationConditionChecks'] },
+  rulePrincipal: WorkflowRulePrincipal,
+  judgedActorRoles: boolean,
+): Pick<CreateTeamIssueRequestBody, 'authorizationConditionChecks'> {
+  if (!judgedActorRoles || rulePrincipal.kind !== 'person') return {}
+  return {
+    authorizationConditionChecks: [
+      ...rulePrincipal.roleConditionChecks,
+      ...(body.authorizationConditionChecks ?? []),
+    ],
+  }
+}
+
+/**
+ * Judges a rule principal against one Work Item.
+ *
+ * A person counts as a manager only when they manage every Project the change touches, so moving a
+ * Work Item into another Project cannot borrow a role from either side.
+ *
+ * @param rulePrincipal - Who is changing the status.
+ * @param workItem - Work Item before the change.
+ * @param workItem.assigneeUserId - Current assignee.
+ * @param workItem.assignedProjectId - Current Project, if any.
+ * @param nextProjectId - Project after the change, if any.
+ * @returns The actor the workflow rules evaluate.
+ */
+export function resolveWorkflowRuleActor(
+  rulePrincipal: WorkflowRulePrincipal,
+  workItem: { assigneeUserId?: string; assignedProjectId?: string },
+  nextProjectId: string | undefined,
+): WorkflowRuleActor {
+  if (rulePrincipal.kind !== 'person') {
+    return { interactive: false, projectManager: false, assignee: false }
+  }
+  const projectIds = new Set([workItem.assignedProjectId, nextProjectId])
+  return {
+    interactive: true,
+    projectManager: [...projectIds].every((projectId) => rulePrincipal.managesProject(projectId)),
+    assignee: workItem.assigneeUserId !== undefined &&
+      workItem.assigneeUserId.trim().toLowerCase() === rulePrincipal.userKey.trim().toLowerCase(),
+  }
+}
+
+/**
+ * Builds the Work Item state that status required fields are checked against.
+ *
+ * @param schedule - Canonical schedule after the change.
+ * @param acceptanceCriteriaCount - Number of acceptance criteria after the change.
+ * @param customFieldValues - Custom field values after the change.
+ * @returns The state with empty strings and lists treated as unfilled.
+ */
+export function createWorkflowRuleWorkItemState(
+  schedule: unknown,
+  acceptanceCriteriaCount: number,
+  customFieldValues: Readonly<Record<string, CustomFieldValue>>,
+): WorkflowRuleWorkItemState {
+  return {
+    hasDueDate: readScheduleDueDate(schedule) !== '',
+    acceptanceCriteriaCount,
+    filledCustomFieldIds: new Set(Object.entries(customFieldValues)
+      .filter(([, value]) =>
+        !(typeof value === 'string' && value.trim() === '') && !(Array.isArray(value) && value.length === 0))
+      .map(([fieldId]) => fieldId)),
+  }
+}
+
+/**
+ * Reads the deadline projection of a normalized schedule without trusting its type.
+ *
+ * @param schedule - Normalized schedule value.
+ * @returns The due date or end date, or an empty string when there is none.
+ */
+function readScheduleDueDate(schedule: unknown): string {
+  if (!isRecord(schedule)) return ''
+  const date = schedule.mode === 'due-date'
+    ? schedule.dueDate
+    : schedule.mode === 'date-range' || schedule.mode === 'milestone'
+      ? schedule.endDate
+      : undefined
+  return typeof date === 'string' ? date : ''
+}
 
 /**
  * Checks whether a request form field can map to a custom field.
@@ -149,14 +313,18 @@ export function readWorkItemTypeChangeResolution(
  * @param teamId - Team whose configuration is authoritative.
  * @param input - Normalized create body.
  * @param resolved - Current Team or inherited Work Item configuration.
+ * @param rulePrincipal - Who creates the Work Item, for a workflow status other than the initial one.
  * @param options - Context-specific status resolution options.
  * @returns A create body with canonical type, workflow, fields, and concurrency guards.
+ * @throws WorkflowRuleError when the Work Item is created in a status its creator may not enter, or
+ *   without a field that status requires.
  */
 export async function prepareConfiguredCreateWorkItem(
   directoryId: string,
   teamId: string,
   input: CreateTeamIssueRequestBody,
   resolved: ResolvedWorkItemConfiguration,
+  rulePrincipal: WorkflowRulePrincipal,
   options: { fallbackToTypeInitialStatus?: boolean } = {},
 ): Promise<CreateTeamIssueRequestBody> {
   const { quickCapture, ...inputWithoutQuickCapture } = input
@@ -215,8 +383,27 @@ export async function prepareConfiguredCreateWorkItem(
     projectId,
     workItemType.id,
   )
+  // Creating in the initial status is not a status change; any other status is entered like one.
+  const judgedActorRoles = workflowStatus.workflowStatusId !== typeWorkflow.initialStatusId &&
+    assertWorkflowRules(resolved.configuration, {
+      workItemTypeId: workItemType.id,
+      projectId,
+      fromStatusId: undefined,
+      toStatusId: workflowStatus.workflowStatusId,
+      // A new Work Item has no assignee before the change, so a creator naming themselves does not
+      // satisfy `assignee`; only the target Project is managed.
+      actor: resolveWorkflowRuleActor(rulePrincipal, { assignedProjectId: projectId }, projectId),
+      state: () => createWorkflowRuleWorkItemState(
+        input.schedule,
+        // The create body's criteria are normalized the same way the create route stores them.
+        readNewWorkItemAcceptanceCriteria(input.acceptanceCriteria)?.length ?? 0,
+        customFieldValues,
+      ),
+    })
   return {
     ...inputWithoutQuickCapture,
+    // The status was entered by the creator's roles, so the create fails when they change first.
+    ...withWorkflowRoleConditionChecks(inputWithoutQuickCapture, rulePrincipal, judgedActorRoles),
     workItemTypeId: workItemType.id,
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     workflowStatusId: workflowStatus.workflowStatusId,

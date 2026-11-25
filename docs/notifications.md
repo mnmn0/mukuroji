@@ -178,13 +178,13 @@ Work Item を対象にした通知は、projection が通知を書くときに�
 
 送信直前の最終確認を通過した通知は、その直後にSlackを無効化・再有効化しても届く場合があります。Slackへの外部送信と設定保存は同一transactionにできないため、すでに送信処理に入った通知の取り消しは保証しません。
 
-管理者は受信者ごとに [Slack Incoming Webhook](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/) を作成し、そのURLを次のSecrets Manager IDに**プレーンな文字列**で登録します。
+送信先の [Slack Incoming Webhook](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/) は、メンバー本人が **設定** → **個人** → **通知設定** の「自分の Slack 通知」で登録・テスト送信・削除します（`GET` / `PUT` / `DELETE /api/notification-preferences/slack-destination`、`POST …/slack-destination/test`）。URLは次のSecrets Manager IDに**プレーンな文字列**で保存され、以前に管理者が同じIDへ登録したsecretもそのまま使えます。
 
 ```text
 mukuroji/automation-webhooks/<sha256(workspaceId.trim())>/slack/<sha256(memberKey.trim().toLowerCase())>
 ```
 
-既存のAutomation secret namespace内の専用サブディレクトリを使用するため、既存のsecret aliasとは衝突せず、Workspaceの閉鎖時には既存のsecret削除・検証処理の対象になります。送信先は受信者の個人用Slackチャンネルなど、当該通知を開示してよいメンバーだけが参加する場所を選んでください。Webhookは作成時に選んだチャンネルに固定されます。アプリのユーザーが別の受信者の送信先を指定するAPIはありません。URLはソース、環境変数、通知row、API response、ログには保存しません。通常SlackとGovSlackの公式Incoming Webhook URLだけを許可します。
+既存のAutomation secret namespace内の専用サブディレクトリを使用するため、既存のsecret aliasとは衝突せず、Workspaceの閉鎖時には既存のsecret削除・検証処理の対象になります。送信先は受信者の個人用Slackチャンネルなど、当該通知を開示してよいメンバーだけが参加する場所を選んでください。Webhookは作成時に選んだチャンネルに固定されます。別の受信者の送信先を指定するAPIはありません。APIは登録の有無だけを返し、URLはソース、環境変数、通知row、API response、audit、ログには保存しません（auditは保存・削除の事実だけを `notification-slack-destination.saved` / `.deleted` で残します）。通常SlackとGovSlackの公式Incoming Webhook URL（`https://hooks.slack.com/services/…`）だけを保存・送信します。テスト送信はSlackが受け付けたかどうかだけを返し、Slackの応答本文は読みません。
 
 CDKで追加される `SlackDeliveryIndex` と、Slack job を毎分実行する `ScheduledJobsFunction` のデプロイ後に有効化します。既存テーブルの置換や通知データのbackfillは不要です。ローカルでは `floci:up` がindexを追加し、`workers:dev` が同じworkerを毎分実行します。Secrets Managerの接続には既存の `SECRETS_MANAGER_ENDPOINT` 設定を使用します。
 
@@ -192,7 +192,7 @@ CDKで追加される `SlackDeliveryIndex` と、Slack job を毎分実行する
 
 通知を投影する際にも保存済み設定を検証します。設定が破損している場合は通知と処理済みreceiptを確定せず、そのstream recordを失敗として返します。他のrecordは処理を続け、設定の修復後にstreamの再試行または失敗イベントの再処理で配信予定を作成できます。設定が未保存の受信者には従来のdefaultを使用します。
 
-60秒のleaseとversion条件で並行workerを排他し、成功した通知はdue indexから除外します。Slackの429と一時障害は最大5試行、指数backoffと `Retry-After`（最大24時間）の長い方で再試行します。本文は最大3,000文字のプレーンテキストで、Slackのメンション展開やリンクプレビューは無効です。概要は受信者の表示設定の言語で書き（[概要の文言](#概要の文言)）、言語を読めないときは送らずに再試行します。`NOTIFICATION_SLACK_APP_ORIGIN`（CDKはWebのoriginを設定）があるときは、本文の下にWork Item keyのページ（`/browse/<key>`）と通知の遷移先へのリンクを1行付けます。リンクのURLとラベルはサーバーが作った値と正規形のkeyだけです。Webhookの応答喪失や成功直後の永続化障害では重複投稿の可能性があります。Incoming Webhook自体にはexactly-once保証がないためです。
+60秒のleaseとversion条件で並行workerを排他し、成功した通知はdue indexから除外します。Slackの429と一時障害は最大5試行、指数backoffと `Retry-After`（最大24時間）の長い方で再試行します。本文は最大3,000文字のプレーンテキストで、Slackのメンション展開やリンクプレビューは無効です。通知の理由は内部のkeyではなく受信者の言語の文言（例: 「担当、ウォッチ中」）で書き、文言のないkeyは出しません。メールの「通知の理由」も同じ文言です。概要は受信者の表示設定の言語で書き（[概要の文言](#概要の文言)）、言語を読めないときは送らずに再試行します。`NOTIFICATION_SLACK_APP_ORIGIN`（CDKはWebのoriginを設定）があるときは、本文の下にWork Item keyのページ（`/browse/<key>`）と通知の遷移先へのリンクを1行付けます。リンクのURLとラベルはサーバーが作った値と正規形のkeyだけです。Webhookの応答喪失や成功直後の永続化障害では重複投稿の可能性があります。Incoming Webhook自体にはexactly-once保証がないためです。
 
 HTTPエラーの再試行可否と待機時間は、受信済みのstatusと `Retry-After` で判定します。エラー本文は読み取らず破棄し、本文の接続切断や破棄処理の失敗で429の待機時間を失ったり、403などの恒久的な拒否を再試行へ変えたりしません。HTTP 200は引き続き本文の `ok` を確認してから成功扱いにし、その確認前の通信障害は再試行します。
 
@@ -216,19 +216,70 @@ Workspace全体のAutomation notifyで明示的に選ばれたactiveなguest受�
 
 Work Itemの担当者だけに向けた通知は、担当変更・状態変更・日程変更も含め、現在の担当者との一致をInboxと共通の条件で確認します。Cognitoから削除済みの受信者は再試行せず配信を抑止し、一時的なCognito障害のみ再試行します。通知設定は認可処理の後にも読み直し、その間のSlack無効化・quiet hours変更を反映します。
 
+## Project・Team の Slack channel
+
+Project と Team には、メンバー全員が見る chat channel の Incoming Webhook を 1 つずつ登録できます（ADR 0086）。
+Team の送信先は Team の **メンバー** 画面、Project の送信先は Project の **概要** 画面の「Slack channel」で、
+登録・テスト送信・削除します（`GET` / `PUT` / `DELETE /api/teams/:teamId/notification-channel`、
+`/api/teams/:teamId/projects/:projectId/notification-channel`、それぞれ `POST …/test`）。
+
+- 閲覧は Team（Project）の閲覧者、変更とテスト送信は Workspace の書き込み権限を持つ Team マネージャー（Project は
+  Project マネージャーも）だけです。保存と削除は revision 条件付きで、呼び出し元の membership・Enterprise の revision・
+  Team と Project が有効であることを同じ transaction で確かめ、`notification-channel.saved` / `.deleted` の audit を
+  書きます。audit と request digest に URL は入りません。
+- URL は `mukuroji/automation-webhooks/<sha256(workspaceId)>/slack-channel/<sha256("team#<teamId>" または
+  "project#<teamId>#<projectId>")>/<version>` に置き、channel 名（表示用）・投稿の言語（ja / en）・revision・使う URL の
+  version は Notifications table の `<workspaceId>#!channel-destinations` partition に置きます。新しい URL は新しい
+  version に書き、設定の保存が commit されたときだけそちらに切り替えるので、権限や revision の確認で拒否された保存は
+  投稿先を変えません（拒否された候補と置き換えた古い version は消します。応答が失われて結果が分からないときは候補を
+残します）。削除しても row は revision を残した削除済みの印として残るので、削除前に読んだ画面からの操作が、後で
+登録し直した送信先を変えることはありません。最初の保存には URL が必要で、以降は URL を
+  空にすると名前と言語だけを変えます。
+- Enterprise の role では、Team の送信先は `teams.read`（閲覧）と `teams.manage`（変更）、Project の送信先は
+  `projects.read` と `projects.manage` を使います。本人の送信先は `workspace.read` で登録できます。
+
+投稿するのは次の event です。collaboration projection が通常の通知と同じ再認可（対象の存在、現在の Team・Project の
+再解決、Milestone と health update の現在の範囲）を通した後、Project に送信先があればそこへ、なければ Team の送信先へ
+1 件だけ投稿します。送信の直前にも、Workspace が有効なことと、対象（Work Item、health update の対象、Milestone）が
+今も投稿 row を作ったときの Team・Project にあることを読み直し、外れていれば投稿しません。読み直しの後に lease を
+更新し、別の実行に引き継がれていれば送りません。
+
+| event | 見出し（ja / en） |
+| --- | --- |
+| `planning-update.published` | ヘルス更新の公開 / Health update published |
+| `planning-update.health-degraded` | ヘルスの悪化 / Health got worse |
+| `planning-entity.milestone-completed` | Milestone の完了 / Milestone completed |
+| `planning-entity.milestone-rescheduled` | Milestone の日程変更 / Milestone rescheduled |
+| `work-item.due` | 今日が期限 / Due today |
+| `work-item.overdue` | 期限超過 / Overdue |
+
+本文は `[見出し] <Work Item key> <タイトル>` と、送信先の言語の概要、`NOTIFICATION_SLACK_APP_ORIGIN` があるときは対象画面と
+Work Item key のページへのリンクです。個人あてと同じくプレーンテキストで、メンション展開とリンクプレビューは無効です。
+channel の参加者全員が投稿を読めるため、送信先はその Project（Team）の内容を見てよい人だけの channel にしてください。
+
+投稿は `<workspaceId>#!channel-posts` partition に event ID ごとの row（TTL 30 日）として条件付きで書くので、projection の
+再試行でも 1 件です。row は既存の `SlackDeliveryIndex` の `slack-channel#0`〜`slack-channel#3` partition に載り、個人あての
+`slack#<n>` とは混ざりません。毎分の Slack job が個人あてと channel を独立に処理し、channel は 1 partition あたり毎分 8 件、
+60 秒の lease と version 条件、最大 5 試行の指数 backoff（`Retry-After` を尊重）で送ります。送信時に送信先が削除されて
+いれば `suppressed` で終えます。5 試行後の失敗と URL の欠落は `slack-channel-failed#<n>` partition へ移し、
+`slackFailureReference` を記録して `SlackChannelPostFailed` ログを出し、job を失敗にして `ScheduledJobsDlq` の
+アラーム対象にします。ログに本文・URL は含みません。
+
+hourly / daily の頻度でまとめる投稿、Microsoft Teams の Webhook、Agent Run の判断待ちの投稿はまだありません。
+
 ## Email 配信
 
-通知設定の **Email** を有効にすると、担当・メンション・返信・期限・承認などの既存通知を、受信者の Cognito profile にある確認済みのメールアドレスへ 1 通ずつ送ります。送信には Amazon SES（API v2）を使います（[ADR 0005](adr/0005-notification-email-ses-transport.md)）。
+通知設定の **Email** を有効にすると、担当・メンション・返信・期限・承認などの既存通知を、受信者の Cognito profile にある確認済みのメールアドレスへ送ります。frequency が instant なら 1 通ずつ、hourly / daily / weekly なら digest にまとめます。送信には Amazon SES（API v2）を使います（[ADR 0005](adr/0005-notification-email-ses-transport.md)、[ADR 0082](adr/0082-notification-email-digest-and-feedback.md)）。
 
 ### 有効にする
 
-送信は deploy 時の opt-in です。CloudFormation parameter `NotificationEmailSender`（既定は空）に SES で検証した送信元アドレスを 1 つ指定すると有効になります。空のあいだは projection が Email の配信予定を書かず、scheduled job も queue を読まないため、後から有効にしても過去の通知はまとめて送られません。メンバーが Email を選んでも、設定が保存されるだけです（設定画面の「無効」表示は後続で入れます）。
+送信は deploy 時の opt-in です。CloudFormation parameter `NotificationEmailSender`（既定は空）に SES で検証した送信元アドレスを 1 つ指定すると有効になります。空のあいだは projection が Email の配信予定を書かず、scheduled job も queue を読まないため、後から有効にしても過去の通知はまとめて送られません。メンバーが Email を選んでも設定が保存されるだけで、設定画面には「無効」と表示します。
 
 運用者は有効にする前に次を行います。
 
 - SES でこのアドレスか、そのドメインを verified identity にする。本番では sandbox を解除する。
 - 送信元ドメインの SPF・DKIM（Easy DKIM）・DMARC を DNS に設定する。
-- SES の account-level suppression list を bounce と complaint について有効にしておく。suppression 中の宛先へは SES が送らないため、bounce した宛先へ送り続けることはありません。運用者は SES console の suppression list（`ListSuppressedDestinations`）で確認・削除できます。
+- bounce と complaint はアプリが受け取って宛先を止めます（下の [bounce と complaint](#bounce-と-complaint)）。stack の configuration set でも SES の suppression list を有効にしています。
 
 Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信元と一致する場合だけ許可します。本文の deep link はアプリの正規 URL（`NOTIFICATION_EMAIL_APP_ORIGIN`）で絶対 URL にします。stack は `cdk/cdk.json` の `mukuroji:webDomainName` を指定すればその独自 domain、空なら CloudFront の domain を渡します（[cdk/README.md](../cdk/README.md#独自-domain-で配信する)）。
 
@@ -242,15 +293,28 @@ Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信�
 
 配信 queue は [Slack 配信](#slack-配信) と同じ実装を使い、属性と index だけが分かれています。通知と同じ transaction で `emailQueueShard`（`email#<番号>`）・`emailNextAttemptAt`・`emailDeliveryStatus`・`emailAttempts` を保存し、16 shard の sparse GSI `EmailDeliveryIndex` から毎分最大32件を処理します。Slack と Email を両方有効にした通知は、それぞれ独立に送ります。どちらの channel の更新も通知 row の `version` を進めるため、一方が期限内の lease を持っている間は他方は claim せず、次の実行で取り直します（互いの送信直前の version 確認を取り消し合わないため）。
 
-再認可・quiet hours と snooze の再確認・lease・version 条件・最大5試行の再試行は Slack と同じです。宛先の読み取りから SES への送信までは合計30秒の期限で打ち切り、送信直前に延長した60秒の lease が切れた後に送ることはありません。frequency は既存の delivery plan の遅延として扱い、通知ごとに 1 通送ります（複数通知を 1 通にまとめる digest ではありません）。SES の throttling（`TooManyRequestsException` など）と一時障害は再試行し、`MessageRejected`・未検証の送信元などは再試行せず失敗にします。応答を失った送信を再試行するため、まれに同じ通知が2通届くことがあります。
+再認可・quiet hours と snooze の再確認・lease・version 条件・最大5試行の再試行は Slack と同じです。宛先の読み取りから SES への送信までは合計30秒の期限で打ち切り、送信直前に延長した60秒の lease が切れた後に送ることはありません。frequency が instant 以外の通知は、delivery plan の遅延（1時間・1日・1週間）が過ぎた最初の 1 件を起点に、同じ受信者のほかの instant 以外の Email 通知（期限前でも、一度も試行していない `pending` のもの）を同じ shard から集め、最大50件を 1 通の digest にします。入りきらない通知が残っていれば、残った最初の通知を起点に続けて次の digest を送ります（1 回の実行で 1 受信者に 4 通まで、その先は次の実行です）。集めるときは同じ shard の 8 日先までを 1 MB の page で最大10ページ読み、それでも終わりに届かないか、壊れた通知 row があれば、見つけた分だけを送って job を失敗にします（残りは後の digest で送ります）。各通知は 1 件ずつ claim して上の確認をすべて通し、送信直前に lease を延長でき、保持期限（`expiresAt`）をまだ過ぎていないものだけを本文に入れ（確認の間に期限を過ぎたものは `suppressed` にします）、SES の結果を全件に同じく記録します。digest の lease は送信直前に120秒へ延長し、SES の結果を全件に同時に記録し終えるまで切れないようにします。延長に25秒を超えた場合は、送らずに全件の lease を返して次の実行に回します。再試行の待ち中の通知と、ほかの worker が lease 中の通知は含めません。起点の通知をほかの実行が claim 済みなら、その実行が digest をまとめているので、残りの通知には手を付けません（実行が重なり、同じ受信者の別の期限到来通知をそれぞれが起点にした場合は 2 通に分かれることがありますが、同じ通知が 2 回入ることはありません）。SES の throttling（`TooManyRequestsException` など）と一時障害は再試行し、`MessageRejected`・未検証の送信元などは再試行せず失敗にします。応答を失った送信を再試行するため、まれに同じ通知が2通届くことがあります。
 
-本文は ja / en 併記のプレーンテキストです。ただし概要は受信者の言語で 1 回だけ書きます（[概要の文言](#概要の文言)）。言語の読み取りに失敗した通知は送らずに再試行します。件名は `[mukuroji] <タイトル>` で、改行などの制御文字は空白にします。本文には Inbox と同じ deep link を入れ、Web の origin 以外を指す link は使わず Web の top を入れます。
+本文は ja / en 併記のプレーンテキストです。digest の件名は `[mukuroji] 通知のまとめ（N 件） / Notification digest (N)` で、本文は発生の古い順に番号・タイトル・概要・deep link を並べます。ただし概要は受信者の言語で 1 回だけ書きます（[概要の文言](#概要の文言)）。言語の読み取りに失敗した通知は送らずに再試行します。件名は `[mukuroji] <タイトル>` で、改行などの制御文字は空白にします。本文には Inbox と同じ deep link を入れ、Web の origin 以外を指す link は使わず Web の top を入れます。
+
+### 他の機能から Email に送る
+
+他の機能が受信者に Email（と Slack・Web Push）で知らせたい場合は、Email を直接送らず、受信者ごとに 1 件の audit outbox event を AuditEvents へ書きます。collaboration projection がそれを Inbox 行にし、受信者の通知設定（channel・frequency・quiet hours・種類とミュート）に従って同じ配信 queue に載せるため、digest・再認可・再試行・bounce の抑止もそのまま効きます。event ID は送る単位（例: 配信の occurrence と受信者）から決めて重複を防ぎます。Analytics の定期配信（`analytics.report.delivered`、[docs/analytics.md](analytics.md)）がこの形です。Update Feed の Inbox digest（#241）は Inbox 行を直接書く in-app 専用の機能で、Email には載せません。
+
+### bounce と complaint
+
+Email job は stack の SES configuration set を指定して送り、message tag `mukuroji-recipient` に recipient key（`<workspaceId>#<memberKey>`）の base64url を付けます。SES の tag 値は256文字までのため、recipient key が192 byte を超える宛先には tag を付けません。そうした宛先の bounce と complaint はアプリに記録されず、SES の suppression list だけが止めます。configuration set は bounce と complaint を EventBridge の default bus に出し、rule が SQS queue `NotificationEmailFeedbackQueue` に入れます。毎分の scheduled job `email-feedback` がこれを読みます。
+
+- permanent bounce と complaint（`complaintFeedbackType: not-spam` を除く）は、Notifications table の `<recipientKey>` / `!EMAIL_SUPPRESSION` row（`itemType: email-suppression`）に、アドレスの SHA-256・理由（`bounce` / `complaint`）・時刻を記録します。アドレスそのものは保存しません。古い event が新しい記録を上書きすることはありません。
+- transient・undetermined の bounce、tag のない mail は何もしません。bounce の種類がないか知らない値の event は読めない event として扱います。読めない event と、抑止の記録に失敗した event は queue に残り、5 回で DLQ `NotificationEmailFeedbackDlq` に移って `NotificationEmailFeedbackDlqAlarm` を出します。
+- 送信時は宛先を読んだ後に suppression を確かめ、記録したハッシュが今のアドレスと一致すれば送らずに抑止します（`emailLastCode: EmailRecipientSuppressed`、alarm なし）。メンバーが Cognito のアドレスを変えた場合、または記録の後に通知設定で Email を無効にしてから有効にし直した場合は、また送ります。ただし configuration set の SES suppression list にも同じアドレスが残るため、同じアドレスで再開するには運用者が先に `aws sesv2 delete-suppressed-destination --email-address <address>` で SES から外します。外さずに再開した場合、SES は送らずに permanent bounce（subtype `OnAccountSuppressionList`）を返すため、アプリはまた抑止を記録します。suppression を読めない場合は送らずに再試行します（`EmailSuppressionUnavailable`）。
+- 運用者は CloudWatch Logs の `EmailRecipientSuppressed`（理由だけを含む）と `Mukuroji/Notifications` の `EmailSuppressions` metric（`Reason` dimension）で件数を、該当通知 row の `emailLastCode` で対象を確認できます。
 
 ### 失敗の調査
 
 永続的失敗は notification row の `emailDeliveryStatus: failed` と秘密情報を含まない `emailLastCode` に残り、row を `EmailDeliveryIndex` の `email-failed#<番号>` partition へ移して `emailFailureReference` を記録します。CloudWatch の `EmailNotificationFailed` ログの `shard`・`dueAt`・`reference` で Slack と同じ手順で対象を特定できます。ログにはメールアドレスと本文を含めません。`Mukuroji/Notifications` の `OldestDueAgeSeconds`（`Channel: Email`）が15分以上の状態で3回続くと `EmailNotificationBacklogAlarm` を出します。`notification-schedule` runtime control で停止できます。
 
-ローカルでは `floci:up` が index を追加し、`workers:dev` が同じ job を毎分実行します。`NOTIFICATION_EMAIL_SENDER` と `NOTIFICATION_EMAIL_APP_ORIGIN`（loopback 以外は HTTPS）を設定した場合だけ送ります。
+ローカルでは `floci:up` が index を追加し、`workers:dev` が同じ job を毎分実行します。`NOTIFICATION_EMAIL_SENDER` と `NOTIFICATION_EMAIL_APP_ORIGIN`（loopback 以外は HTTPS）を設定した場合だけ送ります。configuration set は `NOTIFICATION_EMAIL_CONFIGURATION_SET`、feedback queue は `NOTIFICATION_EMAIL_FEEDBACK_QUEUE_URL` で指定し、空なら tag を付けずに送り、feedback job は何もしません。
 
 ## Web Push 配信
 

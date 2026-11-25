@@ -1,3 +1,4 @@
+import { describeWorkflowRuleRejection } from '../../issues/model/workflowRuleErrors'
 import { useSWRConfig } from 'swr'
 import type {
   TaskViewScope,
@@ -627,6 +628,7 @@ export function MyTasksPage() {
           failed: t('workspace.myTasks.moveError'),
           notFound: t('taskViews.action.notFound'),
           openChildren: t('issues.error.openChildren'),
+          describeWorkflowRule: (error) => describeWorkflowRuleRejection(error, t),
           unavailable: myTaskActionDisabledReasons.unavailable,
         },
       ) ?? createFailedTaskActionResult(
