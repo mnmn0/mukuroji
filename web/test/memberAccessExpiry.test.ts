@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import {
+  followAccessExpiryDraft,
   formatAccessExpiryLastDay,
   hasMemberAccessExpired,
   listOffboardingSuccessors,
@@ -67,4 +68,21 @@ test('offers only active, unexpired non-guest members other than the leaver as s
 
   expect(listOffboardingSuccessors('leaver@example.com', members, now).map((candidate) => candidate.memberKey))
     .toEqual(['admin@example.com', 'later@example.com'])
+})
+
+test('keeps an edited last day on the version it was based on, and refills an unedited one', () => {
+  const base = { version: 3, lastDay: '2026-12-01' }
+  const newer = { version: 4, accessExpiresAt: '2026-12-10T15:00:00.000Z' }
+
+  // Unedited: the field follows the newer expiry and version.
+  expect(followAccessExpiryDraft(base, '2026-12-01', newer)).toEqual({
+    version: 4,
+    lastDay: formatAccessExpiryLastDay(newer.accessExpiresAt),
+  })
+  // Edited: saving sends version 3, so the server reports the other administrator's change.
+  expect(followAccessExpiryDraft(base, '2026-12-24', newer)).toBeUndefined()
+  // Same version: nothing to follow.
+  expect(followAccessExpiryDraft(base, '2026-12-01', { version: 3 })).toBeUndefined()
+  // A refused save marks the base stale, so the next render refills the field.
+  expect(followAccessExpiryDraft({ version: Number.NaN, lastDay: '2026-12-24' }, '2026-12-24', newer)?.version).toBe(4)
 })

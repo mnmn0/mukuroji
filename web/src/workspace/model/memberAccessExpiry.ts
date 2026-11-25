@@ -75,3 +75,32 @@ export function listOffboardingSuccessors(
     !hasMemberAccessExpired(candidate.accessExpiresAt, now)
   )
 }
+
+/** The member version a last-day field was filled from, with the value it was filled with. */
+export type AccessExpiryDraftBase = {
+  /** Member version the field is based on; saving sends it as the expected version. */
+  version: number
+  /** Last day the field was filled with, as `YYYY-MM-DD` or empty. */
+  lastDay: string
+}
+
+/**
+ * Decides whether a last-day field follows a newer member version.
+ *
+ * An unedited field takes up the member's current expiry and version. An edited field keeps the
+ * version it was based on, so saving it is reported as a conflict instead of overwriting a change
+ * another administrator saved meanwhile.
+ *
+ * @param base - Version and value the field was filled from.
+ * @param lastDay - Current value of the field.
+ * @param member - Member as the list shows it now.
+ * @returns The new base to fill the field from, or undefined to keep the field as it is.
+ */
+export function followAccessExpiryDraft(
+  base: AccessExpiryDraftBase,
+  lastDay: string,
+  member: Pick<WorkspaceMember, 'version' | 'accessExpiresAt'>,
+): AccessExpiryDraftBase | undefined {
+  if (member.version === base.version || lastDay !== base.lastDay) return undefined
+  return { version: member.version, lastDay: formatAccessExpiryLastDay(member.accessExpiresAt) }
+}

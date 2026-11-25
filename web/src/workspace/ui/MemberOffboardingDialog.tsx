@@ -4,8 +4,10 @@ import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
 import type { WorkspaceMember } from '../api/access'
 import {
+  followAccessExpiryDraft,
   formatAccessExpiryLastDay,
   listOffboardingSuccessors,
+  type AccessExpiryDraftBase,
   readAccessExpiryFromLastDay,
 } from '../model/memberAccessExpiry'
 import type { MemberOffboardingActions } from '../mutations/useMemberOffboardingActions'
@@ -88,16 +90,14 @@ export function MemberOffboardingDialog({
   const [successorKey, setSuccessorKey] = useState('')
   const [lastDay, setLastDay] = useState(() => formatAccessExpiryLastDay(member.accessExpiresAt))
   // The member version the last-day field was filled from, with the value it was filled with.
-  const [expiryBase, setExpiryBase] = useState(() => ({
+  const [expiryBase, setExpiryBase] = useState<AccessExpiryDraftBase>(() => ({
     version: member.version,
     lastDay: formatAccessExpiryLastDay(member.accessExpiresAt),
   }))
-  if (member.version !== expiryBase.version && lastDay === expiryBase.lastDay) {
-    // The field was not edited, so it follows the member's newer expiry and version. An edited
-    // field keeps the version it was based on, and saving it reports the conflict.
-    const next = { version: member.version, lastDay: formatAccessExpiryLastDay(member.accessExpiresAt) }
-    setExpiryBase(next)
-    setLastDay(next.lastDay)
+  const followed = followAccessExpiryDraft(expiryBase, lastDay, member)
+  if (followed) {
+    setExpiryBase(followed)
+    setLastDay(followed.lastDay)
   }
   const [busy, setBusy] = useState<OffboardingStep>()
   const [errorMessage, setErrorMessage] = useState<string>()
