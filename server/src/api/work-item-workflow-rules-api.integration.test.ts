@@ -299,6 +299,40 @@ test('rejects creating a Work Item in a restricted status even when the creator 
   expect(await response.json()).toMatchObject({ code: 'WorkflowTransitionActorDenied' })
 })
 
+test('fences the creator\'s roles when a create enters a restricted status', async () => {
+  const createChecks: unknown[] = []
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    issueCreateHook: (input) => {
+      createChecks.push(...(input.authorizationConditionChecks ?? []))
+    },
+  })
+  const configuration = configureRules({})
+  configuration.workflow.transitions = configuration.workflow.transitions.map((transition) =>
+    transition.toStatusId === 'review' ? { ...transition, allowedActorRoles: ['project-manager'] } : transition)
+
+  const response = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: 'Reviewed by the manager',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'demo@example.com',
+      schedule: { mode: 'unscheduled', calendarPolicy: { kind: 'all-days' } },
+      priority: 'medium',
+      workflowStatusId: 'review',
+    }),
+  })
+
+  expect(response.status).not.toBe(403)
+  expect(createChecks).toContainEqual({
+    ConditionCheck: expect.objectContaining({
+      Key: { workspaceId: 'user#demo@example.com', recordKey: 'MEMBER#demo@example.com' },
+      ExpressionAttributeValues: expect.objectContaining({ ':expectedVersion': 1 }),
+    }),
+  })
+})
+
 test('maps workflow rule rejections to Public API problems with one pointer per unmet rule', () => {
   const denied = toPublicWorkflowRuleError(new WorkflowRuleError([
     { rule: 'transition-actor', allowedActorRoles: ['project-manager'], message: 'Only a manager may move it.' },

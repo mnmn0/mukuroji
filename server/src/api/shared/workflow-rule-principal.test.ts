@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import type { EnterpriseIdentitySnapshot } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeamResponse } from '../../modules/directory'
 import type { EnterpriseAuthorizationEvaluationSnapshot } from './enterprise-access'
-import type { ProjectPrincipal } from './project-access'
+import type { WorkspacePrincipal } from './project-access'
 import type { TeamPermissionContext } from './workspace-access'
 import { createPersonWorkflowRulePrincipal, resolveWorkflowRuleActor } from './work-item-configuration'
 
@@ -73,7 +73,7 @@ function projectManagerEvaluation(projectId: string): EnterpriseAuthorizationEva
  * @param overrides - Fields that differ from an interactive member.
  * @returns The principal.
  */
-function principal(overrides: Partial<ProjectPrincipal> = {}): ProjectPrincipal {
+function principal(overrides: Partial<WorkspacePrincipal> = {}): WorkspacePrincipal {
   return {
     directoryId: 'workspace-1',
     userKey: 'member@example.com',
@@ -81,6 +81,18 @@ function principal(overrides: Partial<ProjectPrincipal> = {}): ProjectPrincipal 
     isSystemAdmin: false,
     groups: [],
     principalKind: 'member',
+    workspaceMember: {
+      id: 'member-1',
+      memberKey: 'member@example.com',
+      email: 'member@example.com',
+      role: 'member',
+      status: 'active',
+      version: 3,
+      createdAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-01T00:00:00.000Z',
+    },
+    workspaceRole: 'member',
+    workspaceMemberStatus: 'active',
     ...overrides,
   }
 }

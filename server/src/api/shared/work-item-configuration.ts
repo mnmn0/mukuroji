@@ -34,7 +34,8 @@ import {
 import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { getEnv } from './runtime-config'
 import { isRecord } from './value-guards'
-import { principalManagesTeamWorkItem, type ProjectPrincipal } from './project-access'
+import { createPlanningCallerAuthorizationConditionChecks } from './planning-access'
+import { principalManagesTeamWorkItem, type ProjectPrincipal, type WorkspacePrincipal } from './project-access'
 import { readNewWorkItemAcceptanceCriteria } from './work-item-acceptance-criteria'
 import { requireActiveWorkspaceAssignee, type TeamPermissionContext } from './workspace-access'
 
@@ -53,6 +54,11 @@ export type WorkflowRulePrincipal =
     userKey: string
     /** Tells whether the person manages a Project of the Team, or the Team when `undefined`. */
     managesProject: (projectId: string | undefined) => boolean
+    /**
+     * Checks that fail the write when the person's member row or enterprise roles change after the
+     * rules were judged.
+     */
+    roleConditionChecks: NonNullable<CreateTeamIssueRequestBody['authorizationConditionChecks']>
   }
   | {
     /** An app-owned job, never a person. */
@@ -81,7 +87,7 @@ export const CREDENTIAL_WORKFLOW_RULE_PRINCIPAL: WorkflowRulePrincipal = { kind:
  * @returns A rule principal that reads the person's manager roles from the context.
  */
 export function createPersonWorkflowRulePrincipal(
-  principal: ProjectPrincipal,
+  principal: WorkspacePrincipal,
   context: TeamPermissionContext | undefined,
 ): WorkflowRulePrincipal {
   if (principal.principalKind === 'service-account') return CREDENTIAL_WORKFLOW_RULE_PRINCIPAL
@@ -91,6 +97,7 @@ export function createPersonWorkflowRulePrincipal(
     managesProject: (projectId) => context
       ? principalManagesTeamWorkItem(principal, context, projectId)
       : principal.isSystemAdmin,
+    roleConditionChecks: createPlanningCallerAuthorizationConditionChecks(principal),
   }
 }
 
@@ -367,8 +374,22 @@ export async function prepareConfiguredCreateWorkItem(
       ),
     })
   }
+  // A person may enter a restricted status only by their roles, so the create fails when those
+  // roles change before it commits.
+  const roleConditionChecks =
+    workflowStatus.workflowStatusId !== typeWorkflow.initialStatusId && rulePrincipal.kind === 'person'
+      ? rulePrincipal.roleConditionChecks
+      : []
   return {
     ...inputWithoutQuickCapture,
+    ...(roleConditionChecks.length > 0
+      ? {
+          authorizationConditionChecks: [
+            ...roleConditionChecks,
+            ...(inputWithoutQuickCapture.authorizationConditionChecks ?? []),
+          ],
+        }
+      : {}),
     workItemTypeId: workItemType.id,
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     workflowStatusId: workflowStatus.workflowStatusId,
