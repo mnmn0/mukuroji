@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { ChannelDelivery } from '../../application/channel-delivery'
-import { createEmailNotificationSender, renderEmailNotification, type EmailMessage, type EmailRecipientLookup } from './email-sender'
+import { createEmailDigestSender, createEmailNotificationSender, renderEmailNotification, type EmailMessage, type EmailRecipientLookup } from './email-sender'
+import { hashEmailAddress, type EmailSuppression } from '../../domain/email-suppression'
 
 const delivery: ChannelDelivery = {
   workspaceId: 'workspace-1', memberKey: 'member@example.test', recipientKey: 'workspace-1#member@example.test',
@@ -115,5 +116,55 @@ describe('Email notification sender', () => {
       sendEmail: async () => { throw new Error('Must not send') },
     })
     expect(await send(delivery)).toEqual({ succeeded: false, retryable: true, code: 'NotificationLocaleUnavailable' })
+  })
+})
+
+describe('Email digest sender and suppression', () => {
+  const second: ChannelDelivery = {
+    ...delivery, notificationKey: 'key-2',
+    notification: { ...delivery.notification, id: 'notification-2', eventId: 'event-2', title: 'Approve budget', summary: undefined,
+      deepLink: '/projects/p-1', occurredAt: '2026-09-26T10:00:00.000Z' },
+  }
+
+  /** Creates a digest sender with a verified address and an optional stored suppression. */
+  function digestSender(suppression?: EmailSuppression | Error) {
+    const messages: EmailMessage[] = []
+    const options = {
+      sender: 'notify@example.test', appOrigin: 'https://app.example.test',
+      readRecipient: async (): Promise<EmailRecipientLookup> => ({ kind: 'verified', address: 'Member@Example.test' }),
+      readSuppression: async () => { if (suppression instanceof Error) throw suppression; return suppression },
+      sendEmail: async (message: EmailMessage) => { messages.push(message) },
+    }
+    return { digest: createEmailDigestSender(options), single: createEmailNotificationSender(options), messages }
+  }
+
+  test('lists every notification oldest first in one bilingual message tagged with the recipient', async () => {
+    const f = digestSender()
+    expect(await f.digest([delivery, second])).toEqual({ succeeded: true, retryable: false })
+    expect(f.messages).toHaveLength(1)
+    const message = f.messages[0]!
+    expect(message).toMatchObject({ to: 'Member@Example.test', recipientKey: 'workspace-1#member@example.test',
+      subject: '[mukuroji] 通知のまとめ（2 件） / Notification digest (2)' })
+    expect(message.text.indexOf('1. Approve budget')).toBeLessThan(message.text.indexOf('2. Review Bcc: attacker@example.test'))
+    expect(message.text).toContain('   https://app.example.test/projects/p-1')
+    expect(message.text).toContain('   https://app.example.test/teams/core/issues/CORE-1')
+    expect(message.text).toContain('Turn Email off')
+    expect(message.text.split('\n').some((line) => line.startsWith('Bcc:'))).toBe(false)
+  })
+  test('renders a digest of one as the ordinary message and rejects mixed recipients', async () => {
+    const f = digestSender()
+    await f.digest([delivery])
+    expect(f.messages[0]?.subject).toBe('[mukuroji] Review Bcc: attacker@example.test')
+    await expect(f.digest([delivery, { ...second, recipientKey: 'workspace-1#other@example.test' }])).rejects.toThrow()
+    await expect(f.digest([])).rejects.toThrow()
+  })
+  test('suppresses only the address that bounced or complained, and retries when the suppression cannot be read', async () => {
+    const bounced = digestSender({ addressHash: hashEmailAddress(' member@example.TEST '), reason: 'bounce', suppressedAt: '2026-09-26T11:30:00.000Z' })
+    expect(await bounced.single(delivery)).toEqual({ succeeded: false, retryable: false, suppressed: true, code: 'EmailRecipientSuppressed' })
+    expect(await bounced.digest([delivery, second])).toMatchObject({ suppressed: true, code: 'EmailRecipientSuppressed' })
+    expect(bounced.messages).toEqual([])
+    const changed = digestSender({ addressHash: hashEmailAddress('old@example.test'), reason: 'complaint', suppressedAt: '2026-09-26T11:30:00.000Z' })
+    expect(await changed.single(delivery)).toEqual({ succeeded: true, retryable: false })
+    expect(await digestSender(new Error('unavailable')).single(delivery)).toEqual({ succeeded: false, retryable: true, code: 'EmailSuppressionUnavailable' })
   })
 })

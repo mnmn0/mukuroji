@@ -1,6 +1,7 @@
 import {
   PROJECT_CHARTER_TAG_SEPARATOR_PATTERN,
   type ProjectCharter,
+  type ProjectCharterState,
   type ProjectLifecycleState,
   type UpdateProjectCharterInput,
 } from '@mukuroji/contracts'
@@ -194,4 +195,18 @@ export function createProjectCharterPersonCandidates(
       ...(member.name ? { name: member.name } : {}),
     }))
     .sort((left, right) => (left.name ?? left.email).localeCompare(right.name ?? right.email))
+}
+
+/**
+ * Chooses the charter state to cache when a save or transition response arrives.
+ *
+ * @param current - Charter state already in the cache.
+ * @param next - Charter state the response returned.
+ * @returns The cached state when it has a newer revision, otherwise the response.
+ */
+export function newerProjectCharterState(
+  current: ProjectCharterState | undefined,
+  next: ProjectCharterState,
+): ProjectCharterState {
+  return current && current.revision > next.revision ? current : next
 }

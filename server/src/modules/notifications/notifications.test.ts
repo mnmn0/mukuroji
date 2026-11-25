@@ -8,6 +8,7 @@ import {
   NotificationError,
   createNotificationDeliveryPlan,
   createNotificationRecipientKey,
+  isPushNotificationEligible,
   parseStoredNotificationPreferences,
   requiresCurrentWorkItemAssignee,
   requiresCurrentWorkItemContributor,
@@ -948,6 +949,36 @@ describe('notification store', () => {
     const enabled = await recording.client.savePreferences({ ...recipient,
       preferences: { ...disabled, channels: { ...disabled.channels, email: true } }, now: new Date('2026-09-26T12:00:00Z') })
     expect(enabled.emailEnabledAt).toBe('2026-09-26T12:00:00.000Z')
+    expect(await recording.client.getPreferences(recipient)).toEqual(enabled)
+  })
+  test('keeps the push opt-in boundary like Email, using the last save of older preferences', async () => {
+    let stored: Record<string, unknown> | undefined = {
+      recipientKey: 'workspace-1#member@example.com', notificationKey: NOTIFICATION_PREFERENCES_KEY, itemType: 'preferences',
+      ...DEFAULT_NOTIFICATION_PREFERENCES, version: 1, channels: { inApp: true, email: false, push: true },
+      updatedAt: '2026-09-26T09:00:00.000Z',
+    }
+    const recording = createClient(({ constructor, input }) => {
+      if (constructor.name === 'GetCommand') return { Item: stored }
+      if (constructor.name === 'PutCommand') {
+        if (typeof input.Item !== 'object' || input.Item === null || Array.isArray(input.Item)) throw new Error('Missing preference row')
+        stored = { ...input.Item }
+      }
+      return {}
+    })
+    const recipient = { workspaceId: 'workspace-1', memberKey: 'member@example.com' }
+    const legacy = await recording.client.getPreferences(recipient)
+    expect(isPushNotificationEligible(legacy, '2026-09-26T08:59:59.999Z')).toBe(false)
+    expect(isPushNotificationEligible(legacy, '2026-09-26T09:00:00.000Z')).toBe(true)
+    const changed = await recording.client.savePreferences({ ...recipient,
+      preferences: { ...legacy, frequency: 'daily' }, now: new Date('2026-09-26T10:00:00Z') })
+    expect(changed.pushEnabledAt).toBe('2026-09-26T09:00:00.000Z')
+    const disabled = await recording.client.savePreferences({ ...recipient,
+      preferences: { ...changed, channels: { ...changed.channels, push: false } }, now: new Date('2026-09-26T11:00:00Z') })
+    expect(stored?.pushEnabledAt).toBeUndefined()
+    expect(isPushNotificationEligible(disabled, '2026-09-26T11:30:00.000Z')).toBe(false)
+    const enabled = await recording.client.savePreferences({ ...recipient,
+      preferences: { ...disabled, channels: { ...disabled.channels, push: true } }, now: new Date('2026-09-26T12:00:00Z') })
+    expect(enabled.pushEnabledAt).toBe('2026-09-26T12:00:00.000Z')
     expect(await recording.client.getPreferences(recipient)).toEqual(enabled)
   })
   test('owns the Slack activation boundary across updates, disable, re-enable and response-loss retry', async () => {

@@ -163,6 +163,12 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
         green: t('workspace.registration.tone.green'),
         yellow: t('workspace.registration.tone.yellow'),
       },
+      lifecycle: t('workspace.registration.lifecycle'),
+      lifecycleLabels: {
+        proposed: t('projects.lifecycle.proposed'),
+        approved: t('projects.lifecycle.approved'),
+        active: t('projects.lifecycle.active'),
+      },
       createTeam: t('workspace.registration.createTeam'),
       createProject: t('workspace.registration.createProject'),
       saving: t('workspace.registration.saving'),

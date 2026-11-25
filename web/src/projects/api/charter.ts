@@ -2,6 +2,7 @@ import {
   isProjectLifecycleState,
   type ProjectCharter,
   type ProjectCharterState,
+  type ProjectCharterUpdateOwnerSync,
   type ProjectLifecycleState,
   type UpdateProjectCharterInput,
 } from '@mukuroji/contracts'
@@ -174,7 +175,29 @@ function isProjectCharterState(value: unknown): value is ProjectCharterState {
     typeof revision === 'number' &&
     Number.isSafeInteger(revision) &&
     isProjectCharter(Reflect.get(value, 'charter')) &&
-    isOptionalViewerCapabilities(Reflect.get(value, 'viewer'))
+    isOptionalViewerCapabilities(Reflect.get(value, 'viewer')) &&
+    isOptionalUpdateOwnerSync(Reflect.get(value, 'updateOwnerSync'))
+}
+
+/** Every result a charter save may report for the Project's health update owner. */
+const updateOwnerSyncValues: readonly unknown[] = [
+  'synced',
+  'unchanged',
+  'not-configured',
+  'not-permitted',
+  'owner-not-eligible',
+  'superseded',
+  'failed',
+] satisfies readonly ProjectCharterUpdateOwnerSync[]
+
+/**
+ * Checks the optional health update owner result of a charter save.
+ *
+ * @param value - Untrusted `updateOwnerSync` value.
+ * @returns Whether the value is absent or a known result.
+ */
+function isOptionalUpdateOwnerSync(value: unknown): boolean {
+  return value === undefined || updateOwnerSyncValues.includes(value)
 }
 
 /**

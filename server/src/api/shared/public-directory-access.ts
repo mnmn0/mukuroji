@@ -1,6 +1,9 @@
 import {
-  deriveProjectRaidSeverity,
+  type ProjectCharterPerson,
+  toPublicProjectRaidEntry,
   type PublicCredentialOwner,
+  type PublicProjectCharter,
+  type PublicProjectCharterPerson,
   type PublicProjectMemberList,
   type PublicProjectRaidLog,
   type PublicTeamList,
@@ -15,7 +18,12 @@ import {
 import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { resolveDeveloperCredentialPrincipal } from './developer-platform-access'
 import { requirePlanningUpdateProjectPermission } from './planning-access'
-import { requireWorkspaceBusinessRead } from './project-access'
+import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
+import {
+  requireProjectPermission,
+  requireWorkspaceAdministration,
+  requireWorkspaceBusinessRead,
+} from './project-access'
 import { filterReadableProjectDirectory, resolveReadableWorkItemKey } from './project-directory-visibility'
 
 /**
@@ -155,8 +163,88 @@ async function listCredentialProjectRaidLog(
     schemaVersion: 1,
     teamId,
     projectId,
-    items: log.entries.map((entry) => ({ ...entry, severity: deriveProjectRaidSeverity(entry) })),
+    items: log.entries.map(toPublicProjectRaidEntry),
   }
+}
+
+/**
+ * Reads a Project's charter and lifecycle state for an owner who can view the Project.
+ *
+ * The rule matches the Web charter panel: a Workspace administrator or viewer access to the Project reads the charter, and
+ * Workspace guests cannot read it.
+ *
+ * @param credential - Authenticated developer credential.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project ID.
+ * @returns The charter with people referenced by member ID.
+ */
+async function readCredentialProjectCharter(
+  credential: AuthenticatedDeveloperCredential,
+  teamId: string,
+  projectId: string,
+): Promise<PublicProjectCharter> {
+  const principal = await resolveDeveloperCredentialPrincipal(credential, {
+    permission: 'projects.read',
+    teamId,
+    projectId,
+    evaluateProjectScopes: true,
+  })
+  requireWorkspaceBusinessRead(principal)
+  await requireCredentialProjectCharterRead(principal, teamId, projectId)
+  const state = await workspaceDependencies.projectDirectory.getProjectCharter(
+    principal.directoryId,
+    teamId,
+    projectId,
+  )
+  const { charter } = state
+  return {
+    schemaVersion: 1,
+    teamId,
+    projectId,
+    lifecycleState: state.lifecycleState,
+    revision: state.revision,
+    ...(state.updatedAt === undefined ? {} : { updatedAt: state.updatedAt }),
+    ...(charter.code === undefined ? {} : { code: charter.code }),
+    ...(charter.description === undefined ? {} : { description: charter.description }),
+    ...(charter.purpose === undefined ? {} : { purpose: charter.purpose }),
+    ...(charter.owner === undefined ? {} : { owner: toPublicCharterPerson(charter.owner) }),
+    ...(charter.sponsor === undefined ? {} : { sponsor: toPublicCharterPerson(charter.sponsor) }),
+    ...(charter.plannedStartDate === undefined ? {} : { plannedStartDate: charter.plannedStartDate }),
+    ...(charter.plannedEndDate === undefined ? {} : { plannedEndDate: charter.plannedEndDate }),
+    tags: [...charter.tags],
+    repositoryUrls: [...charter.repositoryUrls],
+  }
+}
+
+/**
+ * Applies the Web charter read rule: a Workspace administrator, or viewer access to the Project.
+ *
+ * @param principal - Principal resolved for the credential owner and this Project.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project ID.
+ */
+async function requireCredentialProjectCharterRead(
+  principal: Awaited<ReturnType<typeof resolveDeveloperCredentialPrincipal>>,
+  teamId: string,
+  projectId: string,
+): Promise<void> {
+  try {
+    requireWorkspaceAdministration(principal)
+    return
+  } catch (error) {
+    if (!(error instanceof WorkspaceAccessError)) throw error
+  }
+  await requireProjectPermission(principal, projectId, 'viewer', teamId)
+}
+
+/**
+ * Converts a stored charter person to the Public API shape, which names members by member ID.
+ *
+ * @param person - Charter person with its display snapshot.
+ * @returns The member ID and display name.
+ */
+function toPublicCharterPerson(person: ProjectCharterPerson): PublicProjectCharterPerson {
+  return { memberId: person.userId, displayName: person.displayName }
 }
 
 /**
@@ -185,7 +273,7 @@ async function lookupCredentialWorkItemKey(
  * Creates the Public API directory service backed by the canonical Project directory and the
  * credential owner's current permissions.
  *
- * @returns Directory service for `/api/v1/me`, `/api/v1/teams`, Project members, the Project log, and key lookup.
+ * @returns Directory service for `/api/v1/me`, `/api/v1/teams`, Project members, the Project log, the Project charter, and key lookup.
  */
 export function createCanonicalPublicDirectoryService(): PublicDirectoryService {
   return {
@@ -193,6 +281,7 @@ export function createCanonicalPublicDirectoryService(): PublicDirectoryService 
     listTeams: listCredentialTeams,
     listProjectMembers: listCredentialProjectMembers,
     listProjectRaidLog: listCredentialProjectRaidLog,
+    getProjectCharter: readCredentialProjectCharter,
     lookupWorkItemKey: lookupCredentialWorkItemKey,
   }
 }

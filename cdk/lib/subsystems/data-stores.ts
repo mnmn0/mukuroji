@@ -618,6 +618,14 @@ export function buildDataStores(
     projectionType: dynamodb.ProjectionType.KEYS_ONLY,
   });
 
+  // Sparse: only notifications queued while a VAPID public key is configured carry these keys.
+  notificationsTable.addGlobalSecondaryIndex({
+    indexName: 'PushDeliveryIndex',
+    partitionKey: { name: 'pushQueueShard', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'pushNextAttemptAt', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
+
   const focusTable = new dynamodb.Table(stack, 'FocusTable', {
     partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },

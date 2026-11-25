@@ -6,10 +6,15 @@ import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infras
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 import {
   DynamoDbChannelDeliveryStore,
+  DynamoDbEmailSuppressionStore,
+  EMAIL_RECIPIENT_TAG,
   createChannelDeliveryTelemetry,
+  createEmailDigestSender,
   createEmailNotificationSender,
+  encodeEmailRecipientTag,
   deliverDueEmailNotifications,
   type ChannelDelivery,
+  type EmailMessage,
   type EmailRecipientLookup,
 } from '../../modules/notifications'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
@@ -97,11 +102,15 @@ export function createProductionEmailNotificationHandler(): () => Promise<number
     planningMilestones: createConfiguredPlanningMilestoneNotificationRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
   })
   const ses = new SESv2Client({ region })
-  const send = createEmailNotificationSender({
+  // Bounce and complaint events reach the feedback job only through this configuration set.
+  const configurationSetName = environment.NOTIFICATION_EMAIL_CONFIGURATION_SET?.trim()
+  const suppressions = new DynamoDbEmailSuppressionStore(documentClient, tableName)
+  const senderOptions = {
     sender, appOrigin,
     readLocale: createMemberNotificationLocaleReader(new DynamoDbProjectDirectoryClient(undefined, documentClient)),
     readRecipient: createCognitoEmailRecipientReader(documentClient, workspaceAccessTableName, userPoolId, new CognitoIdentityProviderClient({ region })),
-    async sendEmail(message, signal) {
+    readSuppression: (delivery: ChannelDelivery, signal: AbortSignal) => suppressions.readActive(delivery.recipientKey, signal),
+    async sendEmail(message: EmailMessage, signal: AbortSignal) {
       await ses.send(new SendEmailCommand({
         FromEmailAddress: message.from,
         Destination: { ToAddresses: [message.to] },
@@ -109,10 +118,27 @@ export function createProductionEmailNotificationHandler(): () => Promise<number
           Subject: { Data: message.subject, Charset: 'UTF-8' },
           Body: { Text: { Data: message.text, Charset: 'UTF-8' } },
         } },
+        ...(configurationSetName ? {
+          ConfigurationSetName: configurationSetName,
+          ...emailRecipientTags(message.recipientKey),
+        } : {}),
       }), { abortSignal: signal })
     },
-  })
+  }
+  const send = createEmailNotificationSender(senderOptions)
+  const sendDigest = createEmailDigestSender(senderOptions)
   return () => deliverDueEmailNotifications({
     store, send, telemetry: createChannelDeliveryTelemetry('Email'), createToken: randomUUID, now: () => new Date(), isAuthorized,
+    digest: { listCompanions: (delivery, now, limit) => store.listCompanions(delivery, now, limit), send: sendDigest },
   })
+}
+
+/**
+ * Builds the SES tag that lets bounce and complaint events find the recipient again.
+ * @param recipientKey - Recipient partition of the notification.
+ * @returns The tag list, or nothing when the partition does not fit an SES tag value.
+ */
+function emailRecipientTags(recipientKey: string): { EmailTags?: Array<{ Name: string, Value: string }> } {
+  const value = encodeEmailRecipientTag(recipientKey)
+  return value ? { EmailTags: [{ Name: EMAIL_RECIPIENT_TAG, Value: value }] } : {}
 }

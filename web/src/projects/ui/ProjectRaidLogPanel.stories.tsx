@@ -145,3 +145,73 @@ export const LoadError: Story = {
 export const WorkItemOptionsError: Story = {
   args: { hasWorkItemOptionsError: true, workItemOptions: [], onReloadWorkItemOptions: () => undefined },
 }
+
+/** An open change request asks to move a Work Item; a Project manager approves it after a confirmation. */
+export const ChangeRequestDecision: Story = {
+  args: {
+    canDecide: true,
+    onDecide: async () => undefined,
+    entries: [
+      {
+        id: 'cr-open',
+        kind: 'change-request',
+        title: 'リリース日を2週間延ばす',
+        impact: 4,
+        relatedWorkItemIds: ['wi-2'],
+        scheduleChanges: [{ workItemId: 'wi-2', operation: { type: 'move', targetDate: '2026-12-10' } }],
+        status: 'open',
+        revision: 1,
+        createdAt: '2026-11-18T00:00:00.000Z',
+        updatedAt: '2026-11-18T00:00:00.000Z',
+      },
+      ...entries,
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('project-raid-log-entry-schedule')).toHaveTextContent('CORE-15 結合テスト を 2026-12-10 へ移動')
+    await userEvent.click(canvas.getByTestId('project-raid-log-approve'))
+    await expect(canvas.getByTestId('project-raid-log-decide-baseline')).toBeChecked()
+    await expect(canvas.getByTestId('project-raid-log-approve-confirm')).toBeVisible()
+  },
+}
+
+/** Another manager is approving a change request, so a note says who and until when others must wait. */
+export const ChangeRequestHeld: Story = {
+  args: {
+    canDecide: true,
+    onDecide: async () => undefined,
+    entries: [
+      {
+        id: 'cr-held',
+        kind: 'change-request',
+        title: 'リリース日を2週間延ばす',
+        impact: 4,
+        relatedWorkItemIds: ['wi-2'],
+        scheduleChanges: [{ workItemId: 'wi-2', operation: { type: 'move', targetDate: '2026-12-10' } }],
+        approvalHold: { heldByMemberId: 'tanaka@example.com', heldAt: '2026-11-18T01:00:00.000Z', expiresAt: '2026-11-18T01:10:00.000Z' },
+        status: 'open',
+        revision: 2,
+        createdAt: '2026-11-18T00:00:00.000Z',
+        updatedAt: '2026-11-18T01:00:00.000Z',
+      },
+      ...entries,
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('project-raid-log-approval-hold')).toHaveTextContent('田中 太郎 さんが承認しています')
+  },
+}
+
+/** An author states the date change a change request asks for on a related Work Item. */
+export const ChangeRequestDates: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByTestId('project-raid-log-add'))
+    await userEvent.selectOptions(canvas.getByTestId('project-raid-log-kind'), 'change-request')
+    await userEvent.selectOptions(canvas.getByTestId('project-raid-log-related-add'), 'wi-1')
+    await userEvent.selectOptions(canvas.getByLabelText('変更: CORE-12 部品の調達'), 'resize')
+    await expect(canvas.getByLabelText('新しい終了日: CORE-12 部品の調達')).toBeVisible()
+  },
+}
