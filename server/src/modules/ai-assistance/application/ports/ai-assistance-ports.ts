@@ -422,6 +422,17 @@ export interface AiAssistanceObservability {
   ): void
   /** Records one newly persisted human review decision. */
   recordDecision(observation: AiAssistanceDecisionObservation): void
+  /**
+   * Records that one finished attempt could not be added to the monthly usage counters. The
+   * generation stays successful, so this signal is what tells operators the monthly caps undercount.
+   */
+  recordUsageAccountingFailure?(observation: AiAssistanceUsageAccountingFailureObservation): void
+}
+
+/** Content-free observation of one attempt the monthly usage counters missed. */
+export type AiAssistanceUsageAccountingFailureObservation = {
+  /** Workflow of the attempt. */
+  task: AiAssistanceTask
 }
 
 /** Operational observation boundary used by the terminal-row stream projection. */

@@ -346,7 +346,11 @@ export function createAiAssistanceService(
         usage,
       })
     } catch {
-      // Counting is best effort; see the function documentation.
+      // Counting is best effort; see the function documentation. The content-free metric lets
+      // operators see that the monthly caps undercount.
+      recordAiAssistanceObservation(options.observability, (observability) => {
+        observability.recordUsageAccountingFailure?.({ task })
+      })
     }
   }
 

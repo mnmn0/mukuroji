@@ -874,8 +874,19 @@ describe('monthly AI usage and the deployment-wide switch (#414)', () => {
     })])
   })
 
-  test('keeps the generation when counting its usage fails', async () => {
-    const harness = createHarness({ recordUsageError: new Error('counter unavailable') })
+  test('keeps the generation when counting its usage fails and reports the miss', async () => {
+    const misses: string[] = []
+    const harness = createHarness({
+      recordUsageError: new Error('counter unavailable'),
+      observability: {
+        recordGenerationRequest() {},
+        recordProviderAttempt() {},
+        recordDecision() {},
+        recordUsageAccountingFailure(observation) {
+          misses.push(observation.task)
+        },
+      },
+    })
 
     const generation = await harness.service.generate(
       createActor(),
@@ -885,6 +896,7 @@ describe('monthly AI usage and the deployment-wide switch (#414)', () => {
     )
 
     expect(generation.id).toBeString()
+    expect(misses).toEqual(['summary'])
   })
 
   test('checks the monthly caps of the policy with the reservation', async () => {

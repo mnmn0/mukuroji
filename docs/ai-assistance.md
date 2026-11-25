@@ -209,6 +209,8 @@ provider生成前に設定エラーとなります。Prompt cachingは使わな�
 token、整数micro-USDの推定cost、cost未計算の生成数を持ち、rowは月初からおよそ400日後にTTLで消えます。
 生成IDごとのmarker row `AI_USAGE_RECORDED#<generationId>` を同じtransactionで条件付きPutするため、同じ試行を2回は
 数えません。数えるのは生成の確定後で、失敗しても生成は失敗にしません（数え漏れは上限での停止が遅れるだけです）。
+数え漏れは content-free な `UsageAccountingFailureCount`（`Mukuroji/AIAssistance`、Task 次元）に1件ずつ出るので、
+0 でなければ月次上限が実際より少なく数えていると判断し、原因を直します。
 
 管理者は`GET /api/ai-assistance/usage?month=YYYY-MM`（`workspace.manage`）で月の合計、task別、member別の値を読めます。
 Workspace policyの任意の`monthlyTokenLimit`と`monthlyCostLimitUsd`（1セント単位）を設定すると、予約transactionに
