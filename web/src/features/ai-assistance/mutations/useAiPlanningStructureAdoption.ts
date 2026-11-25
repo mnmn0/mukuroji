@@ -9,7 +9,7 @@ import {
   type WorkItemPriority,
   type WorkItemTypeDefinition,
 } from '@mukuroji/contracts'
-import { createTeamIssue } from '../../../issues/api/workItems'
+import { createTeamIssue, getTeamIssueDetail } from '../../../issues/api/workItems'
 import { getPlanningSnapshot } from '../../../planning/api/snapshot'
 import { createWorkItemScheduleDependency } from '../../../planning/api/workItemDependencies'
 import {
@@ -17,7 +17,6 @@ import {
   type MutationRequestRunner,
 } from '../../../shared/api/mutationHeaders'
 import { getWorkItemConfiguration } from '../../../work-items/api/configuration'
-import { getTeamWorkItemHierarchy } from '../../../work-items/api/hierarchy'
 import { replaceWorkItemParent } from '../../../work-items/api/relations'
 import { createWorkItemDependencyMutationId } from '../../../work-items/model/workItemDependencies'
 import {
@@ -135,8 +134,8 @@ export type AiPlanningStructureApi = {
   getWorkItemConfiguration: typeof getWorkItemConfiguration
   /** Creates one Work Item. */
   createTeamIssue: typeof createTeamIssue
-  /** Reads the Team hierarchy and its graph revision. */
-  getTeamWorkItemHierarchy: typeof getTeamWorkItemHierarchy
+  /** Reads a Work Item with its relations and the Team relation graph revision. */
+  getTeamIssueDetail: typeof getTeamIssueDetail
   /** Sets a Work Item's parent. */
   replaceWorkItemParent: typeof replaceWorkItemParent
   /** Reads the Planning snapshot and its revision. */
@@ -150,7 +149,7 @@ const defaultAiPlanningStructureApi: AiPlanningStructureApi = {
   createTeamIssue,
   createWorkItemScheduleDependency,
   getPlanningSnapshot,
-  getTeamWorkItemHierarchy,
+  getTeamIssueDetail,
   getWorkItemConfiguration,
   replaceWorkItemParent,
 }
@@ -185,7 +184,7 @@ export function createAiPlanningStructureAdoptionSession(
  *
  * Each child is created with an idempotency key made from the generation and row, so sending the
  * same selection again returns the children already created instead of adding new ones. A child is
- * linked to the parent only when the Team hierarchy does not already show that parent, and a
+ * linked to the parent only when its relations do not already show that parent, and a
  * dependency is added only when the Planning graph does not already hold it, so a retry after a
  * partial failure finishes the remaining steps. The child type is checked against the parent's
  * allowed child types before anything is created, so a refused parent link cannot leave orphaned
@@ -308,13 +307,15 @@ async function createChildren(
     createdChildren.set(createdKey, issue.id)
     childWorkItemIds[child.rowId] = issue.id
   }
-  const hierarchy = await api.getTeamWorkItemHierarchy(parent.teamId, token)
-  let graphRevision = hierarchy.graphRevision
+  // Each child's own detail tells whether it already has this parent and gives the current Team
+  // relation graph revision; unlike the Team hierarchy, it can be read in a Team of any size.
   for (const childWorkItemId of Object.values(childWorkItemIds)) {
-    const node = hierarchy.nodes.find((entry) => entry.workItemId === childWorkItemId)
-    if (node?.parentWorkItemId === parent.workItemId) continue
-    const expectedGraphRevision = graphRevision
-    const response = await runner.run(
+    const detail = await api.getTeamIssueDetail(parent.teamId, childWorkItemId, token)
+    const hasParent = detail.relations?.some((relation) =>
+      relation.type === 'parent' && relation.targetWorkItemId === parent.workItemId) ?? false
+    if (hasParent) continue
+    const expectedGraphRevision = detail.relationGraphRevision ?? 0
+    await runner.run(
       `ai-planning:${input.generationId}:parent:${childWorkItemId}`,
       JSON.stringify([parent.workItemId, expectedGraphRevision]),
       (context) => api.replaceWorkItemParent(
@@ -325,7 +326,6 @@ async function createChildren(
         context,
       ),
     )
-    graphRevision = response.graphRevision
   }
   return childWorkItemIds
 }

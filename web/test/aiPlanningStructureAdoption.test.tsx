@@ -103,20 +103,15 @@ function createFakeApi(options: { failParentOnce?: boolean } = {}) {
     async getPlanningSnapshot() {
       return snapshot()
     },
-    async getTeamWorkItemHierarchy() {
+    async getTeamIssueDetail(_teamId, issueId) {
+      const parentId = parents.get(issueId)
       return {
-        graphRevision,
-        nodes: [...issuesByKey.values()].map((id) => ({
-          childWorkItemIds: [],
-          depth: 0,
-          hierarchyRank: '0',
-          openChildCount: 0,
-          parentWorkItemId: parents.get(id) ?? null,
-          wbsNumber: '1',
-          workItemId: id,
-        })),
-        schemaVersion: 1,
-        teamId: 'team-1',
+        activity: [],
+        issue: { ...teamIssueFixtures[0], id: issueId, teamId: 'team-1' },
+        relationGraphRevision: graphRevision,
+        relations: parentId === undefined
+          ? []
+          : [{ sourceWorkItemId: issueId, targetWorkItemId: parentId, type: 'parent' as const }],
       }
     },
     async getWorkItemConfiguration() {
