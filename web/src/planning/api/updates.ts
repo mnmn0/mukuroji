@@ -8,6 +8,7 @@ import type {
   PlanningUpdateTarget,
   PublishPlanningUpdateInput,
 } from '@mukuroji/contracts'
+import { readPlanningUpdateTemplateSettings } from '@mukuroji/contracts'
 import {
   createMutationHeaders,
   type MutationRequestContext,
@@ -23,6 +24,7 @@ import {
 } from './contractValidation'
 import { PlanningApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
+import { isRecord } from '../../shared/api/jsonValidation'
 
 const planningApiBaseUrl = resolveApiBaseUrl()
 
@@ -174,6 +176,7 @@ export function createPlanningUpdateComment(
         body: input.body,
         id: input.id,
         ...(input.mentionMemberKeys?.length ? { mentionMemberKeys: input.mentionMemberKeys } : {}),
+        ...(input.acknowledgement ? { acknowledgement: true } : {}),
       }),
       headers: {
         'Content-Type': 'application/json',
@@ -275,6 +278,21 @@ export async function exportPlanningUpdates(
     filename: readDownloadFilename(response.headers.get('Content-Disposition')) ??
       'mukuroji-planning-updates.json',
   }
+}
+
+/**
+ * Loads the Workspace's health update required fields and template.
+ *
+ * @param accessToken - Authorization bearer token.
+ * @returns The validated settings; the defaults when the Workspace saved none.
+ */
+export function getPlanningUpdateTemplate(accessToken: string) {
+  return requestPlanningUpdateJson(
+    `${planningApiBaseUrl}/planning/updates/template`,
+    accessToken,
+    { method: 'GET' },
+    (value) => (isRecord(value) ? readPlanningUpdateTemplateSettings(value.settings) : undefined),
+  )
 }
 
 /**
@@ -407,6 +425,8 @@ export function createPlanningUpdateSearchParams(
   if (target.type === 'project') {
     parameters.set('teamId', target.teamId)
     parameters.set('projectId', target.projectId)
+  } else if (target.type === 'team') {
+    parameters.set('teamId', target.teamId)
   } else {
     parameters.set('entityId', target.entityId)
   }

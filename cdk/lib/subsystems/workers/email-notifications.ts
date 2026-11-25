@@ -1,6 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import type * as ses from 'aws-cdk-lib/aws-ses';
 import type { ScheduledJobGrant } from './scheduled-jobs';
 import type { ScheduleWorkerInput } from './schedules';
 
@@ -8,6 +9,8 @@ import type { ScheduleWorkerInput } from './schedules';
 export interface EmailNotificationJobInput extends ScheduleWorkerInput {
   /** Web application origin that resolves Inbox deep links in the message. */
   readonly webOrigin: string;
+  /** Configuration set that publishes bounces and complaints to the feedback job. */
+  readonly configurationSet: ses.IConfigurationSet;
 }
 
 /**
@@ -43,6 +46,7 @@ export function defineEmailNotificationJob(
     environment: {
       NOTIFICATION_EMAIL_SENDER: parameters.notificationEmailSender.valueAsString,
       NOTIFICATION_EMAIL_APP_ORIGIN: input.webOrigin,
+      NOTIFICATION_EMAIL_CONFIGURATION_SET: input.configurationSet.configurationSetName,
       // Timesheet reminders reread their time entries before they are sent.
       ANALYTICS_TABLE_NAME: stores.analyticsTable.tableName,
       NOTIFICATIONS_TABLE_NAME: stores.notificationsTable.tableName,
@@ -79,11 +83,15 @@ export function defineEmailNotificationJob(
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['cognito-idp:AdminListGroupsForUser', 'cognito-idp:AdminGetUser'], resources: [parameters.cognitoUserPoolArn],
       }));
-      // SES authorizes the sending identity, which may be the address or its domain; the
-      // condition pins every message to the configured sender. An empty sender matches nothing.
+      // SES authorizes the sending identity, which may be the address or its domain, and the
+      // configuration set; the condition pins every message to the configured sender. An empty
+      // sender matches nothing.
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['ses:SendEmail'],
-        resources: [scope.formatArn({ service: 'ses', resource: 'identity', resourceName: '*' })],
+        resources: [
+          scope.formatArn({ service: 'ses', resource: 'identity', resourceName: '*' }),
+          scope.formatArn({ service: 'ses', resource: 'configuration-set', resourceName: input.configurationSet.configurationSetName }),
+        ],
         conditions: { StringEquals: { 'ses:FromAddress': parameters.notificationEmailSender.valueAsString } },
       }));
     },

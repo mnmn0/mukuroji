@@ -35,6 +35,7 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
+import { syncProjectUpdateOwnerWithCharter } from './planning-routes'
 import { syncDirectorySearchDocumentBestEffort } from '../shared/search-access'
 
 /**
@@ -77,6 +78,11 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
       await requireProjectCharterManagement(principal, teamId, projectId)
+      const previous = await workspaceDependencies.projectDirectory.getProjectCharter(
+        principal.directoryId,
+        teamId,
+        projectId,
+      )
       const state = await updateProjectCharterUseCase(
         {
           store: workspaceDependencies.projectDirectory,
@@ -88,7 +94,16 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
         await readJson<unknown>(c.req),
         (update) => createApiMutationContext(c, principal, update),
       )
-      return c.json({ ...state, viewer: await describeProjectCharterViewer(principal, teamId, projectId) } satisfies ProjectCharterState)
+      // A new charter owner also becomes the Project's health update owner (ADR 0084).
+      const owner = state.charter.owner
+      const updateOwnerSync = owner && owner.userId !== previous.charter.owner?.userId
+        ? await syncProjectUpdateOwnerWithCharter(principal, teamId, projectId, owner.userId)
+        : undefined
+      return c.json({
+        ...state,
+        viewer: await describeProjectCharterViewer(principal, teamId, projectId),
+        ...(updateOwnerSync === undefined ? {} : { updateOwnerSync }),
+      } satisfies ProjectCharterState)
     } catch (error) {
       return toProjectCharterErrorResponse(c, error)
     }

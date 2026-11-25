@@ -11,12 +11,13 @@ Issue #27 の Planning domain は、短期の Cycle と中長期の Portfolio / 
 - `DEPENDENCY#<id>`: directed scheduling dependency
 - `WORK_ITEM_DEPENDENCY#<id>`: Team-qualified Work Item 間の canonical schedule dependency
 - `LINK#<teamId>#<workItemId>`: Work Item から Cycle / Milestone / Goal への link
-- `UPDATE_TARGET#PROJECT#<teamId>#<projectId>` / `UPDATE_TARGET#INITIATIVE#<entityId>`: update owner、cadence、次回期限、latest version の bounded projection
+- `UPDATE_TARGET#PROJECT#<teamId>#<projectId>` / `UPDATE_TARGET#TEAM#<teamId>` / `UPDATE_TARGET#INITIATIVE#<entityId>`: update owner、cadence、次回期限、latest version の bounded projection
 - `UPDATE#<target>#<zero-padded-version>`: structured health update の append-only 正本
 - `UPDATE_ID#<target>#<updateId>`: target 内で update ID の再利用を防ぐ immutable marker
 - `UPDATE_COMMENT#<target>#<version>#...`: immutable update に対する append-only comment
 - `UPDATE_COMMENT_ID#<target>#<version>#<commentId>`: update version 内で comment ID の再利用を防ぐ immutable marker
 - `UPDATE_REACTION#<target>#<version>#...`: immutable update に対する member reaction
+- `UPDATE_ACK#<target>#<version>`: 確認者の「確認済み」を update version ごとに1つに限る marker（確認のコメントと同じ transaction で書く。ADR 0073）
 - `COLLECTION#<collectionId>`: Work Item を参照する整理用 Collection（[Collections](./collections.md)）。Planning graph の revision fence には含めません
 - `COLLECTION_COUNT`: Workspace の Collection 数。作成・削除と同じ transaction で更新し、上限を強制します
 
@@ -175,7 +176,17 @@ Cycle を archive できるのは、残っている link の canonical Work Item
 
 追加・除外・終了予定の遅れ・予定工数の増減は、Web の Cycle の計画が今の snapshot と比べて出します（`web/src/planning/model/cycleBaselines.ts`）。
 
-## Project / Initiative health update
+## Project / Team / Initiative health update
+
+Team も update target にできます（`{ type: 'team', teamId }`）。Team の update は Team scope の Initiative と同じく Team の member 権限で読み書きし、cadence・リマインダー・期限超過・エスカレーション・Update Feed・Focus の扱いは Project と同じです。根拠や進捗に使うのは Team 直下（Project を持たない）の Work Item と計画だけです。AI の下書きは Team では使えません。
+
+Cadence の `reviewerMemberKey`（省略時は `escalationMemberKey`）が確認者です。確認者は `POST .../comments` に `acknowledgement: true` を付けたコメントで「確認済み」を記録します。route は認可に使った snapshot の cadence で確認者を確かめ、Planning `META` の revision を同じ transaction で条件にするので、確認者の変更と競合した記録は 409 になります。1つの version に記録できるのは1回で、2回目は `409 PlanningUpdateAlreadyAcknowledged` です。履歴 API は version ごとに `acknowledgement` を返し、activity projection が最初の確認を保持して Update Feed と Focus に渡します。確認者は publish の通知候補（reason `update-reviewer`）になり、確認すると作成者に通知（reason `update-author`、「Acknowledged: …」）が届きます。確認者の Focus には、自分以外が公開した最新 version で未確認のものが「確認待ちの進捗報告」として出ます。
+
+Workspace ごとの必須項目とテンプレートは tenant profile の `planningUpdateTemplate`（`requiredFields`、`template`）に置き、Workspace 管理者が `PATCH /api/tenant/profile` で保存します。`GET /api/planning/updates/template` はどの member にも設定（未設定なら既定値）を返します。`POST /api/planning/updates` は公開前に必須項目を確かめ、空なら `400 PlanningUpdateRequiredFieldsMissing` で拒否します。設定は公開済みの update を変えません。
+
+### Project charter の責任者との同期（Issue #638、ADR 0084）
+
+`PUT /api/teams/:teamId/projects/:projectId/charter` が責任者（`ownerUserId`）を変えたとき、保存に続けて Project の update target の cadence を、`updateOwnerMemberKey` だけを新しい責任者にして書き直します。cadence endpoint と同じく、呼び出した人に update target の manager（Enterprise 管理の人はその Project での `planning.write` も）、新しい責任者に Project の member 以上（escalation 先は viewer 以上、確認者は member 以上で `planning.write` も）を求め、同じ commit 時の fence を付けます。さらに、憲章の責任者がまだこの人であることを cadence の transaction で確かめるので、先に始まった保存が後の保存より遅れて終わっても、古い責任者で上書きしません。Planning の revision が途中で進んだときは3回まで読み直します。charter は先に確定するので、結果は charter の応答の `updateOwnerSync` に返します: `synced`、`unchanged`（すでに同じ人）、`not-configured`（cadence がない、または archive 済み）、`not-permitted`（呼び出した人が cadence を変えられない）、`owner-not-eligible`（新しい責任者が担当者になれない）、`superseded`（後から別の保存が責任者をさらに変えた）、`failed`（書き込みの失敗、または escalation 先や確認者が権限を失っている）。責任者を変えない保存では `updateOwnerSync` を返さず、cadence にも触れません。Planning で担当者を変えても charter の責任者は変わりません。
 
 ### Update Feed read model (Issue #241, first slice)
 
@@ -289,11 +300,11 @@ A Floci run with exactly the job's environment delivered one generic `/updates` 
 
 After a successful manual preview POST, a failed metadata/permission GET has a distinct refresh-failure state. Both body and editable metadata stay hidden until fresh metadata succeeds, and recovery never automatically repeats the POST or restores its discarded body. A later explicit preview recomputes current authorization; a completed calendar receipt does not consume another generation attempt.
 
-Health update の target は Project と Initiative の union です。Project は Planning entity ではないため `{teamId, projectId}` で Team-qualified に識別し、Initiative は `{entityId}` で識別します。Target ごとに update owner、週次または月次 cadence、IANA time zone、次回期限、事前 reminder、任意の期限後 escalation を設定できます。月次 cadence は設定時の local day を anchor とし、1月31日から2月末へ clamp した後も3月31日に戻します。週次 cadence は local wall-clock を維持して DST をまたぎます。
+Health update の target は Project、Team、Initiative の union です。Project は Planning entity ではないため `{teamId, projectId}` で Team-qualified に識別し、Team は `{teamId}`、Initiative は `{entityId}` で識別します。Target ごとに update owner、週次または月次 cadence、IANA time zone、次回期限、事前 reminder、任意の期限後 escalation を設定できます。月次 cadence は設定時の local day を anchor とし、1月31日から2月末へ clamp した後も3月31日に戻します。週次 cadence は local wall-clock を維持して DST をまたぎます。
 
 報告された health (`unknown` / `on-track` / `at-risk` / `off-track`) と提出状況 (`not-configured` / `missing` / `current` / `stale` / `overdue`) は別の値です。Cadence 未設定は `not-configured`、初回提出前かつ期限前は `missing`、reminder window 前に提出済みなら `current`、提出済みでも次の reminder window に入れば `stale`、次回期限に達すれば `overdue` とします。List、Timeline、Portfolio、Dashboard、詳細 pane は両者を別の badge / column で表示します。
 
-Publish は人が作成した manual draft のみを正本とし、summary、health、risk、risk summary、decision、help needed、next action、evidence を保存します。Progress、scope、target date、Milestone、dependency は publish 時の canonical Planning / Work Item state から server が snapshot を生成し、直前 version との差分も server が固定します。Project の progress snapshot は Planning link の有無に依存せず、同じ `{teamId, projectId}` に属する canonical Work Item 全体から算出します。Team / Project scope の update は target と同じ visibility envelope 内の entity、Milestone、dependency、Work Item だけを snapshot / evidence に含め、scope 外 ID の固定や後続の history read による漏洩を防ぎます。現在公開できる typed evidence は Work Item、Planning entity、File、HTTPS link です。Web の composer は、対象範囲で schedule baseline より遅れている Work Item と Milestone を evidence 候補として出し、1 操作でまとめて添付できます（`docs/work-items.md`「Schedule baseline と slip」）。Decision evidence は canonical visibility adapter が提供されるまで公開契約と composer から除外します。File evidence は canonical File ID reverse lookup で scope と可視性を検証し、credential を含まない HTTPS permalink も必須とします。公開済み version を update / delete する API は提供しません。Comment は別の append-only row、reaction は member ごとの別 row として保存し、親 update の存在を同じ transaction で条件検証するため update 本体の不変性を崩しません。上長の確認は専用の状態を持たず、cadence の escalation 先を確認者とみなし、その member が version に付けた `✅` reaction を「確認済み」として Web が履歴に表示します。判定は現在の escalation 先で行うため、escalation 先を変えると過去の version も新しい確認者の reaction で判定し直します。確認の記録は既存の reaction API と権限をそのまま使い、作成者への確認通知、Focus / Inbox の未確認一覧、Team target はまだありません（#402）。
+Publish は人が作成した manual draft のみを正本とし、summary、health、risk、risk summary、decision、help needed、next action、evidence を保存します。Progress、scope、target date、Milestone、dependency は publish 時の canonical Planning / Work Item state から server が snapshot を生成し、直前 version との差分も server が固定します。Project の progress snapshot は Planning link の有無に依存せず、同じ `{teamId, projectId}` に属する canonical Work Item 全体から算出します。Team / Project scope の update は target と同じ visibility envelope 内の entity、Milestone、dependency、Work Item だけを snapshot / evidence に含め、scope 外 ID の固定や後続の history read による漏洩を防ぎます。現在公開できる typed evidence は Work Item、Planning entity、File、HTTPS link です。Web の composer は、対象範囲で schedule baseline より遅れている Work Item と Milestone を evidence 候補として出し、1 操作でまとめて添付できます（`docs/work-items.md`「Schedule baseline と slip」）。Decision evidence は canonical visibility adapter が提供されるまで公開契約と composer から除外します。File evidence は canonical File ID reverse lookup で scope と可視性を検証し、credential を含まない HTTPS permalink も必須とします。公開済み version を update / delete する API は提供しません。Comment は別の append-only row、reaction は member ごとの別 row として保存し、親 update の存在を同じ transaction で条件検証するため update 本体の不変性を崩しません。上長の確認は、確認者（cadence の `reviewerMemberKey`、省略時は escalation 先）が `acknowledgement: true` 付きのコメントで記録し、version ごとの `UPDATE_ACK#` row で1回に限ります（「Project / Team / Initiative health update」の節）。
 
 History は target ごとに新しい順の cursor API で読み、JSON export は同じ認可と履歴正本を使います。Watch は collaboration scope を Team-qualified な Project / Initiative target へ拡張し、legacy の非修飾 Project watch から Planning 通知を fan-out しません。Cadence が有効な `UPDATE_TARGET` だけを16 shardの sparse `UpdateScheduleDueIndex`へ投影し、最初の reminder（未設定なら due）時刻までの targetをQueryするため、schedule実行時も全Planning履歴をscanしません。Notification schedule は reminder、overdue、escalation を `{workspace,target,nextDueAt,kind,recipient}` から決まる event ID で一度だけ生成します。GSI は候補発見だけに使い、base rowの強整合read、audit projection、Inbox read の各段階で current target、owner、cadence occurrence、archive、Project / Initiative scope、recipient 権限を再検証します。Owner / cadence / scope の変更、archive、permission loss 後は、すでに保存された古い通知も表示しません。
 

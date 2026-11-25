@@ -17,6 +17,7 @@ import {
 import {
   DynamoDBDocumentClient,
   GetCommand,
+  PutCommand,
   QueryCommand,
   TransactWriteCommand,
   type TransactWriteCommandInput,
@@ -133,7 +134,9 @@ import {
 import {
   createAuditFieldChanges,
   createMutationAuditEventPut,
+  deriveMutationAuditPartContext,
   getConfiguredAuditTableName,
+  type MutationAuditContext,
 } from '../../../audit'
 import {
   DOCUMENT_AUTHORIZATION_REVISION_KEY,
@@ -360,6 +363,60 @@ type DynamoDbDocumentAuthorizationGuard = {
 type CreateDocumentPersistenceRequest = CreateDocumentRequest & {
   /** Physical source-document guards created by this adapter. */
   sourceAuthorizationGuards?: readonly DynamoDbDocumentAuthorizationGuard[]
+  /** Template the Document was created from, recorded in its audit event. */
+  sourceTemplateId?: string
+}
+
+/** One Document lifecycle change recorded in the audit log. */
+type DocumentAuditEvent = {
+  /** Audit event type, such as `document.created`. */
+  eventType: string
+  /** Audit action code. */
+  action: string
+  /** Document value after the change. */
+  document: DocumentDetail
+  /** Document value before the change; absent for a created Document. */
+  previous?: DocumentDetail
+  /** English verb that starts the activity summary. */
+  summaryVerb: string
+  /** Resource the change acted on inside the Document, such as a public link. */
+  target?: { type: string; id: string }
+  /** Additional metadata without secrets. */
+  metadata?: Readonly<Record<string, unknown>>
+}
+
+/** Document fields compared by a lifecycle audit event; content is tracked by versions instead. */
+const DOCUMENT_AUDIT_FIELDS: readonly string[] = ['title', 'parentId', 'position', 'scope', 'permission', 'archivedAt']
+
+/**
+ * Lists one optional DynamoDB transaction action.
+ *
+ * @param action - Action to include, when any.
+ * @returns A list with the action, or an empty list.
+ */
+function optionalAction<T>(action: T | undefined): T[] {
+  return action === undefined ? [] : [action]
+}
+
+/**
+ * Shortens a Document audit summary that includes a user-authored title.
+ *
+ * @param value - Summary text.
+ * @returns At most 140 characters on one line.
+ */
+function excerptAuditSummary(value: string) {
+  const line = value.replace(/\s+/g, ' ').trim()
+  return line.length > 140 ? `${line.slice(0, 139)}…` : line
+}
+
+/**
+ * Returns the scope fields a Document audit event records for the activity and webhook readers.
+ *
+ * @param scope - Document scope after the change.
+ * @returns The Project ID of a Project-scoped Document, otherwise nothing.
+ */
+function documentScopeAuditMetadata(scope: DocumentDetail['scope']): Record<string, string> {
+  return scope.type === 'project' ? { projectId: scope.projectId } : {}
 }
 
 /**
@@ -1533,6 +1590,15 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
               authorizationMutationGuard,
             ),
           ]),
+      ...optionalAction(this.createDocumentAuditPut(input.workspaceId, input.access, input.auditContext, {
+        eventType: 'document.created',
+        action: 'created',
+        document,
+        summaryVerb: 'Created',
+        ...(input.sourceTemplateId === undefined
+          ? {}
+          : { metadata: { sourceTemplateId: input.sourceTemplateId } }),
+      })),
       ...authorizationGuardConditionChecks(
         mutationAuthorizationGuards,
       ),
@@ -1751,6 +1817,8 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
           [row.documentId],
         ),
       )
+    const permissionChanged = normalizedPermission !== undefined &&
+      stableStringify(normalizedPermission) !== stableStringify(row.document.permission)
     await this.commitMutation(
       input.workspaceId,
       row,
@@ -1761,6 +1829,29 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       treeMutationGuard,
       authorizationMutationGuard,
       mutationAuthorizationGuards,
+      this.createDocumentAuditPut(input.workspaceId, input.access, input.auditContext, permissionChanged
+        ? {
+            eventType: 'document.permission.updated',
+            action: 'updated',
+            document: next,
+            previous: row.document,
+            summaryVerb: 'Changed permissions of',
+          }
+        : scopeChanged || parentChanged
+        ? {
+            eventType: 'document.moved',
+            action: 'moved',
+            document: next,
+            previous: row.document,
+            summaryVerb: 'Moved',
+          }
+        : {
+            eventType: 'document.updated',
+            action: 'updated',
+            document: next,
+            previous: row.document,
+            summaryVerb: 'Updated',
+          }),
     )
     return this.projectDocument(input.workspaceId, next, input.access)
   }
@@ -2195,6 +2286,15 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       undefined,
       undefined,
       mutationAuthorizationGuards,
+      this.createDocumentAuditPut(input.workspaceId, input.access, input.auditContext, {
+        eventType: 'document.version.restored',
+        action: 'restored',
+        document: next,
+        previous: row.document,
+        summaryVerb: 'Restored a version of',
+        target: { type: 'document-version', id: versionItem.version.id },
+        metadata: { versionId: versionItem.version.id },
+      }),
     )
     return this.projectDocument(input.workspaceId, next, input.access)
   }
@@ -2675,6 +2775,13 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
           [row.documentId],
         ),
       ),
+      this.createDocumentAuditPut(input.workspaceId, input.access, input.auditContext, {
+        eventType: 'document.archived',
+        action: 'archived',
+        document: next,
+        previous: row.document,
+        summaryVerb: 'Archived',
+      }),
     )
     return this.projectDocument(input.workspaceId, next, input.access)
   }
@@ -2760,6 +2867,13 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
           [row.documentId],
         ),
       ),
+      this.createDocumentAuditPut(input.workspaceId, input.access, input.auditContext, {
+        eventType: 'document.restored',
+        action: 'restored',
+        document: next,
+        previous: row.document,
+        summaryVerb: 'Restored',
+      }),
     )
     return this.projectDocument(input.workspaceId, next, input.access)
   }
@@ -2861,6 +2975,8 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       idempotencyFingerprint: requestFingerprint,
       expectedAuthorizationRevision:
         input.expectedAuthorizationRevision,
+      ...(input.auditContext === undefined ? {} : { auditContext: input.auditContext }),
+      sourceTemplateId: template.id,
     })
   }
 
@@ -3778,6 +3894,23 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
               ConditionExpression: 'attribute_not_exists(workspaceId)',
             },
           },
+          ...optionalAction(this.createDocumentAuditPut(
+            input.workspaceId,
+            input.access,
+            input.auditContext,
+            {
+              eventType: 'document.public-link.created',
+              action: 'created',
+              document: authorization.documentRow.document,
+              summaryVerb: 'Created a public link to',
+              target: { type: 'document-public-link', id: shareId },
+              metadata: {
+                shareId,
+                expiresAt: share.expiresAt,
+                allowExport: share.allowExport ?? false,
+              },
+            },
+          )),
           ...documentAuthorizationConditionChecks(
             this.tableName,
             input.workspaceId,
@@ -3996,6 +4129,19 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
               },
             },
           },
+          ...optionalAction(this.createDocumentAuditPut(
+            input.workspaceId,
+            input.access,
+            input.auditContext,
+            {
+              eventType: 'document.public-link.revoked',
+              action: 'revoked',
+              document: authorization.documentRow.document,
+              summaryVerb: 'Revoked a public link to',
+              target: { type: 'document-public-link', id: stored.id },
+              metadata: { shareId: stored.id },
+            },
+          )),
           ...documentAuthorizationConditionChecks(
             this.tableName,
             input.workspaceId,
@@ -4593,7 +4739,72 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       'DocumentExportDenied',
     )
     validateDocumentPayload(row.document)
-    return renderDocumentProjectionExport(projected, input.format)
+    const rendered = renderDocumentProjectionExport(projected, input.format)
+    // The export returns the current content, so a retry after the Document changed is a new
+    // export of another revision and gets its own event instead of reusing the first one.
+    const auditContext = input.auditContext === undefined
+      ? undefined
+      : deriveMutationAuditPartContext(input.auditContext, `revision:${row.revision}`)
+    const auditPut = this.createDocumentAuditPut(input.workspaceId, input.access, auditContext, {
+      eventType: 'document.exported',
+      action: 'exported',
+      document: row.document,
+      summaryVerb: 'Exported',
+      metadata: { format: input.format },
+    })
+    // The export reads only, so its audit event is the one write; it lands before the content leaves.
+    if (auditPut?.Put !== undefined) {
+      try {
+        await this.client.send(new PutCommand(auditPut.Put))
+      } catch (error) {
+        if (!isConditionalFailure(error)) throw normalizeDynamoError(error)
+      }
+    }
+    return rendered
+  }
+
+  /**
+   * Builds the audit outbox Put of one Document lifecycle change.
+   *
+   * Field changes compare the title, tree position, scope, permission, and archive time; the
+   * content is tracked by Document versions instead. No notification candidates are attached, so
+   * the event reaches the audit log and activity consumers only.
+   *
+   * @param workspaceId - Canonical Workspace ID.
+   * @param access - Authorization context of the caller.
+   * @param auditContext - Request audit context; absent when audit is not recorded.
+   * @param event - Lifecycle change to record.
+   * @returns The audit Put, or `undefined` without an audit table or context.
+   */
+  private createDocumentAuditPut(
+    workspaceId: string,
+    access: DocumentAccessContext,
+    auditContext: MutationAuditContext | undefined,
+    event: DocumentAuditEvent,
+  ) {
+    const { document } = event
+    return createMutationAuditEventPut(this.auditTableName, auditContext, {
+      directoryId: workspaceId,
+      eventType: event.eventType,
+      entityType: 'document',
+      entityId: document.id,
+      ...(event.target === undefined ? {} : { target: event.target }),
+      action: event.action,
+      changes: createAuditFieldChanges(
+        event.previous,
+        event.eventType === 'document.created' || event.previous !== undefined ? document : undefined,
+        DOCUMENT_AUDIT_FIELDS,
+      ),
+      summary: excerptAuditSummary(`${event.summaryVerb} ${document.kind}: ${document.title}`),
+      metadata: {
+        actorMemberKey: access.memberKey.trim().toLowerCase(),
+        documentKind: document.kind,
+        documentScopeType: document.scope.type,
+        ...documentScopeAuditMetadata(document.scope),
+        deepLink: `/documents/${encodeURIComponent(document.id)}`,
+        ...event.metadata,
+      },
+    })
   }
 
   private async ensureTable(): Promise<void> {
@@ -5807,6 +6018,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     treeMutationGuard?: DocumentTreeMutationGuard,
     authorizationMutationGuard?: DocumentAuthorizationRevisionGuard,
     mutationAuthorizationGuards?: readonly DynamoDbDocumentAuthorizationGuard[],
+    auditPut?: NonNullable<TransactWriteCommandInput['TransactItems']>[number],
   ): Promise<void> {
     const createsVersionSnapshot =
       reason === 'restore' ||
@@ -5894,6 +6106,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
               authorizationMutationGuard,
             ),
           ]),
+      ...optionalAction(auditPut),
       ...authorizationGuardConditionChecks(
         mutationAuthorizationGuards,
       ),

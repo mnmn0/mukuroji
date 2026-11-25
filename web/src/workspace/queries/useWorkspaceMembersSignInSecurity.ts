@@ -1,5 +1,5 @@
 import useSWR from 'swr'
-import { getWorkspaceMembersSignInSecurity } from '../api/members'
+import { getWorkspaceMembersSignInSecurityReport } from '../api/members'
 
 const signInSecurityQueryConfig = {
   dedupingInterval: 30_000,
@@ -8,7 +8,8 @@ const signInSecurityQueryConfig = {
 } as const
 
 /**
- * Reads each active member's MFA enrollment and password reset availability.
+ * Reads each active member's MFA enrollment and password reset availability, and which members
+ * are system administrators.
  *
  * Only owners and admins may read it, so the caller enables it from the access capabilities.
  *
@@ -19,7 +20,7 @@ const signInSecurityQueryConfig = {
 export function useWorkspaceMembersSignInSecurity(accessToken: string, enabled: boolean) {
   return useSWR(
     enabled ? ['workspace-members-sign-in-security', accessToken] as const : null,
-    ([, token]) => getWorkspaceMembersSignInSecurity(token),
+    ([, token]) => getWorkspaceMembersSignInSecurityReport(token),
     signInSecurityQueryConfig,
   )
 }

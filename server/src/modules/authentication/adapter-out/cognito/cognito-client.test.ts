@@ -1801,3 +1801,65 @@ test('repairs a missing email verification of a confirmed invited user when a re
     'AdminGetUserCommand:pending@example.com',
   ])
 })
+
+test('adds to the first system administrator group, removes from every one, and lists past a missing group', async () => {
+  await withTestEnvironment({
+    SYSTEM_ADMIN_GROUPS: 'legacy-admins,mukuroji-system-admins',
+  }, async () => {
+    const commands: Array<{ name: string, input: Record<string, unknown> }> = []
+    const sdkClient = {
+      async send(command: { constructor: { name: string }, input: Record<string, unknown> }) {
+        commands.push({ name: command.constructor.name, input: command.input })
+        if (command.constructor.name === 'AdminListGroupsForUserCommand') {
+          return { Groups: [{ GroupName: 'legacy-admins' }, { GroupName: 'project-writers' }] }
+        }
+        if (command.constructor.name === 'ListUsersInGroupCommand') {
+          if (command.input.GroupName === 'legacy-admins') {
+            const error = new Error('Group not found.')
+            error.name = 'ResourceNotFoundException'
+            throw error
+          }
+          return {
+            Users: [
+              {
+                Username: 'sato@example.com',
+                Attributes: [
+                  { Name: 'email', Value: 'Sato@Example.com' },
+                  { Name: 'custom:directory_id', Value: 'workspace#production' },
+                ],
+              },
+              {
+                Username: 'other@example.com',
+                Attributes: [
+                  { Name: 'email', Value: 'other@example.com' },
+                  { Name: 'custom:directory_id', Value: 'workspace#other' },
+                ],
+              },
+            ],
+          }
+        }
+        return {}
+      },
+    } as unknown as CognitoIdentityProviderClient
+    const client = new AwsCognitoClient(sdkClient, 'ap-northeast-1_mukuroji', 'mukuroji-client')
+
+    await client.addSystemAdmin('Sato@Example.com')
+    await client.removeSystemAdmin('sato@example.com')
+    await expect(client.listSystemAdminEmails('workspace#production')).resolves.toEqual(['sato@example.com'])
+
+    expect(commands.filter((command) => command.name !== 'ListUsersInGroupCommand')).toEqual([
+      {
+        name: 'AdminAddUserToGroupCommand',
+        input: { UserPoolId: 'ap-northeast-1_mukuroji', Username: 'sato@example.com', GroupName: 'legacy-admins' },
+      },
+      {
+        name: 'AdminListGroupsForUserCommand',
+        input: { UserPoolId: 'ap-northeast-1_mukuroji', Username: 'sato@example.com' },
+      },
+      {
+        name: 'AdminRemoveUserFromGroupCommand',
+        input: { UserPoolId: 'ap-northeast-1_mukuroji', Username: 'sato@example.com', GroupName: 'legacy-admins' },
+      },
+    ])
+  })
+})

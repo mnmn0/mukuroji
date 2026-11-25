@@ -9,17 +9,29 @@ import {
   type ProjectRaidEntry,
   type ProjectRaidEntryInput,
   type ProjectRaidEntryKind,
+  type ProjectRaidChangeDecisionOutcome,
   type ProjectRaidEntryStatus,
+  type ProjectRaidScheduleChange,
   type ProjectRaidSeverity,
 } from '@mukuroji/contracts'
 import { useState, type FormEvent } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { ProjectDirectoryApiError } from '../api/errors'
 import {
+  describeScheduleChanges,
+  ProjectChangeRequestScheduleConflictError,
+  ProjectChangeRequestWorkItemMovedError,
+} from '../model/projectChangeRequestDecision'
+import {
   createProjectRaidLogCsv,
   labelProjectRaidReference,
   type ProjectRaidReferenceOption,
 } from '../model/projectRaidLogExport'
+import {
+  ChangeRequestDecision,
+  ScheduleChangesField,
+  type ProjectChangeRequestDecisionChoice,
+} from './ProjectChangeRequestControls'
 import { downloadProjectRaidLogCsv } from './downloadProjectRaidLogCsv'
 
 /** Props of the Project risk, issue, and change request log panel. */
@@ -51,6 +63,16 @@ export type ProjectRaidLogPanelProps = {
   onSave: (entry: ProjectRaidEntry | undefined, input: ProjectRaidEntryInput) => Promise<void>
   /** Loads the log again. */
   onReload: () => void
+  /** Whether the viewer may approve or reject change requests. */
+  canDecide?: boolean
+  /**
+   * Approves or rejects a change request.
+   *
+   * @param entry - The change request.
+   * @param outcome - Approve or reject.
+   * @param choice - Whether to replace the baseline on approval.
+   */
+  onDecide?: (entry: ProjectRaidEntry, outcome: ProjectRaidChangeDecisionOutcome, choice: ProjectChangeRequestDecisionChoice) => Promise<void>
   /** Translator for every label. */
   t: (key: MessageKey) => string
 }
@@ -75,6 +97,8 @@ type EntryFormValues = {
   ownerMemberId: string
   /** Related Work Item IDs in the order added. */
   relatedWorkItemIds: string[]
+  /** Requested date changes of a change request. */
+  scheduleChanges: ProjectRaidScheduleChange[]
   /** Selected status. */
   status: ProjectRaidEntryStatus
 }
@@ -157,6 +181,7 @@ function toFormValues(entry?: ProjectRaidEntry): EntryFormValues {
     response: entry?.response ?? '',
     ownerMemberId: entry?.ownerMemberId ?? '',
     relatedWorkItemIds: [...(entry?.relatedWorkItemIds ?? [])],
+    scheduleChanges: [...(entry?.scheduleChanges ?? [])],
     status: entry?.status ?? 'open',
   }
 }
@@ -168,6 +193,10 @@ function toFormValues(entry?: ProjectRaidEntry): EntryFormValues {
  * @returns The input sent to the server, which validates it again.
  */
 function toEntryInput(values: EntryFormValues): ProjectRaidEntryInput {
+  // Only a change request asks for date changes, and only on Work Items it still names.
+  const scheduleChanges = values.kind === 'change-request'
+    ? values.scheduleChanges.filter((change) => values.relatedWorkItemIds.includes(change.workItemId))
+    : []
   return {
     kind: values.kind,
     title: values.title,
@@ -178,9 +207,13 @@ function toEntryInput(values: EntryFormValues): ProjectRaidEntryInput {
     ...(values.response.trim() ? { response: values.response } : {}),
     ...(values.ownerMemberId ? { ownerMemberId: values.ownerMemberId } : {}),
     ...(values.relatedWorkItemIds.length > 0 ? { relatedWorkItemIds: values.relatedWorkItemIds } : {}),
+    ...(scheduleChanges.length > 0 ? { scheduleChanges } : {}),
     status: values.status,
   }
 }
+
+/** Error code of a change refused because another manager is approving the request. */
+const HELD_ERROR_CODE = 'ProjectRaidChangeRequestHeld'
 
 /**
  * Describes a failed save for the person who tried it.
@@ -191,12 +224,35 @@ function toEntryInput(values: EntryFormValues): ProjectRaidEntryInput {
  */
 function describeSaveError(error: unknown, t: (key: MessageKey) => string) {
   if (error instanceof ProjectDirectoryApiError) {
+    if (error.code === HELD_ERROR_CODE) return t('projects.raidLog.decision.error.held')
     if (error.status === 409) return t('projects.raidLog.error.conflict')
     if (error.status === 403) return t('projects.raidLog.error.forbidden')
     if (error.status === 413) return t('projects.raidLog.error.full')
     if (error.status === 400) return t('projects.raidLog.error.invalid').replace('{reason}', error.message)
   }
   return t('projects.raidLog.error.save')
+}
+
+/**
+ * Describes a failed decision for the person who tried it.
+ *
+ * @param error - Thrown error.
+ * @param t - Translator.
+ * @returns The message to show.
+ */
+function describeDecisionError(error: unknown, t: (key: MessageKey) => string) {
+  if (error instanceof ProjectChangeRequestScheduleConflictError) {
+    return t('projects.raidLog.decision.error.schedule')
+  }
+  if (error instanceof ProjectChangeRequestWorkItemMovedError) {
+    return t('projects.raidLog.decision.error.movedWorkItem')
+  }
+  if (error instanceof ProjectDirectoryApiError) {
+    if (error.code === HELD_ERROR_CODE) return t('projects.raidLog.decision.error.held')
+    if (error.status === 409) return t('projects.raidLog.error.conflict')
+    if (error.status === 403) return t('projects.raidLog.decision.error.forbidden')
+  }
+  return t('projects.raidLog.decision.error.failed')
 }
 
 /**
@@ -218,6 +274,8 @@ export function ProjectRaidLogPanel({
   onReloadWorkItemOptions,
   onSave,
   onReload,
+  canDecide = false,
+  onDecide,
   t,
 }: ProjectRaidLogPanelProps) {
   const [editor, setEditor] = useState<EditorState>({ mode: 'closed' })
@@ -478,6 +536,15 @@ export function ProjectRaidLogPanel({
               t={t}
               onChange={(ids) => updateValue('relatedWorkItemIds', ids)}
             />
+            {editor.values.kind === 'change-request' ? (
+              <ScheduleChangesField
+                relatedWorkItemIds={editor.values.relatedWorkItemIds}
+                t={t}
+                value={editor.values.scheduleChanges}
+                workItemOptions={workItemOptions}
+                onChange={(changes) => updateValue('scheduleChanges', changes)}
+              />
+            ) : null}
             <label className={`${labelClassName} col-span-full`}>
               {t('projects.raidLog.field.description')}
               <textarea
@@ -570,7 +637,7 @@ export function ProjectRaidLogPanel({
                     <span className="text-xs font-semibold text-fg-505967">
                       {t(entry.status === 'open' ? 'projects.raidLog.status.open' : 'projects.raidLog.status.closed')}
                     </span>
-                    {canEdit && editor.mode === 'closed' ? (
+                    {canEdit && editor.mode === 'closed' && entry.decision === undefined ? (
                       <button
                         aria-label={`${t('projects.raidLog.edit')}: ${entry.title}`}
                         className="workbench-button-secondary min-h-8 px-3"
@@ -604,12 +671,27 @@ export function ProjectRaidLogPanel({
                       )}
                     </p>
                   ) : null}
+                  {entry.scheduleChanges && entry.scheduleChanges.length > 0 ? (
+                    <p className="text-xs font-medium text-fg-505967" data-testid="project-raid-log-entry-schedule">
+                      {t('projects.raidLog.schedule.label').replace('{changes}', describeScheduleChanges(entry.scheduleChanges, workItemOptions, t))}
+                    </p>
+                  ) : null}
                   {entry.description ? <p className="whitespace-pre-wrap text-sm text-fg-1c1d1f">{entry.description}</p> : null}
                   {entry.response ? (
                     <p className="whitespace-pre-wrap text-sm text-fg-505967">
                       <span className="font-semibold">{t('projects.raidLog.field.response')}: </span>
                       {entry.response}
                     </p>
+                  ) : null}
+                  {entry.kind === 'change-request' ? (
+                    <ChangeRequestDecision
+                      canDecide={canDecide && editor.mode === 'closed'}
+                      describeError={(error) => describeDecisionError(error, t)}
+                      entry={entry}
+                      ownerOptions={ownerOptions}
+                      t={t}
+                      onDecide={onDecide}
+                    />
                   ) : null}
                 </li>
               )

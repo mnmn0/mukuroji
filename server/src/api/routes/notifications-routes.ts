@@ -7,7 +7,7 @@ import { createTeamReminderSettingsRouter } from '../../modules/notifications/ad
 import { readReminderPolicyDefaultsFromEnvironment } from '../../modules/notifications'
 import { createMutationAuditEventPut, getConfiguredAuditTableName } from '../../modules/audit/audit'
 import { NOTIFICATION_REMINDER_DAY_FIELDS } from '@mukuroji/contracts'
-import { createPushConfiguration } from '../../modules/notifications/domain/push-subscription'
+import { createPushConfiguration, isPushTransportConfigured } from '../../modules/notifications/domain/push-subscription'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { workItemDependencies } from '../shared/app-dependencies'
 import { createRequestMutationContext, readJson } from '../shared/http'
@@ -37,6 +37,10 @@ export function registerNotificationsRoutes(routeApp: Hono): void {
     createVisibilityFilter: createNotificationVisibilityFilter,
     mapError: toNotificationErrorResponse,
     readJson,
+    getTransports: () => ({
+      email: Boolean(loadServerConfig().environment.NOTIFICATION_EMAIL_SENDER?.trim()),
+      push: isPushTransportConfigured(loadServerConfig().environment.WEB_PUSH_VAPID_PUBLIC_KEY),
+    }),
   }))
   routeApp.route('/', createTeamReminderSettingsRouter({
     authenticate: async (accessToken, context) =>

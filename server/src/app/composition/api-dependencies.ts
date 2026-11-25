@@ -13,6 +13,10 @@ import {
   InMemoryProjectRaidLogStore,
 } from '../../modules/project-raid-log'
 import {
+  DynamoDbCalendarFeedStore,
+  InMemoryCalendarFeedStore,
+} from '../../modules/calendar-feeds'
+import {
   DynamoDbProjectStatusShareStore,
   InMemoryProjectStatusShareStore,
 } from '../../modules/project-status-shares'
@@ -683,6 +687,12 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
       getConfiguredAuditTableName(),
+    ),
+    calendarFeeds: new DynamoDbCalendarFeedStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      getConfiguredAuditTableName(),
+      loadServerConfig().environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY || undefined,
     ),
     projectStatusShares: new DynamoDbProjectStatusShareStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
@@ -1985,6 +1995,7 @@ export function createTestAppDependencies(): AppDependencies {
       updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
       savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
       projectRaidLogs: new InMemoryProjectRaidLogStore(),
+      calendarFeeds: new InMemoryCalendarFeedStore(),
       projectStatusShares: new InMemoryProjectStatusShareStore(),
       weeklyReports: new InMemoryWeeklyReportStore(),
       scheduleBaselines: new InMemoryProjectScheduleBaselineStore(),
@@ -2121,6 +2132,7 @@ export function overrideAppDependencies(
       ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
       ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
       ...(overrides.projectRaidLogs ? { projectRaidLogs: overrides.projectRaidLogs } : {}),
+      ...(overrides.calendarFeeds ? { calendarFeeds: overrides.calendarFeeds } : {}),
       ...(overrides.projectStatusShares ? { projectStatusShares: overrides.projectStatusShares } : {}),
       ...(overrides.weeklyReports ? { weeklyReports: overrides.weeklyReports } : {}),
       ...(overrides.scheduleBaselines ? { scheduleBaselines: overrides.scheduleBaselines } : {}),
