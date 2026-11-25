@@ -826,6 +826,8 @@ export const workItemsMessages = {
   'workItems.agentRuns.stalledHint': 'No activity within the lease. Check on the agent and release the run if needed.',
   'workItems.agentRuns.resumed': 'Resumed',
   'workItems.agentRuns.resumedHint': 'The assignee’s agent resumed the Work Item after the previous run.',
+  'workItems.agentRuns.startedByCredential': 'Started with',
+  'workItems.agentRuns.startedByInstance': 'Agent instance',
   'workItems.agentRuns.usageTotal': 'Tokens for this task',
   'workItems.agentRuns.usageTokens': 'Input {input} · output {output} · cache read {cacheRead} · cache write {cacheCreation}',
   'workItems.agentRuns.usageCompact': '{tokens} tokens',

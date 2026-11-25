@@ -270,7 +270,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       return api.getRun(runId)
     },
     async agentSettings() {
-      return { schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {} }
+      return { schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, acceptNewRuns: true, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {} }
     },
     async acceptanceCriteria() { return [] },
     async effort() { return undefined },
@@ -296,7 +296,7 @@ describe('agent task lifecycle', () => {
     const { service, records } = fixture(rows, {
       async agentSettings() {
         return {
-          schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
+          schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, acceptNewRuns: true,
           readyStatusIds: [], resumableStatusIds: ['coding'], requireAcceptanceCriteria: false, projectBriefs: {},
         }
       },
@@ -336,6 +336,19 @@ describe('agent task lifecycle', () => {
     expect((await service.resume('paused', 2, '00000000-0000-4000-8000-000000000403')).resumedFromRun?.runId).toBe(started.run.runId)
   })
 
+  test('offers no new work while the Team does not accept new runs, but keeps reporting the run it holds', async () => {
+    let acceptNewRuns = false
+    const settings = fixture().api.agentSettings
+    const { service } = fixture([task('held', { priority: 'high' }), task('fresh', { priority: 'low' })], {
+      async agentSettings() { return { ...(await settings()), acceptNewRuns } },
+    })
+    expect(await service.next({})).toMatchObject({ action: 'none', task: null, acceptingNewRuns: false })
+    acceptNewRuns = true
+    await service.transition('held', 1, 'review', 'start', '00000000-0000-4000-8000-000000000411')
+    acceptNewRuns = false
+    expect(await service.next({})).toMatchObject({ action: 'in_progress', task: { id: 'held' } })
+  })
+
   test('does not offer started tasks whose newest run failed or that are outside the resumable statuses', async () => {
     const rows = [
       task('failed', { priority: 'high' }), task('review', { priority: 'high' }), task('waiting', { priority: 'high' }),
@@ -344,7 +357,7 @@ describe('agent task lifecycle', () => {
     const { service, records, api } = fixture(rows, {
       async agentSettings() {
         return {
-          schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
+          schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, acceptNewRuns: true,
           readyStatusIds: [], resumableStatusIds: ['coding'], requireAcceptanceCriteria: false, projectBriefs: {},
         }
       },
@@ -395,7 +408,7 @@ describe('agent task lifecycle', () => {
     const { service, api } = fixture([...stuck, task('fresh', { priority: 'low' })], {
       async agentSettings() {
         return {
-          schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
+          schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, acceptNewRuns: true,
           readyStatusIds: [], resumableStatusIds: ['coding'], requireAcceptanceCriteria: false, projectBriefs: {},
         }
       },
@@ -451,7 +464,7 @@ describe('agent task lifecycle', () => {
 
   test('offers only tasks in a ready status and returns the Team and Project briefs', async () => {
     const settings = {
-      schemaVersion: 1 as const, teamId: 'team', revision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
+      schemaVersion: 1 as const, teamId: 'team', revision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, acceptNewRuns: true,
       readyStatusIds: ['ready'], resumableStatusIds: [], requireAcceptanceCriteria: false, brief: 'Run bun test.', projectBriefs: { web: 'Add a story.' },
     }
     const rows = [task('todo-first', { priority: 'high' }), task('ready-later', { workflowStatusId: 'ready', priority: 'low' })]
@@ -506,7 +519,7 @@ describe('agent task lifecycle', () => {
 
   test('skips tasks without acceptance criteria when the Team requires them and marks criteria by ID', async () => {
     const settings = {
-      schemaVersion: 1 as const, teamId: 'team', revision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
+      schemaVersion: 1 as const, teamId: 'team', revision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, acceptNewRuns: true,
       readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance', projectBriefs: {},
     }
     const criteria = [

@@ -3,7 +3,13 @@ import { useMemo, useState } from 'react'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { Locale } from '../../shared/i18n/i18n'
 import { releaseAgentRun } from '../api/agentRuns'
-import { readAgentRunDisplayState, splitAgentRuns, type AgentRunDisplayState } from '../model/agentRunDisplay'
+import {
+  formatAgentRunCredential,
+  readAgentRunDisplayState,
+  shortenAgentInstanceHash,
+  splitAgentRuns,
+  type AgentRunDisplayState,
+} from '../model/agentRunDisplay'
 import { applyAgentRunToHistory, useWorkItemAgentRuns } from '../queries/useWorkItemAgentRuns'
 import { createWorkItemAgentRunsLabels, type WorkItemAgentRunsLabels } from './agentRunLabels'
 
@@ -194,6 +200,12 @@ export function WorkItemAgentRunsPanel({
             <AgentRunTime label={labels.startedAt} value={formatDateTime(active.startedAt)} />
             <AgentRunTime label={labels.lastActivity} value={formatDateTime(active.lastHeartbeatAt)} />
             <AgentRunTime label={labels.leaseExpiresAt} value={formatDateTime(active.leaseExpiresAt)} />
+            {active.startedBy ? (
+              <>
+                <AgentRunTime label={labels.startedByCredential} value={formatAgentRunCredential(active.startedBy)} />
+                <AgentRunTime label={labels.startedByInstance} value={shortenAgentInstanceHash(active.startedBy.instanceIdHash)} />
+              </>
+            ) : null}
           </dl>
           {active.usage ? (
             <p className="text-xs font-medium text-[var(--workbench-muted)]" data-testid="agent-run-usage">{labels.formatUsageCompact(active.usage)}</p>
@@ -219,6 +231,11 @@ export function WorkItemAgentRunsPanel({
                   {run.finishedAt ? ` – ${formatDateTime(run.finishedAt)}` : ''}
                 </span>
                 {run.usage ? <span className="whitespace-nowrap" data-testid="agent-run-usage">{labels.formatUsageCompact(run.usage)}</span> : null}
+                {run.startedBy ? (
+                  <span className="truncate" data-testid="agent-run-started-by" title={run.startedBy.instanceIdHash}>
+                    {`${labels.startedByCredential}: ${formatAgentRunCredential(run.startedBy)}`}
+                  </span>
+                ) : null}
               </li>
             ))}
           </ol>

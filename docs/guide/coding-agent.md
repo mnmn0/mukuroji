@@ -147,6 +147,7 @@ Claude Code の OpenTelemetry を Mukuroji に送るよう設定すると、タ�
 - 未解決のブロッカーがある
 - 受け入れ条件が必須なのに書かれていない
 - 別の Agent Run がすでに動いている
+- Team の管理者が新しい Agent Run の受付を止めている（エージェント設定の「新しい Agent Run を受け付ける」が off）
 
 ## Factory board
 

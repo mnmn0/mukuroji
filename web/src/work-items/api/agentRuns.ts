@@ -9,6 +9,7 @@ import {
   type AgentRunOutcome,
   type AgentRunReport,
   type AgentRunRuntime,
+  type AgentRunStartedBy,
   type AgentRunUsage,
   type AgentRunVerification,
   type AgentRunView,
@@ -494,6 +495,8 @@ function readAgentRunView(value: unknown): AgentRunView | undefined {
   const resumedFromRunId = value.resumedFromRunId === undefined ? undefined : text('resumedFromRunId')
   const usage = value.usage === undefined ? undefined : readAgentRunUsage(value.usage)
   if (value.usage !== undefined && usage === undefined) return undefined
+  const startedBy = value.startedBy === undefined ? undefined : readAgentRunStartedBy(value.startedBy)
+  if (value.startedBy !== undefined && startedBy === undefined) return undefined
   if (
     value.schemaVersion !== 1 || !runId || !teamId || !workItemId || !assigneeUserId || !agentName ||
     !runtime || !runtimes.has(runtime) || !state || (outcome !== undefined && !outcomes.has(outcome)) ||
@@ -527,7 +530,27 @@ function readAgentRunView(value: unknown): AgentRunView | undefined {
     canRelease: value.canRelease,
     ...(resumedFromRunId === undefined ? {} : { resumedFromRunId }),
     ...(usage === undefined ? {} : { usage }),
+    ...(startedBy === undefined ? {} : { startedBy }),
   }
+}
+
+/**
+ * Validates the credential and instance that started a run, which only Team managers receive.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The starter, or undefined when the shape is not supported.
+ */
+function readAgentRunStartedBy(value: unknown): AgentRunStartedBy | undefined {
+  if (!isRecord(value)) return undefined
+  const { credentialId, credentialName, instanceIdHash } = value
+  if (
+    typeof credentialId !== 'string' || credentialId === '' ||
+    (credentialName !== undefined && (typeof credentialName !== 'string' || credentialName === '')) ||
+    typeof instanceIdHash !== 'string' || instanceIdHash === ''
+  ) {
+    return undefined
+  }
+  return { credentialId, ...(credentialName === undefined ? {} : { credentialName }), instanceIdHash }
 }
 
 /**

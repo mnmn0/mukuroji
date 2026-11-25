@@ -1,7 +1,12 @@
 import type { AgentRunReport, AgentRunView, FactoryBoardItem, FactoryBoardLane, TeamAgentRunBoardResponse } from '@mukuroji/contracts'
 import { useCallback, useId, useRef, useState, type MouseEvent } from 'react'
 import { ChevronIcon, ClockIcon, ExternalLinkIcon } from '../../../shared/ui/icons'
-import { readAgentRunDisplayState, type AgentRunDisplayState } from '../../../work-items/model/agentRunDisplay'
+import {
+  formatAgentRunCredential,
+  readAgentRunDisplayState,
+  shortenAgentInstanceHash,
+  type AgentRunDisplayState,
+} from '../../../work-items/model/agentRunDisplay'
 import { AgentRunReportChips } from '../../../work-items/ui/AgentRunReportChips'
 import {
   FACTORY_BOARD_FILTER_ALL,
@@ -826,6 +831,12 @@ function FactoryBoardDetail({ formatDateTime, item, labels, lane, now, onNavigat
             {run.state === 'active'
               ? <DetailField label={labels.runs.leaseExpiresAt} value={formatDateTime(run.leaseExpiresAt)} />
               : run.finishedAt ? <DetailField label={labels.runs.finishedAt} value={formatDateTime(run.finishedAt)} /> : null}
+            {run.startedBy ? (
+              <>
+                <DetailField label={labels.runs.startedByCredential} value={formatAgentRunCredential(run.startedBy)} />
+                <DetailField label={labels.runs.startedByInstance} value={shortenAgentInstanceHash(run.startedBy.instanceIdHash)} />
+              </>
+            ) : null}
           </dl>
           {run.state === 'active' && readLeaseMinutesRemaining(run.leaseExpiresAt, now) <= 0 ? (
             <p className="text-xs font-semibold text-[var(--workbench-muted)]">{labels.runs.stalledHint}</p>

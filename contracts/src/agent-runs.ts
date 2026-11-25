@@ -131,6 +131,18 @@ export type AgentRunView = AgentRun & {
    * arrived for the run's member and instance while it was active.
    */
   usage?: AgentRunUsage
+  /** Credential and agent instance that started the run; present only for Team managers. */
+  startedBy?: AgentRunStartedBy
+}
+
+/** Credential and agent instance that started a run, shown to Team managers. */
+export type AgentRunStartedBy = {
+  /** Credential the run was started with. */
+  credentialId: string
+  /** Name of the API key, when the credential is one that still exists. */
+  credentialName?: string
+  /** SHA-256 hash of the agent instance ID; the raw ID is never stored. */
+  instanceIdHash: string
 }
 
 /** Event name of the Claude Code OpenTelemetry log record that carries one model request's usage. */
@@ -443,6 +455,11 @@ export type AgentSettings = {
   revision: number
   /** Lease length in minutes for new runs. */
   leaseMinutes: number
+  /**
+   * Whether agents may start, resume, or take over runs. While false, those calls fail with
+   * `not_ready`; active runs keep going until they finish or are released.
+   */
+  acceptNewRuns: boolean
   /** Whether another instance of the same assignee may take over a stalled run. */
   allowTakeoverAfterLeaseExpiry: boolean
   /**
@@ -493,6 +510,8 @@ export type AgentContext = {
   teamId: string
   /** Agent settings revision these values were read from. */
   revision: number
+  /** Whether the Team accepts new Agent Runs; while false, start, resume, and take over fail with `not_ready`. */
+  acceptNewRuns: boolean
   /** Backlog or unstarted workflow status IDs an agent may start from; empty means any. */
   readyStatusIds: string[]
   /** Started workflow status IDs an agent may resume from; empty means any started status. */
@@ -531,6 +550,8 @@ export type UpdateAgentSettingsRequest = {
   fileFailedRunsToTriage?: boolean
   /** Whether stalled runs are filed to Triage; omitted means false. */
   fileStalledRunsToTriage?: boolean
+  /** Whether agents may start, resume, or take over runs; omitted means true. */
+  acceptNewRuns?: boolean
 }
 
 /** Newest Agent Runs of one Work Item for the Web application. */
