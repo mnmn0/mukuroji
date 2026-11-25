@@ -39,6 +39,7 @@ describe('Agent settings draft', () => {
       fileFailedRunsToTriage: true,
       fileStalledRunsToTriage: false,
       notifyAssigneeOfRunEvents: false,
+      acceptNewRuns: true,
     })
   })
 
@@ -60,8 +61,13 @@ describe('Agent settings draft', () => {
       fileFailedRunsToTriage: true,
       fileStalledRunsToTriage: false,
       notifyAssigneeOfRunEvents: false,
+      acceptNewRuns: true,
     })
     expect(isAgentSettingsDraftChanged(agentSettingsFixture, cleared)).toBeTrue()
+    // Turning new runs off is a change the save sends.
+    const stopped = { ...draft, acceptNewRuns: false }
+    expect(isAgentSettingsDraftChanged(agentSettingsFixture, stopped)).toBeTrue()
+    expect(createUpdateAgentSettingsRequest(stopped, 4)).toMatchObject({ acceptNewRuns: false })
     expect(isAgentSettingsDraftChanged(agentSettingsFixture, { ...draft, fileStalledRunsToTriage: true })).toBeTrue()
     expect(isAgentSettingsDraftChanged(agentSettingsFixture, { ...draft, notifyAssigneeOfRunEvents: true })).toBeTrue()
     expect(isAgentSettingsDraftChanged(agentSettingsFixture, { ...draft, resumableStatusIds: [] })).toBeTrue()

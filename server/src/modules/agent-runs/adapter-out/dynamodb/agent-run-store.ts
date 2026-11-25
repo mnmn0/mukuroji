@@ -1000,6 +1000,7 @@ export function isSameSettingsSave(saved: AgentSettings, update: ValidatedAgentS
     saved.fileFailedRunsToTriage === update.fileFailedRunsToTriage &&
     saved.fileStalledRunsToTriage === update.fileStalledRunsToTriage &&
     saved.notifyAssigneeOfRunEvents === update.notifyAssigneeOfRunEvents &&
+    saved.acceptNewRuns === update.acceptNewRuns &&
     saved.acceptanceCriteriaFieldId === update.acceptanceCriteriaFieldId &&
     saved.brief === update.brief &&
     savedProjects.length === updateProjects.length &&
@@ -1079,6 +1080,7 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
     (item.fileFailedRunsToTriage !== undefined && typeof item.fileFailedRunsToTriage !== 'boolean') ||
     (item.fileStalledRunsToTriage !== undefined && typeof item.fileStalledRunsToTriage !== 'boolean') ||
     (item.notifyAssigneeOfRunEvents !== undefined && typeof item.notifyAssigneeOfRunEvents !== 'boolean') ||
+    (item.acceptNewRuns !== undefined && typeof item.acceptNewRuns !== 'boolean') ||
     (item.acceptanceCriteriaFieldId !== undefined &&
       (typeof item.acceptanceCriteriaFieldId !== 'string' || item.acceptanceCriteriaFieldId === '')) ||
     !isRecord(projectBriefs)
@@ -1095,6 +1097,8 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
     teamId,
     revision,
     leaseMinutes,
+    // Rows saved before the switch existed accept new runs.
+    acceptNewRuns: item.acceptNewRuns !== false,
     allowTakeoverAfterLeaseExpiry: item.allowTakeoverAfterLeaseExpiry,
     readyStatusIds,
     resumableStatusIds,

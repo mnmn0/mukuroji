@@ -856,6 +856,39 @@ describe('public Agent Run service', () => {
     expect(await start('start-ready')).toMatchObject({ run: { state: 'active' } })
   })
 
+  test('refuses to start while the Team does not accept new runs, and starts again once it does', async () => {
+    const { store } = configureUnstartedAssignedWorkItem()
+    setTestAppDependencies({
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    store.state.settings.set(`${workspaceId}|core-team`, {
+      ...createDefaultAgentSettings('core-team'), revision: 1, acceptNewRuns: false, updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    })
+    const service = createCanonicalPublicAgentRunService()
+    const start = (key: string) => runWithTestAppDependencies(() => service.start(
+      credential, 'core-team', 'task-1',
+      readStartAgentRunRequest({ expectedRevision: 1, workflowStatusId: 'in-progress', runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-1' }),
+      { requestId: key, idempotencyKey: key },
+      { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    await expect(start('start-stopped')).rejects.toMatchObject({ category: 'conflict', reason: 'not_ready', pointer: '/acceptNewRuns' })
+    expect(store.state.claims.size).toBe(0)
+    expect(await runWithTestAppDependencies(() => service.getContext(credential, 'core-team'))).toMatchObject({ acceptNewRuns: false })
+    store.state.settings.set(`${workspaceId}|core-team`, {
+      ...createDefaultAgentSettings('core-team'), revision: 2, updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    })
+    expect(await start('start-accepted')).toMatchObject({ run: { state: 'active' } })
+  })
+
   test('starts only a Work Item with acceptance criteria when the Team requires them', async () => {
     const { store, projectOptions } = configureUnstartedAssignedWorkItem()
     projectOptions.configurationCustomFields = [{ id: 'acceptance', name: 'Acceptance', type: 'text', required: false, sortOrder: 0 }]
@@ -1087,6 +1120,11 @@ describe('public Agent Run service', () => {
     }
     await expect(takeOverDuring({ ...enabled, revision: 2, allowTakeoverAfterLeaseExpiry: false }, 'disabled'))
       .rejects.toMatchObject({ reason: 'agent_run_takeover_disabled' })
+    // Stopping new Runs is reported first, even when take over was also turned off.
+    await expect(takeOverDuring(
+      { ...enabled, revision: 2, acceptNewRuns: false, allowTakeoverAfterLeaseExpiry: false },
+      'stopped',
+    )).rejects.toMatchObject({ reason: 'not_ready', pointer: '/acceptNewRuns' })
     await expect(takeOverDuring({ ...enabled, revision: 2, leaseMinutes: 45 }, 'changed'))
       .rejects.toMatchObject({ category: 'conflict' })
     // A cancellation with nothing changed, such as an identical request's receipt, stays retryable.
@@ -2268,6 +2306,24 @@ describe('Web Agent Run routes', () => {
     expect(text.match(/"commentId"/g)?.length ?? 0).toBeLessThan(30)
   })
 
+  test('shows the credential and instance that started a run to Team managers only', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'manager' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    const managed = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
+    const [run] = (await managed.json()).items
+    expect(run.startedBy).toMatchObject({ credentialId: 'agent-key', instanceIdHash: held.instanceIdHash })
+    const board = await app.request('http://localhost/api/teams/core-team/agent-runs', { headers })
+    expect(JSON.stringify(await board.json())).toContain(held.instanceIdHash)
+
+    const viewer = configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'member' })
+    viewer.store.seed(held)
+    const listed = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
+    const text = await listed.text()
+    expect(text).not.toContain('startedBy')
+    expect(text).not.toContain(held.instanceIdHash)
+  })
+
   test('lists a Work Item history with release permissions and releases an active run', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
     const held = createHeldRun('task-1')
@@ -2450,7 +2506,7 @@ describe('Web Agent Run routes', () => {
     expect(await read.json()).toMatchObject({ brief: 'Team brief', projectBriefs: { refero: 'Visible brief' } })
     const service = createCanonicalPublicAgentRunService()
     expect((await runWithTestAppDependencies(() => service.getContext(credential, 'core-team')))).toEqual({
-      schemaVersion: 1, teamId: 'core-team', revision: 1, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false,
+      schemaVersion: 1, teamId: 'core-team', revision: 1, acceptNewRuns: true, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false,
       brief: 'Team brief', projectBriefs: { refero: 'Visible brief' },
     })
     // The closed run-settings schema keeps its original fields.

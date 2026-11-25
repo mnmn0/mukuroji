@@ -121,6 +121,7 @@ export function AgentSettingsPanel({
   const validation = draft ? validateAgentSettingsDraft(draft) : undefined
   const disabled = readOnly || isSaving
   const leaseHelpId = `${idPrefix}-lease-help`
+  const intakeHelpId = `${idPrefix}-intake-help`
   const leaseErrorId = `${idPrefix}-lease-error`
 
   /**
@@ -209,6 +210,23 @@ export function AgentSettingsPanel({
               </button>
             </div>
           ) : null}
+
+          <fieldset className="grid gap-3 border-t border-[var(--workbench-border)] px-5 py-6 sm:px-7" disabled={disabled}>
+            <legend className="text-base font-semibold text-[var(--workbench-text)]">{t('agentSettings.intake.title')}</legend>
+            <label className="flex min-h-[44px] items-center gap-3 text-sm font-semibold text-[var(--workbench-text)]">
+              <input
+                aria-describedby={intakeHelpId}
+                checked={draft.acceptNewRuns}
+                className="h-5 w-5 accent-[var(--workbench-primary)]"
+                type="checkbox"
+                onChange={(event) => onDraftChange({ ...draft, acceptNewRuns: event.target.checked })}
+              />
+              {t('agentSettings.intake.accept')}
+            </label>
+            <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]" id={intakeHelpId}>
+              {t('agentSettings.intake.help')}
+            </p>
+          </fieldset>
 
           <fieldset className="grid gap-4 border-t border-[var(--workbench-border)] px-5 py-6 sm:px-7" disabled={disabled}>
             <legend className="text-base font-semibold text-[var(--workbench-text)]">{t('agentSettings.lease.title')}</legend>

@@ -585,6 +585,7 @@ export function createDefaultAgentSettings(teamId: string): AgentSettings {
     teamId,
     revision: 0,
     leaseMinutes: AGENT_RUN_DEFAULT_LEASE_MINUTES,
+    acceptNewRuns: true,
     allowTakeoverAfterLeaseExpiry: false,
     readyStatusIds: [],
     resumableStatusIds: [],
@@ -699,7 +700,7 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
     [
       'expectedRevision', 'leaseMinutes', 'allowTakeoverAfterLeaseExpiry', 'readyStatusIds', 'resumableStatusIds',
       'requireAcceptanceCriteria', 'acceptanceCriteriaFieldId', 'brief', 'projectBriefs',
-      'fileFailedRunsToTriage', 'fileStalledRunsToTriage', 'notifyAssigneeOfRunEvents',
+      'fileFailedRunsToTriage', 'fileStalledRunsToTriage', 'notifyAssigneeOfRunEvents', 'acceptNewRuns',
     ],
     'Agent settings',
   )
@@ -726,7 +727,7 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
       pointer: '/requireAcceptanceCriteria',
     })
   }
-  for (const field of ['fileFailedRunsToTriage', 'fileStalledRunsToTriage', 'notifyAssigneeOfRunEvents'] as const) {
+  for (const field of ['fileFailedRunsToTriage', 'fileStalledRunsToTriage', 'notifyAssigneeOfRunEvents', 'acceptNewRuns'] as const) {
     if (value[field] !== undefined && typeof value[field] !== 'boolean') {
       throw new AgentRunError('validation_failed', `${field} must be a boolean.`, { pointer: `/${field}` })
     }
@@ -750,6 +751,7 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
     fileFailedRunsToTriage: value.fileFailedRunsToTriage === true,
     fileStalledRunsToTriage: value.fileStalledRunsToTriage === true,
     notifyAssigneeOfRunEvents: value.notifyAssigneeOfRunEvents === true,
+    acceptNewRuns: value.acceptNewRuns !== false,
   }
 }
 
@@ -801,6 +803,8 @@ export type ValidatedAgentSettingsUpdate = UpdateAgentSettingsRequest & {
   fileStalledRunsToTriage: boolean
   /** Whether the assignee is notified of blocker and handoff reports, failed finishes, and stalls. */
   notifyAssigneeOfRunEvents: boolean
+  /** Whether agents may start, resume, or take over runs. */
+  acceptNewRuns: boolean
   /**
    * Projects whose briefs were kept from the saved settings because the editor cannot see them;
    * a retry is not compared on these briefs.
@@ -828,6 +832,7 @@ export function createSavedAgentSettings(
     teamId,
     revision: update.expectedRevision + 1,
     leaseMinutes: update.leaseMinutes,
+    acceptNewRuns: update.acceptNewRuns,
     allowTakeoverAfterLeaseExpiry: update.allowTakeoverAfterLeaseExpiry,
     readyStatusIds: [...update.readyStatusIds],
     resumableStatusIds: [...update.resumableStatusIds],

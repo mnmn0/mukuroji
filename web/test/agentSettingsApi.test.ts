@@ -58,7 +58,12 @@ describe('Agent settings response validation', () => {
     }
     // A server older than Triage filing omits the flags, which read as off.
     // A server older than resuming omits the list too, which reads as any started status.
-    expect(readAgentSettings(defaults)).toEqual({ ...defaults, resumableStatusIds: [], fileFailedRunsToTriage: false, fileStalledRunsToTriage: false, notifyAssigneeOfRunEvents: false })
+    // A server older than the intake switch omits it, which reads as accepting new runs.
+    expect(readAgentSettings(defaults)).toEqual({
+      ...defaults, acceptNewRuns: true, resumableStatusIds: [], fileFailedRunsToTriage: false, fileStalledRunsToTriage: false, notifyAssigneeOfRunEvents: false,
+    })
+    expect(readAgentSettings({ ...defaults, acceptNewRuns: false })?.acceptNewRuns).toBeFalse()
+    expect(readAgentSettings({ ...defaults, acceptNewRuns: 'no' })).toBeUndefined()
     expect(readAgentSettings({ ...defaults, fileFailedRunsToTriage: 'yes' })).toBeUndefined()
   })
 
