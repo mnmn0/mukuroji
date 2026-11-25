@@ -1011,6 +1011,43 @@ describe('file proofing domain', () => {
     }
   })
 
+  test('decides the File type by extension when the browser reports no media type', async () => {
+    const { client, session } = await createAvailableFile()
+    for (const [fileName, stored] of [
+      ['wbs.md', 'text/markdown'],
+      ['macro.xlsm', 'application/vnd.ms-excel.sheet.macroenabled.12'],
+      ['flow.drawio', 'application/vnd.jgraph.mxfile'],
+    ]) {
+      const created = await client.createUpload(scope, manager, { contentType: '', fileName, sizeBytes: 100 })
+      expect(created.version.contentType).toBe(stored)
+      expect(created.upload.headers['content-type']).toBe(stored)
+
+      const replacement = await client.createVersionUpload(
+        scope,
+        manager,
+        session.file.id,
+        { contentType: '', fileName, sizeBytes: 100 },
+        createAuditContext(`replace-${fileName}`),
+      )
+      expect(replacement.version.contentType).toBe(stored)
+      expect(replacement.upload.headers['content-type']).toBe(stored)
+    }
+
+    for (const fileName of ['setup.exe', 'deploy.sh', 'page.html']) {
+      await expect(client.createUpload(scope, manager, { contentType: '', fileName, sizeBytes: 100 }))
+        .rejects.toMatchObject({ code: 'FileTypeNotAllowed', status: 415, fileTypeRejection: { reason: 'dangerous' } })
+      await expect(client.createVersionUpload(
+        scope,
+        manager,
+        session.file.id,
+        { contentType: '', fileName, sizeBytes: 100 },
+        createAuditContext(`replace-${fileName}`),
+      )).rejects.toMatchObject({ code: 'FileTypeNotAllowed', status: 415, fileTypeRejection: { reason: 'dangerous' } })
+    }
+    await expect(client.createUpload(scope, manager, { contentType: '', fileName: 'README', sizeBytes: 100 }))
+      .rejects.toMatchObject({ code: 'FileTypeNotAllowed', status: 415, fileTypeRejection: { reason: 'unrecognized' } })
+  })
+
   test('applies the Workspace File types but never accepts a dangerous type', async () => {
     const reads: string[] = []
     const client = new DynamoDbFileProofingClient(

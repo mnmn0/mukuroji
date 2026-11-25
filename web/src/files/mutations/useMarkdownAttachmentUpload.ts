@@ -1,4 +1,4 @@
-import { useCallback, useState, type ClipboardEvent, type DragEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type DragEvent } from 'react'
 import type { FileTypeRejection } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
@@ -89,6 +89,15 @@ export function useMarkdownAttachmentUpload({
   const [errorKey, setErrorKey] = useState<MessageKey>()
   const [fileTypeRejection, setFileTypeRejection] = useState<FileTypeRejection>()
   const canAttach = Boolean(controller?.scope?.kind === 'work-item' && controller.capabilities.canUpload) && !disabled
+  const scopeKey = controller?.scope ? JSON.stringify(controller.scope) : ''
+  // The scope shown now; an upload started for another Work Item must not report into this one.
+  const currentScopeKeyRef = useRef(scopeKey)
+
+  useEffect(() => {
+    currentScopeKeyRef.current = scopeKey
+    setErrorKey(undefined)
+    setFileTypeRejection(undefined)
+  }, [scopeKey])
 
   const attachFiles = useCallback(async (files: readonly File[]) => {
     if (!controller || !canAttach || files.length === 0 || isUploading) return
@@ -104,6 +113,7 @@ export function useMarkdownAttachmentUpload({
     if (rejection) setErrorKey(rejection)
     if (accepted.length === 0) return
 
+    const operationScopeKey = scopeKey
     setIsUploading(true)
     onUploadingChange?.(true)
     try {
@@ -114,6 +124,7 @@ export function useMarkdownAttachmentUpload({
           rejected = rejection
         },
       })
+      if (currentScopeKeyRef.current !== operationScopeKey) return
       const messages = readMarkdownAttachmentBatchMessages(succeeded, rejected)
       if (messages.fileTypeRejection) setFileTypeRejection(messages.fileTypeRejection)
       if (messages.errorKey) setErrorKey(messages.errorKey)
@@ -121,7 +132,7 @@ export function useMarkdownAttachmentUpload({
       setIsUploading(false)
       onUploadingChange?.(false)
     }
-  }, [canAttach, controller, isUploading, onInsert, onUploadingChange])
+  }, [canAttach, controller, isUploading, onInsert, onUploadingChange, scopeKey])
 
   const handlePaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
     const files = Array.from(event.clipboardData.files)

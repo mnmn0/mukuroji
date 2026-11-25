@@ -3055,9 +3055,20 @@ function normalizeFileName(value: unknown) {
   return fileName
 }
 
-/** MIME type parameter を除去して小文字化します。 */
+/**
+ * Removes MIME type parameters and lowercases the essence. Browsers report an empty media type for
+ * files they do not know (for example `.md`, `.xlsm`, or `.drawio`), so an empty string is kept and
+ * the File type is decided by the extension.
+ *
+ * @param value - Untrusted media type from the upload request.
+ * @returns Lowercase `type/subtype`, or an empty string when the browser reported none.
+ * @throws FileProofingError `400 InvalidFileProofingInput` when the value is not a string.
+ */
 function normalizeContentType(value: unknown) {
-  return normalizeFileContentType(requireText(value, 'File media type'))
+  if (typeof value !== 'string') {
+    throw new FileProofingError(400, 'InvalidFileProofingInput', 'File media type is required.')
+  }
+  return normalizeFileContentType(value)
 }
 
 /** MIME type を browser preview 種別へ変換します。 */

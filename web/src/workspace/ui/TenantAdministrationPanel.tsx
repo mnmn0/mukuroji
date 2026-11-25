@@ -459,7 +459,7 @@ export function TenantAdministrationPanel({
             t={t}
           />
           <FileTypeFields
-            disabled={tenantLifecycleLocked}
+            disabled={isSaving || tenantLifecycleLocked}
             onChange={(next) => onChangeProfile({ ...profile, fileTypes: next })}
             settings={profile.fileTypes ?? DEFAULT_WORKSPACE_FILE_TYPE_SETTINGS}
             t={t}
