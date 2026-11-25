@@ -7,6 +7,7 @@ import {
   createProjectCharterFormValues,
   createProjectCharterPersonCandidates,
   createProjectCharterUpdateInput,
+  newerProjectCharterState,
 } from '../src/projects/model/projectCharterView'
 import {
   createProjectDirectoryRows,
@@ -298,5 +299,16 @@ describe('ProjectCharterPanel', () => {
       { id: 'ext@example.com', email: 'ext@example.com' },
       { id: 'suzuki@example.com', email: 'suzuki@example.com', name: '鈴木 次郎' },
     ])
+  })
+})
+
+describe('newerProjectCharterState', () => {
+  test('keeps a newer cached charter when an older save response arrives late', () => {
+    const older = createState({ revision: 2 })
+    const newer = createState({ revision: 3 })
+
+    expect(newerProjectCharterState(newer, older)).toBe(newer)
+    expect(newerProjectCharterState(older, newer)).toBe(newer)
+    expect(newerProjectCharterState(undefined, older)).toBe(older)
   })
 })

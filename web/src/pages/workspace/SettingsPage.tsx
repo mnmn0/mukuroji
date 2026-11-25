@@ -5,6 +5,7 @@ import { AutomationManagementPanelContainer } from '../../automation/ui/Automati
 import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platform/ui/DeveloperPlatformSettingsPanelContainer'
 import { AccountSecurityPanelContainer } from '../../features/account-security/ui/AccountSecurityPanel'
 import { AuditLogPanelContainer } from '../../features/audit-log/ui/AuditLogPanelContainer'
+import { CalendarFeedsPanelContainer } from '../../features/calendar-feeds/ui/CalendarFeedsPanelContainer'
 import { resolveBrowserTimeZone } from '../../features/time-tracking/model/timePeriod'
 import { WorkspaceTimePeriodContainer } from '../../features/time-tracking/ui/WorkspaceTimePeriodContainer'
 import { AgentSettingsPanelContainer } from '../../features/agent-settings/ui/AgentSettingsPanelContainer'
@@ -128,6 +129,13 @@ export function SettingsPage() {
                 }}
               />
             )}
+            calendarFeedsSection={workspace.accessToken ? (
+              <CalendarFeedsPanelContainer
+                accessToken={workspace.accessToken}
+                locale={workspace.locale}
+                teams={workspace.teams}
+              />
+            ) : undefined}
             fontSizePreference={workspace.fontSizePreference}
             themePreference={workspace.themePreference}
             timeZone={workspace.timeZone}

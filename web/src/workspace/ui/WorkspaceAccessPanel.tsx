@@ -34,11 +34,15 @@ import {
 } from '../api'
 import { useWorkspaceAccess } from '../queries/useWorkspaceAccess'
 import { useWorkspaceMembersSignInSecurity } from '../queries/useWorkspaceMembersSignInSecurity'
+import { useWorkspaceMemberRoleAssignments } from '../queries/useWorkspaceMemberRoleAssignments'
+import type { MemberRoleAssignmentLabel } from '../model/memberRoleAssignments'
+import { EnterpriseSecurityApiError } from '../../security/api'
 import {
   shouldCloseCredentialResetDialog,
   useWorkspaceMemberCredentialReset,
 } from '../mutations/useWorkspaceMemberCredentialReset'
 import { useWorkspaceMemberRename } from '../mutations/useWorkspaceMemberRename'
+import { useWorkspaceMemberSystemAdministratorChange } from '../mutations/useWorkspaceMemberSystemAdministratorChange'
 import {
   createWorkspaceAccessMutationSession,
   getBulkInvitationRunner,
@@ -54,6 +58,18 @@ import {
 } from '../model/memberDirectory'
 import { WorkspaceBulkInvitePanel } from './WorkspaceBulkInvitePanel'
 import { MemberWorkHandoverDialogContainer } from './MemberWorkHandoverDialogContainer'
+
+/**
+ * Tells whether a failed direct-role load is worth reporting. A caller without security access
+ * is refused with 403, which only means the roles are not shown to them.
+ *
+ * @param error - Error of the direct-role query, if any.
+ * @returns Whether to show the load error with a retry.
+ */
+function isMemberRoleAssignmentsLoadFailure(error: unknown) {
+  if (!error) return false
+  return !(error instanceof EnterpriseSecurityApiError && error.status === 403)
+}
 
 function shouldRetainWorkspaceMutationContext(error: unknown) {
   return !(error instanceof WorkspaceAccessApiError)
@@ -167,6 +183,30 @@ type WorkspaceAccessPanelProps = {
     action: WorkspaceMemberCredentialAction,
   ) => Promise<void>
   /**
+   * Member keys of the system administrators, for owners and admins. Absent while unknown.
+   */
+  systemAdministratorMemberKeys?: string[]
+  /**
+   * Whether the API could not read the system administrators; the retry reloads the sign-in security.
+   */
+  systemAdministratorsLoadFailed?: boolean
+  /**
+   * Roles assigned directly to each member, for callers who can read the security settings.
+   */
+  memberRoleAssignments?: ReadonlyMap<string, MemberRoleAssignmentLabel[]>
+  /**
+   * Whether loading the direct roles failed for a reason other than missing security access.
+   */
+  memberRoleAssignmentsLoadFailed?: boolean
+  /**
+   * Loads the direct roles again after a failure.
+   */
+  onRetryMemberRoleAssignments?: () => void
+  /**
+   * Grants or revokes system administrator access for a member. Offered to owners only.
+   */
+  onChangeSystemAdministrator?: (memberKey: string, systemAdministrator: boolean) => Promise<void>
+  /**
    * Session used to hand a member's open Work Items to another member; absent hides the action.
    */
   memberHandover?: {
@@ -222,6 +262,20 @@ type WorkspaceAccessAction =
        * Which credential to reset.
        */
       action: WorkspaceMemberCredentialAction
+    }
+  | {
+      /**
+       * Discriminant of a system administrator grant or revoke.
+       */
+      kind: 'member-system-administrator'
+      /**
+       * Member to change.
+       */
+      member: WorkspaceMember
+      /**
+       * Whether the member becomes a system administrator.
+       */
+      systemAdministrator: boolean
     }
   | {
       /**
@@ -338,6 +392,15 @@ export function WorkspaceAccessPanelContainer({
     access?.capabilities.canManageMembers === true,
   )
 
+  const {
+    data: memberRoleAssignments,
+    error: memberRoleAssignmentsError,
+    mutate: mutateMemberRoleAssignments,
+  } = useWorkspaceMemberRoleAssignments(
+    mutationSession.accessToken,
+    access?.capabilities.canManageMembers === true,
+  )
+
   const administratorKey = access?.currentMember.memberKey
   const credentialResetRunner = useMemo(
     () => administratorKey === undefined
@@ -352,6 +415,11 @@ export function WorkspaceAccessPanelContainer({
     [administratorKey],
   )
   const resetMemberCredential = useWorkspaceMemberCredentialReset({
+    accessToken: mutationSession.accessToken,
+    requestRunner: credentialResetRunner,
+    revalidateSignInSecurity: mutateSignInSecurity,
+  })
+  const changeSystemAdministrator = useWorkspaceMemberSystemAdministratorChange({
     accessToken: mutationSession.accessToken,
     requestRunner: credentialResetRunner,
     revalidateSignInSecurity: mutateSignInSecurity,
@@ -487,9 +555,17 @@ export function WorkspaceAccessPanelContainer({
         // Members reactivated or given another role change who the MFA list covers.
         void mutateSignInSecurity()
       }}
-      signInSecurity={signInSecurity}
+      signInSecurity={signInSecurity?.members}
       signInSecurityLoadFailed={Boolean(signInSecurityError)}
       onRetrySignInSecurity={() => void mutateSignInSecurity()}
+      systemAdministratorMemberKeys={signInSecurity?.systemAdministratorMemberKeys}
+      systemAdministratorsLoadFailed={signInSecurity?.systemAdministratorsLoadFailed}
+      memberRoleAssignments={memberRoleAssignments}
+      memberRoleAssignmentsLoadFailed={isMemberRoleAssignmentsLoadFailure(memberRoleAssignmentsError)}
+      onRetryMemberRoleAssignments={() => void mutateMemberRoleAssignments()}
+      onChangeSystemAdministrator={access?.currentMember.role === 'owner'
+        ? changeSystemAdministrator
+        : undefined}
       {...(workspaceId ? { memberHandover: { accessToken, workspaceId } } : {})}
     />
   )
@@ -516,6 +592,12 @@ export function WorkspaceAccessPanel({
   signInSecurity,
   signInSecurityLoadFailed = false,
   onRetrySignInSecurity,
+  systemAdministratorMemberKeys,
+  systemAdministratorsLoadFailed = false,
+  memberRoleAssignments,
+  memberRoleAssignmentsLoadFailed = false,
+  onRetryMemberRoleAssignments,
+  onChangeSystemAdministrator,
   memberHandover,
 }: WorkspaceAccessPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
@@ -614,6 +696,25 @@ export function WorkspaceAccessPanel({
 
     setIsActionBusy(true)
     setOperationErrorMessage(undefined)
+
+    if (action.kind === 'member-system-administrator') {
+      try {
+        await onChangeSystemAdministrator?.(action.member.memberKey, action.systemAdministrator)
+        setAction(undefined)
+        setNoticeMessage(
+          t(action.systemAdministrator
+            ? 'memberSecurity.systemAdmin.granted'
+            : 'memberSecurity.systemAdmin.revoked')
+            .replace('{name}', action.member.name?.trim() || action.member.email),
+        )
+      } catch (error) {
+        if (shouldCloseCredentialResetDialog(error)) setAction(undefined)
+        setOperationErrorMessage(resolveMemberCredentialErrorMessage(error, t))
+      } finally {
+        setIsActionBusy(false)
+      }
+      return
+    }
 
     if (action.kind === 'member-credential') {
       try {
@@ -825,11 +926,18 @@ export function WorkspaceAccessPanel({
           access={access}
           canResetCredentials={Boolean(onResetMemberCredential)}
           locale={locale}
+          canChangeSystemAdministrator={Boolean(onChangeSystemAdministrator) &&
+            access.currentMember.role === 'owner'}
+          memberRoleAssignments={memberRoleAssignments}
+          memberRoleAssignmentsLoadFailed={memberRoleAssignmentsLoadFailed}
           signInSecurity={signInSecurity}
           signInSecurityLoadFailed={signInSecurityLoadFailed}
+          systemAdministratorMemberKeys={systemAdministratorMemberKeys}
+          systemAdministratorsLoadFailed={systemAdministratorsLoadFailed}
           t={t}
           onRenameMember={onRenameMember}
           onRequestAction={requestAction}
+          onRetryMemberRoleAssignments={onRetryMemberRoleAssignments}
           onRetrySignInSecurity={onRetrySignInSecurity}
           {...(memberHandover ? { onOpenHandover: setHandoverMember } : {})}
         />
@@ -909,28 +1017,43 @@ function AccessLedgerMetric({
 
 function WorkspaceMemberLedger({
   access,
+  canChangeSystemAdministrator,
   canResetCredentials,
   locale,
+  memberRoleAssignments,
+  memberRoleAssignmentsLoadFailed,
   signInSecurity,
   signInSecurityLoadFailed,
+  systemAdministratorMemberKeys,
+  systemAdministratorsLoadFailed,
   t,
   onRenameMember,
   onRequestAction,
+  onRetryMemberRoleAssignments,
   onRetrySignInSecurity,
   onOpenHandover,
 }: {
   access: WorkspaceAccess
+  canChangeSystemAdministrator: boolean
   canResetCredentials: boolean
   locale: Locale
+  memberRoleAssignments?: ReadonlyMap<string, MemberRoleAssignmentLabel[]>
+  memberRoleAssignmentsLoadFailed: boolean
   signInSecurity?: WorkspaceMemberSignInSecurity[]
   signInSecurityLoadFailed: boolean
+  systemAdministratorMemberKeys?: string[]
+  systemAdministratorsLoadFailed: boolean
   t: (key: MessageKey) => string
   onRenameMember?: (memberKey: string, name: string | undefined, expectedVersion: number) => Promise<void>
   onRequestAction: (action: WorkspaceAccessAction) => void
+  onRetryMemberRoleAssignments?: () => void
   onRetrySignInSecurity?: () => void
   /** Opens the handover of a member's open Work Items; absent hides the action. */
   onOpenHandover?: (member: WorkspaceMember) => void
 }) {
+  const systemAdministrators = systemAdministratorMemberKeys === undefined
+    ? undefined
+    : new Set(systemAdministratorMemberKeys)
   const activeOwners = access.members.filter(
     (member) => member.role === 'owner' && member.status === 'active',
   )
@@ -978,6 +1101,40 @@ function WorkspaceMemberLedger({
           {t('memberSecurity.summary').replace('{count}', String(unenrolledMemberCount))}
         </p>
       ) : null}
+      {systemAdministratorsLoadFailed && !signInSecurityLoadFailed ? (
+        <div className="flex flex-wrap items-center gap-3 border-t border-[var(--workbench-border)] px-4 py-3">
+          <p className="text-sm font-semibold text-fg-red-700" role="alert">
+            {t('memberSecurity.systemAdmin.loadError')}
+          </p>
+          {onRetrySignInSecurity ? (
+            <button
+              className="workbench-button-secondary min-h-9 px-3"
+              data-testid="workspace-member-system-admin-retry"
+              type="button"
+              onClick={onRetrySignInSecurity}
+            >
+              {t('memberSecurity.retry')}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {memberRoleAssignmentsLoadFailed ? (
+        <div className="flex flex-wrap items-center gap-3 border-t border-[var(--workbench-border)] px-4 py-3">
+          <p className="text-sm font-semibold text-fg-red-700" role="alert">
+            {t('memberSecurity.roleAssignments.loadError')}
+          </p>
+          {onRetryMemberRoleAssignments ? (
+            <button
+              className="workbench-button-secondary min-h-9 px-3"
+              data-testid="workspace-member-direct-roles-retry"
+              type="button"
+              onClick={onRetryMemberRoleAssignments}
+            >
+              {t('memberSecurity.retry')}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       <div className="relative overflow-x-auto">
         <table className="w-full border-collapse text-left min-[761px]:min-w-[860px]" data-testid="workspace-member-ledger">
           <thead className="max-[760px]:sr-only">
@@ -1012,6 +1169,15 @@ function WorkspaceMemberLedger({
               const canSendPasswordReset = canResetMemberCredentials &&
                 memberSignInSecurity?.passwordReset === 'available'
               const canResetMfa = canResetMemberCredentials && memberSignInSecurity?.mfa === 'enrolled'
+              const isSystemAdministrator = member.status === 'active'
+                ? systemAdministrators?.has(member.memberKey)
+                : undefined
+              // Owners change it for others; a guest can lose it but not receive it.
+              const canToggleSystemAdministrator = canChangeSystemAdministrator &&
+                isSystemAdministrator !== undefined &&
+                !isCurrentMember &&
+                (isSystemAdministrator || member.role !== 'guest')
+              const directRoles = memberRoleAssignments?.get(member.memberKey) ?? []
 
               return (
                 <tr
@@ -1036,16 +1202,44 @@ function WorkspaceMemberLedger({
                           onSave={(name, expectedVersion) => onRenameMember(member.memberKey, name, expectedVersion)}
                         />
                       ) : null}
-                      {memberSignInSecurity ? (
-                        <span
-                          className="mt-1.5 inline-flex"
-                          data-testid={`workspace-member-mfa-${createAccessTestId(member.memberKey)}`}
-                        >
-                          <AccessStatusBadge
-                            label={t(`memberSecurity.mfa.${memberSignInSecurity.mfa}`)}
-                            tone={getMemberMfaTone(memberSignInSecurity.mfa)}
-                          />
+                      {memberSignInSecurity || isSystemAdministrator ? (
+                        <span className="mt-1.5 flex flex-wrap gap-1.5">
+                          {memberSignInSecurity ? (
+                            <span
+                              className="inline-flex"
+                              data-testid={`workspace-member-mfa-${createAccessTestId(member.memberKey)}`}
+                            >
+                              <AccessStatusBadge
+                                label={t(`memberSecurity.mfa.${memberSignInSecurity.mfa}`)}
+                                tone={getMemberMfaTone(memberSignInSecurity.mfa)}
+                              />
+                            </span>
+                          ) : null}
+                          {isSystemAdministrator ? (
+                            <span
+                              className="inline-flex"
+                              data-testid={`workspace-member-system-admin-${createAccessTestId(member.memberKey)}`}
+                            >
+                              <AccessStatusBadge label={t('memberSecurity.systemAdmin.badge')} tone="warning" />
+                            </span>
+                          ) : null}
                         </span>
+                      ) : null}
+                      {directRoles.length > 0 ? (
+                        <ul
+                          aria-label={t('memberSecurity.roleAssignments.label')}
+                          className="mt-1.5 flex flex-wrap gap-1.5"
+                          data-testid={`workspace-member-direct-roles-${createAccessTestId(member.memberKey)}`}
+                        >
+                          {directRoles.map((role) => (
+                            <li
+                              className="rounded border border-[var(--workbench-border)] px-1.5 py-0.5 text-xs font-medium text-[var(--workbench-muted)]"
+                              key={role.id}
+                            >
+                              {`${role.roleName} · ${t(`memberSecurity.roleAssignments.scope.${role.scopeType}`)}`}
+                            </li>
+                          ))}
+                        </ul>
                       ) : null}
                       <p className="mt-1 text-xs font-medium text-[var(--workbench-muted-soft)]">
                         {t('workspace.access.updatedAt').replace('{date}', formatAccessDate(member.updatedAt, locale))}
@@ -1107,6 +1301,22 @@ function WorkspaceMemberLedger({
                           onClick={() => onRequestAction({ kind: 'member-credential', member, action: 'mfa-reset' })}
                         >
                           {t('memberSecurity.action.mfaReset')}
+                        </button>
+                      ) : null}
+                      {canToggleSystemAdministrator ? (
+                        <button
+                          className="workbench-button-secondary min-h-10 px-3"
+                          data-testid={`workspace-member-system-admin-toggle-${createAccessTestId(member.memberKey)}`}
+                          type="button"
+                          onClick={() => onRequestAction({
+                            kind: 'member-system-administrator',
+                            member,
+                            systemAdministrator: !isSystemAdministrator,
+                          })}
+                        >
+                          {t(isSystemAdministrator
+                            ? 'memberSecurity.systemAdmin.revoke'
+                            : 'memberSecurity.systemAdmin.grant')}
                         </button>
                       ) : null}
                       {onOpenHandover && canManage ? (
@@ -1636,6 +1846,24 @@ function createWorkspaceAccessActionCopy(
     }
   }
 
+  if (action.kind === 'member-system-administrator') {
+    const name = action.member.name?.trim() || action.member.email
+
+    return {
+      confirmLabel: t(action.systemAdministrator
+        ? 'memberSecurity.systemAdmin.grant'
+        : 'memberSecurity.systemAdmin.revoke'),
+      description: t(action.systemAdministrator
+        ? 'memberSecurity.systemAdmin.grantDescription'
+        : 'memberSecurity.systemAdmin.revokeDescription')
+        .replace('{name}', name),
+      destructive: action.systemAdministrator,
+      title: t(action.systemAdministrator
+        ? 'memberSecurity.systemAdmin.grantTitle'
+        : 'memberSecurity.systemAdmin.revokeTitle'),
+    }
+  }
+
   if (action.kind === 'member-credential') {
     const isPasswordReset = action.action === 'password-reset'
 
@@ -1795,6 +2023,14 @@ function resolveMemberCredentialErrorMessage(
 
     if (error.code === 'MemberMfaNotEnrolled') {
       return t('memberSecurity.error.notEnrolled')
+    }
+
+    if (error.code === 'WorkspaceGuestSystemAdministrator') {
+      return t('memberSecurity.systemAdmin.error.guest')
+    }
+
+    if (error.code === 'MemberSystemAdministratorUnavailable') {
+      return t('memberSecurity.systemAdmin.error.otherWorkspace')
     }
 
     if (error.code === 'WorkspaceCredentialActionInProgress') {

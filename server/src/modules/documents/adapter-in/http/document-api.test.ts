@@ -2198,6 +2198,26 @@ test('binds active member share validation to the private ACL generation', async
   ).toBe(27)
 })
 
+test('records an export in another format under the same key as another request', async () => {
+  const hashes: string[] = []
+  const app = createTestApp(createDocumentClient({
+    async exportDocument(input) {
+      hashes.push(input.auditContext?.idempotencyKeyHash ?? '')
+      return { format: input.format, contentType: 'text/plain', fileName: 'page.txt', content: 'content' }
+    },
+  }))
+  for (const format of ['markdown', 'markdown', 'json']) {
+    const response = await app.request(`/api/documents/document-1/export?format=${format}`, {
+      headers: { Authorization: 'Bearer test-token', 'Idempotency-Key': 'export-request-1' },
+    })
+    expect(response.status).toBe(200)
+  }
+
+  // A retry of the same export reuses its audit event; another format gets its own.
+  expect(hashes[0]).toBe(hashes[1])
+  expect(hashes[2]).not.toBe(hashes[0])
+})
+
 test('forwards the mutation idempotency key when creating a public share', async () => {
   let receivedIdempotencyKey: string | undefined
   const app = createTestApp(createDocumentClient({

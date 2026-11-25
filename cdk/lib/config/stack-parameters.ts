@@ -617,7 +617,8 @@ export function buildStackParameters(
     constraintDescription:
       'WebPushVapidPublicKey must be empty or an unpadded base64url uncompressed P-256 public key.',
     description:
-      'VAPID application server public key browsers use to subscribe to Web Push. Empty disables push subscriptions.',
+      'VAPID application server public key browsers use to subscribe to Web Push. Store the matching private key in '
+      + 'the Secrets Manager secret mukuroji/web-push/vapid-private-key before setting it. Empty disables Web Push.',
   });
   const notificationEmailSender = new cdk.CfnParameter(stack, 'NotificationEmailSender', {
     type: 'String',

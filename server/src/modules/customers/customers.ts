@@ -18,6 +18,7 @@ import type {
   CustomerSavedView,
   CustomerWorkspaceExport,
   CustomerWorkItemSummary,
+  ProjectCustomerLinks,
   LinkCustomerRequestWorkItemInput,
   MergeCustomerContactInput,
   MergeCustomerInput,
@@ -42,6 +43,7 @@ import {
 } from './domain/customer'
 import { CustomerError } from './domain/customer'
 import type { TriageAuthorizationConditionChecks } from '../triage'
+import type { MutationAuditContext } from '../audit'
 
 /** Maximum number of canonical Work Item reads issued concurrently for Project impact. */
 const CUSTOMER_PROJECT_IMPACT_RESOLUTION_CONCURRENCY = 8
@@ -192,6 +194,14 @@ export interface CustomerRetentionClient {
 
 /** Public Customer persistence and application surface. */
 export interface CustomerClient {
+  /**
+   * Returns a client whose writes also record audit events for one request, when supported.
+   *
+   * @param context - Request audit context.
+   * @returns The request-bound client.
+   */
+  withAuditContext?(context: MutationAuditContext): CustomerClient
+
   /** Lists customers within one Workspace boundary.
    *
    * @param workspaceId Workspace containing the customers.
@@ -600,6 +610,12 @@ export interface CustomerClient {
     projectId: string,
     resolveWorkItemProject: CustomerWorkItemProjectResolver,
   ): Promise<CustomerImpactSignal>
+  /** Lists the Customers each Project is linked to through Customer Request to Project links.
+   *
+   * @param workspaceId Workspace containing the links.
+   * @returns One entry for each linked Project, ordered by Project ID.
+   */
+  listProjectCustomerLinks(workspaceId: string): Promise<ProjectCustomerLinks[]>
   /** Returns Work Items associated with a Customer.
    *
    * @param workspaceId Workspace containing the Customer.
@@ -2068,6 +2084,40 @@ export class InMemoryCustomerClient implements CustomerClient {
         .map((customer) => this.withCustomerCounts(state, customer)),
       impactedRequests,
     )
+  }
+
+  /** Lists the Customers each Project is linked to through Customer Request to Project links.
+   *
+   * Customers hidden by a pending deletion or merge are left out, as in the impact signals.
+   *
+   * @param workspaceId Workspace containing the links.
+   * @returns One entry for each linked Project, ordered by Project ID.
+   */
+  async listProjectCustomerLinks(workspaceId: string): Promise<ProjectCustomerLinks[]> {
+    const state = this.state(workspaceId)
+    const counts = new Map<string, Map<string, number>>()
+    for (const request of state.requests.values()) {
+      // A merged request's links live on in its target, so it would count twice.
+      if (request.status === 'merged') continue
+      if (this.isCustomerUnavailable(workspaceId, request.customerId)) continue
+      if (!state.customers.has(request.customerId)) continue
+      for (const projectId of new Set(request.projectLinks.map((link) => link.projectId))) {
+        const customers = counts.get(projectId) ?? new Map<string, number>()
+        customers.set(request.customerId, (customers.get(request.customerId) ?? 0) + 1)
+        counts.set(projectId, customers)
+      }
+    }
+    return [...counts.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([projectId, customers]) => ({
+        projectId,
+        customers: [...customers.entries()]
+          .flatMap(([customerId, requestCount]) => {
+            const customer = state.customers.get(customerId)
+            return customer ? [{ customerId, name: customer.name, requestCount }] : []
+          })
+          .sort((left, right) => left.name.localeCompare(right.name) || left.customerId.localeCompare(right.customerId)),
+      }))
   }
 
   /** Returns Work Items associated with a Customer.
