@@ -2761,6 +2761,56 @@ describe('annotation resolution and project file approval', () => {
     expect((await client.list(scope, manager)).files[0]?.unresolvedAnnotationCount).toBe(1)
   })
 
+  test('settles an annotation delete that loses a race by its own receipt only', async () => {
+    const { client, documentClient, session } = await createAvailableFile()
+    const annotate = (key: string) => client.createAnnotation(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      { anchor: { kind: 'image', x: 0.5, y: 0.5 }, bodyMarkdown: key },
+      createAuditContext(key, { key }),
+    )
+    const deleteWith = (annotationId: string, key: string) => client.deleteAnnotation(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      annotationId,
+      createAuditContext(key, { delete: annotationId }),
+    )
+    /** Commits the given delete just before the next delete transaction is sent. */
+    const commitFirst = (concurrentDelete: () => Promise<void>) => {
+      const originalSend = documentClient.send.bind(documentClient)
+      documentClient.send = async (command: unknown) => {
+        if (command instanceof TransactWriteCommand) {
+          documentClient.send = originalSend
+          await concurrentDelete()
+        }
+        return await originalSend(command)
+      }
+    }
+    const first = await annotate('race-first')
+    const second = await annotate('race-second')
+    const third = await annotate('race-third')
+    await deleteWith(first.id, 'race-key')
+
+    // The key already deleted another annotation, and a different key deletes this one first.
+    commitFirst(() => deleteWith(second.id, 'race-other-key'))
+    await expect(deleteWith(second.id, 'race-key'))
+      .rejects.toMatchObject({ code: 'IdempotencyKeyReused', status: 409 })
+
+    // Without any receipt of this request, an annotation another request deleted is not found.
+    commitFirst(() => deleteWith(third.id, 'race-third-other'))
+    await expect(deleteWith(third.id, 'race-third-key'))
+      .rejects.toMatchObject({ code: 'AnnotationNotFound', status: 404 })
+
+    // A duplicate of the same request that commits first is this request's success.
+    const fourth = await annotate('race-fourth')
+    commitFirst(() => deleteWith(fourth.id, 'race-fourth-key'))
+    await expect(deleteWith(fourth.id, 'race-fourth-key')).resolves.toBeUndefined()
+  })
+
   test('requests, decides, and lists approval of a Project file without a Work Item', async () => {
     const { client, documentClient, session } = await createAvailableFile(undefined, projectScope, 'audit')
     const listed = await client.list(projectScope, manager)

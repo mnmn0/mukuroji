@@ -1860,11 +1860,21 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       if (!isConditionalTransactionError(error)) {
         throw error
       }
+      // Only this same request's receipt proves the delete succeeded. A receipt of another
+      // request under this key means the key was reused (409), and an annotation that another
+      // request deleted first is not found, as when this request had read it already gone.
+      const isSameRequestCommitted = await this.hasAnnotationDeleteReceipt(
+        scopeKey,
+        actor,
+        fileId,
+        versionId,
+        annotationId,
+        auditContext,
+      )
       if (!await this.getItem<StoredAnnotationItem>(scopeKey, current.recordKey)) {
-        return
+        if (isSameRequestCommitted) return
+        throw new FileProofingError(404, 'AnnotationNotFound', 'Annotation was not found.', { cause: error })
       }
-      // A receipt already stored under this key belongs to another request: the key was reused.
-      await this.hasAnnotationDeleteReceipt(scopeKey, actor, fileId, versionId, annotationId, auditContext)
       throw new FileProofingError(
         409,
         'AnnotationConflict',
