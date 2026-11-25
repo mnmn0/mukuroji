@@ -175,6 +175,10 @@ export const workspaceMessages = {
   'workspace.focus.updateDeadlines.dueAt': '{time} まで',
   'workspace.focus.updateDeadlines.project': 'Project の進捗報告',
   'workspace.focus.updateDeadlines.initiative': 'Initiative の進捗報告',
+  'workspace.focus.updateDeadlines.team': 'Team の進捗報告',
+  'workspace.focus.updateReviews.title': '確認待ちの進捗報告',
+  'workspace.focus.updateReviews.meta': '{author} · {time} に提出',
+  'workspace.focus.updateReviews.resolves': '確認済みにすると消えます',
   'workspace.focus.updateDeadlines.resolves': '進捗報告を提出すると消えます',
   'workspace.focus.projectLog.title': '担当のリスク・課題・変更要求',
   'workspace.focus.projectLog.reviewOverdue': '見直し期限切れ',
@@ -316,6 +320,7 @@ export const workspaceMessages = {
   'workspace.inbox.reason.projectMember': 'Project メンバー',
   'workspace.inbox.reason.updateAuthor': 'あなたの update',
   'workspace.inbox.reason.updateOwner': 'Update 担当',
+  'workspace.inbox.reason.updateReviewer': 'Update 確認者',
   'workspace.inbox.reason.contributor': '参加（Contributor）',
   'workspace.inbox.reason.creator': '作成者',
   'workspace.inbox.reason.escalation': 'Project マネージャー',
@@ -372,6 +377,7 @@ export const workspaceMessages = {
   'workspace.registration.tone.purple': 'ニュートラル',
   'workspace.registration.tone.green': '緑',
   'workspace.registration.tone.yellow': '黄',
+  'workspace.registration.lifecycle': '開始時のライフサイクル',
   'workspace.registration.createTeam': 'チームを登録',
   'workspace.registration.createProject': 'プロジェクトを登録',
   'workspace.registration.saving': '登録中',
@@ -485,6 +491,35 @@ export const workspaceMessages = {
   'workspace.help.agentGuideTitle': 'coding agent 利用者ガイド',
   'workspace.help.agentGuideDescription':
     'token の発行、クライアントへの登録、agent の作業の流れ、Factory board での確認。',
+  'workspace.help.featureGuidesTitle': '機能別の案内',
+  'workspace.help.featureGuidesDescription':
+    '主な画面の役割を短く説明します。「画面を開く」でその画面へ、「ガイドを読む」で利用者ガイドの該当箇所へ移動します。',
+  'workspace.help.featureOpen': '画面を開く',
+  'workspace.help.featureGuide': 'ガイドを読む',
+  'workspace.help.featureProjectsTitle': 'プロジェクト',
+  'workspace.help.featureProjectsDescription':
+    'Project を作り、憲章・メンバー・WBS を整えます。タスクの親子が WBS になり、ガントで日程と依存関係を確認します。',
+  'workspace.help.featurePlanningTitle': '計画',
+  'workspace.help.featurePlanningDescription':
+    'Phase・Milestone・Cycle などの計画を置き、タイムラインで依存とクリティカルパス、Project 横断の予定を確認します。',
+  'workspace.help.featureUpdatesTitle': 'アップデート',
+  'workspace.help.featureUpdatesDescription':
+    '毎週の近況（健全性・リスク・要約・次のアクション）を読み、コメントや確認を付けます。公開は Project の更新欄から行います。',
+  'workspace.help.featureReportsTitle': 'レポート',
+  'workspace.help.featureReportsDescription':
+    'Throughput、バーンダウン、期限超過、完了予測などのウィジェットでレポートを作り、定期配信を設定します。',
+  'workspace.help.featureMyTasksTitle': 'マイタスク',
+  'workspace.help.featureMyTasksDescription':
+    '自分が担当・参加するタスクをボード・テーブル・ガント・カレンダーで確認し、ドラッグで状態を進めます。',
+  'workspace.help.featureFocusTitle': 'フォーカス',
+  'workspace.help.featureFocusDescription':
+    'いま対応すべきことだけを理由と解消条件つきで優先度順に並べます。スヌーズで後回しにできます。',
+  'workspace.help.featureInboxTitle': '受信箱',
+  'workspace.help.featureInboxDescription':
+    '担当への追加、メンション、期限、督促などの通知を受け取り、既読・スヌーズ・アーカイブで整理します。',
+  'workspace.help.featureSettingsTitle': '設定',
+  'workspace.help.featureSettingsDescription':
+    '個人設定と、管理者向けの Workspace・Team・権限・Work Item・オートメーション・エージェントの設定を行います。',
   'workspace.help.buildTitle': '稼働中の Web build',
   'workspace.help.buildDescription':
     '問題を報告するときはこの commit を伝えてください。運用者はこれを手がかりに Web を前の release へ戻します。',
@@ -584,18 +619,21 @@ export const workspaceMessages = {
   'workspace.settings.notifications.version': '設定 v{version}',
   'workspace.settings.notifications.channelsTitle': '配信チャネル',
   'workspace.settings.notifications.channelsDescription':
-    'アプリ内とSlackは次の通知から反映されます。メールとプッシュは配信基盤接続後に使う事前設定です。',
+    '変更は次の通知から反映されます。この環境で送信できないチャネルには「無効」と表示します。',
   'workspace.settings.notifications.channel.inApp': 'アプリ内',
   'workspace.settings.notifications.channel.inAppDescription': '受信箱と未読バッジへ表示します。',
   'workspace.settings.notifications.channel.email': 'メール',
   'workspace.settings.notifications.channel.emailDescription':
-    'メール配信基盤の接続後に使う受信設定を保存します。',
+    'アカウントの確認済みメールアドレスに届きます。',
   'workspace.settings.notifications.channel.push': 'プッシュ',
   'workspace.settings.notifications.channel.slack': 'Slack',
   'workspace.settings.notifications.channel.slackDescription':
     '同じ通知を自分のSlack送信先にも配信します。管理者による接続設定が必要です。',
   'workspace.settings.notifications.channel.pushDescription':
-    '下の「このデバイスのプッシュ通知」で登録したデバイスに、プッシュ配信の開始後に届きます。',
+    '下の「このデバイスのプッシュ通知」で登録したデバイスに届きます。',
+  'workspace.settings.notifications.channelUnavailable': '無効',
+  'workspace.settings.notifications.channelUnavailableDescription':
+    'この環境では送信元が設定されていないため送信されません。設定は保存され、管理者が有効にした後の通知から届きます。',
   'workspace.settings.notifications.categoriesTitle': '種類ごとの配信先',
   'workspace.settings.notifications.categoriesDescription': '通知の種類ごとに、受け取るチャネルを選びます。上の配信チャネルを切っているチャネルには届きません。',
   'workspace.settings.notifications.categoryColumn': '通知の種類',
@@ -1027,6 +1065,16 @@ export const workspaceMessages = {
   'workspace.tenantAdministration.defaultRole': '既定 member role',
   'workspace.tenantAdministration.fiscalYearStartMonth': '会計年度の開始月',
   'workspace.tenantAdministration.monthOption': '{month}月',
+  'workspace.tenantAdministration.planningUpdateTemplate.title': '進捗報告（health update）の必須項目とテンプレート',
+  'workspace.tenantAdministration.planningUpdateTemplate.hint': 'チェックした項目を空のまま公開できなくします。テンプレートは公開フォームの初期値になります。',
+  'workspace.tenantAdministration.planningUpdateTemplate.required': '必須にする項目',
+  'workspace.tenantAdministration.planningUpdateTemplate.templateFor': '{field} のテンプレート',
+  'workspace.tenantAdministration.planningUpdateTemplate.field.summary': '要約',
+  'workspace.tenantAdministration.planningUpdateTemplate.field.riskSummary': 'リスクの背景',
+  'workspace.tenantAdministration.planningUpdateTemplate.field.decisionSummary': '判断事項',
+  'workspace.tenantAdministration.planningUpdateTemplate.field.helpNeeded': '必要な支援',
+  'workspace.tenantAdministration.planningUpdateTemplate.field.nextAction': '次のアクション',
+  'workspace.tenantAdministration.planningUpdateTemplate.field.evidence': '根拠',
   'workspace.tenantAdministration.weeklyReportReminders.title': '週報のリマインダー',
   'workspace.tenantAdministration.weeklyReportReminders.hint': '週報を提出していない人に通知します（Workspace のタイムゾーン）。上長への通知は、直近のリマインダーの週について、その人が参加している Project の manager に届きます。',
   'workspace.tenantAdministration.weeklyReportReminders.reminder': '未提出の本人に知らせる',

@@ -1,3 +1,4 @@
+import { createECDH } from 'node:crypto'
 import { describe, expect, setSystemTime, spyOn, test } from 'bun:test'
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import { AdminListGroupsForUserCommand, CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
@@ -779,6 +780,32 @@ describe('collaboration projection pure helpers', () => {
       weeklyReportAuthorMemberKey: 'member@example.com',
       weeklyReportWeekStart: '2026-07-06',
     })
+  })
+  test('queues Web Push only when the deployment configured a VAPID key and the event is inside the opt-in period', () => {
+    const previous = process.env.WEB_PUSH_VAPID_PUBLIC_KEY
+    const candidate = { memberKey: 'member@example.com', reasons: ['mention'] }
+    const preferences = { ...DEFAULT_NOTIFICATION_PREFERENCES,
+      channels: { inApp: true, email: false, push: true }, pushEnabledAt: '2026-07-12T12:00:00.000Z' }
+    const ecdh = createECDH('prime256v1')
+    ecdh.generateKeys()
+    try {
+      for (const key of ['', ecdh.getPublicKey().toString('base64url')]) {
+        process.env.WEB_PUSH_VAPID_PUBLIC_KEY = key
+        for (const occurredAt of ['2026-07-12T11:59:59.999Z', '2026-07-12T12:00:00.000Z']) {
+          const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', occurredAt, preferences, unscopedRoutingSubject)
+          const row = createNotificationProjectionItem(createProjectionEvent({ occurredAt }), candidate, state)
+          const queued = Boolean(key) && occurredAt === preferences.pushEnabledAt
+          expect(row.deliveryChannels).toContain('push')
+          expect(row.pushQueueShard !== undefined).toBe(queued)
+          expect(row.pushNextAttemptAt).toBe(queued ? state.deliveryAfter : undefined)
+          expect(row.pushDeliveryStatus).toBe(queued ? 'pending' : undefined)
+          expect(row.emailQueueShard).toBeUndefined()
+        }
+      }
+    } finally {
+      if (previous === undefined) delete process.env.WEB_PUSH_VAPID_PUBLIC_KEY
+      else process.env.WEB_PUSH_VAPID_PUBLIC_KEY = previous
+    }
   })
   test('queues Email only when the deployment configured a sender and the event is inside the opt-in period', () => {
     const previous = process.env.NOTIFICATION_EMAIL_SENDER

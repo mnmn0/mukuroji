@@ -6,6 +6,7 @@ import {
   type ProjectRaidEntryInput,
 } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { ChangeRequestDecision } from '../src/projects/ui/ProjectChangeRequestControls'
 import { SWRConfig, unstable_serialize } from 'swr'
 import { projectRaidLogKey } from '../src/projects/queries/useProjectRaidLog'
 import { ProjectRaidLogPanel } from '../src/projects/ui/ProjectRaidLogPanel'
@@ -134,6 +135,85 @@ describe('ProjectRaidLogPanel Work Item candidates', () => {
     expect(markup).toContain('data-testid="project-raid-log-work-items-error"')
     expect(markup).toContain('再読み込み')
     expect(render([entry()])).not.toContain('project-raid-log-work-items-error')
+  })
+})
+
+describe('ProjectRaidLogPanel change requests', () => {
+  /**
+   * Renders the panel for a Project manager.
+   *
+   * @param entries - Entries to show.
+   * @param canDecide - Whether the viewer may decide.
+   * @returns The static markup.
+   */
+  function renderDecider(entries: ProjectRaidEntry[], canDecide: boolean) {
+    return renderToStaticMarkup(
+      <ProjectRaidLogPanel
+        canDecide={canDecide}
+        canEdit
+        entries={entries}
+        hasLoadError={false}
+        isLoading={false}
+        ownerOptions={[{ id: 'sato@example.com', label: '佐藤 花子' }]}
+        t={t}
+        today="2026-11-19"
+        workItemOptions={[{ id: 'wi-1', label: 'CORE-12 部品の調達' }]}
+        onDecide={async () => undefined}
+        onReload={() => undefined}
+        onSave={async () => undefined}
+      />,
+    )
+  }
+  const request = entry({
+    id: 'cr-1',
+    kind: 'change-request',
+    probability: undefined,
+    title: '納期の延長',
+    relatedWorkItemIds: ['wi-1'],
+    scheduleChanges: [{ workItemId: 'wi-1', operation: { type: 'move', targetDate: '2026-12-10' } }],
+  })
+
+  test('shows the requested dates and offers approval only to a decider', () => {
+    const markup = renderDecider([request], true)
+    expect(markup).toContain('日程の変更: CORE-12 部品の調達 を 2026-12-10 へ移動')
+    expect(markup).toContain('data-testid="project-raid-log-approve"')
+    expect(markup).toContain('data-testid="project-raid-log-reject"')
+    expect(renderDecider([request], false)).not.toContain('project-raid-log-approve')
+  })
+
+  test('tells everyone who is approving a held request', () => {
+    const held: ProjectRaidEntry = {
+      ...request,
+      approvalHold: { heldByMemberId: 'sato@example.com', heldAt: '2026-11-20T00:00:00.000Z', expiresAt: '2026-11-20T00:10:00.000Z' },
+    }
+    for (const canDecide of [true, false]) {
+      const markup = renderDecider([held], canDecide)
+      expect(markup).toContain('data-testid="project-raid-log-approval-hold"')
+      expect(markup).toContain('佐藤 花子 さんが承認しています')
+    }
+    expect(renderDecider([request], true)).not.toContain('project-raid-log-approval-hold')
+  })
+
+  test('shows who decided and whether the baseline was replaced', () => {
+    const decided: ProjectRaidEntry = {
+      ...request,
+      status: 'closed',
+      closedAt: '2026-11-20T00:00:00.000Z',
+      decision: { outcome: 'approved', decidedAt: '2026-11-20T00:00:00.000Z', decidedByMemberId: 'sato@example.com', baselineId: 'b-1' },
+    }
+    const markup = renderToStaticMarkup(
+      <ChangeRequestDecision
+        canDecide
+        describeError={() => ''}
+        entry={decided}
+        ownerOptions={[{ id: 'sato@example.com', label: '佐藤 花子' }]}
+        t={t}
+        onDecide={async () => undefined}
+      />,
+    )
+    expect(markup).toContain('佐藤 花子 が 2026-11-20 に承認')
+    expect(markup).toContain('（ベースラインを差し替え）')
+    expect(markup).not.toContain('project-raid-log-approve')
   })
 })
 

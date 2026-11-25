@@ -16,6 +16,8 @@ import { workItemDependencies, workspaceDependencies } from '../shared/app-depen
 import { hasCustomerManagementAccess, hasCustomerReadAccess } from '../shared/customer-access'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
 import {
+  createApiMutationContext,
+  hasEnterprisePermissionAtResource,
   requireAssignedProjectPermission,
   requireProjectPermission,
   requireTeamPermission,
@@ -170,6 +172,7 @@ function requireCustomerManagement(
 export function registerCustomersRoutes(routeApp: Hono): void {
   routeApp.route('/', createCustomerRouter<WorkspacePrincipal & CustomerPrincipal>({
     getCustomers: () => workspaceDependencies.customers,
+    createAuditContext: (context, principal) => createApiMutationContext(context, principal, undefined),
     requireWorkspaceAccess: requireCustomerWorkspaceAccess,
     verifyTriageAccess: async (principal, teamId, minimum) => {
       await requireTeamPermission(principal, teamId, minimum)
@@ -246,6 +249,33 @@ export function registerCustomersRoutes(routeApp: Hono): void {
             isCompleted: detail.issue.statusCategory === 'completed',
             ...(authorizationConditionChecks ? { authorizationConditionChecks } : {}),
           }
+    },
+    listEnterpriseViewableProjectIds: async (principal, projectIds) => {
+      // Customer routes do not evaluate Enterprise Project scopes, and Enterprise principals do not
+      // fall back to legacy ACLs, so each Project's own projects.read grant is evaluated here.
+      if (principal.enterprisePermissions === undefined) return undefined
+      const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+        principal.directoryId,
+        'ja',
+        true,
+      )
+      const viewable = new Set<string>()
+      for (const projectId of new Set(projectIds)) {
+        const ownerTeams = directory.teams.filter((team) =>
+          team.projects.some((project) => project.id === projectId)
+        )
+        const [ownerTeam] = ownerTeams
+        if (ownerTeams.length !== 1 || !ownerTeam) continue
+        if (hasEnterprisePermissionAtResource(principal, 'projects.read', {
+          workspaceId: principal.directoryId,
+          kind: 'project',
+          targetId: projectId,
+          parentTeamId: ownerTeam.id,
+        })) {
+          viewable.add(projectId)
+        }
+      }
+      return viewable
     },
     verifyProjectAccess: async (principal, projectId, minimum) => {
       await requireProjectPermission(principal, projectId, minimum)

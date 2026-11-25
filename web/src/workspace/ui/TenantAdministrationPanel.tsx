@@ -3,6 +3,7 @@ import {
   useState,
 } from 'react'
 import {
+  DEFAULT_PLANNING_UPDATE_TEMPLATE_SETTINGS,
   DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
   DEFAULT_WORKSPACE_FILE_TYPE_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
@@ -18,6 +19,7 @@ import {
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
 import { WorkspaceWorkingCalendarFields } from './WorkspaceWorkingCalendarFields'
+import { PlanningUpdateTemplateFields } from './PlanningUpdateTemplateFields'
 import { WeeklyReportReminderFields } from './WeeklyReportReminderFields'
 import { hasWeeklyReportReminderConflict } from '../model/weeklyReportReminders'
 import { hasTimeEntryCategoryProblem } from '../model/timeEntryCategories'
@@ -287,6 +289,7 @@ export function TenantAdministrationPanel({
   const tenantLifecycleLocked = profile.status !== 'active'
   const calendar = profile.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
   const weeklyReportReminders = profile.weeklyReportReminders ?? DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS
+  const planningUpdateTemplate = profile.planningUpdateTemplate ?? DEFAULT_PLANNING_UPDATE_TEMPLATE_SETTINGS
   const timeEntryCategories = profile.timeEntryCategories ?? DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
   const tenantClosed = profile.status === 'closed'
 
@@ -441,6 +444,12 @@ export function TenantAdministrationPanel({
             disabled={tenantLifecycleLocked}
             onChange={(next) => onChangeProfile({ ...profile, weeklyReportReminders: next })}
             settings={weeklyReportReminders}
+            t={t}
+          />
+          <PlanningUpdateTemplateFields
+            disabled={isSaving || tenantLifecycleLocked}
+            onChange={(next) => onChangeProfile({ ...profile, planningUpdateTemplate: next })}
+            settings={planningUpdateTemplate}
             t={t}
           />
           <TimeEntryCategoryFields

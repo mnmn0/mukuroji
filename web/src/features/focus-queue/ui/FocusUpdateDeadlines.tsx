@@ -1,7 +1,7 @@
 import type { FocusUpdateDeadline } from '@mukuroji/contracts'
 import { Link } from 'react-router'
 import type { Locale, MessageKey } from '../../../shared/i18n/i18n'
-import { formatFocusTimestamp } from '../model/focusQueue'
+import { focusUpdateTargetLabelKey, formatFocusTimestamp } from '../model/focusQueue'
 
 /** Props for the health update deadlines owned by the current viewer. */
 export type FocusUpdateDeadlinesProps = {
@@ -38,9 +38,7 @@ export function FocusUpdateDeadlines({ deadlines, locale, t }: FocusUpdateDeadli
                 className="break-words text-app-body font-semibold text-[var(--workbench-text)] underline-offset-4 hover:underline"
                 to={deadline.deepLink}
               >
-                {deadline.title ?? t(deadline.target.type === 'project'
-                  ? 'workspace.focus.updateDeadlines.project'
-                  : 'workspace.focus.updateDeadlines.initiative')}
+                {deadline.title ?? t(focusUpdateTargetLabelKey(deadline.target))}
               </Link>
               <span className="text-app-caption text-[var(--workbench-muted)]">
                 {t('workspace.focus.updateDeadlines.dueAt').replace(

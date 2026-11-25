@@ -9,7 +9,7 @@ import type { UpdateFeedReader } from './read-update-feed'
 export async function readUpdateFeedFilterOptions(reader: UpdateFeedReader): Promise<UpdateFeedFilterOptions> {
   const snapshot = await reader.readSnapshot()
   if (snapshot.updateTargets.length > 2000) throw new PlanningError(413, 'UpdateFeedTargetLimitExceeded', 'Feed target projection exceeds its bounded read limit.')
-  const identities = snapshot.updateTargets.map(({ target }) => JSON.stringify(target.type === 'project' ? ['project', target.teamId, target.projectId] : ['initiative', target.entityId]))
+  const identities = snapshot.updateTargets.map(({ target }) => JSON.stringify(target.type === 'project' ? ['project', target.teamId, target.projectId] : target.type === 'team' ? ['team', target.teamId] : ['initiative', target.entityId]))
   if (new Set(identities).size !== identities.length) throw new PlanningError(409, 'UpdateFeedDuplicateTarget', 'Feed projection contains duplicate target identities.')
   const teams = new Map<string, string>()
   const projects = new Map<string, UpdateFeedFilterOptions['projects'][number]>()

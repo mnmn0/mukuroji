@@ -23,6 +23,7 @@ import type {
   TenantRetentionReconciliation,
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
+  PlanningUpdateTemplateSettings,
   WeeklyReportReminderSettings,
   WorkspaceCalendarSettings,
   WorkspaceFileTypeSettings,
@@ -32,6 +33,7 @@ import {
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   findRemovedTimeEntryCategoryKeys,
   isCurrencyCode,
+  readPlanningUpdateTemplateSettings,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
   readWorkspaceFileTypeSettings,
@@ -292,6 +294,9 @@ export class DynamoDbTenantAdministrationClient implements
       ...(input.calendar ? { calendar: readStoredWorkspaceCalendar(input.calendar) } : {}),
       ...(input.weeklyReportReminders
         ? { weeklyReportReminders: readStoredWeeklyReportReminders(input.weeklyReportReminders) }
+        : {}),
+      ...(input.planningUpdateTemplate
+        ? { planningUpdateTemplate: readStoredPlanningUpdateTemplate(input.planningUpdateTemplate) }
         : {}),
       ...(timeEntryCategories ? { timeEntryCategories } : {}),
       ...(input.fileTypes ? { fileTypes: readStoredFileTypes(input.fileTypes) } : {}),
@@ -2009,6 +2014,9 @@ function readTenantProfile(value: unknown): TenantProfile {
     ...(value.weeklyReportReminders === undefined
       ? {}
       : { weeklyReportReminders: readStoredWeeklyReportReminders(value.weeklyReportReminders) }),
+    ...(value.planningUpdateTemplate === undefined
+      ? {}
+      : { planningUpdateTemplate: readStoredPlanningUpdateTemplate(value.planningUpdateTemplate) }),
     ...(value.timeEntryCategories === undefined
       ? {}
       : { timeEntryCategories: readStoredTimeEntryCategories(value.timeEntryCategories) }),
@@ -2035,6 +2043,19 @@ function readTenantProfile(value: unknown): TenantProfile {
 function readStoredDefaultCurrency(value: unknown): string {
   if (!isCurrencyCode(value)) throw new Error('invalid tenant default currency')
   return value
+}
+
+/**
+ * Reads stored or already-validated health update template settings.
+ *
+ * @param value - Settings candidate.
+ * @returns The settings.
+ * @throws Error when the settings are invalid.
+ */
+function readStoredPlanningUpdateTemplate(value: unknown): PlanningUpdateTemplateSettings {
+  const settings = readPlanningUpdateTemplateSettings(value)
+  if (!settings) throw new Error('invalid planning update template settings')
+  return settings
 }
 
 /**

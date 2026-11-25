@@ -218,6 +218,8 @@ export function defineCycleScheduleJob(input: ScheduleWorkerInput): ScheduledJob
   return {
     id: 'CycleSchedule',
     runtimeScope: 'automation-schedule',
+    // Three small statements; the inline policy keeps the shared role within ten managed policies.
+    policy: 'shared-role',
     environment: {
       PLANNING_TABLE_NAME: planningTable.tableName,
       PLANNING_UPDATE_SCHEDULE_INDEX_NAME: 'UpdateScheduleDueIndex',

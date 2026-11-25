@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, within } from 'storybook/test'
-import type { ProjectCharterState } from '@mukuroji/contracts'
+import type { ProjectCharterState, UpdateProjectCharterInput } from '@mukuroji/contracts'
 import type { ProjectMember } from '../api'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { ProjectCharterPanel } from './ProjectCharterPanel'
@@ -29,6 +29,10 @@ const activeState: ProjectCharterState = {
   updatedAt: '2026-06-10T00:00:00.000Z',
 }
 
+/** Save handler of the stories that do not save; typed so a story can return a saved state. */
+const saveNothing: (input: UpdateProjectCharterInput) => Promise<ProjectCharterState | undefined> =
+  async () => undefined
+
 const meta = {
   title: 'Projects/ProjectCharterPanel',
   component: ProjectCharterPanel,
@@ -46,7 +50,7 @@ const meta = {
     state: activeState,
     t: createTranslator('ja'),
     onReload: () => undefined,
-    onSave: async () => undefined,
+    onSave: saveNothing,
     onTransition: async () => undefined,
   },
 } satisfies Meta<typeof ProjectCharterPanel>
@@ -95,5 +99,40 @@ export const LoadError: Story = {
   args: {
     hasLoadError: true,
     state: undefined,
+  },
+}
+
+/** Saving a new owner reports that the Project's health update owner moved too (ADR 0084). */
+export const SaveMovesUpdateOwner: Story = {
+  args: {
+    onSave: async (input) => ({
+      ...activeState,
+      revision: input.expectedRevision + 1,
+      updateOwnerSync: 'synced',
+    }),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByTestId('project-charter-save'))
+    await expect(await canvas.findByText('憲章を保存し、進捗報告の担当者も新しい責任者に変更しました'))
+      .toBeVisible()
+  },
+}
+
+/** A save whose new owner cannot post updates says the update owner stayed. */
+export const SaveKeepsUpdateOwner: Story = {
+  args: {
+    onSave: async (input) => ({
+      ...activeState,
+      revision: input.expectedRevision + 1,
+      updateOwnerSync: 'owner-not-eligible',
+    }),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByTestId('project-charter-save'))
+    await expect(await canvas.findByText(
+      '憲章を保存しました。新しい責任者がこのプロジェクトのメンバーではないため、進捗報告の担当者は変わっていません',
+    )).toBeVisible()
   },
 }

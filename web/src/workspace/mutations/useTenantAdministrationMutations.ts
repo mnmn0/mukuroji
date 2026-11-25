@@ -92,6 +92,7 @@ export function useTenantAdministrationMutations({
           defaultPolicy: profile.defaultPolicy,
           ...(profile.calendar ? { calendar: profile.calendar } : {}),
           ...(profile.weeklyReportReminders ? { weeklyReportReminders: profile.weeklyReportReminders } : {}),
+          ...(profile.planningUpdateTemplate ? { planningUpdateTemplate: profile.planningUpdateTemplate } : {}),
           ...(profile.timeEntryCategories ? { timeEntryCategories: profile.timeEntryCategories } : {}),
           ...(profile.fileTypes ? { fileTypes: profile.fileTypes } : {}),
           ...(profile.defaultCurrency ? { defaultCurrency: profile.defaultCurrency } : {}),
