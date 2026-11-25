@@ -27,6 +27,7 @@ import {
   canAccessAssignedProject,
   canWorkspaceBusinessWrite,
   createApiMutationContext,
+  hasEnterprisePermissionAtResource,
   requireProjectPermission,
   requireTeamPermission,
   requireWorkspaceBusinessRead,
@@ -238,6 +239,16 @@ async function requireTargetRead(principal: WorkspacePrincipal, target: ChannelD
  */
 async function canManageTarget(principal: WorkspacePrincipal, target: ChannelDestinationTarget): Promise<boolean> {
   if (!canWorkspaceBusinessWrite(principal)) return false
+  // An Enterprise GET is authorized with read access, so its derived role cannot show management.
+  if (principal.enterprisePermissions !== undefined) {
+    return target.scope === 'team'
+      ? hasEnterprisePermissionAtResource(principal, 'teams.manage', {
+          workspaceId: principal.directoryId, kind: 'team', targetId: target.teamId,
+        })
+      : hasEnterprisePermissionAtResource(principal, 'projects.manage', {
+          workspaceId: principal.directoryId, kind: 'project', targetId: target.projectId, parentTeamId: target.teamId,
+        })
+  }
   if (await succeeds(() => requireTeamPermission(principal, target.teamId, 'manager'))) return true
   return target.scope === 'project' &&
     await succeeds(() => requireProjectPermission(principal, target.projectId, 'manager', target.teamId))

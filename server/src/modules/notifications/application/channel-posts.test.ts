@@ -170,6 +170,23 @@ describe('channel post delivery', () => {
     expect(failures).toEqual([{ shard: 'slack-channel-failed#1', dueAt: post.nextAttemptAt, reference: 'token-5', code: 'SlackDeliveryUnavailable' }])
   })
 
+  test('fails a post reclaimed after its last attempt without sending it again', async () => {
+    const state = queue({ ...post, attempts: 5 })
+    const failures: ChannelPostFailure[] = []
+    await expect(deliverDueChannelPosts({
+      destinations: destinations({ scope: 'team', teamId: 'core' }),
+      posts: state.posts,
+      isAuthorized: async () => { throw new Error('Must not recheck') },
+      send: async () => { throw new Error('Must not send') },
+      shards: ['slack-channel#1'],
+      reportFailure: (failure) => failures.push(failure),
+      createToken: () => 'token-6',
+      now: () => now,
+    })).rejects.toThrow('1 failed')
+    expect(state.finished).toEqual([{ status: 'failed', code: 'ChannelPostAttemptsExhausted' }])
+    expect(failures.map((failure) => failure.code)).toEqual(['ChannelPostAttemptsExhausted'])
+  })
+
   test('drops a post whose source left its Team or Project, or whose Workspace closed', async () => {
     const state = queue(post)
     const delivered = await deliverDueChannelPosts({

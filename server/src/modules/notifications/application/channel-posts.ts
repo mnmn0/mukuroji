@@ -155,6 +155,11 @@ export async function deliverDueChannelPosts(dependencies: ChannelPostDeliveryDe
       const claimedAt = dependencies.now()
       if (!await dependencies.posts.claim(post, token, new Date(claimedAt.getTime() + 60_000))) continue
       const claimed: ChannelPost = { ...post, version: post.version + 1, attempts: post.attempts + 1 }
+      if (claimed.attempts > maximumAttempts) {
+        // A lease that expired mid-send was reclaimed after the last attempt; never send again.
+        if (!await retryOrFail(dependencies, claimed, token, { succeeded: false, retryable: false, code: 'ChannelPostAttemptsExhausted' })) failedCount += 1
+        continue
+      }
       let destination: ChannelDestinationRecord | undefined
       let authorized: boolean
       try {
