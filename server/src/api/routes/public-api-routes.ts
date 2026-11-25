@@ -2804,6 +2804,7 @@ function toConnectorWorkItemSnapshot(
     ...(issue.description ? { description: issue.description } : {}),
     status: issue.workflowStatusId,
     ...toConnectorEventScheduleField(issue.schedule),
+    ...(issue.schedule.mode === 'unscheduled' ? {} : { scheduleMode: issue.schedule.mode }),
   }
 }
 

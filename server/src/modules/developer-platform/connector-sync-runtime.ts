@@ -57,6 +57,11 @@ export type ConnectorWorkItemSnapshot = {
   status?: string
   /** All-day dates of the Work Item schedule; absent while it is unscheduled. */
   schedule?: ConnectorEventSchedule
+  /**
+   * Mode of the Work Item schedule, which tells which day of a multi-day event a deadline or a
+   * milestone keeps; absent while it is unscheduled.
+   */
+  scheduleMode?: 'due-date' | 'milestone' | 'date-range'
 }
 
 /** External record から Work Item へ適用する canonical fields です。 */
@@ -697,7 +702,7 @@ export class ConnectorSyncEngine {
     }
     // A Work Item whose dates are still the dates last synchronized only changed elsewhere, such
     // as its title; the event's dates apply on the condition that it has not changed since read.
-    const expectedRevision = lastSyncedDates && keepsSyncedDates(workItem.schedule, lastSyncedDates)
+    const expectedRevision = lastSyncedDates && keepsSyncedDates(workItem, lastSyncedDates)
       ? workItem.revision
       : state.workItemRevision
     // The gateway keys its receipt on the expected revision too. A write conditional on the Work
@@ -1514,7 +1519,7 @@ export class ConnectorSyncEngine {
       !workItem.schedule ||
       !record.schedule ||
       // A deadline or milestone synchronized from a multi-day event holds one of its days.
-      keepsSyncedDates(workItem.schedule, record.schedule)
+      keepsSyncedDates(workItem, record.schedule)
     ) {
       return { kind: 'skipped', linkId: link.id, reason: 'stale' }
     }
@@ -2258,20 +2263,26 @@ function hasSameDates(
 /**
  * Tells whether Work Item dates are still the dates an inbound sync of the event dates produced.
  * A date range takes the event dates as they are, a deadline takes the last day, and a milestone
- * takes the first day, so a single day at either end of the synchronized dates also counts.
+ * takes the first day.
  *
- * @param schedule - Work Item dates as read.
+ * @param workItem - Work Item as read.
  * @param synced - Event dates last synchronized.
  * @returns Whether the Work Item dates have not changed since that sync.
  */
 function keepsSyncedDates(
-  schedule: { startDate: string; endDate: string } | undefined,
+  workItem: ConnectorWorkItemSnapshot,
   synced: { startDate: string; endDate: string },
 ) {
+  const schedule = workItem.schedule
   if (!schedule) return false
-  if (hasSameDates(schedule, synced)) return true
-  return schedule.startDate === schedule.endDate &&
-    (schedule.endDate === synced.endDate || schedule.startDate === synced.startDate)
+  switch (workItem.scheduleMode) {
+    case 'due-date':
+      return schedule.endDate === synced.endDate
+    case 'milestone':
+      return schedule.startDate === synced.startDate
+    default:
+      return hasSameDates(schedule, synced)
+  }
 }
 
 /**

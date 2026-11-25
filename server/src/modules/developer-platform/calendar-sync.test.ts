@@ -276,6 +276,7 @@ async function createCalendarFixture() {
     },
     useDeadlines: () => {
       deadlineOnly = true
+      workItem = { ...workItem, scheduleMode: 'due-date' }
     },
     advance: (milliseconds: number) => {
       currentTime = new Date(currentTime.getTime() + milliseconds)
@@ -881,6 +882,7 @@ describe('calendar connectors (ADR 0089)', () => {
       // Only the event moves, as after a retried create that returned the first attempt's event.
       ['bidirectional', { startDate: '2026-11-30', endDate: '2026-11-30', timeZone: 'Asia/Tokyo' }],
       // The Work Item dates were cleared.
+      ['inbound', undefined],
       ['bidirectional', undefined],
     ] as const) {
       const fixture = await createCalendarFixture()
@@ -1009,6 +1011,17 @@ describe('calendar connectors (ADR 0089)', () => {
     move('2026-12-08', '2026-12-11', '"range-2"')
     expect((await poll()).results).toMatchObject([{ kind: 'synced' }])
     expect(fixture.getWorkItem()).toMatchObject({ title: 'Renamed', schedule: { endDate: '2026-12-10' } })
+
+    // A deadline moved to the first day of the synchronized range is a local change, so the next
+    // event move records a conflict instead of overwriting it.
+    fixture.setWorkItem({
+      ...fixture.getWorkItem(),
+      revision: fixture.getWorkItem().revision + 1,
+      schedule: { startDate: '2026-12-08', endDate: '2026-12-08', timeZone: 'Asia/Tokyo' },
+    })
+    move('2026-12-14', '2026-12-17', '"range-3"')
+    expect((await poll()).results).toMatchObject([{ kind: 'conflict' }])
+    expect(fixture.getWorkItem().schedule).toMatchObject({ endDate: '2026-12-08' })
   })
 
   test('retries an event change applied to the Work Item as read after the state commit failed', async () => {
