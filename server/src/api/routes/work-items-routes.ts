@@ -99,7 +99,8 @@ import {
   type WorkItemDependencyScheduleState,
   type WorkItemRelationNotificationEndpoint,
 } from '../../modules/work-items'
-import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
+import { isWorkspaceMemberRowActive } from '../../modules/workspace-access'
+import { WorkspaceAccessError, type WorkspaceMemberStatus } from '../../modules/workspace-access/workspace-access'
 import {
   CollaborationError,
   COLLABORATION_CONTEXT_BODY_MAX_LENGTH,
@@ -2363,8 +2364,22 @@ async function hydrateProjectMemberUpdateResponse(
   } satisfies UpdateProjectMemberResponse
 }
 
+/**
+ * Adds the Cognito profile, member-set name, and assignable Workspace status to a Project member.
+ *
+ * A member whose access expiry has passed keeps an `active` row until handover or the scheduled
+ * job deactivates it, but work can no longer be assigned to them, so they are reported as
+ * `deactivated` here, matching the assignee check (ADR 0095).
+ *
+ * @param member - Project member row from the directory.
+ * @param directoryId - Workspace that owns the Project.
+ * @returns The member with profile fields and the Workspace status assignment pickers read.
+ */
 async function hydrateProjectMember(member: ProjectMemberResponseItem, directoryId: string) {
   const workspaceMember = await workspaceDependencies.workspaceAccess.getMember(directoryId, member.id)
+  const workspaceStatus: WorkspaceMemberStatus = workspaceMember && isWorkspaceMemberRowActive(workspaceMember, new Date())
+    ? 'active'
+    : 'deactivated'
 
   try {
     const profile = await authenticationDependencies.cognito.getUserProfile(member.id)
@@ -2380,14 +2395,14 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem, directory
       name,
       enabled: profile.enabled,
       status: profile.status,
-      workspaceStatus: workspaceMember?.status ?? 'deactivated',
+      workspaceStatus,
     } satisfies ProjectMemberResponseItem
   } catch (error) {
     if (isCognitoUserNotFoundError(error)) {
       return {
         ...member,
         ...(workspaceMember ? { name: workspaceMember.name?.trim() || undefined } : {}),
-        workspaceStatus: workspaceMember?.status ?? 'deactivated',
+        workspaceStatus,
       }
     }
 
@@ -2395,7 +2410,7 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem, directory
     return {
       ...member,
       ...(workspaceMember ? { name: workspaceMember.name?.trim() || undefined } : {}),
-      workspaceStatus: workspaceMember?.status ?? 'deactivated',
+      workspaceStatus,
     }
   }
 }

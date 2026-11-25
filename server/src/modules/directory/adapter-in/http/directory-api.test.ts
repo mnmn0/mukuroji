@@ -188,6 +188,49 @@ test('keeps project members available when Cognito profile hydration fails', asy
   expect(calls.userProfiles).toEqual(['demo@example.com'])
 })
 
+test('reports a Project member whose access expired as deactivated, so pickers do not offer them (ADR 0095)', async () => {
+  configureFakeProjectClients(true, { role: 'manager' })
+  const { workspaceAccess, projectDirectory } = getTestAppDependencies().workspace
+  setTestAppDependencies({
+    workspaceAccess: {
+      ...workspaceAccess,
+      async getMember(workspaceId, memberKey) {
+        const member = await workspaceAccess.getMember(workspaceId, memberKey)
+        // The row stays active until handover or the scheduled job writes the deactivation.
+        return member && memberKey === 'sato@example.com'
+          ? { ...member, accessExpiresAt: '2020-01-01T00:00:00.000Z' }
+          : member
+      },
+    },
+    projectDirectory: {
+      ...projectDirectory,
+      async getProjectMembers(directoryId, projectId, teamId) {
+        const response = await projectDirectory.getProjectMembers(directoryId, projectId, teamId)
+        return {
+          ...response,
+          members: [
+            ...response.members,
+            { id: 'sato@example.com', email: 'sato@example.com', role: 'member', updatedAt: '2026-06-08T00:00:00.000Z' },
+          ],
+        }
+      },
+    },
+  })
+
+  const response = await app.request('/api/projects/refero/members', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  const body: unknown = await response.json()
+  expect(body).toMatchObject({
+    members: [
+      { id: 'demo@example.com', workspaceStatus: 'active' },
+      { id: 'sato@example.com', workspaceStatus: 'deactivated' },
+    ],
+  })
+})
+
 test('creates a team in the authenticated user scoped directory', async () => {
   const calls = configureFakeProjectClients(true)
 
