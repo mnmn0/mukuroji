@@ -489,8 +489,8 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         readQuestionsForTask(id),
         readAttachmentsForTask(id),
       ])
-      // The task may have moved to another Project while its linked Documents and files were read.
-      if (scope.assignedProjectId !== undefined && ((relatedDocuments?.items.length ?? 0) > 0 || (attachments?.length ?? 0) > 0)) {
+      // The task may have moved to another Project while its linked Documents, questions, and files were read.
+      if (scope.assignedProjectId !== undefined && ((relatedDocuments?.items.length ?? 0) > 0 || (questions?.items.length ?? 0) > 0 || (attachments?.length ?? 0) > 0)) {
         inScope(await api.get(id))
       }
       return {
