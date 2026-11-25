@@ -473,6 +473,18 @@ function RulesTab({
 }: RulesTabProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [editingRuleId, setEditingRuleId] = useState<string>()
+  // Counts editor opens and closes so a finished save closes only the editing session that started it.
+  const editSession = useRef(0)
+
+  /**
+   * Opens a rule editor, or closes it with `undefined`, and starts a new editing session.
+   *
+   * @param ruleId - The rule to edit, or `undefined` to close the editor.
+   */
+  const changeEditingRule = (ruleId: string | undefined) => {
+    editSession.current += 1
+    setEditingRuleId(ruleId)
+  }
 
   return (
     <>
@@ -521,7 +533,7 @@ function RulesTab({
                   data-testid={`automation-rule-edit-${id}`}
                   disabled={busyOperation === `rule:update:${id}`}
                   type="button"
-                  onClick={() => setEditingRuleId(isEditing ? undefined : id)}
+                  onClick={() => changeEditingRule(isEditing ? undefined : id)}
                 >
                   {t(isEditing ? 'automation.ruleEdit.cancel' : 'automation.edit')}
                 </button>
@@ -554,12 +566,13 @@ function RulesTab({
                 locale={locale}
                 options={editorOptions}
                 rule={rule}
-                onCancel={() => setEditingRuleId(undefined)}
+                onCancel={() => changeEditingRule(undefined)}
                 onDryRun={onDryRun}
                 onSave={async (input) => {
+                  const session = editSession.current
                   await onUpdate(rule, input)
-                  // Close only this editor: another rule may have been opened while this one saved.
-                  setEditingRuleId((current) => current === id ? undefined : current)
+                  // Close only the session that saved: the editor may have been switched or reopened meanwhile.
+                  if (editSession.current === session) changeEditingRule(undefined)
                 }}
               />
             ) : null}
