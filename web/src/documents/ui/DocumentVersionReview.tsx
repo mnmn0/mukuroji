@@ -422,9 +422,10 @@ function VersionCompare({
         <div className="grid gap-3">
           {diff.titleChange !== undefined ? (
             <p className="m-0 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-fg-amber-800">
-              {t('documents.versionReview.titleChanged')
-                .replace('{before}', diff.titleChange.before)
-                .replace('{after}', diff.titleChange.after)}
+              {fillMessagePlaceholders(t('documents.versionReview.titleChanged'), {
+                before: diff.titleChange.before,
+                after: diff.titleChange.after,
+              })}
             </p>
           ) : null}
           {diff.whiteboard ? (
@@ -1105,6 +1106,20 @@ function StatusNotice({
     <p className="m-0 px-6 py-10 text-center text-sm font-medium text-[var(--workbench-muted)]" role={role}>
       {text}
     </p>
+  )
+}
+
+/**
+ * Fills `{name}` placeholders of a message in one pass. Values are inserted as they are, so a
+ * title that contains another placeholder or a replacement pattern such as `$&` stays intact.
+ *
+ * @param message - Translated message with placeholders.
+ * @param values - Text for each placeholder name.
+ * @returns The message with every known placeholder filled.
+ */
+function fillMessagePlaceholders(message: string, values: Readonly<Record<string, string>>) {
+  return message.replace(/\{(\w+)\}/gu, (placeholder, name: string) =>
+    Object.hasOwn(values, name) ? values[name] ?? placeholder : placeholder
   )
 }
 

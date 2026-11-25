@@ -325,6 +325,84 @@ function isIdentifiedRecordList(value: unknown) {
 }
 
 /**
+ * Checks whether a value is an optional string field.
+ *
+ * @param value - Parsed response value.
+ * @returns Whether the value is absent or a string.
+ */
+function isOptionalString(value: unknown) {
+  return value === undefined || typeof value === 'string'
+}
+
+/**
+ * Checks one checklist item of a snapshot block.
+ *
+ * @param value - Parsed response value.
+ * @returns Whether the item has the fields the read-only view and the comparison read.
+ */
+function isChecklistItem(value: unknown) {
+  const item = readRecord(value)
+  return typeof item.id === 'string' &&
+    typeof item.text === 'string' &&
+    typeof item.checked === 'boolean' &&
+    isOptionalString(item.assigneeMemberKey) &&
+    isOptionalString(item.dueDate)
+}
+
+/**
+ * Checks one table row of a snapshot block.
+ *
+ * @param value - Parsed response value.
+ * @returns Whether the row has an ID and cells with an ID and text.
+ */
+function isTableRow(value: unknown) {
+  const row = readRecord(value)
+  return typeof row.id === 'string' &&
+    Array.isArray(row.cells) &&
+    row.cells.every((cell) => {
+      const record = readRecord(cell)
+      return typeof record.id === 'string' && typeof record.text === 'string'
+    })
+}
+
+/**
+ * Checks one block of a page or template snapshot against the shape of its type in the shared
+ * contract, so the read-only view and the comparison can read every field they render.
+ *
+ * @param value - Parsed response value.
+ * @returns Whether the value is a block of a known type with the fields of that type.
+ */
+function isVersionBlock(value: unknown) {
+  const block = readRecord(value)
+  if (typeof block.id !== 'string') return false
+  switch (block.type) {
+    case 'paragraph':
+      return typeof block.text === 'string'
+    case 'heading':
+      return typeof block.text === 'string' &&
+        (block.level === 1 || block.level === 2 || block.level === 3)
+    case 'table':
+      return Array.isArray(block.columns) &&
+        block.columns.every((column) => typeof column === 'string') &&
+        Array.isArray(block.rows) &&
+        block.rows.every(isTableRow)
+    case 'code':
+      return typeof block.code === 'string' && isOptionalString(block.language)
+    case 'checklist':
+      return Array.isArray(block.items) && block.items.every(isChecklistItem)
+    case 'embed':
+      return typeof block.url === 'string' &&
+        isOptionalString(block.title) &&
+        isOptionalString(block.provider)
+    case 'diagram':
+      return (block.format === 'mermaid' || block.format === 'text') &&
+        typeof block.source === 'string'
+    default:
+      return false
+  }
+}
+
+/**
  * Checks the content a version snapshot is shown with, for its kind: the blocks of a page or
  * template, the objects, connectors, and frames of a whiteboard, or the child count of a folder.
  *
@@ -341,9 +419,7 @@ function isVersionSnapshot(value: unknown) {
     return false
   }
   if (record.kind === 'page' || record.kind === 'template') {
-    return isIdentifiedRecordList(record.blocks) &&
-      Array.isArray(record.blocks) &&
-      record.blocks.every((block) => typeof readRecord(block).type === 'string')
+    return Array.isArray(record.blocks) && record.blocks.every(isVersionBlock)
   }
   if (record.kind === 'whiteboard') {
     const whiteboard = readRecord(record.whiteboard)

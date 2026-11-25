@@ -252,6 +252,14 @@ describe('DocumentVersionReviewDialog', () => {
       current: { ...documentRecordFixture, revision: 2, title: 'Approved spec' },
     })
     expect(html).toContain('The title changed from “Spec v1” to “Approved spec”.')
+
+    // A title is inserted as it is, even when it holds a placeholder or a replacement pattern.
+    const tricky = renderDialog({
+      initialTab: 'compare',
+      snapshot: { ...createSnapshot(), title: 'Plan {after} $& $1' },
+      current: { ...documentRecordFixture, revision: 2, title: 'Final $` {before}' },
+    })
+    expect(tricky).toContain('The title changed from “Plan {after} $&amp; $1” to “Final $` {before}”.')
   })
 
   test('orders the comparison by the revisions of the shown snapshots', () => {

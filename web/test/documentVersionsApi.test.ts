@@ -60,10 +60,38 @@ describe('Document version API response validation', () => {
       .resolves.toMatchObject({ document: { kind: 'whiteboard' } })
   })
 
+  test('reads a snapshot with every block type', async () => {
+    const blocks = [
+      { id: 'p', type: 'paragraph', text: 'Body' },
+      { id: 'h', type: 'heading', level: 2, text: 'Scope' },
+      { id: 't', type: 'table', columns: ['A'], rows: [{ id: 'r', cells: [{ id: 'c', text: '1' }] }] },
+      { id: 'k', type: 'code', language: 'ts', code: 'const a = 1' },
+      { id: 'l', type: 'checklist', items: [{ id: 'i', text: 'Sign', checked: false, dueDate: '2099-01-01' }] },
+      { id: 'e', type: 'embed', url: 'https://example.com', title: 'Example' },
+      { id: 'g', type: 'diagram', format: 'mermaid', source: 'graph TD' },
+    ]
+    installFetch({ version: { version, document: { ...documentRecordFixture, blocks } } })
+    await expect(getDocumentVersion('token', documentRecordFixture.id, version.id))
+      .resolves.toMatchObject({ document: { blocks } })
+  })
+
   test('rejects a snapshot that lacks the content of its kind', async () => {
     for (const document of [
       { id: 'd', title: 'T', revision: 1, kind: 'whiteboard' },
       { id: 'd', title: 'T', revision: 1, kind: 'page', blocks: [null] },
+      // A checklist without items and a table without columns or rows would throw while rendering.
+      { id: 'd', title: 'T', revision: 1, kind: 'page', blocks: [{ id: 'c', type: 'checklist' }] },
+      { id: 'd', title: 'T', revision: 1, kind: 'page', blocks: [{ id: 't', type: 'table' }] },
+      { id: 'd', title: 'T', revision: 1, kind: 'page', blocks: [{ id: 't', type: 'table', columns: ['A'] }] },
+      { id: 'd', title: 'T', revision: 1, kind: 'page', blocks: [{ id: 't', type: 'table', rows: [] }] },
+      {
+        id: 'd',
+        title: 'T',
+        revision: 1,
+        kind: 'page',
+        blocks: [{ id: 'c', type: 'checklist', items: [{ id: 'i', text: 'x' }] }],
+      },
+      { id: 'd', title: 'T', revision: 1, kind: 'page', blocks: [{ id: 'u', type: 'unknown' }] },
       { id: 'd', title: 'T', kind: 'page', blocks: [] },
     ]) {
       installFetch({ version: { version, document } })
