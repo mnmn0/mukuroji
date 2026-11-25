@@ -88,6 +88,7 @@ export const timeTrackingMessages = {
   'timeTracking.indirect.hours': '時間数（h）',
   'timeTracking.indirect.invalidHours': '時間数は 1 分以上、その日の 24 時間以内で入力してください。',
   'timeTracking.indirect.hint': '会議や管理などタスクに紐づかない作業を、日付と時間数で記録します。',
+  'timeTracking.indirect.targetsPending': 'セッションが切れる前に入力していた間接作業は、記録できる Project を読み込むと開きます。',
   'timeTracking.panel.empty': 'このタスクの記録はまだありません。',
   'timeTracking.panel.partial': '直近 90 日の記録が一度に表示できる件数を超えているため、この一覧と合計は一部が欠けている可能性があります。',
   'timeTracking.timer.start': 'タイマー開始',

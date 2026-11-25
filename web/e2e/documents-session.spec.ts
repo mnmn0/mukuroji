@@ -175,14 +175,20 @@ test.describe('Document editing across an ended session', () => {
 
   test('sends only the edits that were not saved yet when the session ends during a split save', async ({ page }) => {
     const state = await mockDocuments(page)
+    await page.clock.install()
     await page.goto(`/documents/${documentRecordFixture.id}`)
+    await expect(page.getByPlaceholder('Enter code…')).toBeVisible()
     // Five blocks edited at once are saved in two requests; the second meets the ended session.
     state.rejectSaveAfterBatches = 1
+    // The autosave timer is held until all five edits are queued, so they are saved as one batch.
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000))
     await page.getByPlaceholder('Heading').fill('Context first')
     await page.getByLabel('Text', { exact: true }).fill('Split save paragraph')
     await page.getByLabel('Cell').first().fill('Quiet first')
     await page.getByPlaceholder('Item').first().fill('Review first')
     await page.getByPlaceholder('Enter code…').fill('const split = true')
+    expect(state.savedBatches).toHaveLength(0)
+    await page.clock.resume()
     await expect(page.getByRole('button', { name: 'Retry save' })).toBeVisible()
     expect(state.savedBatches).toHaveLength(1)
     expect(state.savedBatches[0]?.operations).toHaveLength(4)

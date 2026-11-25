@@ -243,6 +243,17 @@ export function PersonalTimesheet({
           targets={indirectTargets}
         />
       ) : null}
+      {creating === 'indirect' && !indirectTargets ? (
+        // Input kept from an ended session waits for the targets, but the member can still leave.
+        <div className="flex flex-wrap items-center gap-2" data-testid="indirect-time-entry-pending">
+          <p className="text-sm font-medium text-[var(--workbench-muted)]" role="status">
+            {t('timeTracking.indirect.targetsPending')}
+          </p>
+          <button className="workbench-button-secondary min-h-9 px-4" onClick={() => setCreating(undefined)} type="button">
+            {t('timeTracking.form.cancel')}
+          </button>
+        </div>
+      ) : null}
 
       {isPartial ? (
         <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-fg-amber-800" role="alert">

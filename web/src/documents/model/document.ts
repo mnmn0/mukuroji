@@ -170,11 +170,14 @@ export class DocumentOperationChunkSaveError extends Error {
    * @param originalError - Chunk callback が返した元 error です。
    * @param remainingOperations - 再試行が必要な operation です。
    * @param lastSavedResult - 失敗前に最後まで保存できた operation 結果です。
+   * @param lastCommittedRevision - Revision of a chunk the API committed before its detail could
+   *   be read; it overrides the one in `lastSavedResult`.
    */
   constructor(
     originalError: unknown,
     remainingOperations: readonly DocumentOperation[],
     lastSavedResult?: DocumentOperationSaveResult,
+    lastCommittedRevision?: number,
   ) {
     super(
       originalError instanceof Error
@@ -186,7 +189,7 @@ export class DocumentOperationChunkSaveError extends Error {
     this.remainingOperations = [...remainingOperations]
     this.lastSavedDocument = lastSavedResult?.document
     this.lastCommittedRevision =
-      lastSavedResult?.committedRevision
+      lastCommittedRevision ?? lastSavedResult?.committedRevision
   }
 }
 
@@ -337,15 +340,38 @@ export async function saveAllPendingDocumentChanges(controller: {
 }
 
 /**
- * Receives each operation chunk the Document API saved, while later chunks may still be sent.
+ * Receives each operation chunk the Document API committed, while later chunks may still be sent.
+ * It is called before the Document detail after the chunk is read.
  *
  * @param chunk - Operations the API accepted.
- * @param result - Revision and Document after the chunk was saved.
+ * @param committedRevision - Revision the API committed the chunk at.
  */
 export type DocumentOperationChunkSavedListener = (
   chunk: readonly DocumentOperation[],
-  result: DocumentOperationSaveResult,
+  committedRevision: number,
 ) => void
+
+/**
+ * Reports a chunk's commit to the listener once, however many times the commit is seen.
+ *
+ * @param chunk - Operations being saved.
+ * @param onChunkSaved - Listener told of the commit.
+ * @returns A function that records the commit, and one that reads the recorded revision.
+ */
+function createChunkCommitReporter(
+  chunk: readonly DocumentOperation[],
+  onChunkSaved?: DocumentOperationChunkSavedListener,
+) {
+  let committedRevision: number | undefined
+  return {
+    committedRevision: () => committedRevision,
+    report: (revision: number) => {
+      if (committedRevision !== undefined) return
+      committedRevision = revision
+      onChunkSaved?.(chunk, revision)
+    },
+  }
+}
 
 /**
  * Pending operation を API 上限ずつ保存し、各 response revision を
@@ -353,8 +379,9 @@ export type DocumentOperationChunkSavedListener = (
  *
  * @param operations - 保存順を維持する pending operation です。
  * @param baseRevision - 最初の chunk が基準にする revision です。
- * @param saveChunk - 一つの chunk を保存する callback です。
- * @param onChunkSaved - Chunk が保存されるたびに、その chunk と結果を受け取る callback です。
+ * @param saveChunk - 一つの chunk を保存する callback です。Detail の取得前に、確定した revision を
+ *   第 3 引数の callback へ渡します。
+ * @param onChunkSaved - Chunk が確定するたびに、その chunk と revision を受け取る callback です。
  * @returns 最後に保存された operation 結果、または空入力なら undefined です。
  * @throws {DocumentOperationChunkSaveError} 途中失敗時に未送信 operation を保持します。
  */
@@ -364,6 +391,7 @@ export async function saveDocumentOperationChunks(
   saveChunk: (
     revision: number,
     chunk: DocumentOperation[],
+    onCommitted: (committedRevision: number) => void,
   ) => Promise<DocumentOperationSaveResult>,
   onChunkSaved?: DocumentOperationChunkSavedListener,
 ) {
@@ -379,17 +407,23 @@ export async function saveDocumentOperationChunks(
       index,
       index + DOCUMENT_OPERATION_BATCH_LIMIT,
     )
+    const commit = createChunkCommitReporter(chunk, onChunkSaved)
     try {
-      lastSavedResult = await saveChunk(revision, chunk)
+      lastSavedResult = await saveChunk(revision, chunk, commit.report)
+      commit.report(lastSavedResult.committedRevision)
       revision = lastSavedResult.committedRevision
     } catch (error) {
+      const committedRevision = commit.committedRevision()
+      // A chunk committed before its detail could be read is not sent again.
       throw new DocumentOperationChunkSaveError(
         error,
-        operations.slice(index),
+        operations.slice(
+          committedRevision === undefined ? index : index + chunk.length,
+        ),
         lastSavedResult,
+        committedRevision,
       )
     }
-    onChunkSaved?.(chunk, lastSavedResult)
   }
 
   return lastSavedResult

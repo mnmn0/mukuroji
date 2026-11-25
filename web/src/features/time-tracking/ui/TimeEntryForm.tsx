@@ -63,7 +63,10 @@ export function TimeEntryForm({
   const [endDate, setEndDate] = useState(() => entry ? toLocalDateKey(entry.endAt) : defaultDate)
   // Last complete start date, so a date typed in pieces still moves the end date once it is whole.
   const [anchorStartDate, setAnchorStartDate] = useState(startDate)
+  // Held in state, so the chosen Work Item stays selected while the options load or change.
+  const [selectedWorkItemId, setSelectedWorkItemId] = useState(() => entry?.workItemId ?? fixedWorkItemId ?? '')
   const sessionDraft = useTimeEntryFormSessionDraft(sessionDraftKey, (draft) => {
+    if (draft.fields.workItemId !== undefined) setSelectedWorkItemId(draft.fields.workItemId)
     const restoredStartDate = draft.fields.date
     const restoredEndDate = draft.fields.endDate
     if (restoredStartDate !== undefined) {
@@ -73,7 +76,6 @@ export function TimeEntryForm({
     if (restoredEndDate !== undefined) setEndDate(restoredEndDate)
   })
   const restoredFields = sessionDraft.restored?.fields
-  const selectedWorkItemId = entry?.workItemId ?? fixedWorkItemId ?? (restoredFields?.workItemId || undefined)
   const hasSelectedOption = workItemOptions.some((option) => option.id === selectedWorkItemId)
 
   /**
@@ -158,12 +160,11 @@ export function TimeEntryForm({
           {t('timeTracking.form.workItem')}
           <select
             className="workbench-input h-9 w-full min-w-0 px-3"
-            defaultValue={selectedWorkItemId ?? ''}
             id={`${id}-work-item`}
-            // Options that load after the form opened select the chosen Work Item again.
-            key={hasSelectedOption ? 'listed' : 'unlisted'}
             name="workItemId"
+            onChange={(event) => setSelectedWorkItemId(event.target.value)}
             required
+            value={selectedWorkItemId}
           >
             <option value="">{t('timeTracking.form.workItemPlaceholder')}</option>
             {selectedWorkItemId && !hasSelectedOption ? <option value={selectedWorkItemId}>{selectedWorkItemId}</option> : null}

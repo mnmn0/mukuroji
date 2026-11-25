@@ -1114,7 +1114,7 @@ export function DocumentPage() {
         saved = await saveDocumentOperationChunks(
           operations,
           expectedRevision,
-          (revision, chunk) => {
+          (revision, chunk, onCommitted) => {
             const input = {
               baseRevision: revision,
               clientId: presenceClientId,
@@ -1134,6 +1134,7 @@ export function DocumentPage() {
                       selectedId,
                       candidateInput,
                       context,
+                      onCommitted,
                     ),
                 ),
             )
@@ -2811,11 +2812,11 @@ function DocumentWorkspace({
             localDocument.id,
             expectedRevision,
             operations,
-            (chunk, result) => {
+            (chunk, committedRevision) => {
               // Chunks already saved must not be sent again after the session ends: the next
               // session uses another client identity, so the API would refuse their IDs.
               inFlightOperationsRef.current = inFlightOperationsRef.current.slice(chunk.length)
-              flushBaseRevisionRef.current = result.committedRevision
+              flushBaseRevisionRef.current = committedRevision
             },
           )
           inFlightOperationsRef.current = []
@@ -2849,18 +2850,19 @@ function DocumentWorkspace({
             ...chunkError.remainingOperations,
             ...pendingOperationsRef.current,
           ])
-          if (
-            chunkError.lastSavedDocument &&
-            chunkError.lastCommittedRevision !== undefined
-          ) {
-            revisionRef.current =
-              chunkError.lastCommittedRevision
+          const { lastCommittedRevision, lastSavedDocument } = chunkError
+          // A chunk committed before its detail could be read still advances the revision.
+          if (lastCommittedRevision !== undefined) {
+            revisionRef.current = lastCommittedRevision
             setLocalDocument((current) => ({
               ...current,
-              capabilities:
-                chunkError.lastSavedDocument!.capabilities,
-              revision: chunkError.lastCommittedRevision!,
-              updatedAt: chunkError.lastSavedDocument!.updatedAt,
+              ...(lastSavedDocument
+                ? {
+                    capabilities: lastSavedDocument.capabilities,
+                    updatedAt: lastSavedDocument.updatedAt,
+                  }
+                : {}),
+              revision: lastCommittedRevision,
             }))
           }
           if (

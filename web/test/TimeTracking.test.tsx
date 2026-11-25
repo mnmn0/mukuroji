@@ -643,6 +643,47 @@ describe('time tracking views', () => {
     }
   })
 
+  test('the timesheet lets a member leave indirect work kept from an ended session while its targets load', () => {
+    const previousWindow = Reflect.get(globalThis, 'window')
+    Reflect.set(globalThis, 'window', { localStorage: new MemoryStorage(), sessionStorage: new MemoryStorage() })
+    resetAuthSessionTabAccount()
+    const payload = Buffer.from(JSON.stringify({ sub: 'member-a' })).toString('base64url')
+    const session = { accessToken: `header.${payload}.signature`, expiresAt: Date.now() + 60_000, refreshToken: 'refresh', remember: false, tokenType: 'Bearer' }
+    const draftKey = createTimeEntryFormSessionDraftKey('indirect', ['timesheet', 'core-team'])
+    try {
+      saveAuthSession(session)
+      const unregister = registerSessionDraft(draftKey, 'member-a', () => ({ billable: false, fields: { hours: '2' } }))
+      clearAuthSession()
+      unregister()
+      saveAuthSession(session)
+      const html = renderToStaticMarkup(
+        <PersonalTimesheet
+          teamId="core-team"
+          entries={[]}
+          formatters={formatters}
+          onCreateEntry={noop}
+          onMoveWeek={() => undefined}
+          onRetry={() => undefined}
+          onSubmitEntry={noop}
+          onSubmitWeek={async () => ({ count: 0, failedEntryIds: [], partialFailure: false, entries: [] })}
+          onUpdateEntry={noop}
+          t={t}
+          today="2026-11-10"
+          week={week}
+          workItemOptions={timeTrackingFixtureWorkItems}
+          workItemTitles={workItemTitles}
+        />,
+      )
+      // The form waits for the targets, and a Cancel button leaves it without waiting.
+      expect(html).not.toContain('data-testid="indirect-time-entry-form"')
+      expect(html).toMatch(/data-testid="indirect-time-entry-pending"[^]*>Cancel</u)
+    } finally {
+      discardSessionDrafts()
+      resetAuthSessionTabAccount()
+      Reflect.set(globalThis, 'window', previousWindow)
+    }
+  })
+
   test('the approval queue hides everything but a notice from non-managers', () => {
     const html = renderToStaticMarkup(
       <TimeApprovalQueue

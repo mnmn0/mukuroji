@@ -88,6 +88,7 @@ export const timeTrackingMessages = {
   'timeTracking.indirect.hours': 'Hours',
   'timeTracking.indirect.invalidHours': 'Enter at least 1 minute and no more than the 24 hours of that day.',
   'timeTracking.indirect.hint': 'Record work that is not on a task, such as meetings or management, as a date and a number of hours.',
+  'timeTracking.indirect.targetsPending': 'Indirect work you entered before your session ended opens once the Projects you can record it on are loaded.',
   'timeTracking.panel.empty': 'No time has been recorded on this task yet.',
   'timeTracking.panel.partial': 'You have more entries in the last 90 days than can be shown at once, so this list and its total may be missing some.',
   'timeTracking.timer.start': 'Start timer',

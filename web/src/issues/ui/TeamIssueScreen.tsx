@@ -1613,7 +1613,8 @@ export function TeamIssueScreen({
                 ) : null}
                 {isCreateOpen && onCreateIssue ? (
                   <CreateIssuePanel
-                    key={`create-issue-${createWorkItemTypeId ?? ''}-${createWorkflowStatusId ?? ''}-${createDuplicateDraft?.sourceWorkItemId ?? ''}`}
+                    // A Team switch starts a new form, so text typed for one Team is never kept for another.
+                    key={`create-issue-${teamId}-${createWorkItemTypeId ?? ''}-${createWorkflowStatusId ?? ''}-${createDuplicateDraft?.sourceWorkItemId ?? ''}`}
                     assigneeOptions={assigneeOptions}
                     calendarPolicy={workingCalendar}
                     canCreateUnassignedIssue={canCreateUnassignedIssue}
