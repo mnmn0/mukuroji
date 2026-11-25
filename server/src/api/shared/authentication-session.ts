@@ -26,12 +26,13 @@ import { recordSignInSucceeded } from './sign-in-audit'
 import { decodeJwtPayload, readNumericClaim, readUserAttribute } from './token-claims'
 
 /**
- * Links a refreshed token set to the access token it replaces.
+ * Marks a token set as a refresh of an existing sign-in, linked to the access token it replaces.
  */
 export type AuthenticationSessionContinuation = {
   /**
-   * Access token the client used before the refresh; it may already be expired. A refresh without
-   * it still passes a continuation, so it is not recorded as a new sign-in.
+   * Access token the client used before the refresh; it may already be expired. Absent when the
+   * client did not send one, so nothing carries over. A refresh without it still passes a
+   * continuation, so it is not recorded as a new sign-in.
    */
   previousAccessToken?: string
 }
@@ -44,7 +45,7 @@ export type AuthenticationSessionContinuation = {
  * @param requestBody - Login request body.
  * @param requestAuditContext - Audit context of the login request.
  * @param verifiedAuthenticationMethods - Authentication methods verified for the session.
- * @param continuation - Previous access token when the token set came from a refresh.
+ * @param continuation - Set when the token set came from a refresh, which is not a new sign-in.
  * @param loadedUser - Cognito user already read with the same access token, if any.
  * @returns The HTTP response carrying the session tokens.
  */
@@ -93,6 +94,13 @@ export async function createAuthenticationResponse(
       email: readUserAttribute(user, 'email') ?? principal.userKey,
       name: readUserAttribute(user, 'name'),
     }, auditContext)
+    if (!continuation) {
+      await recordMemberSignIn(
+        principal.directoryId,
+        principal.userKey,
+        c.req.header('X-Correlation-Id')?.trim(),
+      )
+    }
     const claims = decodeJwtPayload<CognitoAccessTokenClaims>(tokens.AccessToken)
     const authenticatedAt = readNumericClaim(claims?.auth_time) ??
       readNumericClaim(claims?.iat) ??
@@ -134,6 +142,35 @@ export async function createAuthenticationResponse(
     refreshToken: tokens.RefreshToken,
     expiresAt: Date.now() + (tokens.ExpiresIn ?? 3600) * 1000,
     tokenType: tokens.TokenType ?? 'Bearer',
+  }
+}
+
+/**
+ * Records a new sign-in as the member's last sign-in. A token refresh is not a sign-in and does
+ * not call this. Failing to record never fails the sign-in, because the time is only shown to
+ * administrators for reference.
+ *
+ * @param workspaceId - Workspace of the member.
+ * @param memberKey - Member that signed in.
+ * @param correlationId - Canonical correlation ID of the sign-in request, logged with a failed
+ *   record so it can be traced to the request's access log.
+ */
+async function recordMemberSignIn(
+  workspaceId: string,
+  memberKey: string,
+  correlationId: string | undefined,
+) {
+  const { workspaceAccess } = workspaceDependencies
+  if (!workspaceAccess.recordMemberSignIn) return
+  try {
+    await workspaceAccess.recordMemberSignIn(workspaceId, memberKey)
+  } catch (error) {
+    // The error message and the member key can carry the member's address, so only the error's
+    // name is logged with the request's correlation ID.
+    console.error('Failed to record the member sign-in:', {
+      correlationId,
+      errorName: error instanceof Error ? error.name : 'Unknown',
+    })
   }
 }
 
