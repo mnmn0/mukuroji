@@ -58,6 +58,7 @@ import {
   createWorkItemCollaborationEntityKey,
 } from '../../modules/collaboration/collaboration'
 import { evaluateEnterpriseAccess } from '../../modules/enterprise-identity'
+import { resolveConnectorStateStatus } from '../shared/connector-state-status'
 import {
   WorkItemCompletionGateError,
   WorkflowRuleError,
@@ -2669,21 +2670,29 @@ export function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGate
         ) {
           throw createWorkItemAuthorizationChangedError()
         }
+        const configuration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+          input.workspaceId,
+          input.teamId,
+        )
+        // A two-state resource (a GitHub issue) carries open / closed, which becomes a status of the
+        // matching category in the Work Item's own workflow.
+        const stateStatusId = input.patch.state === undefined
+          ? undefined
+          : resolveConnectorStateStatus(
+              resolveWorkItemTypeWorkflow(configuration.configuration, detail.issue.workItemTypeId, { allowArchived: true }),
+              detail.issue.workflowStatusId,
+              input.patch.state,
+            )
+        const workflowStatusId = input.patch.status ?? stateStatusId
         const body = normalizeTeamIssueInput({
           expectedRevision: input.expectedRevision,
           ...(input.patch.title !== undefined ? { title: input.patch.title } : {}),
           ...(input.patch.description !== undefined
             ? { description: input.patch.description }
             : {}),
-          ...(input.patch.status !== undefined
-            ? { workflowStatusId: input.patch.status }
-            : {}),
+          ...(workflowStatusId !== undefined ? { workflowStatusId } : {}),
           ...(schedule ? { schedule: schedule.schedule } : {}),
         }, permission.team)
-        const configuration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
-          input.workspaceId,
-          input.teamId,
-        )
         const configuredBody = await prepareConfiguredUpdateWorkItem(
           input.workspaceId,
           input.teamId,
@@ -2803,6 +2812,7 @@ function toConnectorWorkItemSnapshot(
     title: issue.title,
     ...(issue.description ? { description: issue.description } : {}),
     status: issue.workflowStatusId,
+    statusCategory: issue.statusCategory,
     ...toConnectorEventScheduleField(issue.schedule),
     ...(issue.schedule.mode === 'unscheduled' ? {} : { scheduleMode: issue.schedule.mode }),
   }

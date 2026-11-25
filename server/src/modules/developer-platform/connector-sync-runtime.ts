@@ -55,6 +55,8 @@ export type ConnectorWorkItemSnapshot = {
   description?: string
   /** Provider adapter が理解する normalized status です。 */
   status?: string
+  /** Status category of the workflow status, for providers that store only open or closed. */
+  statusCategory?: string
   /** All-day dates of the Work Item schedule; absent while it is unscheduled. */
   schedule?: ConnectorEventSchedule
   /**
@@ -72,6 +74,11 @@ export type ConnectorWorkItemPatch = {
   description?: string
   /** External status が存在する場合の normalized status です。 */
   status?: string
+  /**
+   * Open or closed state of the resource. The gateway moves a Work Item whose status category
+   * disagrees to the first status of the matching category that its workflow allows.
+   */
+  state?: 'open' | 'closed'
   /**
    * Calendar event dates to move the Work Item to; the gateway keeps the schedule mode and
    * calendar policy.
@@ -1889,6 +1896,7 @@ export function createConnectorWorkItemSnapshot(
     title: workItem.title,
     description: workItem.description,
     status: workItem.workflowStatusId,
+    statusCategory: workItem.statusCategory,
     ...toConnectorEventScheduleField(workItem.schedule),
   }
 }
@@ -1966,6 +1974,7 @@ function createOutboundMutation(
     title: workItem.title,
     description: workItem.description,
     ...(calendar ? {} : { status: workItem.status }),
+    ...(!calendar && workItem.statusCategory !== undefined ? { statusCategory: workItem.statusCategory } : {}),
     ...(calendar && workItem.schedule ? { schedule: workItem.schedule } : {}),
     originMarker: createConnectorOriginMarker(
       link.installationId,
@@ -2068,6 +2077,9 @@ function createConflictFields(
     appendConflictField(fields, 'title', workItem.title, record.title)
     appendConflictField(fields, 'description', workItem.description, record.description)
     appendConflictField(fields, 'status', workItem.status, record.status)
+    if (record.state !== undefined) {
+      appendConflictField(fields, 'state', toConnectorState(workItem.statusCategory), record.state)
+    }
   }
   if (fields.length === 0) {
     fields.push({
@@ -2077,6 +2089,17 @@ function createConflictFields(
     })
   }
   return fields
+}
+
+/**
+ * Converts a status category to the open or closed state of a two-state provider resource.
+ *
+ * @param category - Status category of the Work Item, when known.
+ * @returns `closed` for completed and canceled, `open` for the other categories.
+ */
+export function toConnectorState(category: string | undefined): 'open' | 'closed' | undefined {
+  if (category === undefined) return undefined
+  return category === 'completed' || category === 'canceled' ? 'closed' : 'open'
 }
 
 function appendConflictField(
@@ -2101,6 +2124,7 @@ function recordToPatch(record: ConnectorExternalRecord): ConnectorWorkItemPatch 
     ...(record.title !== undefined ? { title: record.title } : {}),
     ...(record.description !== undefined ? { description: record.description } : {}),
     ...(record.status !== undefined ? { status: record.status } : {}),
+    ...(record.state !== undefined ? { state: record.state } : {}),
   }
 }
 

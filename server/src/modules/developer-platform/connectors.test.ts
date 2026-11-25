@@ -39,19 +39,14 @@ function createAdapter(): ConnectorAdapter {
 }
 
 describe('ConnectorRegistry', () => {
-  test('covers every provider exposed by the developer platform contract', () => {
+  test('lists only the providers a runtime can configure, without mail or cloud storage', () => {
     expect(BUILT_IN_CONNECTOR_CATALOG.map((definition) => definition.id)).toEqual([
       'github',
       'gitlab',
       'slack',
       'microsoft-teams',
-      'gmail',
-      'outlook',
       'google-calendar',
       'outlook-calendar',
-      'google-drive',
-      'onedrive',
-      'dropbox',
     ])
   })
 

@@ -16,6 +16,7 @@ import {
 } from './connectors'
 
 import { createBuiltInConnectorResourceProtocol } from './calendar-event-protocols'
+import { GITHUB_CONNECTOR_DEFAULTS, GitHubIssueProtocol } from './github-issue-protocol'
 import { ConnectorRuntimeError } from './connector-runtime-error'
 import type {
   ConnectorProviderRequest,
@@ -1557,7 +1558,7 @@ export function createOAuthConnectorRegistryFromEnvironment(
     )
   }
   const adapters = parsed.map((value) => {
-    const entry = readEnvironmentEntry(value)
+    const entry = applyBundledProviderSettings(readEnvironmentEntry(value))
     const secret = options.environment[entry.clientSecretEnvironmentVariable]
     if (!secret) {
       throw new ConnectorRuntimeError(
@@ -1574,7 +1575,8 @@ export function createOAuthConnectorRegistryFromEnvironment(
         'Connector provider is not supported by this runtime.',
       )
     }
-    const resourceProtocol = createBuiltInConnectorResourceProtocol(entry.provider)
+    const resourceProtocol = createBuiltInConnectorResourceProtocol(entry.provider) ??
+      (usesBundledGitHubSettings(entry) ? new GitHubIssueProtocol() : undefined)
     return new ConfiguredOAuthConnectorAdapter({
       ...entry,
       definition,
@@ -1585,6 +1587,59 @@ export function createOAuthConnectorRegistryFromEnvironment(
     })
   })
   return new ConnectorRegistry(adapters)
+}
+
+/**
+ * Tells whether a GitHub entry relies on the bundled issue sync: it maps no REST resources itself.
+ *
+ * @param entry - Provider entry.
+ * @returns Whether the GitHub issue protocol serves the entry.
+ */
+function usesBundledGitHubSettings(entry: Pick<ConnectorOAuthEnvironmentEntry, 'provider' | 'resources'>) {
+  return entry.provider === 'github' && Object.keys(entry.resources ?? {}).length === 0
+}
+
+/**
+ * Fills the GitHub OAuth App endpoints, token and account mapping, scope, and hosts that a GitHub
+ * entry leaves out, so an operator writes only the client ID, secret variable, and redirect URI.
+ * Values the entry sets win; entries of other providers and GitHub entries with REST resource
+ * mappings are returned unchanged.
+ *
+ * @param entry - Provider entry read from the environment.
+ * @returns Entry with the bundled settings applied.
+ */
+function applyBundledProviderSettings(entry: ConnectorOAuthEnvironmentEntry): ConnectorOAuthEnvironmentEntry {
+  if (!usesBundledGitHubSettings(entry)) return entry
+  const defaults = GITHUB_CONNECTOR_DEFAULTS
+  // The JSON entry is untrusted input whose fields may be absent despite the entry type.
+  return {
+    ...entry,
+    authorizationEndpoint: entry.authorizationEndpoint ?? defaults.authorizationEndpoint,
+    tokenEndpoint: entry.tokenEndpoint ?? defaults.tokenEndpoint,
+    accountEndpoint: entry.accountEndpoint ?? defaults.accountEndpoint,
+    apiBaseUrl: entry.apiBaseUrl ?? defaults.apiBaseUrl,
+    clientAuthentication: entry.clientAuthentication ?? defaults.clientAuthentication,
+    defaultScopes: entry.defaultScopes ?? [...defaults.defaultScopes],
+    token: entry.token ?? { ...defaults.token },
+    account: entry.account ?? { ...defaults.account },
+    allowedHosts: entry.allowedHosts ?? [...defaults.allowedHosts, ...readRedirectHost(entry.redirectUri)],
+  }
+}
+
+/**
+ * Reads the host of the OAuth redirect URI, which the bundled host allowlist must also hold. The
+ * adapter validates the URI itself, so an unparsable value adds nothing here.
+ *
+ * @param redirectUri - Redirect URI from the entry.
+ * @returns The host, or nothing.
+ */
+function readRedirectHost(redirectUri: unknown): string[] {
+  if (typeof redirectUri !== 'string') return []
+  try {
+    return [new URL(redirectUri).hostname]
+  } catch {
+    return []
+  }
 }
 
 function readEnvironmentEntry(value: unknown): ConnectorOAuthEnvironmentEntry {
