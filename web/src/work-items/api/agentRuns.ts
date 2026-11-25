@@ -132,10 +132,16 @@ export async function listWorkItemAgentRunReports(
  *
  * @param accessToken - Session access token.
  * @param teamId - Team ID.
- * @returns Board items and the read bounds the server reached.
+ * @param continuation - Token of the previous page, to read the sources it left unread.
+ * @returns Board items, the read bounds the server reached, and the token of the next page.
  */
-export async function getTeamAgentRunBoard(accessToken: string, teamId: string): Promise<TeamAgentRunBoardResponse> {
-  const data = await requestJson(`${apiBaseUrl}/teams/${encodeURIComponent(teamId)}/agent-runs`, accessToken)
+export async function getTeamAgentRunBoard(
+  accessToken: string,
+  teamId: string,
+  continuation?: string,
+): Promise<TeamAgentRunBoardResponse> {
+  const query = continuation === undefined ? '' : `?continuation=${encodeURIComponent(continuation)}`
+  const data = await requestJson(`${apiBaseUrl}/teams/${encodeURIComponent(teamId)}/agent-runs${query}`, accessToken)
   const board = readTeamAgentRunBoard(data)
   if (!board) throw new WorkItemConfigurationApiError(502, 'The Factory board returned an unexpected response.')
   return board
@@ -326,11 +332,12 @@ function readFactoryAnalyticsUsage(value: unknown): FactoryAnalyticsUsage | unde
  */
 function readTeamAgentRunBoard(value: unknown): TeamAgentRunBoardResponse | undefined {
   if (!isRecord(value) || !Array.isArray(value.items)) return undefined
-  const { generatedAt, activeRunsHasMore, finishedRunsHasMore, startedWorkItemsHasMore } = value
+  const { generatedAt, activeRunsHasMore, finishedRunsHasMore, startedWorkItemsHasMore, continuation } = value
   if (
     typeof generatedAt !== 'string' || !Number.isFinite(Date.parse(generatedAt)) ||
     typeof activeRunsHasMore !== 'boolean' || typeof finishedRunsHasMore !== 'boolean' ||
-    typeof startedWorkItemsHasMore !== 'boolean'
+    typeof startedWorkItemsHasMore !== 'boolean' ||
+    (continuation !== undefined && (typeof continuation !== 'string' || continuation === ''))
   ) {
     return undefined
   }
@@ -340,7 +347,14 @@ function readTeamAgentRunBoard(value: unknown): TeamAgentRunBoardResponse | unde
     if (!item) return undefined
     items.push(item)
   }
-  return { generatedAt, items, activeRunsHasMore, finishedRunsHasMore, startedWorkItemsHasMore }
+  return {
+    generatedAt,
+    items,
+    activeRunsHasMore,
+    finishedRunsHasMore,
+    startedWorkItemsHasMore,
+    ...(continuation === undefined ? {} : { continuation }),
+  }
 }
 
 /**
