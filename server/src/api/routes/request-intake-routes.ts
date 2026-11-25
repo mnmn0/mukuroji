@@ -79,6 +79,7 @@ import {
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
 import {
+  createPersonWorkflowRulePrincipal,
   filterRequestConversionCustomFieldValues,
   prepareConfiguredCreateWorkItem,
 } from '../shared/work-item-configuration'
@@ -1084,6 +1085,7 @@ async function acceptTriageEntryAsNewWorkItem(
     request.teamId,
     conversionInput,
     resolvedConfiguration,
+    createPersonWorkflowRulePrincipal(principal, teamContext),
     { fallbackToTypeInitialStatus: formConversion !== undefined },
   )
   const acceptanceReferenceConditionChecks =

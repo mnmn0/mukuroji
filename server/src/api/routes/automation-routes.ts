@@ -202,6 +202,8 @@ import {
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
 import {
+  AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
+  createPersonWorkflowRulePrincipal,
   prepareConfiguredCreateWorkItem,
   validateWorkItemConfigurationReferences,
 } from '../shared/work-item-configuration'
@@ -1092,6 +1094,7 @@ function createApiBulkOperationAdapter(
           loaded.detail.issue,
           body,
           configuration,
+          createPersonWorkflowRulePrincipal(principal, loaded.context),
         )
     // Only a member reassignment changes contributors; the successor is fenced in the write.
     const configuredBody = configuration === undefined || action.type !== 'reassign-member'
@@ -1377,6 +1380,7 @@ function createApiBulkOperationAdapter(
             loaded.detail.issue,
             normalizedBody,
             undoConfiguration,
+            createPersonWorkflowRulePrincipal(principal, loaded.context),
           )
       // A share the handover merged away comes back under its own ID with its own role, and every
       // member brought back is checked as newly assigned.
@@ -1898,6 +1902,7 @@ async function executeAutomationWorkItemUpdate(
       context.execution.workspaceId,
       target.teamId,
     ),
+    AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
     { relationDependencies: dependencies },
   )
   if ('assigneeUserId' in configuredBody) {
@@ -2158,6 +2163,7 @@ async function executeAutomationWorkItemCreate(
       ),
     },
     configuration,
+    AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
   )
   const assignee = readTeamIssueAssigneeUserId(configuredBody)
   await requireActiveWorkspaceAssignee(

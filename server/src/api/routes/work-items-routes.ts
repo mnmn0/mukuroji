@@ -213,6 +213,7 @@ import {
 } from '../shared/http'
 import { readAuditEventQuery, readLocale, readRequiredRouteId } from '../shared/input-parsing'
 import {
+  createPlanningCallerAuthorizationConditionChecks,
   createPlanningFencedWorkItemAuthorizationSnapshot,
   filterPlanningSnapshotForPrincipal,
   withPlanningLegacyReadScope,
@@ -283,9 +284,11 @@ import {
   summarizeAccessibleWorkItems,
 } from '../shared/work-item-aggregate-read'
 import {
+  createPersonWorkflowRulePrincipal,
   filterRequestConversionCustomFieldValues,
   getWorkItemConfigurationTableName,
   prepareConfiguredCreateWorkItem,
+  type WorkflowRulePrincipal,
 } from '../shared/work-item-configuration'
 import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
@@ -1272,6 +1275,7 @@ async function resolveFileApprovalCompletionTransitionForDecision(
   teamId: string,
   workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
   completionTransition: string,
+  decider: WorkflowRulePrincipal,
 ): Promise<FileApprovalCompletionTransition | undefined> {
   try {
     return await resolveFileApprovalCompletionTransition(
@@ -1279,6 +1283,7 @@ async function resolveFileApprovalCompletionTransitionForDecision(
       teamId,
       workItem,
       completionTransition,
+      decider,
     )
   } catch (error) {
     if (
@@ -3932,6 +3937,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         conversion.target.teamId,
         conversionInput,
         resolvedConfiguration,
+        createPersonWorkflowRulePrincipal(principal, teamContext),
         { fallbackToTypeInitialStatus: body.target?.workflowStatusId === undefined },
       )
       const authorizationConditionChecks = await createTriageProjectAuthorizationConditionChecks(
@@ -4823,6 +4829,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         teamId,
         body,
         resolvedConfiguration,
+        createPersonWorkflowRulePrincipal(principal, context),
       )
       const assigneeUserId = readTeamIssueAssigneeUserId(configuredBody)
       await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
@@ -5280,6 +5287,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         detail.issue,
         body,
         resolvedConfiguration,
+        createPersonWorkflowRulePrincipal(principal, context),
       )
 
       let authorizationSnapshot: WorkItemAuthorizationSnapshot | undefined
@@ -6025,12 +6033,36 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const resolveCompletionTransition: FileApprovalCompletionTransitionResolver = async (
         completionTransition,
       ) => {
-        const resolved = await resolveFileApprovalCompletionTransitionForDecision(
+        // The decider changes the status, so the workflow's transition actor roles apply to them.
+        // A reviewer may hold no Team role; then only the assignee role can hold, so that denial
+        // leaves the manager role unmet instead of blocking a decision no rule restricts. Any other
+        // failure surfaces.
+        const deciderContext = await requireTeamPermission(principal, scope.teamId, 'viewer')
+          .catch((error: unknown) => {
+            if (error instanceof ProjectDataError && error.status === 403) return undefined
+            throw error
+          })
+        const transition = await resolveFileApprovalCompletionTransitionForDecision(
           principal.directoryId,
           scope.teamId,
           canonicalWorkItem,
           completionTransition,
+          createPersonWorkflowRulePrincipal(principal, deciderContext),
         )
+        // The transition was judged against the decider's roles, so a role change before the
+        // decision commits fails it. The decision already writes Planning META, so only the caller's
+        // member row and enterprise CONTROL revision are checked here.
+        const resolved = transition && {
+          ...transition,
+          configurationConditionChecks: [
+            ...transition.configurationConditionChecks,
+            ...createPlanningCallerAuthorizationConditionChecks(
+              principal,
+              [],
+              principal.principalKind !== 'service-account',
+            ),
+          ],
+        }
         resolvedCompletionTransition = resolved
         return resolved
       }
