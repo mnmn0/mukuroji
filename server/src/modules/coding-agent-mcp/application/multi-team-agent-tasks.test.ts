@@ -112,8 +112,11 @@ function teamApi(teamId: string, tasks: AgentTask[], runs: AgentRunRecord[] = []
       return { schemaVersion: 1, teamId, projectId, lifecycleState: 'active', revision: 1, tags: [], repositoryUrls: [] }
     },
     document: unexpected,
-    async attachments() { return [] },
-    attachmentDownload: unexpected,
+    async attachments(id) { calls.push(`attachments:${id}`); return [] },
+    async attachmentDownload(id, fileId) {
+      calls.push(`download:${id}/${fileId}`)
+      return { fileId, versionId: `${fileId}-v1`, url: `https://files.example.test/${teamId}/${fileId}`, expiresAt: '2026-11-25T00:05:00.000Z' }
+    },
   }
   return { teamId, api, calls }
 }
@@ -145,6 +148,10 @@ describe('multi-Team agent tasks', () => {
     await tasks.comments('b1')
     expect(teamB.calls).toContain('comments:b1')
     expect(teamA.calls).not.toContain('comments:b1')
+    await tasks.attachments('b1')
+    expect((await tasks.attachmentDownload('b1', 'file-1')).url).toBe('https://files.example.test/team-b/file-1')
+    expect(teamB.calls).toEqual(expect.arrayContaining(['attachments:b1', 'download:b1/file-1']))
+    expect(teamA.calls.filter((call) => call.startsWith('attachments:') || call.startsWith('download:'))).toEqual([])
     // The Team is remembered, so the second call does not ask the first Team again.
     expect(teamA.calls.filter((call) => call === 'get:b1')).toHaveLength(1)
     await expect(tasks.get('missing')).rejects.toMatchObject({ code: 'not_found' })
@@ -222,7 +229,9 @@ describe('multi-Team agent tasks', () => {
     const teamB = teamApi('team-b', [task('team-b', 'shared')])
     const tasks = createMultiTeamAgentTasks([teamA, teamB], scope)
     await expect(tasks.comments('shared')).rejects.toMatchObject({ code: 'invalid_request' })
-    expect([...teamA.calls, ...teamB.calls].filter((call) => call.startsWith('comments:'))).toEqual([])
+    await expect(tasks.attachments('shared')).rejects.toMatchObject({ code: 'invalid_request' })
+    await expect(tasks.attachmentDownload('shared', 'file-1')).rejects.toMatchObject({ code: 'invalid_request' })
+    expect([...teamA.calls, ...teamB.calls].filter((call) => /^(comments|attachments|download):/u.test(call))).toEqual([])
 
     // A listing that sees the same ID in two Teams marks it ambiguous too.
     const listed = createMultiTeamAgentTasks([teamApi('team-a', [task('team-a', 'shared')]), teamApi('team-b', [task('team-b', 'shared')])], scope)

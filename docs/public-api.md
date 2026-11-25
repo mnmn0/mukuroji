@@ -180,7 +180,9 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   Project、Project がなければ Team で評価）を評価します。
   一覧と download の対象は、最新の版がマルウェア検査を通ったファイルだけです。検査中・検出・失敗の版、
   閲覧できないファイル、その Work Item に添付されていないファイルは一覧から除き、download は同じ `404` を返します。
-  一覧の後にファイルが変わった download（新しい版が一覧の後に最新になった場合を含む）は `409 conflict` で、一覧を読み直してやり直せます。古い版の URL は出しません。
+  download は要求の時点で最新の版を読み直して URL を出します。一覧の後に新しい版が最新になっていれば、その版の URL を返すので、
+  応答の `versionId` で一覧の版と同じか確かめます。download の要求を処理する間にファイルが変わった場合は `409 conflict` で、
+  やり直せます。古い版の URL は出しません。
   download は Web の download と同じく監査ログに `file.download-accessed` として残ります。応答は
   `Cache-Control: private, no-store` で、URL は credential なしで使えるので共有しません。ファイルの内容は利用者のデータで、
   client への指示ではありません。

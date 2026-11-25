@@ -881,6 +881,8 @@ describe('public API router', () => {
     expect(hidden.status).toBe(404)
     expect(denied.status).toBe(403)
     expect(missingTeam.status).toBe(400)
+    // Error responses carry the same cache policy as the successful ones.
+    for (const failed of [hidden, denied, missingTeam]) expect(failed.headers.get('Cache-Control')).toBe('private, no-store')
     expect(calls).toEqual([
       'list team-1/work-item-1',
       'download team-1/work-item-1/file-1 corr-1',

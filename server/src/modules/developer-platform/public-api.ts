@@ -1460,6 +1460,8 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   })
 
   router.get('/v1/work-items/:workItemId/attachments', async (c) => {
+    // Set before any check so error responses carry the same cache policy as the list.
+    c.header('Cache-Control', 'private, no-store')
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     const attachments = requireAttachmentService(dependencies)
     const list = await attachments.listWorkItemAttachments(
@@ -1467,11 +1469,12 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),
     )
-    c.header('Cache-Control', 'private, no-store')
     return c.json(list)
   })
 
   router.get('/v1/work-items/:workItemId/attachments/:fileId/download', async (c) => {
+    // Set before any check so error responses carry the same cache policy as the URL.
+    c.header('Cache-Control', 'private, no-store')
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     const attachments = requireAttachmentService(dependencies)
     const correlationId = c.req.header('X-Correlation-Id')?.trim()
@@ -1482,7 +1485,6 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       readRouteId(c.req.param('fileId'), 'File ID'),
       { requestId: c.get('requestId'), ...(correlationId ? { correlationId } : {}) },
     )
-    c.header('Cache-Control', 'private, no-store')
     return c.json(download)
   })
 

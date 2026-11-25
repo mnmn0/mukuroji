@@ -1674,6 +1674,13 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       const existing = await this.getItem<StoredDownloadItem>(scopeKey, history.recordKey)
       if (existing) {
         requireMatchingIdempotencyFingerprint(existing.requestFingerprint, auditContext)
+        // A replay must not hand out an older version once a caller asked for the current one only.
+        if (options?.requireCurrentVersion) {
+          const latest = await this.getFile(scopeKey, fileId)
+          if (latest.currentVersionId !== versionId) {
+            throw new FileProofingError(409, 'FileVersionConflict', 'File access state changed. Reload and try again.', { cause: error })
+          }
+        }
       } else {
         throw new FileProofingError(
           409,
