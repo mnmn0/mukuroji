@@ -1,12 +1,11 @@
 import { useMemo, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
-import { applyReleasedRunToBoard } from '../../features/factory-board/model/factoryBoard'
 import {
   DEFAULT_FACTORY_ANALYTICS_PERIOD_DAYS,
   type FactoryAnalyticsPeriodDays,
 } from '../../features/factory-board/model/factoryAnalytics'
 import { useReleaseFactoryBoardRun } from '../../features/factory-board/mutations/useReleaseFactoryBoardRun'
-import { useFactoryAnalytics, useFactoryBoardReports, useTeamAgentRunBoard } from '../../features/factory-board/queries/useFactoryBoard'
+import { useFactoryAnalytics, useFactoryBoardReports, useTeamAgentRunBoardPages } from '../../features/factory-board/queries/useFactoryBoard'
 import { FactoryAnalyticsSummary } from '../../features/factory-board/ui/FactoryAnalyticsSummary'
 import { FactoryBoard, type FactoryBoardView } from '../../features/factory-board/ui/FactoryBoard'
 import { createFactoryAnalyticsLabels, createFactoryBoardLabels } from '../../features/factory-board/ui/factoryBoardLabels'
@@ -56,15 +55,15 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
   const [selectedWorkItemId, setSelectedWorkItemId] = useState<string>()
   const enabled = workspace.canLoadWorkspaceData && activeTeam !== undefined
   const accessToken = enabled ? workspace.accessToken : undefined
-  const board = useTeamAgentRunBoard(accessToken, teamId)
+  const board = useTeamAgentRunBoardPages(accessToken, teamId)
   const reports = useFactoryBoardReports(accessToken, teamId, selectedWorkItemId)
   const [analyticsDays, setAnalyticsDays] = useState<FactoryAnalyticsPeriodDays>(DEFAULT_FACTORY_ANALYTICS_PERIOD_DAYS)
   const analytics = useFactoryAnalytics(accessToken, teamId, analyticsDays)
   const onRelease = useReleaseFactoryBoardRun(accessToken, teamId, async (released) => {
     // Show the committed release from the response, so a failed refresh cannot bring back the active run.
-    await board.mutate((current) => applyReleasedRunToBoard(current, released), { revalidate: false })
+    await board.applyRelease(released)
     // A release finishes a run and counts as an intervention, so the period summary is read again too.
-    void Promise.all([board.mutate(), reports.mutate(), analytics.mutate()]).catch(() => undefined)
+    void Promise.all([board.refresh(), reports.mutate(), analytics.mutate()]).catch(() => undefined)
   })
   const labels = useMemo(() => createFactoryBoardLabels(workspace.locale), [workspace.locale])
   const analyticsLabels = useMemo(() => createFactoryAnalyticsLabels(workspace.locale), [workspace.locale])
@@ -103,11 +102,13 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
             ? createProjectIssuesPath(item.workItem.assignedProjectId, teamId, item.workItem.id)
             : createTeamIssuesPath(teamId ?? '', item.workItem.id)}
           isLoading={board.isLoading}
+          isLoadingMore={board.isLoadingMore}
           isRefreshing={board.isValidating}
           labels={labels}
+          onLoadMore={board.loadMore}
           onNavigate={(href) => { void navigate(href) }}
           onRefresh={() => {
-            void board.mutate()
+            void board.refresh()
             void analytics.mutate()
           }}
           onRelease={onRelease}

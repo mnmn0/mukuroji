@@ -12,6 +12,7 @@ import { toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
 import {
   getWebAgentSettings,
   listWebTeamAgentRunBoard,
+  readFactoryBoardContinuation,
   listWebWorkItemAgentRunReports,
   listWebWorkItemAgentRuns,
   releaseWebAgentRun,
@@ -107,7 +108,13 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
     if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-      return c.json(await listWebTeamAgentRunBoard(principal, c.req.param('teamId'), c.req.header('X-Correlation-Id')?.trim() || undefined))
+      const continuation = c.req.query('continuation')
+      return c.json(await listWebTeamAgentRunBoard(
+        principal,
+        c.req.param('teamId'),
+        c.req.header('X-Correlation-Id')?.trim() || undefined,
+        continuation === undefined ? undefined : readFactoryBoardContinuation(continuation),
+      ))
     } catch (error) {
       return toAgentRunErrorResponse(c, error)
     }

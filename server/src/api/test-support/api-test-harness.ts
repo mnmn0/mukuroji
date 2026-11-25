@@ -881,6 +881,7 @@ function createTeamIssuesFake(
     getTeamIssuesByReferences: unsupported,
     getTeamHierarchyEntries: unsupported,
     getPublicWorkItemPage: unsupported,
+    listStartedWorkItemIds: unsupported,
     getWorkItemKeyLocation: unsupported,
     listWorkItemKeyPrefixes: unsupported,
     getTeamWorkItemKeyPrefix: unsupported,
@@ -3174,6 +3175,14 @@ function configureFakeProjectClients(
         })
         return {
           issues: createFakeTeamIssues(teamId).slice(0, readOptions.limit),
+        }
+      },
+      async listStartedWorkItemIds(_directoryId, teamId, readOptions) {
+        return {
+          workItemIds: createFakeTeamIssues(teamId)
+            .filter((issue) => issue.statusCategory === 'started')
+            .slice(0, readOptions.limit)
+            .map((issue) => issue.id),
         }
       },
       async getTeamIssuePage(directoryId, teamId, readOptions) {

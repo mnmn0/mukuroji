@@ -68,6 +68,10 @@ export type FactoryBoardLabels = {
   noResults: string
   /** Notice shown when the server reached a read bound. */
   incomplete: string
+  /** Action that reads the rest of the sources that reached a read bound. */
+  loadMore: string
+  /** Text of the load-more action while it reads. */
+  loadingMore: string
   /** Accessible name of the filter group. */
   filterLabel: string
   /** Runtime filter label. */
@@ -183,6 +187,8 @@ export function createFactoryBoardLabels(locale: Locale): FactoryBoardLabels {
     emptyDescription: t('factoryBoard.emptyDescription'),
     noResults: t('factoryBoard.noResults'),
     incomplete: t('factoryBoard.incomplete'),
+    loadMore: t('factoryBoard.loadMore'),
+    loadingMore: t('factoryBoard.loadingMore'),
     filterLabel: t('factoryBoard.filter.label'),
     filterRuntime: t('factoryBoard.filter.runtime'),
     filterAssignee: t('factoryBoard.filter.assignee'),

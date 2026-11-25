@@ -44,6 +44,7 @@ import { isStoredAcceptanceCriterionList } from '../../domain/acceptance-criteri
 import {
   WORK_ITEM_CUSTOMER_COMPLETION_PREPARATION_INDEX_NAME,
   WORK_ITEM_NOTIFICATION_DUE_INDEX_NAME,
+  WORK_ITEM_TEAM_STARTED_INDEX_NAME,
   createWorkItemNotificationScheduleAttributes,
   createWorkItemNotificationScheduleUpdate,
 } from '../../work-item-notification-schedule-index'
@@ -840,6 +841,22 @@ export type WorkItemListReadOptions = {
   limitEvaluatedRows?: boolean
 }
 
+/** Read options of one page of a Team's started Work Item IDs. */
+export type StartedWorkItemPageReadOptions = {
+  /** Most rows the index Query reads, from 1 to 100. */
+  limit: number
+  /** Opaque cursor of the previous page, bound to the Team. */
+  cursor?: string
+}
+
+/** One page of a Team's started Work Item IDs. */
+export type StartedWorkItemIdPage = {
+  /** Work Item IDs, most recently updated first. */
+  workItemIds: string[]
+  /** Opaque cursor of the next page; absent once the index has no more rows. */
+  nextCursor?: string
+}
+
 /** Public Work Item の DynamoDB-backed bounded page read options です。 */
 export type PublicWorkItemPageReadOptions = {
   /** DynamoDB が一度の Query で評価する最大 item 数です。 */
@@ -1533,6 +1550,21 @@ export type TeamIssuesClient = {
    * @returns The Team's prefix state after the change.
    */
   changeTeamWorkItemKeyPrefix(input: ChangeTeamWorkItemKeyPrefixInput): Promise<TeamWorkItemKeyPrefixState>
+  /**
+   * Lists one page of a Team's started, unarchived Work Item IDs, most recently updated first,
+   * from the sparse started index (ADR 0098). The index is eventually consistent, so callers read
+   * each Work Item again before they show it.
+   *
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param options - Page size and the cursor of the previous page.
+   * @returns Work Item IDs and the cursor of the next page.
+   */
+  listStartedWorkItemIds(
+    directoryId: string,
+    teamId: string,
+    options: StartedWorkItemPageReadOptions,
+  ): Promise<StartedWorkItemIdPage>
   /** Public API 用の bounded canonical Work Item page を取得します。 */
   getPublicWorkItemPage(
     directoryId: string,
@@ -2234,6 +2266,42 @@ export class DynamoDbTeamIssuesClient {
       if (error instanceof ProjectDataError) {
         throw error
       }
+      throw toProjectDataError(error)
+    }
+  }
+
+  /** @inheritdoc */
+  async listStartedWorkItemIds(
+    directoryId: string,
+    teamId: string,
+    options: StartedWorkItemPageReadOptions,
+  ): Promise<StartedWorkItemIdPage> {
+    await this.ensureLocalTables()
+    const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
+    const limit = normalizePublicWorkItemPageLimit(options.limit)
+    const exclusiveStartKey = decodeStartedWorkItemPageCursor(options.cursor, directoryTeamId)
+    try {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.issueTableName,
+        IndexName: WORK_ITEM_TEAM_STARTED_INDEX_NAME,
+        KeyConditionExpression: '#startedDirectoryTeamId = :startedDirectoryTeamId',
+        ExpressionAttributeNames: { '#startedDirectoryTeamId': 'startedDirectoryTeamId' },
+        ExpressionAttributeValues: { ':startedDirectoryTeamId': directoryTeamId },
+        ExclusiveStartKey: exclusiveStartKey,
+        ScanIndexForward: false,
+        Limit: limit,
+      }))
+      const workItemIds = (response.Items ?? []).flatMap((item) =>
+        item.directoryTeamId === directoryTeamId && typeof item.issueId === 'string' ? [item.issueId] : []
+      )
+      return {
+        workItemIds,
+        ...(response.LastEvaluatedKey
+          ? { nextCursor: encodeStartedWorkItemPageCursor(response.LastEvaluatedKey, directoryTeamId) }
+          : {}),
+      }
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
       throw toProjectDataError(error)
     }
   }
@@ -4776,6 +4844,7 @@ async function ensureLocalTeamIssuesTable(
           { AttributeName: 'notificationScheduleShard', AttributeType: 'S' },
           { AttributeName: 'notificationDueKey', AttributeType: 'S' },
           { AttributeName: 'customerCompletionPreparationAt', AttributeType: 'S' },
+          { AttributeName: 'startedDirectoryTeamId', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
@@ -4795,6 +4864,14 @@ async function ensureLocalTeamIssuesTable(
             KeySchema: [
               { AttributeName: 'notificationScheduleShard', KeyType: 'HASH' },
               { AttributeName: 'customerCompletionPreparationAt', KeyType: 'RANGE' },
+            ],
+            Projection: { ProjectionType: 'KEYS_ONLY' },
+          },
+          {
+            IndexName: WORK_ITEM_TEAM_STARTED_INDEX_NAME,
+            KeySchema: [
+              { AttributeName: 'startedDirectoryTeamId', KeyType: 'HASH' },
+              { AttributeName: 'updatedAt', KeyType: 'RANGE' },
             ],
             Projection: { ProjectionType: 'KEYS_ONLY' },
           },
@@ -6344,6 +6421,37 @@ function encodePublicWorkItemPageCursor(
     issueId,
   }
   return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+/**
+ * Encodes the continuation key of the started index as an opaque cursor bound to the Team.
+ *
+ * @param key - LastEvaluatedKey of the started index Query.
+ * @param directoryTeamId - Team partition the Query read.
+ * @returns Opaque cursor.
+ * @throws ProjectDataError when the key does not belong to the Team partition.
+ */
+function encodeStartedWorkItemPageCursor(key: Record<string, unknown>, directoryTeamId: string): string {
+  const updatedAt = typeof key.updatedAt === 'string' ? key.updatedAt : undefined
+  const issueId = typeof key.issueId === 'string' ? key.issueId : undefined
+  if (key.directoryTeamId !== directoryTeamId || key.startedDirectoryTeamId !== directoryTeamId || !updatedAt || !issueId) {
+    throw new ProjectDataError(503, 'InvalidWorkItemPageCursor', 'Started Work Item page did not include a valid continuation key.')
+  }
+  const cursor: PublicWorkItemPageCursor = { version: 1, directoryTeamId, updatedAt, issueId }
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+/**
+ * Validates a started index cursor and turns it back into the DynamoDB key.
+ *
+ * @param value - Opaque cursor, possibly from a client.
+ * @param directoryTeamId - Team partition the caller reads.
+ * @returns ExclusiveStartKey, or undefined for the first page.
+ * @throws ProjectDataError when the cursor is malformed or belongs to another Team.
+ */
+function decodeStartedWorkItemPageCursor(value: string | undefined, directoryTeamId: string) {
+  const key = decodePublicWorkItemPageCursor(value, directoryTeamId)
+  return key ? { ...key, startedDirectoryTeamId: directoryTeamId } : undefined
 }
 
 /** Public Work Item store cursor を検証し DynamoDB key に戻します。 */

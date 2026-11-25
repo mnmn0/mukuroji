@@ -21,6 +21,18 @@ export const WORK_ITEM_CUSTOMER_COMPLETION_PREPARATION_KEY_ATTRIBUTE =
   'customerCompletionPreparationAt'
 
 /**
+ * Sparse GSI that lists a Team's `started` Work Items by update time, so the Factory board reads
+ * them without scanning the Team's other Work Items (ADR 0098).
+ */
+export const WORK_ITEM_TEAM_STARTED_INDEX_NAME = 'TeamStartedWorkItemIndex'
+
+/**
+ * Partition attribute of {@link WORK_ITEM_TEAM_STARTED_INDEX_NAME}: the row's `directoryTeamId`
+ * while the Work Item is started and not archived; absent rows leave the index.
+ */
+export const WORK_ITEM_STARTED_DIRECTORY_TEAM_ID_ATTRIBUTE = 'startedDirectoryTeamId'
+
+/**
  * Due key of a started Work Item. It sorts before every real date, so every run reads started
  * Work Items for the stale reminder whatever their due date is.
  */
@@ -36,7 +48,10 @@ export type WorkItemNotificationDueState = {
   dueDate: unknown
 }
 
-/** DynamoDB update expression fragments that keep the notification index attributes current. */
+/**
+ * DynamoDB update expression fragments that keep the notification index attributes, and the
+ * started index attribute, current.
+ */
 export type WorkItemNotificationScheduleUpdate = {
   /** `SET` clauses to append to the update expression. */
   setExpressions: string[]
@@ -54,6 +69,8 @@ export type WorkItemNotificationScheduleAttributes = {
   notificationScheduleShard: string
   /** Due key, present only while the schedule must evaluate the row. */
   notificationDueKey?: string
+  /** Team partition of the started index, present only while the Work Item is started. */
+  startedDirectoryTeamId?: string
 }
 
 /**
@@ -122,7 +139,8 @@ export function createWorkItemNotificationDueKey(
 }
 
 /**
- * Creates the index attributes to store on a new Work Item row.
+ * Creates the index attributes to store on a new Work Item row: the notification schedule shard and
+ * due key, and the Team started index partition the Factory board reads (ADR 0098).
  *
  * @param workspaceId - Workspace that owns the Work Item.
  * @param teamId - Team that owns the Work Item.
@@ -137,14 +155,35 @@ export function createWorkItemNotificationScheduleAttributes(
   state: WorkItemNotificationDueState,
 ): WorkItemNotificationScheduleAttributes {
   const dueKey = createWorkItemNotificationDueKey(state)
+  const startedDirectoryTeamId = createWorkItemStartedDirectoryTeamId(workspaceId, teamId, state)
   return {
     notificationScheduleShard: createWorkItemNotificationScheduleShard(workspaceId, teamId, issueId),
     ...(dueKey ? { notificationDueKey: dueKey } : {}),
+    ...(startedDirectoryTeamId ? { startedDirectoryTeamId } : {}),
   }
 }
 
 /**
- * Creates update expression fragments that move a Work Item to its index position after a write.
+ * Returns the started-index partition a Work Item should hold after a write.
+ *
+ * @param workspaceId - Workspace that owns the Work Item.
+ * @param teamId - Team that owns the Work Item.
+ * @param state - Work Item fields after the write.
+ * @returns The Team partition while the Work Item is started and not archived, otherwise undefined.
+ */
+export function createWorkItemStartedDirectoryTeamId(
+  workspaceId: string,
+  teamId: string,
+  state: WorkItemNotificationDueState,
+): string | undefined {
+  if (state.archivedAt !== undefined && state.archivedAt !== null) return undefined
+  if (state.statusCategory !== 'started') return undefined
+  return `${requireKeyPart(workspaceId, 'Workspace ID')}#team#${requireKeyPart(teamId, 'Team ID')}`
+}
+
+/**
+ * Creates update expression fragments that move a Work Item to its index positions after a write,
+ * in the notification schedule indexes and the Team started index.
  *
  * The shard is written on every update, so a row saved before the index existed joins it the
  * next time it changes.
@@ -165,6 +204,7 @@ export function createWorkItemNotificationScheduleUpdate(
   const expressionAttributeNames: Record<string, string> = {
     '#notificationScheduleShard': WORK_ITEM_NOTIFICATION_SCHEDULE_SHARD_ATTRIBUTE,
     '#notificationDueKey': WORK_ITEM_NOTIFICATION_DUE_KEY_ATTRIBUTE,
+    '#startedDirectoryTeamId': WORK_ITEM_STARTED_DIRECTORY_TEAM_ID_ATTRIBUTE,
   }
   const expressionAttributeValues: Record<string, string> = {
     ':notificationScheduleShard': attributes.notificationScheduleShard,
@@ -176,6 +216,12 @@ export function createWorkItemNotificationScheduleUpdate(
     setExpressions.push('#notificationDueKey = :notificationDueKey')
   } else {
     removeExpressions.push('#notificationDueKey')
+  }
+  if (attributes.startedDirectoryTeamId) {
+    expressionAttributeValues[':startedDirectoryTeamId'] = attributes.startedDirectoryTeamId
+    setExpressions.push('#startedDirectoryTeamId = :startedDirectoryTeamId')
+  } else {
+    removeExpressions.push('#startedDirectoryTeamId')
   }
   return { setExpressions, removeExpressions, expressionAttributeNames, expressionAttributeValues }
 }

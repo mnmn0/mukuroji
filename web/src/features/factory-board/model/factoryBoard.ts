@@ -201,6 +201,37 @@ export function isFactoryBoardIncomplete(board: Pick<TeamAgentRunBoardResponse, 
 }
 
 /**
+ * Combines the pages of a board read with continuation tokens into one board. The first page sets
+ * the read time; the last page tells which sources are still unread and how to continue. A Work
+ * Item that appears on more than one page keeps its first, freshest-read entry.
+ *
+ * @param pages - Pages in read order; the first page has no continuation input.
+ * @returns The combined board, or undefined before the first page loads.
+ */
+export function mergeFactoryBoardPages(pages: readonly TeamAgentRunBoardResponse[]): TeamAgentRunBoardResponse | undefined {
+  const [first] = pages
+  const last = pages.at(-1)
+  if (!first || !last) return undefined
+  const seen = new Set<string>()
+  const items: FactoryBoardItem[] = []
+  for (const page of pages) {
+    for (const item of page.items) {
+      if (seen.has(item.workItem.id)) continue
+      seen.add(item.workItem.id)
+      items.push(item)
+    }
+  }
+  return {
+    generatedAt: first.generatedAt,
+    items,
+    activeRunsHasMore: last.activeRunsHasMore,
+    finishedRunsHasMore: last.finishedRunsHasMore,
+    startedWorkItemsHasMore: last.startedWorkItemsHasMore,
+    ...(last.continuation === undefined ? {} : { continuation: last.continuation }),
+  }
+}
+
+/**
  * Puts a run returned by a committed release in place of the same run on a loaded board, so the
  * board shows the release even when reading it again fails.
  *
