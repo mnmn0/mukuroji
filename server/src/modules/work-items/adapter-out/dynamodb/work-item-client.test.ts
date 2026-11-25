@@ -5319,3 +5319,26 @@ test('DynamoDB Work Item builds the requester completion notice for an approval 
     occurredAt: '2026-07-20T00:00:00.000Z',
   })).toEqual([])
 })
+
+test('DynamoDB started Work Item index fails instead of skipping a row of another Team', async () => {
+  /**
+   * Creates a client whose Query returns the given rows once.
+   *
+   * @param items - Index rows.
+   * @returns The client.
+   */
+  const createClient = (items: unknown[]) => new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    { async send() { return { Items: items } } } as unknown as DynamoDBDocumentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const ownTeam = 'workspace-1#team#core-team'
+  const page = await createClient([{ directoryTeamId: ownTeam, issueId: 'task-1' }])
+    .listStartedWorkItemIds('workspace-1', 'core-team', { limit: 10 })
+  expect(page.workItemIds).toEqual(['task-1'])
+  await expect(createClient([{ directoryTeamId: ownTeam, issueId: 'task-1' }, { directoryTeamId: 'workspace-1#team#other', issueId: 'task-2' }])
+    .listStartedWorkItemIds('workspace-1', 'core-team', { limit: 10 }))
+    .rejects.toMatchObject({ status: 503, code: 'InvalidTeamIssue' })
+})

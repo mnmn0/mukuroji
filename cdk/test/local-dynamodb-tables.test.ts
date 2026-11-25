@@ -32,6 +32,7 @@ describe('local DynamoDB tables', () => {
       'TeamIssueUpdatedAtIndex',
       'AssignedProjectIssueIndex',
       'WorkItemNotificationDueIndex',
+      'TeamStartedWorkItemIndex',
       'WorkItemCustomerCompletionPreparationIndex',
     ]);
   });

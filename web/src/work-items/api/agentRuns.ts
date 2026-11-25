@@ -6,6 +6,8 @@ import {
   AGENT_RUN_VERIFICATION_STATUSES,
   isAgentRunArtifactUrl,
   type AgentRunArtifact,
+  type AgentRunHistoryEntry,
+  type AgentRunHistoryFilters,
   type AgentRunOutcome,
   type AgentRunReport,
   type AgentRunRuntime,
@@ -21,6 +23,7 @@ import {
   type FactoryBoardReportSummary,
   type FactoryBoardWorkItem,
   type TeamAgentRunBoardResponse,
+  type TeamAgentRunHistoryResponse,
   type TeamFactoryAnalyticsResponse,
   type WorkItemAgentRunReportsResponse,
   type WorkItemAgentRunsResponse,
@@ -132,10 +135,16 @@ export async function listWorkItemAgentRunReports(
  *
  * @param accessToken - Session access token.
  * @param teamId - Team ID.
- * @returns Board items and the read bounds the server reached.
+ * @param continuation - Token of the previous page, to read the sources it left unread.
+ * @returns Board items, the read bounds the server reached, and the token of the next page.
  */
-export async function getTeamAgentRunBoard(accessToken: string, teamId: string): Promise<TeamAgentRunBoardResponse> {
-  const data = await requestJson(`${apiBaseUrl}/teams/${encodeURIComponent(teamId)}/agent-runs`, accessToken)
+export async function getTeamAgentRunBoard(
+  accessToken: string,
+  teamId: string,
+  continuation?: string,
+): Promise<TeamAgentRunBoardResponse> {
+  const query = continuation === undefined ? '' : `?continuation=${encodeURIComponent(continuation)}`
+  const data = await requestJson(`${apiBaseUrl}/teams/${encodeURIComponent(teamId)}/agent-runs${query}`, accessToken)
   const board = readTeamAgentRunBoard(data)
   if (!board) throw new WorkItemConfigurationApiError(502, 'The Factory board returned an unexpected response.')
   return board
@@ -162,6 +171,88 @@ export async function getTeamFactoryAnalytics(
   const analytics = readTeamFactoryAnalytics(data)
   if (!analytics) throw new WorkItemConfigurationApiError(502, 'Factory analytics returned an unexpected response.')
   return analytics
+}
+
+/**
+ * Reads the runs of a Team that finished in a period on Work Items the viewer can see, newest finish
+ * first. A malformed run fails the whole response instead of being dropped.
+ *
+ * @param accessToken - Session access token.
+ * @param teamId - Team ID.
+ * @param request - UTC ISO 8601 bounds of the period, both inclusive, and optional filters.
+ * @returns Runs of the period and whether more exist.
+ */
+export async function getTeamAgentRunHistory(
+  accessToken: string,
+  teamId: string,
+  request: { from: string; to: string } & AgentRunHistoryFilters,
+): Promise<TeamAgentRunHistoryResponse> {
+  const query = new URLSearchParams()
+  for (const [name, value] of Object.entries(request)) {
+    if (typeof value === 'string' && value !== '') query.set(name, value)
+  }
+  const data = await requestJson(`${apiBaseUrl}/teams/${encodeURIComponent(teamId)}/agent-runs/history?${query}`, accessToken)
+  const history = readTeamAgentRunHistory(data, teamId)
+  if (!history) throw new WorkItemConfigurationApiError(502, 'The Run history returned an unexpected response.')
+  return history
+}
+
+/**
+ * Validates a Run history response.
+ *
+ * @param value - Unknown JSON value.
+ * @param teamId - Team the request named; a response for another Team is rejected.
+ * @returns The history, or undefined when the shape is not supported.
+ */
+function readTeamAgentRunHistory(value: unknown, teamId: string): TeamAgentRunHistoryResponse | undefined {
+  if (!isRecord(value) || value.teamId !== teamId || typeof value.hasMore !== 'boolean' || !Array.isArray(value.runs)) return undefined
+  if (typeof value.from !== 'string' || typeof value.to !== 'string' || !Number.isFinite(Date.parse(value.from)) || !Number.isFinite(Date.parse(value.to))) {
+    return undefined
+  }
+  const runs: AgentRunHistoryEntry[] = []
+  for (const item of value.runs) {
+    const entry = readAgentRunHistoryEntry(item, teamId)
+    if (!entry) return undefined
+    runs.push(entry)
+  }
+  return { teamId, from: value.from, to: value.to, runs, hasMore: value.hasMore }
+}
+
+/**
+ * Validates one finished run of the Run history.
+ *
+ * @param value - Unknown JSON value.
+ * @param teamId - Team of the history.
+ * @returns The entry, or undefined when the shape is not supported.
+ */
+function readAgentRunHistoryEntry(value: unknown, teamId: string): AgentRunHistoryEntry | undefined {
+  if (!isRecord(value) || typeof value.workItemTitle !== 'string') return undefined
+  if (value.projectId !== undefined && (typeof value.projectId !== 'string' || value.projectId === '')) return undefined
+  // The history carries no actions, so the shared run check runs with a fixed, unused release flag.
+  const run = readAgentRunView({ ...value, canRelease: false })
+  if (!run || run.teamId !== teamId || run.state !== 'finished' || run.finishedAt === undefined || run.outcome === undefined) return undefined
+  return {
+    schemaVersion: run.schemaVersion,
+    runId: run.runId,
+    teamId: run.teamId,
+    workItemId: run.workItemId,
+    assigneeUserId: run.assigneeUserId,
+    runtime: run.runtime,
+    agentName: run.agentName,
+    state: run.state,
+    outcome: run.outcome,
+    startRevision: run.startRevision,
+    leaseMinutes: run.leaseMinutes,
+    startedAt: run.startedAt,
+    lastHeartbeatAt: run.lastHeartbeatAt,
+    leaseExpiresAt: run.leaseExpiresAt,
+    stalled: run.stalled,
+    finishedAt: run.finishedAt,
+    ...(run.finishedBy === undefined ? {} : { finishedBy: run.finishedBy }),
+    reportCount: run.reportCount,
+    workItemTitle: value.workItemTitle,
+    ...(typeof value.projectId === 'string' ? { projectId: value.projectId } : {}),
+  }
 }
 
 /**
@@ -326,11 +417,12 @@ function readFactoryAnalyticsUsage(value: unknown): FactoryAnalyticsUsage | unde
  */
 function readTeamAgentRunBoard(value: unknown): TeamAgentRunBoardResponse | undefined {
   if (!isRecord(value) || !Array.isArray(value.items)) return undefined
-  const { generatedAt, activeRunsHasMore, finishedRunsHasMore, startedWorkItemsHasMore } = value
+  const { generatedAt, activeRunsHasMore, finishedRunsHasMore, startedWorkItemsHasMore, continuation } = value
   if (
     typeof generatedAt !== 'string' || !Number.isFinite(Date.parse(generatedAt)) ||
     typeof activeRunsHasMore !== 'boolean' || typeof finishedRunsHasMore !== 'boolean' ||
-    typeof startedWorkItemsHasMore !== 'boolean'
+    typeof startedWorkItemsHasMore !== 'boolean' ||
+    (continuation !== undefined && (typeof continuation !== 'string' || continuation === ''))
   ) {
     return undefined
   }
@@ -340,7 +432,14 @@ function readTeamAgentRunBoard(value: unknown): TeamAgentRunBoardResponse | unde
     if (!item) return undefined
     items.push(item)
   }
-  return { generatedAt, items, activeRunsHasMore, finishedRunsHasMore, startedWorkItemsHasMore }
+  return {
+    generatedAt,
+    items,
+    activeRunsHasMore,
+    finishedRunsHasMore,
+    startedWorkItemsHasMore,
+    ...(continuation === undefined ? {} : { continuation }),
+  }
 }
 
 /**

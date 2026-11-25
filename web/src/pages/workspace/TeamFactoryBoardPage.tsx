@@ -1,16 +1,16 @@
 import { useMemo, useState } from 'react'
-import { useNavigate, useParams, useSearchParams } from 'react-router'
-import { applyReleasedRunToBoard } from '../../features/factory-board/model/factoryBoard'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import {
   DEFAULT_FACTORY_ANALYTICS_PERIOD_DAYS,
   type FactoryAnalyticsPeriodDays,
 } from '../../features/factory-board/model/factoryAnalytics'
 import { useReleaseFactoryBoardRun } from '../../features/factory-board/mutations/useReleaseFactoryBoardRun'
-import { useFactoryAnalytics, useFactoryBoardReports, useTeamAgentRunBoard } from '../../features/factory-board/queries/useFactoryBoard'
+import { useFactoryAnalytics, useFactoryBoardReports, useTeamAgentRunBoardPages } from '../../features/factory-board/queries/useFactoryBoard'
 import { FactoryAnalyticsSummary } from '../../features/factory-board/ui/FactoryAnalyticsSummary'
 import { FactoryBoard, type FactoryBoardView } from '../../features/factory-board/ui/FactoryBoard'
 import { createFactoryAnalyticsLabels, createFactoryBoardLabels } from '../../features/factory-board/ui/factoryBoardLabels'
-import { createProjectIssuesPath, createTeamIssuesPath } from '../../shared/routing/paths'
+import { createTranslator } from '../../shared/i18n/i18n'
+import { createProjectIssuesPath, createTeamIssuesPath, createTeamRunHistoryPath } from '../../shared/routing/paths'
 import { SoftwareFactoryGate } from '../../workspace/ui/SoftwareFactoryGate'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
@@ -56,18 +56,19 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
   const [selectedWorkItemId, setSelectedWorkItemId] = useState<string>()
   const enabled = workspace.canLoadWorkspaceData && activeTeam !== undefined
   const accessToken = enabled ? workspace.accessToken : undefined
-  const board = useTeamAgentRunBoard(accessToken, teamId)
+  const board = useTeamAgentRunBoardPages(accessToken, teamId)
   const reports = useFactoryBoardReports(accessToken, teamId, selectedWorkItemId)
   const [analyticsDays, setAnalyticsDays] = useState<FactoryAnalyticsPeriodDays>(DEFAULT_FACTORY_ANALYTICS_PERIOD_DAYS)
   const analytics = useFactoryAnalytics(accessToken, teamId, analyticsDays)
   const onRelease = useReleaseFactoryBoardRun(accessToken, teamId, async (released) => {
     // Show the committed release from the response, so a failed refresh cannot bring back the active run.
-    await board.mutate((current) => applyReleasedRunToBoard(current, released), { revalidate: false })
+    await board.applyRelease(released)
     // A release finishes a run and counts as an intervention, so the period summary is read again too.
-    void Promise.all([board.mutate(), reports.mutate(), analytics.mutate()]).catch(() => undefined)
+    void Promise.all([board.refresh(), reports.mutate(), analytics.mutate()]).catch(() => undefined)
   })
   const labels = useMemo(() => createFactoryBoardLabels(workspace.locale), [workspace.locale])
   const analyticsLabels = useMemo(() => createFactoryAnalyticsLabels(workspace.locale), [workspace.locale])
+  const historyLabel = useMemo(() => createTranslator(workspace.locale)('factoryBoard.history.open'), [workspace.locale])
   const formatNumber = useMemo(() => {
     const formatter = new Intl.NumberFormat(workspace.locale === 'ja' ? 'ja-JP' : 'en-US', { maximumFractionDigits: 1 })
     return (value: number) => formatter.format(value)
@@ -84,6 +85,11 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
   return (
     <WorkspaceRouteContent isLoading={board.isLoading} sessionErrors={[board.error, reports.error, analytics.error]}>
       <div className="px-[clamp(16px,3vw,34px)] py-5">
+        {teamId ? (
+          <Link className="mb-3 inline-block text-sm text-[var(--workbench-primary-text)] underline-offset-2 hover:underline" to={createTeamRunHistoryPath(teamId)}>
+            {historyLabel}
+          </Link>
+        ) : null}
         <FactoryAnalyticsSummary
           analytics={analytics.data}
           errorMessage={analytics.error ? analyticsLabels.loadError : undefined}
@@ -103,11 +109,13 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
             ? createProjectIssuesPath(item.workItem.assignedProjectId, teamId, item.workItem.id)
             : createTeamIssuesPath(teamId ?? '', item.workItem.id)}
           isLoading={board.isLoading}
+          isLoadingMore={board.isLoadingMore}
           isRefreshing={board.isValidating}
           labels={labels}
+          onLoadMore={board.loadMore}
           onNavigate={(href) => { void navigate(href) }}
           onRefresh={() => {
-            void board.mutate()
+            void board.refresh()
             void analytics.mutate()
           }}
           onRelease={onRelease}

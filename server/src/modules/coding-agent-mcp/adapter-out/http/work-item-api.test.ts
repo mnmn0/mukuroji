@@ -286,6 +286,38 @@ test('reads linked Documents from their endpoints and treats an older server as 
   await expect(api.document('task', 'missing')).rejects.toMatchObject({ code: 'not_found' })
 })
 
+test('reads task attachments from their endpoints and treats an older server as having none', async () => {
+  const paths: string[] = []
+  const attachment = {
+    id: 'file/1', name: 'spec.pdf', versionId: 'version-2', versionNumber: 2,
+    contentType: 'application/pdf', sizeBytes: 2048, updatedAt: '2026-09-01T00:00:00.000Z',
+  }
+  const download = { fileId: 'file/1', versionId: 'version-2', url: 'https://files.example.test/file-1', expiresAt: '2026-09-01T00:05:00.000Z' }
+  const api = createAgentWorkItemApi(config, async (url) => {
+    paths.push(`${url.pathname}${url.search}`)
+    switch (url.pathname) {
+      case '/api/v1/work-items/task/attachments':
+        return Response.json({ items: [attachment] })
+      case '/api/v1/work-items/task/attachments/file%2F1/download':
+        return Response.json(download)
+      case '/api/v1/work-items/task/attachments/other/download':
+        return Response.json(download)
+      case '/api/v1/work-items/task/attachments/bad-url/download':
+        return Response.json({ ...download, fileId: 'bad-url', url: 'not a url' })
+      default:
+        return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
+    }
+  })
+  expect(await api.attachments('task')).toEqual([attachment])
+  expect(paths[0]).toBe('/api/v1/work-items/task/attachments?teamId=team')
+  expect(await api.attachments('legacy')).toBeUndefined()
+  expect(await api.attachmentDownload('task', 'file/1')).toEqual(download)
+  expect(paths[2]).toBe('/api/v1/work-items/task/attachments/file%2F1/download?teamId=team')
+  await expect(api.attachmentDownload('task', 'other')).rejects.toMatchObject({ code: 'invalid_response' })
+  await expect(api.attachmentDownload('task', 'bad-url')).rejects.toMatchObject({ code: 'invalid_response' })
+  await expect(api.attachmentDownload('task', 'missing')).rejects.toMatchObject({ code: 'not_found' })
+})
+
 const validRun = {
   schemaVersion: 1, runId: 'run_00000000-0000-4000-8000-000000000001', teamId: 'team', workItemId: 'task',
   assigneeUserId: 'agent', runtime: 'codex', agentName: 'Codex', state: 'active', startRevision: 2, leaseMinutes: 30,

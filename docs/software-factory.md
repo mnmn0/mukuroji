@@ -720,8 +720,16 @@ Slice 3 は 3 つの変更に分けて入れ、すべて実装済み。
     `finishedRunsHasMore: true` を返す。失敗の partition は解決済みの失敗も残るため、失敗の総数が 500 件を
     超える Team では古い失敗が欠けうる（[ADR 0006](adr/0006-finished-run-index.md)）。index の key がない
     既存の終了済み Run への付与は #365 の migration で行う。
-  - Work Item を更新の新しい順に最大 300 件評価し、閲覧できる `started` のものを拾う。status category の
-    index はない。
+  - `TeamStartedWorkItemIndex`（Team の `started` で archive されていない Work Item だけが載る sparse
+    index）から、更新の新しい順に最大 300 件読む。他の status category の Work Item は読まない
+    （[ADR 0098](adr/0098-team-started-work-item-index-and-board-continuation.md)）。
+- 上限で止まった source があれば、応答に opaque な `continuation` を付ける。
+  `GET /api/teams/{teamId}/agent-runs?continuation=...` は token にある source だけを続きから読み、
+  次の token を返す。続きの page は最初の page の読み取り時刻で評価するため、24 時間の範囲、lane、
+  lease の停滞判定、`generatedAt` は最初の page と同じになる。token は暗号化・認証され、
+  閲覧者と Team に結び付く。作り替えた token、別の閲覧者や Team の token、各 store の cursor の Team が
+  合わない token は `400` を返す。Web は「続きの Run とタスクを読み込む」で page を
+  足し、同じ Work Item が複数の page に出た場合は先の page を使う。
 - 候補の Work Item はそれぞれ強整合で読み直し、archive・削除済みと、閲覧できない Project のものを除く
   （`canAccessAssignedProject`）。`active` Run がなければ Work Item の Run 履歴から最新の 1 件を読む。
   「その後に新しい Run がない」はこの最新 1 件で判定する。読み取りは同時 10 件までとする。

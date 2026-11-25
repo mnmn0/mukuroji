@@ -215,6 +215,7 @@ import {
   normalizeTeamIssueInput,
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
+import { createCanonicalPublicAttachmentService } from '../shared/public-attachment-access'
 import { createCanonicalPublicDocumentService } from '../shared/public-document-access'
 import { createCanonicalPublicAgentTelemetryService } from './public-agent-telemetry-service'
 import { createCanonicalPublicDirectoryService } from '../shared/public-directory-access'
@@ -4108,6 +4109,7 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       agentRuns: createForwardingClient(() => developerPlatformDependencies.publicAgentRuns),
       agentTelemetry: createCanonicalPublicAgentTelemetryService(),
       documents: createCanonicalPublicDocumentService(),
+      attachments: createCanonicalPublicAttachmentService(),
       directory: createCanonicalPublicDirectoryService(),
       openApiDocument: PUBLIC_API_OPENAPI_DOCUMENT,
       get cursorSecret() {

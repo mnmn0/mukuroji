@@ -18,6 +18,8 @@ import {
   type PublicWorkItemKey,
   type PublicWorkItemHierarchy,
   type PublicDocumentContent,
+  type PublicWorkItemAttachmentDownload,
+  type PublicWorkItemAttachmentList,
   type PublicCredentialOwner,
   type PublicProjectCharter,
   type PublicProjectMemberList,
@@ -585,6 +587,48 @@ export interface PublicDirectoryService {
   lookupWorkItemKey(credential: AuthenticatedDeveloperCredential, key: string): Promise<PublicWorkItemKeyLookup>
 }
 
+/** Request facts a download records in the audit log. */
+export type PublicReadAuditRequest = {
+  /** Request ID that support and the audit log match on. */
+  requestId: string
+  /** Caller's correlation ID, when it sent one. */
+  correlationId?: string
+}
+
+/** Read-only access to the files attached to Work Items, for the credential owner. */
+export interface PublicAttachmentService {
+  /**
+   * Lists the files attached to a Work Item that the credential owner can view and whose current
+   * version passed the malware scan.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns Downloadable attachments.
+   */
+  listWorkItemAttachments(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<PublicWorkItemAttachmentList>
+  /**
+   * Issues a short-lived download URL for the current version of a Work Item attachment and
+   * records the download in the audit log.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item the file is attached to.
+   * @param fileId - File ID.
+   * @param request - Request facts for the audit log.
+   * @returns The download URL and its expiry.
+   */
+  createWorkItemAttachmentDownload(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    fileId: string,
+    request: PublicReadAuditRequest,
+  ): Promise<PublicWorkItemAttachmentDownload>
+}
+
 export interface PublicDocumentService {
   /**
    * Lists one page of Documents linked to a Work Item that the credential owner can view.
@@ -1018,6 +1062,8 @@ export type PublicApiDependencies = {
   agentTelemetry?: PublicAgentTelemetryService
   /** Read-only Document adapter; Document routes report unavailable when it is not configured. */
   documents?: PublicDocumentService
+  /** Read-only attachment adapter; attachment routes report unavailable when it is not configured. */
+  attachments?: PublicAttachmentService
   /** Read-only directory adapter; directory routes report unavailable when it is not configured. */
   directory?: PublicDirectoryService
   /** Public OpenAPI 3.1 document です。 */
@@ -1411,6 +1457,35 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     )
     c.header('Cache-Control', 'private, no-store')
     return c.json(document)
+  })
+
+  router.get('/v1/work-items/:workItemId/attachments', async (c) => {
+    // Set before any check so error responses carry the same cache policy as the list.
+    c.header('Cache-Control', 'private, no-store')
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const attachments = requireAttachmentService(dependencies)
+    const list = await attachments.listWorkItemAttachments(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    )
+    return c.json(list)
+  })
+
+  router.get('/v1/work-items/:workItemId/attachments/:fileId/download', async (c) => {
+    // Set before any check so error responses carry the same cache policy as the URL.
+    c.header('Cache-Control', 'private, no-store')
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const attachments = requireAttachmentService(dependencies)
+    const correlationId = c.req.header('X-Correlation-Id')?.trim()
+    const download = await attachments.createWorkItemAttachmentDownload(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+      readRouteId(c.req.param('fileId'), 'File ID'),
+      { requestId: c.get('requestId'), ...(correlationId ? { correlationId } : {}) },
+    )
+    return c.json(download)
   })
 
   router.get('/v1/work-items/:workItemId/key', async (c) => {
@@ -5587,6 +5662,19 @@ function requireDirectoryService(dependencies: PublicApiDependencies): PublicDir
     throw new PublicApiServiceError(503, 'temporarily_unavailable', 'The directory is not configured.', true)
   }
   return dependencies.directory
+}
+
+/**
+ * Returns the configured attachment service or reports that attachments are unavailable.
+ *
+ * @param dependencies - Router dependencies.
+ * @returns Attachment service.
+ */
+function requireAttachmentService(dependencies: PublicApiDependencies): PublicAttachmentService {
+  if (!dependencies.attachments) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Attachments are not configured.', true)
+  }
+  return dependencies.attachments
 }
 
 /**
