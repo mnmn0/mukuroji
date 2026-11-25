@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { useSWRConfig } from 'swr'
 import type { CreateDocumentVersionApprovalInput } from '@mukuroji/contracts'
 import {
@@ -19,6 +19,16 @@ type PendingRequest = {
 }
 
 /**
+ * Approval request that is being sent, shared by every send of the same logical request.
+ */
+type InFlightRequest = {
+  /** Serialized input of the request. */
+  fingerprint: string
+  /** Settles when the request and the cache refresh finish. */
+  promise: Promise<void>
+}
+
+/**
  * Pins Document versions and requests their approval, then refreshes the version history and
  * the approvals shown for the Document.
  *
@@ -32,6 +42,8 @@ export function useDocumentVersionReviewMutations(
 ) {
   const { mutate } = useSWRConfig()
   const pendingRef = useRef(new Map<string, PendingRequest>())
+  const inFlightRef = useRef(new Map<string, InFlightRequest>())
+  const [requestingVersionIds, setRequestingVersionIds] = useState<readonly string[]>([])
 
   /**
    * Reuses the idempotency context of an unfinished request with the same input.
@@ -88,11 +100,37 @@ export function useDocumentVersionReviewMutations(
   const requestApproval = async (versionId: string, input: CreateDocumentVersionApprovalInput) => {
     if (!accessToken) throw new Error('Missing access token.')
     const key = `approval:${versionId}`
-    const context = resolveContext(key, JSON.stringify(input))
-    await requestDocumentVersionApproval(accessToken, documentId, versionId, input, context)
-    pendingRef.current.delete(key)
-    await refresh()
+    const fingerprint = JSON.stringify(input)
+    const inFlight = inFlightRef.current.get(key)
+    if (inFlight) {
+      // A second send of the same request waits for the first one; another request for the same
+      // version is refused until the first one settles.
+      if (inFlight.fingerprint === fingerprint) return inFlight.promise
+      throw new Error('An approval request for this version is still being sent.')
+    }
+    const context = resolveContext(key, fingerprint)
+    const promise = (async () => {
+      await requestDocumentVersionApproval(accessToken, documentId, versionId, input, context)
+      pendingRef.current.delete(key)
+      await refresh()
+    })()
+    inFlightRef.current.set(key, { fingerprint, promise })
+    setRequestingVersionIds((current) => [...current, versionId])
+    try {
+      await promise
+    } finally {
+      inFlightRef.current.delete(key)
+      setRequestingVersionIds((current) => current.filter((candidate) => candidate !== versionId))
+    }
   }
 
-  return { pinVersion, requestApproval }
+  /**
+   * Reports whether an approval request for a version is still being sent.
+   *
+   * @param versionId - Version whose request is checked.
+   * @returns Whether a request is in flight.
+   */
+  const isRequestingApproval = (versionId: string) => requestingVersionIds.includes(versionId)
+
+  return { pinVersion, requestApproval, isRequestingApproval }
 }

@@ -1,4 +1,4 @@
-import type { FileAttachment, FileVersion } from '@mukuroji/contracts'
+import { readFileTypeRejection, type FileAttachment, type FileVersion } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { FilesApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
@@ -277,7 +277,12 @@ async function requestJson<TResponse>(
       ? data.code
       : undefined
 
-    throw new FilesApiError(response.status, message, code)
+    throw new FilesApiError(
+      response.status,
+      message,
+      code,
+      code === 'FileTypeNotAllowed' ? readFileTypeRejection(data) : undefined,
+    )
   }
 
   return data as TResponse

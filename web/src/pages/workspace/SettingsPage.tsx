@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useLocation, useSearchParams } from 'react-router'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { AutomationManagementPanelContainer } from '../../automation/ui/AutomationManagementPanelContainer'
+import { TeamAutomationPanelContainer } from '../../automation/ui/TeamAutomationPanelContainer'
 import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platform/ui/DeveloperPlatformSettingsPanelContainer'
 import { AccountSecurityPanelContainer } from '../../features/account-security/ui/AccountSecurityPanel'
 import { AuditLogPanelContainer } from '../../features/audit-log/ui/AuditLogPanelContainer'
@@ -12,6 +13,7 @@ import { AgentSettingsPanelContainer } from '../../features/agent-settings/ui/Ag
 import { AiAssistanceSettingsPanelContainer } from '../../features/ai-assistance/ui'
 import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
 import { DirectoryAdministrationPanelContainer } from '../../projects/ui/DirectoryAdministrationPanel'
+import { OrgStructurePanelContainer } from '../../projects/ui/OrgStructurePanel'
 import { TeamProfilePanelContainer } from '../../projects/ui/TeamProfilePanel'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { useAppBadgePermission } from '../../shared/lib/pwa/badgePermission'
@@ -199,6 +201,12 @@ export function SettingsPage() {
                       accessToken={workspace.accessToken}
                       locale={workspace.locale}
                     />
+                    <OrgStructurePanelContainer
+                      accessToken={workspace.accessToken}
+                      guardRequest={workspace.guardEnterpriseSession}
+                      locale={workspace.locale}
+                      teams={workspace.teams}
+                    />
                   </SettingsPanelAnchor>
                 ) : null}
                 {workspace.canManageWorkspaceTimePeriods ? (
@@ -269,6 +277,13 @@ export function SettingsPage() {
             </SettingsPanelAnchor>
             <SettingsPanelAnchor panel="work-item-key-prefix">
               <WorkItemKeyPrefixPanelContainer
+                accessToken={workspace.accessToken}
+                locale={workspace.locale}
+                teams={workspace.teams}
+              />
+            </SettingsPanelAnchor>
+            <SettingsPanelAnchor panel="team-automation">
+              <TeamAutomationPanelContainer
                 accessToken={workspace.accessToken}
                 locale={workspace.locale}
                 teams={workspace.teams}
@@ -347,6 +362,7 @@ function listSettingsPanels(
           signedIn && 'work-item-configuration',
           signedIn && 'work-calendar',
           signedIn && 'work-item-key-prefix',
+          signedIn && 'team-automation',
           signedIn && available.softwareFactory && 'agent-settings',
         ]
   return panels.filter((panel) => panel !== false).map((panel) => ({ panel, section }))

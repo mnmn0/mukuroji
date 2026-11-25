@@ -1,10 +1,14 @@
 import {
   APPROVAL_MAX_REVIEWERS,
+  AUTOMATION_APPROVAL_DECISIONS,
   AUTOMATION_BASELINE_SLIP_MAX_DAYS,
+  AUTOMATION_DUE_WORK_ITEMS_MAX_DAYS_BEFORE,
   AUTOMATION_RELATION_TRIGGER_MAX_EVENT_TYPES,
   WORK_ITEM_RELATION_EVENT_TYPES,
   isWorkItemRelationEventType,
   type AutomationAction,
+  type AutomationApprovalDecision,
+  type AutomationDueWorkItemsSelection,
   type AutomationCondition,
   type AutomationRateLimit,
   type AutomationRetryPolicy,
@@ -62,6 +66,9 @@ type AutomationFieldOperator = Extract<
  */
 export function validateCreateAutomationRuleInput(value: unknown): CreateAutomationRuleInput {
   const input = requireRecord(value, 'Automation rule')
+  const ownerTeamId = input.ownerTeamId === undefined
+    ? undefined
+    : requireBoundedText(input.ownerTeamId, 'Automation rule owner Team ID', 256)
   const name = requireBoundedText(input.name, 'Automation rule name', 160)
   if (typeof input.enabled !== 'boolean') {
     throw invalidInput('Automation rule enabled must be boolean.')
@@ -86,7 +93,11 @@ export function validateCreateAutomationRuleInput(value: unknown): CreateAutomat
   const maxChainDepth = input.maxChainDepth === undefined
     ? undefined
     : requireInteger(input.maxChainDepth, 'Automation maxChainDepth', 1, 64)
+  if (ownerTeamId !== undefined) {
+    assertAutomationRuleTeamScope(ownerTeamId, trigger, actions)
+  }
   return {
+    ...(ownerTeamId === undefined ? {} : { ownerTeamId }),
     name,
     enabled: input.enabled,
     trigger,
@@ -97,6 +108,52 @@ export function validateCreateAutomationRuleInput(value: unknown): CreateAutomat
     ...(allowReentry === undefined ? {} : { allowReentry }),
     ...(maxChainDepth === undefined ? {} : { maxChainDepth }),
   }
+}
+
+/**
+ * Rejects triggers and actions that a Team-owned rule cannot use.
+ *
+ * A Team-owned rule only reacts to its Team's Work Item events and only changes or creates
+ * Work Items in that Team. Form and inbound webhook triggers and outbound webhook actions use
+ * Workspace-level endpoints and secrets, so they stay with Workspace administrators.
+ *
+ * @param ownerTeamId - Team that owns the rule.
+ * @param trigger - Validated rule trigger.
+ * @param actions - Validated rule actions.
+ * @throws AutomationError when the rule reaches outside its Team.
+ */
+export function assertAutomationRuleTeamScope(
+  ownerTeamId: string,
+  trigger: AutomationTrigger,
+  actions: readonly AutomationAction[],
+): void {
+  if (trigger.type === 'form' || trigger.type === 'webhook') {
+    throw teamScopeViolation(`A Team rule cannot use the ${trigger.type} trigger.`)
+  }
+  if (trigger.type === 'work-item-type' && trigger.teamId !== ownerTeamId) {
+    throw teamScopeViolation('A Team rule can only watch Work Item types of its own Team.')
+  }
+  for (const action of actions) {
+    if (action.type === 'webhook') {
+      throw teamScopeViolation('A Team rule cannot call an outbound webhook.')
+    }
+    if (action.type === 'create') {
+      const teamId = action.values?.teamId
+      if (teamId !== undefined && teamId !== ownerTeamId) {
+        throw teamScopeViolation('A Team rule can only create Work Items in its own Team.')
+      }
+    }
+  }
+}
+
+/**
+ * Creates the stable error for a Team-owned definition that reaches another scope.
+ *
+ * @param message - Safe explanation of the rejected reference.
+ * @returns A 403 Automation error.
+ */
+export function teamScopeViolation(message: string): AutomationError {
+  return new AutomationError('forbidden', 'AutomationTeamScopeViolation', message)
 }
 
 /** Validates a trigger discriminator and its filters. */
@@ -191,6 +248,16 @@ function validateAutomationTrigger(value: unknown): AutomationTrigger {
         type: 'comment',
         ...(trigger.kind === undefined ? {} : { kind: trigger.kind }),
       }
+    case 'approval': {
+      const decision: unknown = trigger.decision
+      if (decision !== undefined && !isAutomationApprovalDecision(decision)) {
+        throw invalidInput('Automation approval trigger decision is invalid.')
+      }
+      return {
+        type: 'approval',
+        ...(decision === undefined ? {} : { decision }),
+      }
+    }
     case 'relation':
       return {
         type: 'relation',
@@ -208,14 +275,54 @@ function validateAutomationTrigger(value: unknown): AutomationTrigger {
         type: 'webhook',
         webhookId: requireBoundedText(trigger.webhookId, 'Webhook ID', 256),
       }
-    case 'schedule':
+    case 'schedule': {
+      const schedule = validateRecurringSchedule(trigger.schedule)
+      if (schedule.monthlyDay === 'business-day') {
+        throw invalidInput('Business-day schedules are only available to Recurring Work.')
+      }
       return {
         type: 'schedule',
-        schedule: validateRecurringSchedule(trigger.schedule),
+        schedule,
+        ...(trigger.dueWorkItems === undefined ? {} : {
+          dueWorkItems: validateDueWorkItemsSelection(trigger.dueWorkItems),
+        }),
       }
+    }
     default:
       throw invalidInput('Automation trigger type is invalid.')
   }
+}
+
+/**
+ * Validates the due-soon Work Item selection of a schedule trigger.
+ *
+ * @param value - Untrusted selection.
+ * @returns The normalized selection.
+ */
+function validateDueWorkItemsSelection(value: unknown): AutomationDueWorkItemsSelection {
+  const selection = requireRecord(value, 'Automation due Work Item selection')
+  const daysBefore: unknown = selection.daysBefore
+  if (
+    typeof daysBefore !== 'number' ||
+    !Number.isSafeInteger(daysBefore) ||
+    daysBefore < 0 ||
+    daysBefore > AUTOMATION_DUE_WORK_ITEMS_MAX_DAYS_BEFORE
+  ) {
+    throw invalidInput(
+      `Automation due Work Item days must be 0 to ${AUTOMATION_DUE_WORK_ITEMS_MAX_DAYS_BEFORE}.`,
+    )
+  }
+  return { daysBefore }
+}
+
+/**
+ * Tests whether a value is an approval decision an approval trigger accepts.
+ *
+ * @param value - Untrusted decision.
+ * @returns Whether the value is a known approval decision.
+ */
+function isAutomationApprovalDecision(value: unknown): value is AutomationApprovalDecision {
+  return AUTOMATION_APPROVAL_DECISIONS.some((decision) => decision === value)
 }
 
 /**
@@ -401,12 +508,17 @@ function validateAutomationAction(value: unknown): AutomationAction {
         'Notification recipients',
         100,
       )
-      if (recipientMemberKeys.length === 0) {
+      if (action.notifyAssignee !== undefined && typeof action.notifyAssignee !== 'boolean') {
+        throw invalidInput('Automation notification assignee flag must be a boolean.')
+      }
+      const notifyAssignee = action.notifyAssignee === true
+      if (recipientMemberKeys.length === 0 && !notifyAssignee) {
         throw invalidInput('Automation notification requires recipients.')
       }
       return {
         type: 'notify',
         recipientMemberKeys,
+        ...(notifyAssignee ? { notifyAssignee } : {}),
         title: requireBoundedText(action.title, 'Notification title', 256),
         ...(action.body === undefined ? {} : {
           body: requireBoundedText(action.body, 'Notification body', 4_096),

@@ -9,6 +9,7 @@ import {
 } from '../src/auth/session'
 import {
   discardSessionDrafts,
+  hasSessionDraft,
   registerSessionDraft,
   takeSessionDraft,
 } from '../src/auth/sessionDrafts'
@@ -294,4 +295,44 @@ test('rejects preserved values that are not comment input', () => {
     bodyMarkdown: 'a',
     mentionMemberKeys: ['m'],
   })
+})
+
+test('keeps input when a rejected refresh removes the session, before any page clears it', () => {
+  const session = signIn(token('member-a', 'access-1'))
+  register(commentKey, () => ({ bodyMarkdown: 'Typed before the refresh failed', mentionMemberKeys: [] }))
+
+  removeStoredAuthSession(session.refreshToken ?? '')
+  // The member reloads instead of signing in from the page, so nothing clears the session again.
+  expect(getAuthSession()).toBeNull()
+
+  signIn(token('member-a', 'access-2'))
+  expect(takeSessionDraft(commentKey, 'member-a')).toEqual({
+    bodyMarkdown: 'Typed before the refresh failed',
+    mentionMemberKeys: [],
+  })
+})
+
+test('tells whether a draft waits for an input only to the account that typed it', () => {
+  signIn(token('member-a', 'access-1'))
+  register('time-entry:form', () => ({ fields: { description: 'Review' }, billable: false }))
+  clearAuthSession()
+
+  expect(hasSessionDraft('time-entry:form', 'member-a')).toBe(true)
+  expect(hasSessionDraft('other-input', 'member-a')).toBe(false)
+  expect(hasSessionDraft('time-entry:form', 'member-b')).toBe(false)
+  expect(hasSessionDraft('time-entry:form', undefined)).toBe(false)
+  // Peeking leaves the draft for the input to take.
+  expect(takeSessionDraft('time-entry:form', 'member-a')).toEqual({ fields: { description: 'Review' }, billable: false })
+  expect(hasSessionDraft('time-entry:form', 'member-a')).toBe(false)
+})
+
+test('does not offer one account’s drafts to another account that signs in to the tab', () => {
+  signIn(token('member-a', 'access-1'))
+  register('document:["doc-1"]', () => ({ baseRevision: 3, conflicted: false, operations: [], title: 'Plan' }))
+  clearAuthSession()
+
+  signIn(token('member-b', 'access-2'))
+
+  expect(hasSessionDraft('document:["doc-1"]', 'member-b')).toBe(false)
+  expect(hasSessionDraft('document:["doc-1"]', 'member-a')).toBe(false)
 })

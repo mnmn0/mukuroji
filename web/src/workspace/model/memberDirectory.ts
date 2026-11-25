@@ -1,6 +1,20 @@
 import { escapeSpreadsheetCell } from '../../shared/lib/spreadsheetCell'
 import type { WorkspaceMember, WorkspaceMemberStatus, WorkspaceRole } from '../api/access'
 
+/**
+ * Order of the Workspace member list.
+ *
+ * - `default`: the server's order (role, then name)
+ * - `name`: name, or email when the member has no name
+ * - `last-sign-in`: members without a recorded sign-in first, then the oldest sign-in first, to
+ *   find accounts nobody uses
+ * - `joined`: the newest member first
+ */
+export type WorkspaceMemberSort = 'default' | 'name' | 'last-sign-in' | 'joined'
+
+/** Orders of the member list, in the order the list offers them. */
+export const workspaceMemberSorts: readonly WorkspaceMemberSort[] = ['default', 'name', 'last-sign-in', 'joined']
+
 /** Filter of the Workspace member list. */
 export type WorkspaceMemberFilter = {
   /** Text matched against the member's name and email; blank matches everyone. */
@@ -9,12 +23,15 @@ export type WorkspaceMemberFilter = {
   status: WorkspaceMemberStatus | 'all'
   /** Role to keep, or `all`. */
   role: WorkspaceRole | 'all'
+  /** Order of the kept members. */
+  sort: WorkspaceMemberSort
 }
 
 /** Filter that keeps every member. */
 export const emptyWorkspaceMemberFilter: WorkspaceMemberFilter = {
   query: '',
   role: 'all',
+  sort: 'default',
   status: 'all',
 }
 
@@ -31,7 +48,32 @@ function foldSearchText(value: string) {
 }
 
 /**
- * Keeps the members that match a filter, in their original order.
+ * Compares two members for a sort order. Ties keep the original order, because the sort is stable.
+ *
+ * @param left - First member.
+ * @param right - Second member.
+ * @param sort - Sort order other than `default`.
+ * @returns A negative number when `left` comes first, a positive number when `right` does.
+ */
+function compareMembers(
+  left: WorkspaceMember,
+  right: WorkspaceMember,
+  sort: Exclude<WorkspaceMemberSort, 'default'>,
+) {
+  if (sort === 'name') {
+    return (left.name?.trim() || left.email).localeCompare(right.name?.trim() || right.email, 'ja')
+  }
+  if (sort === 'joined') {
+    return right.createdAt.localeCompare(left.createdAt)
+  }
+  if (left.lastSignedInAt === right.lastSignedInAt) return 0
+  if (left.lastSignedInAt === undefined) return -1
+  if (right.lastSignedInAt === undefined) return 1
+  return left.lastSignedInAt.localeCompare(right.lastSignedInAt)
+}
+
+/**
+ * Keeps the members that match a filter, in the filter's order.
  *
  * @param members - Workspace members.
  * @param filter - Filter to apply.
@@ -42,13 +84,15 @@ export function filterWorkspaceMembers(
   filter: WorkspaceMemberFilter,
 ): WorkspaceMember[] {
   const query = foldSearchText(filter.query)
-  return members.filter((member) =>
+  const kept = members.filter((member) =>
     (filter.status === 'all' || member.status === filter.status) &&
     (filter.role === 'all' || member.role === filter.role) &&
     (query === '' ||
       foldSearchText(member.name ?? '').includes(query) ||
       foldSearchText(member.email).includes(query))
   )
+  const { sort } = filter
+  return sort === 'default' ? kept : kept.sort((left, right) => compareMembers(left, right, sort))
 }
 
 /** Column headers of the member CSV export. */
@@ -65,6 +109,8 @@ export type WorkspaceMemberCsvHeaders = {
   createdAt: string
   /** Header of the deactivation date column. */
   deactivatedAt: string
+  /** Header of the last sign-in column, which is blank when no sign-in is recorded or shown. */
+  lastSignedInAt: string
 }
 
 /**
@@ -91,7 +137,15 @@ export function createWorkspaceMemberCsv(
   headers: WorkspaceMemberCsvHeaders,
 ): string {
   const rows = [
-    [headers.email, headers.name, headers.role, headers.status, headers.createdAt, headers.deactivatedAt],
+    [
+      headers.email,
+      headers.name,
+      headers.role,
+      headers.status,
+      headers.createdAt,
+      headers.deactivatedAt,
+      headers.lastSignedInAt,
+    ],
     ...members.map((member) => [
       member.email,
       member.name ?? '',
@@ -99,6 +153,7 @@ export function createWorkspaceMemberCsv(
       member.status,
       member.createdAt,
       member.deactivatedAt ?? '',
+      member.lastSignedInAt ?? '',
     ]),
   ]
   return `${rows.map((row) => row.map(toCsvCell).join(',')).join('\r\n')}\r\n`

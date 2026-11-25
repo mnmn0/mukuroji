@@ -23,18 +23,28 @@ const documentsApiBaseUrl = resolveDocumentsApiBaseUrl(import.meta.env)
 
 /**
  * Canonical operation batch を保存し、更新後 detail を取得します。
+ *
+ * @param accessToken - Workspace access token.
+ * @param documentId - Document the operations are saved to.
+ * @param input - Operation batch to save.
+ * @param context - Idempotency context of the request.
+ * @param onCommitted - Receives the committed revision as soon as the API accepts the batch,
+ *   before the detail is read, so a failed detail read does not hide the commit.
+ * @returns The committed revision and the Document detail read after it.
  */
 export async function applyDocumentOperations(
   accessToken: string,
   documentId: string,
   input: ApplyDocumentOperationsInput,
   context: MutationRequestContext,
+  onCommitted?: (committedRevision: number) => void,
 ) {
   const response = await requestJson(
     `${documentsApiBaseUrl}/documents/${encodeURIComponent(documentId)}/operations`,
     accessToken,
     createJsonMutationInit('POST', input, context),
   ) as ApplyDocumentOperationsResponse
+  onCommitted?.(response.revision)
   const document = await getDocument(accessToken, documentId)
   return {
     committedRevision: response.revision,

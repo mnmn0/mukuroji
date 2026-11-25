@@ -41,7 +41,7 @@ import { toWorkItemConfigurationErrorResponse } from './collaboration-access'
 import { TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS } from './constants'
 import { toAuthErrorResponse } from './http'
 import {
-  createEnterpriseControlAuthorizationConditionCheck,
+  createEnterpriseAuthorizationConditionChecks,
   getEffectiveProjectAccessList,
   isEnterpriseTriageTeamScope,
   requireTeamPermission,
@@ -405,10 +405,7 @@ export async function createTriageProjectAuthorizationConditionChecks(
       access.projectId === projectId && projectAccessAllows(access, minimumRole)
     ) === true
   if (isEnterpriseTriageTeamScope(principal, teamId) || enterpriseProjectAccess) {
-    const enterpriseControlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
-    return enterpriseControlCheck
-      ? [...actorMembershipChecks, enterpriseControlCheck]
-      : actorMembershipChecks
+    return [...actorMembershipChecks, ...createEnterpriseAuthorizationConditionChecks(principal)]
   }
   if (!projectId) return actorMembershipChecks
   const access = context.projectAccesses?.find((candidate) => candidate.projectId === projectId)

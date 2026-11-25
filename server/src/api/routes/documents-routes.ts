@@ -74,6 +74,9 @@ async function createDocumentApiPrincipal(
             enterpriseControlRevision:
               principal.enterpriseIdentityControlRevision,
           }),
+      ...(principal.enterpriseOrgStructureRevision === undefined
+        ? {}
+        : { orgStructureRevision: principal.enterpriseOrgStructureRevision }),
     } satisfies DocumentAuthorizationFenceSnapshot],
     projectRoles,
     ...createDocumentEnterpriseScopeBoundary(principal),
@@ -307,8 +310,15 @@ export function registerDocumentsRoutes(routeApp: Hono): void {
         throw error
       }
     },
-    requestVersionApproval: async (principal, request, context) =>
-      createAuthorizedDocumentVersionApproval(
+    requestVersionApproval: async (principal, request, context, access) => {
+      // The edit permission and pin checked here are re-checked in the approval transaction.
+      const documentConditions = await workItemDependencies.documents.prepareVersionApprovalTransactWrite({
+        workspaceId: principal.workspaceId,
+        documentId: request.documentId,
+        versionId: request.versionId,
+        access,
+      })
+      return createAuthorizedDocumentVersionApproval(
         context,
         // The Work Item is authorized as its own approval route would, not through the Document
         // route's scopes, so Work Item access in another Project counts.
@@ -318,7 +328,9 @@ export function registerDocumentsRoutes(routeApp: Hono): void {
           createWorkItemRouteContext(context, request.teamId, request.issueId, 'approvals'),
         ),
         request,
-      ),
+        documentConditions.conditionChecks,
+      )
+    },
     listVersionApprovals: async (principal, documentId, context) =>
       listAuthorizedDocumentApprovals(
         await reauthenticateDocumentPrincipal(principal, context),

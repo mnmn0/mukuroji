@@ -362,12 +362,12 @@ function isEnterpriseAssignableRoleIds(
   const members = value.members
 
   return (
-    ['workspace', 'team', 'project'].every((scope) =>
+    ['workspace', 'org-unit', 'team', 'project'].every((scope) =>
       isStringArray(groupMappings[scope]),
     ) &&
     isStringArray(value.serviceAccounts) &&
     isRecord(members) &&
-    ['workspace', 'team', 'project'].every((scope) =>
+    ['workspace', 'org-unit', 'team', 'project'].every((scope) =>
       isStringArray(members[scope]),
     )
   )

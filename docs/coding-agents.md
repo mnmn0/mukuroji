@@ -84,3 +84,20 @@ Claude Code では `.mcp.json.example` を `.mcp.json` にコピーし、Claude 
 `MUKUROJI_MCP_ASSIGNEE_ID` を設定します。token は `.mcp.json` に書きません。
 Codex と Kiro の設定例は [Coding Agent MCP](coding-agent-mcp.md#クライアント別の設定例) を
 参照してください。
+
+## 4. 自動化しないもの
+
+- **Claude Code の SessionStart hook**: setup は使いません。cloud 環境は環境設定の setup script
+  （`bash scripts/codex-setup.sh`）で依存を入れ、review Skill は上の `install` / `check` を手で実行します。
+  hook は branch 上の `.claude/settings.json` で書き換えられるため、trusted な `origin/main` から Skill を
+  導入するという前提を hook に置かないためです。
+- **review Skill の repository 内への配置**（`.claude/skills` や `.kiro/skills`）: 作業 branch が reviewer
+  instructions を書き換えられないよう、Skill の source は `.codex/skills/mukuroji-review` の 1 か所に保ち、
+  各 agent へは personal scope に導入します。
+
+## 5. trust root
+
+`CLAUDE.md`、`.kiro/steering/mukuroji.md`、`scripts/sync-review-skill.sh` は、`AGENTS.md` と同じく
+agent の規則やレビュー手順を決めるため、`review-skill.yml` の trust root（変更に maintainer の
+`review-ok:<head SHA>` label が要る path）の対象です。workflow への追加は maintainer が手で反映するため、
+反映されるまではこれらを変える PR で maintainer が差分を直接確認します。

@@ -36,7 +36,7 @@ export type MemberRoleAssignmentSource = {
  * Groups the direct role assignments by member, with role names, for the member list.
  *
  * @param source - Assignments and role definitions from the security snapshot.
- * @returns Each member's direct roles, Workspace scope first.
+ * @returns Each member's direct roles, broadest scope first (Workspace, OrgUnit, Team, Project).
  */
 export function groupMemberRoleAssignments(
   source: MemberRoleAssignmentSource,
@@ -44,8 +44,10 @@ export function groupMemberRoleAssignments(
   const roleNames = new Map(source.roles.map((role) => [role.id, role.name]))
   const scopeOrder: Record<EnterpriseMemberRoleAssignmentScope, number> = {
     workspace: 0,
-    team: 1,
-    project: 2,
+    // An OrgUnit covers the Teams under it, so its roles come before a single Team's.
+    'org-unit': 1,
+    team: 2,
+    project: 3,
   }
   const grouped = new Map<string, MemberRoleAssignmentLabel[]>()
   for (const assignment of source.memberRoleAssignments) {

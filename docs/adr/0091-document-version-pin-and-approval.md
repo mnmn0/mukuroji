@@ -30,6 +30,13 @@ file の version と Work Item 本体にしかなかった。承認の結果は 
   公開できない）。Document の編集権限の確認は documents module、Work Item の認可・reviewer 検証・承認の保存は
   API composition（`server/src/api/shared/document-approval-access.ts`）が行う。documents module は
   `DocumentApiDependencies` の任意の callback を通してだけ承認に触れ、files module に依存しない。
+- 承認依頼の保存 transaction には、documents module が返す condition check（依頼者の Document
+  編集権限の判定に使った認可 row と、version が固定済みであること）と、Work Item が認可時と同じ
+  Project に属すること（Project なしなら Project なしのまま）の condition check を含める。検証後に
+  権限や Work Item の所属が変わった場合は、承認・reviewer projection・通知の event をまとめて保存しない。
+- 固定の再送は `Idempotency-Key` を actor・Document・version・名前に束縛した receipt
+  （`VERSION_PIN_RECEIPT#<documentId>#<digest>`、30 日の TTL）で検出し、確定済みの結果を書き直さずに
+  返す。同じ key で別の version や名前を送ると 409 にする。
 
 ## 検討した選択肢
 
@@ -50,6 +57,10 @@ file の version と Work Item 本体にしかなかった。承認の結果は 
 - 承認の判断・取消・通知・完了 Gate は既存の Work Item 承認と同じに振る舞う。Document 側の
   pointer row は不変で、Work Item や承認の削除後は main row がないものとして読み飛ばす。
 - Reviewer が Document を閲覧できるかは承認作成時に検証しない（Work Item の閲覧だけを確かめる）。
-  Document を読めない reviewer は版を開けないため、必要なら後で検証を足す。
+  依頼者以外の member の Document ACL（member grant、Project role、Enterprise の Document scope）を
+  server 側で評価する resolver がまだないためである。判断の権限は Work Item の承認と同じで、
+  版の閲覧権限とは一致しない。Document を読めない reviewer は承認カードから版を開けないが、判断は
+  できる。依頼者は Document を読める reviewer を選ぶ（利用者ガイドに明記する）。版の閲覧と判断の
+  権限をそろえる検証は、他 member の Document 認可を評価できるようになった時点で足す。
 - 固定の解除、Workspace ごとの保持期間は見送った。
 - 更新した文書: `docs/documents.md`、`docs/guide/member.md`。

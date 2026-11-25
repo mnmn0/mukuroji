@@ -118,6 +118,9 @@ function createRequestIntakeClient(
     completeConversion: createUnexpectedRequestIntakeCall('completeConversion'),
     getRequesterThread: createUnexpectedRequestIntakeCall('getRequesterThread'),
     replyToThread: createUnexpectedRequestIntakeCall('replyToThread'),
+    listRequesterSubmissions: createUnexpectedRequestIntakeCall('listRequesterSubmissions'),
+    getRequesterSubmission: createUnexpectedRequestIntakeCall('getRequesterSubmission'),
+    replyAsRequester: createUnexpectedRequestIntakeCall('replyAsRequester'),
     ingestEmail: createUnexpectedRequestIntakeCall('ingestEmail'),
     createAttachmentAccess: createUnexpectedRequestIntakeCall(
       'createAttachmentAccess',
@@ -655,7 +658,7 @@ test('delegates Request Form publish revision checks to the Request Intake clien
       Authorization: 'Bearer test-token',
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ expectedRevision: 2 }),
+    body: JSON.stringify({ expectedRevision: requestForm.revision }),
   })
 
   expect(response.status).toBe(409)

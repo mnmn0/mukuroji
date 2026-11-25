@@ -44,6 +44,7 @@ import {
 } from '../../bulk-operations/model/bulkOperationTaskAction'
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
+import type { ProjectDeliverablesController } from '../../files/queries/useProjectDeliverables'
 import type { IssueCollaborationController } from '../../issues/mutations/useIssueCollaboration'
 import type { IssueCollaborationRoute } from '../../issues/model/collaborationTabs'
 import {
@@ -56,6 +57,7 @@ import {
   createWorkItemTemplateDraft,
   listWorkItemTemplatesForTeam,
 } from '../../issues/model/workItemDuplicate'
+import { describeWorkflowRuleRejection } from '../../issues/model/workflowRuleErrors'
 import { useWorkItemCreateTemplates } from '../../automation/queries/useWorkItemCreateTemplates'
 import { TeamIssuesApiError, type TeamIssue, type TeamIssueDetail, type UpdateTeamIssueInput } from '../../issues/api'
 import type {
@@ -210,6 +212,8 @@ import {
 import { resolveTaskActualDateUndo } from '../model/taskActualDates'
 import type { TaskScheduleWindowNavigation } from '../model/taskScheduleWindow'
 import { CreateTaskPanel } from './CreateTaskPanel'
+import { createWorkItemCreateSessionDraftKey } from '../../work-items/model/workItemCreateSessionDraft'
+import { hasPendingSessionDraft } from '../../auth/useSessionDraft'
 import { TaskActionFeedback } from './TaskActionFeedback'
 import { TaskDetailPane, type TaskDetailAiAssistanceRenderer } from './TaskDetailPane'
 import { TaskHeader } from './TaskHeader'
@@ -532,6 +536,8 @@ export type TaskScreenProps = {
   artifacts?: FileArtifactsController
   /** File controller scoped to the current Project. */
   projectFiles: FileArtifactsController
+  /** Deliverables of the current Project and its readable Work Items. */
+  projectDeliverables?: ProjectDeliverablesController
   /** Workspace members used by mention, actor, and person-field controls. */
   workspaceMembers?: WorkspaceMember[]
   /** Current Workspace member key used by collaboration and file approvals. */
@@ -684,6 +690,7 @@ export function TaskScreen({
   isSystemAdmin = false,
   isLoading = false,
   projectMembers = emptyProjectMembers,
+  projectDeliverables,
   projectFiles,
   projectMembersErrorMessage,
   projectUserQuery = '',
@@ -777,7 +784,10 @@ export function TaskScreen({
   const [localSelectedDetailTaskKey, setLocalSelectedDetailTaskKey] = useState<string>()
   const [isDetailOpen, setIsDetailOpen] = useState(true)
   const [isAiOperationPending, setIsAiOperationPending] = useState(false)
-  const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(defaultCreateTaskOpen)
+  const createTaskSessionDraftKey = createWorkItemCreateSessionDraftKey(['project', projectId])
+  // A create form whose title was kept when the session ended opens again so the title comes back.
+  const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(() =>
+    defaultCreateTaskOpen || hasPendingSessionDraft(createTaskSessionDraftKey))
   const [createTaskContext, setCreateTaskContext] = useState<TaskCreateContext>()
   const createTemplates = useWorkItemCreateTemplates(accessToken, isCreateTaskOpen && Boolean(onCreateTask))
   const createTemplateTeamId = createTaskContext?.teamId ?? activeProjectTeamId
@@ -3831,6 +3841,7 @@ export function TaskScreen({
                 }}
                 projectId={createDestinationProjectId}
                 projectName={createDestinationProjectName}
+                {...(createDestinationProjectId === projectId ? { sessionDraftKey: createTaskSessionDraftKey } : {})}
                 teamName={createDestinationTeamName}
                 t={t}
                 workspaceMembers={workspaceMembers}
@@ -3946,6 +3957,7 @@ export function TaskScreen({
                 personOptions={personOptions}
                 priorityFilter={priorityFilter}
                 workItemTypeFilter={workItemTypeFilter}
+                projectDeliverables={projectDeliverables}
                 projectFiles={projectFiles}
                 projectId={projectId}
                 projectMembers={projectMembers}
@@ -4307,6 +4319,8 @@ function resolveTaskMutationErrorMessage(
   error: unknown,
   t: (key: MessageKey) => string,
 ): string {
+  const workflowRule = describeWorkflowRuleRejection(error, t)
+  if (workflowRule) return workflowRule
   if (error instanceof TeamIssuesApiError) {
     if (isTaskSchedulePreviewStaleCode(error.code)) {
       return t('tasks.schedule.previewStale')

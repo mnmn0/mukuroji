@@ -94,9 +94,18 @@ export type { UnsubmittedTimeEntry } from './application/timesheet-reminders'
 export type { ScheduledWeeklyReportReader } from './application/ports/weekly-report-reminder-reader'
 export type { WeeklyReportTeamRoster } from './application/weekly-report-reminders'
 export { createDynamoDbWeeklyReportRosterReader } from './adapter-out/dynamodb/weekly-report-roster-reader'
+/** Exposes the member access expiry notice reader port and its Project Directory adapter. */
+export type {
+  ExpiringMemberProject,
+  ExpiringWorkspaceMember,
+  ScheduledMemberAccessExpiryReader,
+} from './application/member-access-expiry-notices'
+export { createDynamoDbMemberProjectReader } from './adapter-out/dynamodb/member-project-reader'
 /** Exposes reminder override validation shared by HTTP adapters. */
 export { normalizeTeamReminderDays } from './domain/reminder-days'
 export {
+  MEMBER_ACCESS_EXPIRING_EVENT_TYPE,
+  MEMBER_ACCESS_EXPIRY_REASON,
   TIMESHEET_REMINDER_EVENT_TYPE,
   WEEKLY_REPORT_ESCALATION_EVENT_TYPE,
   WEEKLY_REPORT_ESCALATION_REASON,
@@ -112,3 +121,35 @@ export {
   type PlanningUpdateTargetReference,
   type PlanningUpdateTargetScheduleProjection,
 } from './adapter-in/schedules/notification-schedule'
+/** Exposes Team and Project channel posts: queuing from the projection and the scheduled sender. */
+export {
+  deliverDueChannelPosts,
+  enqueueChannelPost,
+  type ChannelPostEnqueueDependencies,
+  type ChannelPostFailure,
+} from './application/channel-posts'
+export { DynamoDbChannelPostStore, channelPostShards } from './adapter-out/dynamodb/channel-post-store'
+export { createSlackChannelPostSender, createSlackTestMessageSender } from './adapter-out/slack/slack-channel-post-sender'
+/** Exposes the destination settings use cases the HTTP routes call. */
+export {
+  deleteChannelDestination,
+  deletePersonalSlackDestination,
+  readChannelDestinationSaveBody,
+  readExpectedRevision,
+  readPersonalSlackWebhookUrl,
+  saveChannelDestination,
+  savePersonalSlackDestination,
+  testNotificationDestination,
+  toPublicChannelDestination,
+} from './application/notification-destinations'
+export type { ChannelDestinationRecord, ChannelDestinationTarget } from './domain/channel-destination'
+export type {
+  ChannelDestinationStore,
+  DeleteChannelDestinationInput,
+  SaveChannelDestinationInput,
+} from './application/ports/channel-posts'
+export {
+  SecretsManagerSlackDestinationSecretStore,
+  slackChannelDestinationSecretId,
+} from './adapter-out/secrets-manager/slack-destination-secret-store'
+export { slackNotificationSecretId } from './adapter-out/slack/slack-sender'

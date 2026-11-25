@@ -16,6 +16,7 @@ import { createDocumentRelationTargetKey } from '../model/linkTargets'
 import { createCanonicalWorkItemId, parseCanonicalWorkItemId } from '../model/relations'
 import {
   listEnteredReviewerKeys,
+  listReviewerCandidates,
   readEnteredReviewerKey,
   resolveApprovalStatusClassName,
 } from '../model/versionApprovals'
@@ -24,6 +25,7 @@ import { useDocumentVersionDetail } from '../queries/useDocumentVersionReview'
 import { DocumentReadOnlyBlock, DocumentReadOnlyContent } from './DocumentEditor'
 import { DocumentRelationTargetLabel, DocumentRelationTargetPicker } from './DocumentLinkPicker'
 import { focusFirstModalElement, trapModalFocus } from './modalFocus'
+import { WhiteboardReadOnly } from './WhiteboardCanvas'
 
 /** Value of the compare selector that stands for the current, unsaved-to-history content. */
 const CURRENT_CONTENT = 'current'
@@ -38,8 +40,14 @@ export type ApprovalsReadStatus =
       kind: 'loading'
     }
   | {
-      /** The read failed. */
+      /** The read failed, and no approvals were loaded before. */
       kind: 'error'
+      /** Reads the approvals again. */
+      onRetry: () => void
+    }
+  | {
+      /** A refresh failed; the approvals shown are from the last successful read. */
+      kind: 'stale'
       /** Reads the approvals again. */
       onRetry: () => void
     }
@@ -83,6 +91,11 @@ export type DocumentVersionReviewDialogProps = {
   onPin?: (name: string) => Promise<void>
   /** Requests approval of the pinned version; omitted when the viewer cannot edit. */
   onRequestApproval?: (input: CreateDocumentVersionApprovalInput) => Promise<void>
+  /**
+   * Whether an approval request for this version is still being sent. It outlives the request
+   * form, so switching tabs and back cannot send the request a second time.
+   */
+  isRequestingApproval?: boolean
   /** Opens an application path. */
   onNavigate?: (path: string) => void
 }
@@ -100,6 +113,7 @@ export function DocumentVersionReviewDialog({
   approvalsStatus,
   document,
   initialTab = 'preview',
+  isRequestingApproval = false,
   locale,
   members,
   onClose,
@@ -243,10 +257,12 @@ export function DocumentVersionReviewDialog({
               approvals={approvals}
               approvalsStatus={approvalsStatus}
               document={document}
+              isRequestingApproval={isRequestingApproval}
               locale={locale}
               members={members}
               onNavigate={onNavigate}
               onPin={onPin}
+              onPinned={() => globalThis.document.getElementById(`${tabIdPrefix}-tab-approval`)?.focus()}
               onRequestApproval={onRequestApproval}
               t={t}
               version={version}
@@ -302,11 +318,11 @@ function VersionPreview({
     )
   }
   if (snapshot.kind === 'whiteboard') {
+    // The saved objects, connectors, and frames are drawn without editing controls.
     return (
-      <StatusNotice
-        text={t('documents.versionReview.whiteboardSummary')
-          .replace('{objects}', String(snapshot.whiteboard.objects.length))}
-      />
+      <div className="p-5">
+        <WhiteboardReadOnly content={snapshot.whiteboard} t={t} />
+      </div>
     )
   }
   return <StatusNotice text={snapshot.title} />
@@ -352,20 +368,17 @@ function VersionCompare({
     document.id,
     targetId === CURRENT_CONTENT ? undefined : targetId,
   )
-  // The current content is always the newest side, even when the history is ahead of a stale
-  // client copy of the Document.
-  const targetRevision = targetId === CURRENT_CONTENT
-    ? Number.POSITIVE_INFINITY
-    : versions.find((candidate) => candidate.id === targetId)?.revision ?? 0
+  // The direction follows the revisions of the snapshots actually shown: the current content's
+  // own revision, and the revision of the read history snapshot.
   const targetSnapshot: DocumentDetail | undefined = targetId === CURRENT_CONTENT
     ? document
     : target.data?.document
   const diff = useMemo(() => {
     if (!reviewed.data || !targetSnapshot) return undefined
-    return targetRevision >= version.revision
+    return targetSnapshot.revision >= reviewed.data.document.revision
       ? diffDocumentVersions(reviewed.data.document, targetSnapshot)
       : diffDocumentVersions(targetSnapshot, reviewed.data.document)
-  }, [reviewed.data, targetRevision, targetSnapshot, version.revision])
+  }, [reviewed.data, targetSnapshot])
 
   return (
     <div className="grid gap-4 p-5">
@@ -407,9 +420,12 @@ function VersionCompare({
         <StatusNotice text={t('documents.versionReview.noChanges')} />
       ) : (
         <div className="grid gap-3">
-          {diff.previousTitle !== undefined ? (
+          {diff.titleChange !== undefined ? (
             <p className="m-0 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-fg-amber-800">
-              {t('documents.versionReview.titleChanged').replace('{title}', diff.previousTitle)}
+              {fillMessagePlaceholders(t('documents.versionReview.titleChanged'), {
+                before: diff.titleChange.before,
+                after: diff.titleChange.after,
+              })}
             </p>
           ) : null}
           {diff.whiteboard ? (
@@ -529,10 +545,12 @@ function VersionApproval({
   approvals,
   approvalsStatus,
   document,
+  isRequestingApproval,
   locale,
   members,
   onNavigate,
   onPin,
+  onPinned,
   onRequestApproval,
   t,
   version,
@@ -545,6 +563,8 @@ function VersionApproval({
   approvalsStatus?: ApprovalsReadStatus
   /** Current Document whose linked Work Items are offered first. */
   document: DocumentRecord
+  /** Whether an approval request for this version is still being sent. */
+  isRequestingApproval: boolean
   /** Locale used for dates and labels. */
   locale: Locale
   /** Members offered as reviewers. */
@@ -553,6 +573,8 @@ function VersionApproval({
   onNavigate?: (path: string) => void
   /** Pins the version with a name. */
   onPin?: (name: string) => Promise<void>
+  /** Moves focus into the dialog after a pin removes the pin form. */
+  onPinned: () => void
   /** Requests approval of the pinned version. */
   onRequestApproval?: (input: CreateDocumentVersionApprovalInput) => Promise<void>
   /** Translator. */
@@ -563,7 +585,7 @@ function VersionApproval({
   return (
     <div className="grid gap-5 p-5">
       {version.name === undefined ? (
-        <PinVersionForm onPin={onPin} t={t} />
+        <PinVersionForm onPin={onPin} onPinned={onPinned} t={t} />
       ) : (
         <p className="m-0 rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2 text-sm font-medium text-[var(--workbench-text)]">
           {t('documents.versionReview.pinnedValue').replace('{name}', version.name)}
@@ -573,6 +595,20 @@ function VersionApproval({
         <h3 className="m-0 text-sm font-semibold text-[var(--workbench-text)]">
           {t('documents.versionReview.approvals')}
         </h3>
+        {approvalsStatus?.kind === 'stale' ? (
+          <div className="flex flex-wrap items-center gap-2" role="alert">
+            <p className="m-0 text-xs font-semibold text-[var(--workbench-danger)]">
+              {t('documents.versions.approvalsStale')}
+            </p>
+            <button
+              className="workbench-button-secondary min-h-8 px-2.5 text-xs"
+              onClick={approvalsStatus.onRetry}
+              type="button"
+            >
+              {t('documents.versions.retry')}
+            </button>
+          </div>
+        ) : null}
         {approvalsStatus?.kind === 'error' ? (
           <div className="flex flex-wrap items-center gap-2" role="alert">
             <p className="m-0 text-xs font-semibold text-[var(--workbench-danger)]">
@@ -612,6 +648,7 @@ function VersionApproval({
         <RequestApprovalForm
           accessToken={accessToken}
           document={document}
+          isRequestingApproval={isRequestingApproval}
           locale={locale}
           members={members}
           onRequestApproval={onRequestApproval}
@@ -630,10 +667,13 @@ function VersionApproval({
  */
 function PinVersionForm({
   onPin,
+  onPinned,
   t,
 }: {
   /** Pins the version with a name. */
   onPin?: (name: string) => Promise<void>
+  /** Moves focus to a control that stays after the pinned version removes this form. */
+  onPinned: () => void
   /** Translator. */
   t: (key: MessageKey) => string
 }) {
@@ -662,6 +702,8 @@ function PinVersionForm({
     setHasError(false)
     try {
       await onPin(trimmed)
+      // A failed pin keeps the form and the focused name field; a pin removes them.
+      onPinned()
     } catch {
       setHasError(true)
     } finally {
@@ -706,6 +748,7 @@ function PinVersionForm({
 function RequestApprovalForm({
   accessToken,
   document,
+  isRequestingApproval,
   locale,
   members,
   onRequestApproval,
@@ -715,6 +758,8 @@ function RequestApprovalForm({
   accessToken: string
   /** Current Document whose linked Work Items are offered first. */
   document: DocumentRecord
+  /** Whether a request for this version, possibly sent before this form mounted, is in flight. */
+  isRequestingApproval: boolean
   /** Locale used for labels. */
   locale: Locale
   /** Members offered as reviewers. */
@@ -740,19 +785,15 @@ function RequestApprovalForm({
   const [hasError, setHasError] = useState(false)
   const [isDone, setIsDone] = useState(false)
   const activeMembers = (members ?? []).filter((member) => member.status === 'active')
-  const normalizedQuery = reviewerQuery.trim().toLowerCase()
   const enteredReviewerKeys = listEnteredReviewerKeys(
     reviewerKeys,
     activeMembers.map((member) => member.memberKey),
   )
   const enteredReviewerKey = readEnteredReviewerKey(reviewerQuery, reviewerKeys)
-  const visibleMembers = activeMembers.filter((member) =>
-    reviewerKeys.includes(member.memberKey) ||
-    !normalizedQuery ||
-    [member.name, member.email, member.memberKey].some((value) => value?.toLowerCase().includes(normalizedQuery))
-  ).slice(0, 30)
+  const visibleMembers = listReviewerCandidates(activeMembers, reviewerKeys, reviewerQuery)
   const workItem = workItemId === undefined ? undefined : parseCanonicalWorkItemId(workItemId)
-  const canSubmit = workItem !== undefined && reviewerKeys.length > 0 && dueDate !== '' && !isSaving
+  const isSending = isSaving || isRequestingApproval
+  const canSubmit = workItem !== undefined && reviewerKeys.length > 0 && dueDate !== '' && !isSending
 
   /**
    * Adds a Work Item chosen in the picker and selects it.
@@ -942,7 +983,7 @@ function RequestApprovalForm({
       ) : null}
       <div className="flex justify-end">
         <button className="workbench-button-primary h-8 px-3 text-xs disabled:opacity-50" disabled={!canSubmit} type="submit">
-          {isSaving ? t('documents.versionReview.saving') : t('documents.versionReview.request')}
+          {isSending ? t('documents.versionReview.saving') : t('documents.versionReview.request')}
         </button>
       </div>
     </form>
@@ -1065,6 +1106,20 @@ function StatusNotice({
     <p className="m-0 px-6 py-10 text-center text-sm font-medium text-[var(--workbench-muted)]" role={role}>
       {text}
     </p>
+  )
+}
+
+/**
+ * Fills `{name}` placeholders of a message in one pass. Values are inserted as they are, so a
+ * title that contains another placeholder or a replacement pattern such as `$&` stays intact.
+ *
+ * @param message - Translated message with placeholders.
+ * @param values - Text for each placeholder name.
+ * @returns The message with every known placeholder filled.
+ */
+function fillMessagePlaceholders(message: string, values: Readonly<Record<string, string>>) {
+  return message.replace(/\{(\w+)\}/gu, (placeholder, name: string) =>
+    Object.hasOwn(values, name) ? values[name] ?? placeholder : placeholder
   )
 }
 

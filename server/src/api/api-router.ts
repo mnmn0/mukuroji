@@ -6,6 +6,7 @@ import { registerDocumentsRoutes } from './routes/documents-routes'
 import { registerAuthenticationRoutes } from './routes/authentication-routes'
 import { registerAccountSecurityRoutes } from './routes/account-security-routes'
 import { registerWorkspaceRoutes } from './routes/workspace-routes'
+import { registerWorkspaceMemberOffboardingRoutes } from './routes/workspace-member-offboarding-routes'
 import { registerAnalyticsRoutes } from './routes/analytics-routes'
 import { registerAuditRoutes } from './routes/audit-routes'
 import { registerTenantAdministrationRoutes } from './routes/tenant-administration-routes'
@@ -13,6 +14,7 @@ import { registerTimeTrackingRoutes } from './routes/time-tracking-routes'
 import { registerAgentRunRoutes } from './routes/agent-run-routes'
 import { registerCapacityPlanningRoutes } from './routes/capacity-planning-routes'
 import { registerNotificationsRoutes } from './routes/notifications-routes'
+import { registerNotificationDestinationRoutes } from './routes/notification-destination-routes'
 import { registerAutomationRoutes } from './routes/automation-routes'
 import { registerWorkItemKeyPrefixRoutes } from './routes/work-item-key-prefix-routes'
 import { registerWorkItemsRoutes } from './routes/work-items-routes'
@@ -25,6 +27,7 @@ import { registerProjectBudgetRoutes } from './routes/project-budget-routes'
 import { registerScheduleBaselineRoutes } from './routes/schedule-baseline-routes'
 import { registerWorkCalendarRoutes } from './routes/work-calendar-routes'
 import { registerDirectoryAdministrationRoutes } from './routes/directory-administration-routes'
+import { registerOrgStructureRoutes } from './routes/org-structure-routes'
 import { registerCollaborationRoutes } from './routes/collaboration-routes'
 import { registerRequestIntakeRoutes } from './routes/request-intake-routes'
 import { registerCollectionsRoutes } from './routes/collections-routes'
@@ -88,6 +91,8 @@ export type {
 
 export {
   createAutomationActionExecutor,
+  createAutomationExecutionFailureNotifier,
+  createAutomationWorkCalendarSource,
   createBulkItemMutationIdempotencyKey,
   requireBulkOperationOwner,
   toBulkOperationResponse,
@@ -170,6 +175,7 @@ registerDocumentsRoutes(routeApp)
 registerAuthenticationRoutes(routeApp)
 registerAccountSecurityRoutes(routeApp)
 registerWorkspaceRoutes(routeApp)
+registerWorkspaceMemberOffboardingRoutes(routeApp)
 registerAnalyticsRoutes(routeApp)
 registerAuditRoutes(routeApp)
 registerTenantAdministrationRoutes(routeApp)
@@ -177,6 +183,7 @@ registerTimeTrackingRoutes(routeApp)
 registerAgentRunRoutes(routeApp)
 registerCapacityPlanningRoutes(routeApp)
 registerNotificationsRoutes(routeApp)
+registerNotificationDestinationRoutes(routeApp)
 registerAutomationRoutes(routeApp)
 registerWorkItemsRoutes(routeApp)
 registerWorkItemKeyPrefixRoutes(routeApp)
@@ -189,6 +196,7 @@ registerScheduleBaselineRoutes(routeApp)
 registerProjectBudgetRoutes(routeApp)
 registerWorkCalendarRoutes(routeApp)
 registerDirectoryAdministrationRoutes(routeApp)
+registerOrgStructureRoutes(routeApp)
 registerCollaborationRoutes(routeApp)
 registerRequestIntakeRoutes(routeApp)
 registerCollectionsRoutes(routeApp)

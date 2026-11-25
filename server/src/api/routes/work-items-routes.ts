@@ -99,6 +99,7 @@ import {
   type WorkItemDependencyScheduleState,
   type WorkItemRelationNotificationEndpoint,
 } from '../../modules/work-items'
+import { isWorkspaceMemberRowActive, type WorkspaceMemberStatus } from '../../modules/workspace-access'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import {
   CollaborationError,
@@ -128,6 +129,7 @@ import {
   RequestIntakeError,
   createRequestWorkItemInput,
 } from '../../modules/request-intake/request-intake'
+import { resolveRequestFormTitle } from '../../modules/request-intake/my-requests'
 import { CustomerError, projectCustomerImpactSignal } from '../../modules/customers'
 import {
   createTriageAcceptanceTransactionItems,
@@ -213,6 +215,7 @@ import {
 } from '../shared/http'
 import { readAuditEventQuery, readLocale, readRequiredRouteId } from '../shared/input-parsing'
 import {
+  createPlanningCallerAuthorizationConditionChecks,
   createPlanningFencedWorkItemAuthorizationSnapshot,
   filterPlanningSnapshotForPrincipal,
   withPlanningLegacyReadScope,
@@ -283,9 +286,11 @@ import {
   summarizeAccessibleWorkItems,
 } from '../shared/work-item-aggregate-read'
 import {
+  createPersonWorkflowRulePrincipal,
   filterRequestConversionCustomFieldValues,
   getWorkItemConfigurationTableName,
   prepareConfiguredCreateWorkItem,
+  type WorkflowRulePrincipal,
 } from '../shared/work-item-configuration'
 import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
@@ -1266,12 +1271,52 @@ async function requirePlanningProjectScopeIsUnused(
   }
 }
 
+/**
+ * Adds the source requester's completion notification to an approval that completes a Work Item
+ * made from a request, so the notice does not depend on how the Work Item was completed.
+ *
+ * @param principal - Member deciding the approval.
+ * @param teamId - Team that owns the Work Item.
+ * @param workItem - Work Item before the decision.
+ * @param transition - Resolved completion transition.
+ * @param correlationId - Correlation ID of the approval decision, so the notice can be traced.
+ * @returns The transition, with the notification items when the Work Item becomes completed.
+ */
+async function addSourceRequesterCompletionNotice(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
+  transition: FileApprovalCompletionTransition,
+  correlationId: string | undefined,
+): Promise<FileApprovalCompletionTransition> {
+  const createItems = workItemDependencies.teamIssues.createSourceRequesterCompletionTransactionItems
+  if (
+    !createItems ||
+    !workItem.sourceRequestId ||
+    workItem.statusCategory === 'completed' ||
+    transition.statusCategory !== 'completed'
+  ) {
+    return transition
+  }
+  const items = await createItems.call(workItemDependencies.teamIssues, {
+    directoryId: principal.directoryId,
+    teamId,
+    issueId: workItem.id,
+    nextRevision: transition.expectedRevision + 1,
+    actorUserId: principal.userKey,
+    occurredAt: new Date().toISOString(),
+    ...(correlationId ? { correlationId } : {}),
+  })
+  return items.length > 0 ? { ...transition, completionSideEffectItems: items } : transition
+}
+
 /** Approval 作成後に削除・無効化された遷移先を decision conflict として扱います。 */
 async function resolveFileApprovalCompletionTransitionForDecision(
   directoryId: string,
   teamId: string,
   workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
   completionTransition: string,
+  decider: WorkflowRulePrincipal,
 ): Promise<FileApprovalCompletionTransition | undefined> {
   try {
     return await resolveFileApprovalCompletionTransition(
@@ -1279,6 +1324,7 @@ async function resolveFileApprovalCompletionTransitionForDecision(
       teamId,
       workItem,
       completionTransition,
+      decider,
     )
   } catch (error) {
     if (
@@ -2363,8 +2409,22 @@ async function hydrateProjectMemberUpdateResponse(
   } satisfies UpdateProjectMemberResponse
 }
 
+/**
+ * Adds the Cognito profile, member-set name, and assignable Workspace status to a Project member.
+ *
+ * A member whose access expiry has passed keeps an `active` row until handover or the scheduled
+ * job deactivates it, but work can no longer be assigned to them, so they are reported as
+ * `deactivated` here, matching the assignee check (ADR 0095).
+ *
+ * @param member - Project member row from the directory.
+ * @param directoryId - Workspace that owns the Project.
+ * @returns The member with profile fields and the Workspace status assignment pickers read.
+ */
 async function hydrateProjectMember(member: ProjectMemberResponseItem, directoryId: string) {
   const workspaceMember = await workspaceDependencies.workspaceAccess.getMember(directoryId, member.id)
+  const workspaceStatus: WorkspaceMemberStatus = workspaceMember && isWorkspaceMemberRowActive(workspaceMember, new Date())
+    ? 'active'
+    : 'deactivated'
 
   try {
     const profile = await authenticationDependencies.cognito.getUserProfile(member.id)
@@ -2380,14 +2440,14 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem, directory
       name,
       enabled: profile.enabled,
       status: profile.status,
-      workspaceStatus: workspaceMember?.status ?? 'deactivated',
+      workspaceStatus,
     } satisfies ProjectMemberResponseItem
   } catch (error) {
     if (isCognitoUserNotFoundError(error)) {
       return {
         ...member,
         ...(workspaceMember ? { name: workspaceMember.name?.trim() || undefined } : {}),
-        workspaceStatus: workspaceMember?.status ?? 'deactivated',
+        workspaceStatus,
       }
     }
 
@@ -2395,7 +2455,7 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem, directory
     return {
       ...member,
       ...(workspaceMember ? { name: workspaceMember.name?.trim() || undefined } : {}),
-      workspaceStatus: workspaceMember?.status ?? 'deactivated',
+      workspaceStatus,
     }
   }
 }
@@ -3932,6 +3992,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         conversion.target.teamId,
         conversionInput,
         resolvedConfiguration,
+        createPersonWorkflowRulePrincipal(principal, teamContext),
         { fallbackToTypeInitialStatus: body.target?.workflowStatusId === undefined },
       )
       const authorizationConditionChecks = await createTriageProjectAuthorizationConditionChecks(
@@ -3994,6 +4055,14 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           actorId: principal.userKey,
           submissionId,
           events: submission.events,
+          ...(submission.requesterUserId
+            ? {
+                requester: {
+                  memberKey: submission.requesterUserId,
+                  formTitle: resolveRequestFormTitle(submission),
+                },
+              }
+            : {}),
         },
         {
           entryId: triageAcceptance.entry.id,
@@ -4536,7 +4605,14 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       await requireProjectPermission(principal, projectId, 'manager')
       const body = await readJson<UpdateProjectMemberRequestBody>(c.req)
       const profile = await authenticationDependencies.cognito.getUserProfile(memberKey)
-      const workspaceMember = await workspaceDependencies.workspaceAccess.getActiveMember(principal.directoryId, profile.id)
+      const activeMember = await workspaceDependencies.workspaceAccess.getActiveMember(principal.directoryId, profile.id)
+      // A member whose access expired keeps an active row until their roles are handed over, so
+      // their Project role can still be lowered, but never raised or newly given (ADR 0095).
+      const expiredMember = activeMember
+        ? undefined
+        : await workspaceDependencies.workspaceAccess.getMember(principal.directoryId, profile.id)
+      const workspaceMember = activeMember ??
+        (expiredMember?.status === 'active' ? expiredMember : undefined)
 
       if (!workspaceMember) {
         throw new WorkspaceAccessError(
@@ -4564,6 +4640,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
               memberKey: profile.id,
               ...body,
             }),
+            activeMember ? {} : { demotionOnly: true },
           ),
           principal.directoryId,
         ),
@@ -4823,6 +4900,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         teamId,
         body,
         resolvedConfiguration,
+        createPersonWorkflowRulePrincipal(principal, context),
       )
       const assigneeUserId = readTeamIssueAssigneeUserId(configuredBody)
       await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
@@ -5280,6 +5358,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         detail.issue,
         body,
         resolvedConfiguration,
+        createPersonWorkflowRulePrincipal(principal, context),
       )
 
       let authorizationSnapshot: WorkItemAuthorizationSnapshot | undefined
@@ -5691,6 +5770,9 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           ...(principal.enterpriseIdentityControlRevision === undefined
             ? {}
             : { enterpriseControlRevision: principal.enterpriseIdentityControlRevision }),
+          ...(principal.enterpriseOrgStructureRevision === undefined
+            ? {}
+            : { orgStructureRevision: principal.enterpriseOrgStructureRevision }),
         },
         kind: request.kind,
         title: request.title,
@@ -5815,6 +5897,9 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           ...(principal.enterpriseIdentityControlRevision === undefined
             ? {}
             : { enterpriseControlRevision: principal.enterpriseIdentityControlRevision }),
+          ...(principal.enterpriseOrgStructureRevision === undefined
+            ? {}
+            : { orgStructureRevision: principal.enterpriseOrgStructureRevision }),
         },
         expectedRevision: request.expectedRevision,
         ...(request.kind ? { kind: request.kind } : {}),
@@ -6021,25 +6106,59 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const canonicalWorkItem = requireCanonicalFileProofingWorkItem(workItem)
       const body = await readFileProofingJson<CreateFileApprovalDecisionInput>(c.req)
       const input = { ...body } satisfies CreateFileApprovalDecisionInput
+      const decisionAuditContext = createApiMutationContext(c, principal, input)
       let resolvedCompletionTransition: FileApprovalCompletionTransition | undefined
       const resolveCompletionTransition: FileApprovalCompletionTransitionResolver = async (
         completionTransition,
       ) => {
-        const resolved = await resolveFileApprovalCompletionTransitionForDecision(
+        // The decider changes the status, so the workflow's transition actor roles apply to them.
+        // A reviewer may hold no Team role; then only the assignee role can hold, so that denial
+        // leaves the manager role unmet instead of blocking a decision no rule restricts. Any other
+        // failure surfaces.
+        const deciderContext = await requireTeamPermission(principal, scope.teamId, 'viewer')
+          .catch((error: unknown) => {
+            if (error instanceof ProjectDataError && error.status === 403) return undefined
+            throw error
+          })
+        const transition = await resolveFileApprovalCompletionTransitionForDecision(
           principal.directoryId,
           scope.teamId,
           canonicalWorkItem,
           completionTransition,
+          createPersonWorkflowRulePrincipal(principal, deciderContext),
         )
-        resolvedCompletionTransition = resolved
-        return resolved
+        // The transition was judged against the decider's roles, so a role change before the
+        // decision commits fails it. The decision already writes Planning META, so only the caller's
+        // member row and enterprise CONTROL revision are checked here.
+        const resolved = transition && {
+          ...transition,
+          configurationConditionChecks: [
+            ...transition.configurationConditionChecks,
+            ...createPlanningCallerAuthorizationConditionChecks(
+              principal,
+              [],
+              principal.principalKind !== 'service-account',
+            ),
+          ],
+        }
+        const withRequesterNotice = resolved
+          ? await addSourceRequesterCompletionNotice(
+              principal,
+              scope.teamId,
+              canonicalWorkItem,
+              resolved,
+              decisionAuditContext.correlationId,
+            )
+          : undefined
+        resolvedCompletionTransition = withRequesterNotice
+        return withRequesterNotice
       }
       const approval = await workItemDependencies.fileProofing.decideApproval(
         scope,
         actor,
         readRequiredRouteId(c.req.param('approvalId'), 'Approval ID'),
         input,
-        createApiMutationContext(c, principal, input),
+        decisionAuditContext,
         resolveCompletionTransition,
       )
       if (approval.status === 'approved' && resolvedCompletionTransition) {

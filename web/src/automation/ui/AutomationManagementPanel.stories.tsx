@@ -15,6 +15,7 @@ import {
   workflowAutomationTemplateFixture,
   workflowTemplateApplicationFixture,
   workItemAutomationTemplateFixture,
+  automationRuleEditorOptionsFixture,
 } from '../fixtures'
 
 /** AutomationManagementPanel の Storybook metadata です。 */
@@ -82,6 +83,12 @@ const meta = {
     onRotateWebhook: async () => inboundWebhookSecretResponseFixture,
     onToggleRecurringWork: async () => undefined,
     onToggleRule: async () => undefined,
+    onUpdateRule: async () => undefined,
+    onDeleteRule: async () => undefined,
+    onDryRunRule: async () => ({ matched: true, triggerType: 'status', conditions: [], actions: [] }),
+    onDeleteTemplate: async () => undefined,
+    onDeleteRecurringWork: async () => undefined,
+    ruleEditorOptions: automationRuleEditorOptionsFixture,
     onToggleTemplate: async () => undefined,
     onUpdateTemplate: async () => undefined,
     onRefreshTemplateApplication: async (applicationId) =>
@@ -144,5 +151,29 @@ export const ReadOnly: Story = {
 export const Loading: Story = {
   args: {
     isLoading: true,
+  },
+}
+
+/** Team の設定で、所有 Team の定義だけを Webhook なしで管理している状態です。 */
+export const TeamOwnedDefinitions: Story = {
+  args: {
+    canViewWebhooks: false,
+    teamScoped: true,
+    rules: [{ ...activeAutomationRuleFixture, ownerTeamId: 'core-team' }],
+    templates: [{ ...workItemAutomationTemplateFixture, ownerTeamId: 'core-team' }],
+    templateOptions: [workItemAutomationTemplateFixture, { ...workItemAutomationTemplateFixture, ownerTeamId: 'core-team' }],
+    webhooks: [],
+  },
+}
+
+/** Team の実行が直近の履歴に見つからず、さらに古い履歴を探せる状態です。 */
+export const TeamRunsSearchOlder: Story = {
+  args: {
+    canViewWebhooks: false,
+    teamScoped: true,
+    initialTab: 'runs',
+    executions: [],
+    onLoadMoreExecutions: () => undefined,
+    webhooks: [],
   },
 }

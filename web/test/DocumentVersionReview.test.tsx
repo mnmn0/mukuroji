@@ -3,9 +3,12 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
 import { SWRConfig, unstable_serialize } from 'swr'
 import type { ApprovalRequest, DocumentBlock, DocumentDetail, DocumentVersion } from '@mukuroji/contracts'
-import { documentRecordFixture } from '../src/documents/fixtures'
-import { listEnteredReviewerKeys, readEnteredReviewerKey } from '../src/documents/model/versionApprovals'
-import { documentApprovalsQueryConfig } from '../src/documents/queries/useDocumentVersionReview'
+import { documentRecordFixture, whiteboardRecordFixture } from '../src/documents/fixtures'
+import {
+  listEnteredReviewerKeys,
+  listReviewerCandidates,
+  readEnteredReviewerKey,
+} from '../src/documents/model/versionApprovals'
 import { DocumentVersionReviewDialog, type ApprovalsReadStatus } from '../src/documents/ui/DocumentVersionReview'
 import { DocumentContextPanel } from '../src/documents/ui/DocumentContextPanel'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -60,7 +63,12 @@ function createCurrentPage(blocks: DocumentBlock[]) {
  * @param ownership - Owner and deadline saved on the item.
  * @returns The checklist block.
  */
-function createChecklist(ownership: { assigneeMemberKey?: string; dueDate?: string }): DocumentBlock {
+function createChecklist(ownership: {
+  /** Member key of the item's owner. */
+  assigneeMemberKey?: string
+  /** Deadline of the item as `YYYY-MM-DD`. */
+  dueDate?: string
+}): DocumentBlock {
   return {
     id: 'checklist-1',
     type: 'checklist',
@@ -75,22 +83,37 @@ function createChecklist(ownership: { assigneeMemberKey?: string; dueDate?: stri
  * @returns Static markup.
  */
 function renderDialog(props: {
+  /** Tab opened first. */
   initialTab: 'preview' | 'compare' | 'approval'
+  /** Approvals of the version; none when omitted. */
   approvals?: ApprovalRequest[]
+  /** Version under review; the pinned version when omitted. */
   version?: DocumentVersion
+  /** False omits the pin and request callbacks, as for a viewer who cannot edit. */
   canEdit?: boolean
+  /** Read state of the approvals. */
   approvalsStatus?: ApprovalsReadStatus
+  /** Seeds the SWR cache with a failed version detail read instead of the snapshot. */
   detailFailed?: boolean
+  /** Blocks of the version snapshot; one paragraph when omitted. */
   snapshotBlocks?: DocumentBlock[]
+  /** Snapshot of the version, replacing the page built from `snapshotBlocks`. */
+  snapshot?: DocumentDetail
+  /** Blocks of the current content; the fixture page when omitted. */
   currentBlocks?: DocumentBlock[]
+  /** Current Document, replacing the page built from `currentBlocks`. */
+  current?: DocumentDetail
+  /** Workspace members offered as reviewers. */
   members?: MentionableMember[]
+  /** Whether an approval request for the version is still being sent. */
+  isRequestingApproval?: boolean
 }) {
   const version = props.version ?? pinnedVersion
   const detailKey = unstable_serialize(['document-version-detail', 'token', documentRecordFixture.id, version.id])
   const fallback = props.detailFailed ? {} : {
     [detailKey]: {
       version,
-      document: createSnapshot(props.snapshotBlocks),
+      document: props.snapshot ?? createSnapshot(props.snapshotBlocks),
     },
   }
   // A failed read is seeded as the cached SWR state of the version detail.
@@ -104,8 +127,9 @@ function renderDialog(props: {
           accessToken="token"
           approvals={props.approvals ?? []}
           approvalsStatus={props.approvalsStatus}
-          document={props.currentBlocks ? createCurrentPage(props.currentBlocks) : documentRecordFixture}
+          document={props.current ?? (props.currentBlocks ? createCurrentPage(props.currentBlocks) : documentRecordFixture)}
           initialTab={props.initialTab}
+          isRequestingApproval={props.isRequestingApproval}
           locale="en"
           members={props.members ?? [{ memberKey: 'reviewer@example.com', name: 'Rina Reviewer', status: 'active' }]}
           onClose={() => undefined}
@@ -211,9 +235,97 @@ describe('DocumentVersionReviewDialog', () => {
     )).toEqual(['ann@example.com', 'bob@example.com'])
   })
 
-  test('reads the approval list again on focus while version snapshots stay cached', () => {
-    // Approvals are decided on the Work Item, often in another tab, so their status can change.
-    expect(documentApprovalsQueryConfig.revalidateOnFocus).toBe(true)
+  test('previews a whiteboard version with its saved objects', () => {
+    if (whiteboardRecordFixture.kind !== 'whiteboard') throw new Error('Expected a Whiteboard fixture.')
+    const html = renderDialog({
+      initialTab: 'preview',
+      snapshot: { ...whiteboardRecordFixture, id: documentRecordFixture.id, revision: 1 },
+    })
+    expect(html).toContain('<svg')
+    expect(html).toContain('Clarify the launch decision')
+  })
+
+  test('shows both titles when the title changed', () => {
+    if (documentRecordFixture.kind !== 'page') throw new Error('Expected a page fixture.')
+    const html = renderDialog({
+      initialTab: 'compare',
+      current: { ...documentRecordFixture, revision: 2, title: 'Approved spec' },
+    })
+    expect(html).toContain('The title changed from “Spec v1” to “Approved spec”.')
+
+    // A title is inserted as it is, even when it holds a placeholder or a replacement pattern.
+    const tricky = renderDialog({
+      initialTab: 'compare',
+      snapshot: { ...createSnapshot(), title: 'Plan {after} $& $1' },
+      current: { ...documentRecordFixture, revision: 2, title: 'Final $` {before}' },
+    })
+    expect(tricky).toContain('The title changed from “Plan {after} $&amp; $1” to “Final $` {before}”.')
+  })
+
+  test('orders the comparison by the revisions of the shown snapshots', () => {
+    if (documentRecordFixture.kind !== 'page') throw new Error('Expected a page fixture.')
+    // The client copy of the Document is older than the reviewed version from the history.
+    const html = renderDialog({
+      initialTab: 'compare',
+      version: { ...pinnedVersion, id: `${documentRecordFixture.id}:8`, revision: 8 },
+      snapshot: {
+        ...documentRecordFixture,
+        revision: 8,
+        blocks: [{ id: 'added-in-8', type: 'paragraph', text: 'Added in revision 8' }],
+      },
+      current: { ...documentRecordFixture, revision: 7, blocks: [] },
+    })
+    expect(html).toContain('data-diff-kind="added"')
+    expect(html).not.toContain('data-diff-kind="removed"')
+  })
+
+  test('keeps every selected reviewer listed beyond the candidate limit', () => {
+    const members: MentionableMember[] = Array.from({ length: 40 }, (_value, index) => ({
+      memberKey: `member-${index}@example.com`,
+      name: `Member ${index}`,
+      status: 'active',
+    }))
+    const html = renderDialog({ initialTab: 'approval', members })
+    expect(html).toContain('Member 29<')
+    expect(html).not.toContain('Member 30<')
+
+    // Member 35 was found by a search and chosen; clearing the search keeps it listed.
+    const listed = listReviewerCandidates(members, ['member-35@example.com'], '')
+    expect(listed[0]?.memberKey).toBe('member-35@example.com')
+    expect(listed).toHaveLength(31)
+    expect(listReviewerCandidates(members, ['member-35@example.com'], 'member 1').map(({ name }) => name))
+      .toEqual(['Member 35', 'Member 1', ...Array.from({ length: 10 }, (_value, index) => `Member ${10 + index}`)])
+  })
+
+  test('keeps the request button busy while a request sent before a tab switch is in flight', () => {
+    const html = renderDialog({ initialTab: 'approval', isRequestingApproval: true })
+    expect(html).toContain('disabled="" type="submit">Saving…</button>')
+  })
+
+  test('shows a failed refresh with a retry above the last loaded approvals', () => {
+    const approval: ApprovalRequest = {
+      id: 'approval-stale',
+      subjectType: 'document-version',
+      documentId: documentRecordFixture.id,
+      versionId: pinnedVersion.id,
+      revision: 1,
+      status: 'pending',
+      reviewers: [{ memberKey: 'reviewer@example.com', status: 'pending' }],
+      dueAt: '2026-11-30T00:00:00.000Z',
+      requestedByMemberKey: 'owner@example.com',
+      requestedByKind: 'member',
+      createdAt: '2026-11-02T00:00:00.000Z',
+      updatedAt: '2026-11-02T00:00:00.000Z',
+      capabilities: { canDecide: false, canCancel: false },
+    }
+    const html = renderDialog({
+      initialTab: 'approval',
+      approvals: [approval],
+      approvalsStatus: { kind: 'stale', onRetry: () => undefined },
+    })
+    expect(html).toContain('Approval statuses could not be refreshed.')
+    expect(html).toContain('>Retry<')
+    expect(html).toContain('data-testid="document-approval-approval-stale"')
   })
 
   test('offers a retry when the version detail of the preview or comparison fails to load', () => {

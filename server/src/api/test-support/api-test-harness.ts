@@ -29,6 +29,7 @@ import {
   type ProjectCharter,
   type ProjectCharterState,
   type ProjectLifecycleState,
+  type OrgStructure,
 } from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import {
@@ -56,6 +57,7 @@ import {
 import {
   DynamoDbProjectDirectoryClient,
   ProjectDataError,
+  readReplaceOrgStructureCommand,
   type ProjectArchiveWorkItemRevisionGuard,
   type ProjectRole,
 } from '../../modules/directory'
@@ -601,6 +603,9 @@ function createFileProofingStub(
     createAccess: unsupported,
     listAnnotations: unsupported,
     createAnnotation: unsupported,
+    setAnnotationResolution: unsupported,
+    deleteAnnotation: unsupported,
+    listDeliverables: unsupported,
     deleteFile: unsupported,
     createApproval: unsupported,
     createWorkItemApproval: unsupported,
@@ -725,12 +730,18 @@ function createWorkspaceAccessFake(
     reconcileAuthenticatedMember: unsupported,
     updateMember: unsupported,
     updateMemberName: unsupported,
+    updateMemberAccessExpiry: unsupported,
+    listMembersWithAccessExpiringBefore: unsupported,
+    expireMember: unsupported,
     recordMemberCredentialAction: unsupported,
     markMemberCredentialActionApplying: async () => undefined,
     readMemberCredentialActionProgress: async () => 'none',
     completeMemberCredentialAction: async () => undefined,
     revokeMemberSignIns: async () => undefined,
+    recordMemberSignIn: async () => undefined,
     reconcileDirectoryMember: unsupported,
+    findMemberCredentialRevocation: async () => undefined,
+    recordMemberCredentialRevocation: async () => undefined,
     deprovisionDirectoryMember: unsupported,
     ...overrides,
   } satisfies Required<WorkspaceAccessClient>
@@ -765,6 +776,9 @@ function createDocumentFake(
     restoreVersion: unsupported,
     getVersion: unsupported,
     pinVersion: unsupported,
+    async prepareVersionApprovalTransactWrite() {
+      return { conditionChecks: [] }
+    },
     updatePreference: unsupported,
     listRecent: unsupported,
     getCommentCreateReplay: unsupported,
@@ -878,6 +892,7 @@ function createTeamIssuesFake(
     createTriageDuplicateContextTransactionItems: () => {
       throw new Error('Unexpected Team Issues client call.')
     },
+    createSourceRequesterCompletionTransactionItems: unsupported,
     getTeamIssues: unsupported,
     listMemberWorkItemReferences: unsupported,
     getTeamIssuesByReferences: unsupported,
@@ -1657,10 +1672,19 @@ function configureFakeProjectClients(
     }>
     /** Project 別 canonical Work Item fake が返す Issue ID です。 */
     canonicalProjectIssueIds?: string[]
+    /** Owning Team of a canonical Project Work Item by Issue ID; unlisted ones belong to `core-team`. */
+    canonicalProjectIssueTeamIds?: Readonly<Record<string, string>>
     /** Project 別 canonical Work Item fake の Issue ID ごとの canonical schedule です。 */
     canonicalProjectIssueSchedules?: Readonly<Record<string, WorkItemSchedule>>
     /** Project quick access fake が最初に返す viewer preference です。 */
     projectQuickAccessPreference?: ProjectQuickAccessPreferences
+    /** OrgUnit structure the fake directory returns first. */
+    orgStructure?: OrgStructure
+    /**
+     * Runs after a Team rename is authorized and before it commits, with a setter for the stored
+     * OrgUnit structure, to model an administrator's change racing the mutation.
+     */
+    beforeTeamRenameCommit?: (setOrgStructure: (next: OrgStructure) => void) => void
     /** Team Issue fake が返す canonical Work Item 数です。 */
     teamIssueCount?: number
     /** Team Issue fake の先頭に置く閲覧不可 Work Item 数です。 */
@@ -1670,6 +1694,8 @@ function configureFakeProjectClients(
     unassignedIssue?: boolean
     workspaceRole?: WorkspaceRole
     workspaceReconcileFailures?: number
+    /** Error that the member sign-in record fake throws after observing the call. */
+    workspaceSignInError?: Error
     workspaceStatus?: WorkspaceMemberStatus
     /** Invitation provisioning 時に Cognito user が存在しない状態を再現します。 */
     workspaceUserMissing?: boolean
@@ -1682,6 +1708,8 @@ function configureFakeProjectClients(
   const workspaceStatus = options.workspaceStatus ?? 'active'
   let workspaceReconcileFailures = options.workspaceReconcileFailures ?? 0
   let memberPreferences: MemberPreferences = { revision: 0 }
+  let orgStructure: OrgStructure = options.orgStructure ??
+    { orgUnits: [], teamAssignments: [], revision: 0 }
   let projectQuickAccessPreference = options.projectQuickAccessPreference === undefined
     ? { items: [], revision: 0 }
     : cloneProjectQuickAccessPreferences(options.projectQuickAccessPreference)
@@ -1878,6 +1906,11 @@ function configureFakeProjectClients(
       input: UpdateMemberPreferencesInput
       memberKey: string
     }>,
+    orgStructureReplacements: [] as Array<{
+      directoryId: string
+      input: unknown
+      authorizationConditionCheckCount: number
+    }>,
     userLists: [] as Array<{
       directoryId?: string
       limit?: number
@@ -1902,6 +1935,7 @@ function configureFakeProjectClients(
       name?: string
     }>,
     workspaceReconciliations: [] as string[],
+    workspaceSignIns: [] as string[],
     mfaChallenges: [] as Array<{
       challenge: string
       code: string
@@ -1969,7 +2003,7 @@ function configureFakeProjectClients(
           schemaVersion: WORK_ITEM_SCHEMA_VERSION,
           revision: 1,
           id: issueId,
-          teamId: 'core-team',
+          teamId: options.canonicalProjectIssueTeamIds?.[issueId] ?? 'core-team',
           assignedProjectId: projectId,
           title: `Canonical Work Item ${index}`,
           assigneeUserId: 'sato@example.com',
@@ -2401,6 +2435,27 @@ function configureFakeProjectClients(
       async getMemberPreferences() {
         return { ...memberPreferences }
       },
+      async getOrgStructure() {
+        return orgStructure
+      },
+      async replaceOrgStructure(directoryId, input, _auditContext, authorizationConditionChecks = []) {
+        calls.orgStructureReplacements.push({
+          directoryId,
+          input,
+          authorizationConditionCheckCount: authorizationConditionChecks.length,
+        })
+        const command = readReplaceOrgStructureCommand(input)
+        if (command.expectedRevision !== orgStructure.revision) {
+          throw new ProjectDataError(409, 'OrgStructureConflict', 'The OrgUnit structure changed.')
+        }
+        orgStructure = {
+          orgUnits: command.orgUnits,
+          teamAssignments: command.teamAssignments,
+          revision: command.expectedRevision + 1,
+          updatedAt: '2026-11-24T00:00:00.000Z',
+        }
+        return orgStructure
+      },
       async replaceMemberPreferences(directoryId, memberKey, input) {
         calls.memberPreferencesReplacements.push({ directoryId, input: { ...input }, memberKey })
         if (input.revision !== memberPreferences.revision) {
@@ -2598,7 +2653,13 @@ function configureFakeProjectClients(
           }],
         }
       },
-      async renameTeam(directoryId, teamId, input) {
+      async renameTeam(directoryId, teamId, input, _auditContext, authorizationConditionChecks = []) {
+        options.beforeTeamRenameCommit?.((next) => {
+          orgStructure = next
+        })
+        if (hasStaleOrgStructureFence(authorizationConditionChecks, orgStructure.revision)) {
+          throw new ProjectDataError(403, 'DirectoryAuthorizationChanged', 'Your permission changed. Reload and try again.')
+        }
         calls.directoryAdministration.push({ method: 'renameTeam', directoryId, teamId, input })
 
         return { teamId, nameJa: 'リネーム', nameEn: 'Renamed' }
@@ -3034,6 +3095,10 @@ function configureFakeProjectClients(
         }
 
         return createWorkspaceMember(input.memberKey)
+      },
+      async recordMemberSignIn(_workspaceId, memberKey) {
+        calls.workspaceSignIns.push(memberKey)
+        if (options.workspaceSignInError) throw options.workspaceSignInError
       },
       async updateMember(_workspaceId, _actorMemberKey, memberKey, input, auditContext) {
         calls.workspaceMutationAuditContexts.push({ stage: 'updateMember', context: auditContext })
@@ -3734,6 +3799,8 @@ async function configureEnterpriseScimGuestRoleScenario(
   ])
   const reconciledRoles: WorkspaceRole[] = []
   const reconcileAuditContexts: MutationAuditContext[] = []
+  /** Credential revocations the SCIM group worker asked for, as `memberKey:actorId`. */
+  const credentialRevocations: string[] = []
   let reconcileFailures = 0
   let afterNextDirectoryReconcile: (() => Promise<void>) | undefined
   const planningClient = new InMemoryPlanningClient()
@@ -3860,9 +3927,14 @@ async function configureEnterpriseScimGuestRoleScenario(
           return undefined
         },
       },
+      async revokeMemberCredentials(_workspaceId, memberKey, actorId) {
+        credentialRevocations.push(`${memberKey}:${actorId}`)
+        return { revokedApiKeyIds: [], revokedOAuthAppIds: [] }
+      },
     }),
   )
   return {
+    credentialRevocations,
     identity,
     members,
     reconcileAuditContexts,
@@ -4186,4 +4258,35 @@ export function createApiTestHarness() {
 export type {
   AppDependencyOverrides,
   ObservedWorkspaceMutationAuditContext,
+}
+
+/**
+ * Evaluates the OrgUnit structure fences of a fake transaction the way DynamoDB would.
+ *
+ * @param checks - Caller authorization condition checks.
+ * @param currentRevision - Stored structure revision, 0 when no row exists.
+ * @returns Whether any fence expects a revision other than the stored one.
+ */
+function hasStaleOrgStructureFence(checks: readonly unknown[], currentRevision: number): boolean {
+  return checks.some((check) => {
+    if (!isRecord(check) || !isRecord(check.ConditionCheck)) return false
+    const condition = check.ConditionCheck
+    if (!isRecord(condition.Key) || condition.Key.entryKey !== 'STRUCTURE') return false
+    if (typeof condition.Key.directoryId !== 'string' || !condition.Key.directoryId.startsWith('ORG_STRUCTURE#')) {
+      return false
+    }
+    const values = isRecord(condition.ExpressionAttributeValues) ? condition.ExpressionAttributeValues : {}
+    const expected = values[':expectedOrgStructureRevision'] ?? 0
+    return expected !== currentRevision
+  })
+}
+
+/**
+ * Narrows an unknown value to a plain object.
+ *
+ * @param value - Value to check.
+ * @returns Whether the value is a non-array object.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

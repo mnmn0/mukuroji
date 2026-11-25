@@ -70,6 +70,8 @@ export type DocumentAuthorizationFenceSnapshot = {
   planningRevision?: number
   /** Enterprise Identity control revision observed during authorization. */
   enterpriseControlRevision?: number
+  /** OrgUnit structure revision that expanded the caller's OrgUnit scopes (ADR 0097). */
+  orgStructureRevision?: number
 }
 
 /**
@@ -300,6 +302,20 @@ export type GetDocumentVersionRequest = {
 }
 
 /**
+ * 固定 version の承認依頼を作成する transaction に、Document 側の条件を加える input です。
+ */
+export type PrepareDocumentVersionApprovalRequest = {
+  /** Canonical Workspace ID です。 */
+  workspaceId: string
+  /** 承認対象の Document ID です。 */
+  documentId: string
+  /** 承認対象の canonical version ID です。 */
+  versionId: string
+  /** 依頼者の認可 snapshot です。編集権限を確認し、その状態を transaction 条件に含めます。 */
+  access: DocumentAccessContext
+}
+
+/**
  * Version に名前を付けて保持期間の対象外にする store input です。
  */
 export type PinDocumentVersionRequest = {
@@ -311,6 +327,11 @@ export type PinDocumentVersionRequest = {
   versionId: string
   /** 検証済みの version 名です。 */
   name: string
+  /**
+   * Client の Idempotency-Key です。指定時は actor・version・名前に束縛した receipt で再送を
+   * 検出し、確定済みの結果を書き直さずに返します。
+   */
+  idempotencyKey?: string
   /** Mutation actor の認可 snapshot です。 */
   access: DocumentAccessContext
 }

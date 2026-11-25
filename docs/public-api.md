@@ -56,7 +56,7 @@ API キーだけで、接続先の Team・Project・メンバーを調べられ�
 
 - `GET /api/v1/me` は credential 所有者を `{ schemaVersion, workspaceId, memberId, name?, email }` で返します。`memberId` は Work Item の `assigneeUserId` に使う値です。
 - `GET /api/v1/teams?locale=ja|en` は、所有者が閲覧できる Project と、その Project を持つ Team（Enterprise RBAC で Team を直接与えられた場合はその Team も）を Web の Project directory と同じ規則で返します。Project には `lifecycleState` と charter の要約（`code`、責任者の `ownerMemberId`、`plannedStartDate`、`plannedEndDate`）を含めます。
-- `GET /api/v1/projects/{projectId}/members?teamId={teamId}` は Project の active なメンバーと Project 内の role を返します。Web の担当者選択と同じく、所有者にその Project の member 以上の権限が要ります。Workspace から外れたメンバーは含めません。
+- `GET /api/v1/projects/{projectId}/members?teamId={teamId}` は Project の active なメンバーと Project 内の role を返します。Web の担当者選択と同じく、所有者にその Project の member 以上の権限が要ります。Workspace から外れたメンバーと、利用期限を過ぎたメンバーは含めません。
 - `GET /api/v1/projects/{projectId}/raid-log?teamId={teamId}` は Project のリスク・課題・変更要求を、クローズ済みも含めて新しい順に返します。各登録には Web と同じ規則で決めた `severity`（`low`〜`critical`）、担当者の `ownerMemberId`、関連する `relatedWorkItemIds`、変更要求が求める日程の `scheduleChanges`、判断済みなら `decision`（`approved` / `rejected`、判断日時、判断した member、差し替えた `baselineId`）を含めます。Web の登録簿と同じく、所有者にその Project の viewer 以上の権限が要り、Workspace の guest には返しません。
 - `GET /api/v1/projects/{projectId}/charter?teamId={teamId}` は Project のライフサイクル状態と charter（`code`、`description`、`purpose`、責任者とスポンサーの `memberId` と `displayName`、`plannedStartDate`、`plannedEndDate`、`tags`、`repositoryUrls`）を、Web の charter パネルと同じ値で返します。`revision` は charter とライフサイクルの変更で進みます。所有者にその Project の viewer 以上の権限が要り、Workspace の guest には返しません。
 
@@ -221,6 +221,12 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   `agent_run_forbidden`、`invalid_transition`、`agent_run_takeover_disabled`、`invalid_artifact_url`、
   `not_ready`）で
   返し、`code` は既存の `conflict` / `forbidden` / `validation_failed` です。
+- Work Item の作成・`PATCH`・import・Agent Run の start で status を変えるとき、Team のワークフローの
+  遷移を実行できる役割と状態ごとの必須項目も判定します。developer credential は役割を限った遷移を
+  実行できず、`403 forbidden` と `errors[].code` の `transition_actor_denied`（`pointer: "/workflowStatusId"`）
+  を返します。必須項目が空なら `409 conflict` と `status_field_required`（`pointer` は `/schedule`、
+  `/acceptanceCriteria`、`/customFieldValues/<ID>`）です。どちらも `retryable: false` で、詳細は
+  [Work Item configuration](work-item-configuration.md#遷移を実行できる役割と状態ごとの必須項目)にあります。
 [Coding Agent MCP](coding-agent-mcp.md)はこのAPIで作業報告を保存します。
 
 ### Pagination contract
@@ -307,6 +313,12 @@ Public API の external link は
 `/api/v1/work-items/{workItemId}/external-links?teamId={teamId}` で一覧・作成し、
 個別削除は末尾に `{externalLinkId}` を追加する。Work Item と integration の両方の
 scope、および対象 Team の current RBAC を必要とする。
+
+`resourceType: "calendar-event"` は category が `calendar` の installation（Google Calendar、Outlook Calendar）
+だけで使える。`externalId` と `externalUrl` は送らない（送ると `400`）。接続先の既定カレンダーに Work Item の日付で
+終日の予定を作ってからリンクする。既存の予定はリンクできない。同じ `Idempotency-Key` で再送しても予定は 1 つだけになる。
+日付のない Work Item には作れない。同期するのは日付だけで、題名は同期しない（ADR 0089）。
+`resourceType` は今後も増えることがある。consumer は知らない `resourceType` のリンクを無視する。
 
 管理 API では `PATCH /api/developer/external-links/{externalLinkId}` に
 `syncDirection` を送って同期方向を変更する。`none` は link を `paused`、それ以外は

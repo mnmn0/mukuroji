@@ -27,6 +27,7 @@ import {
 import {
   AI_ASSISTANCE_MAX_AVAILABLE_MODELS,
   AI_ASSISTANCE_SCHEMA_VERSION,
+  DEFAULT_WORKSPACE_FILE_TYPE_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ZONE,
@@ -135,13 +136,19 @@ import {
 import {
   createEnterpriseSessionActivityClient,
 } from '../../modules/enterprise-identity/enterprise-session-activity'
-import { createDefaultFileProofingClient } from '../../modules/files/file-proofing'
+import {
+  createDefaultFileProofingClient,
+  type FileTypeSettingsSource,
+} from '../../modules/files/file-proofing'
 import {
   InMemoryFocusStateClient,
   createFocusStateClient,
 } from '../../modules/focus'
 import { DynamoDbPushSubscriptionStore } from '../../modules/notifications/adapter-out/dynamodb/push-subscription-store'
 import { DynamoDbReminderSettingsStore } from '../../modules/notifications/adapter-out/dynamodb/reminder-settings-store'
+import { DynamoDbChannelPostStore } from '../../modules/notifications/adapter-out/dynamodb/channel-post-store'
+import { SecretsManagerSlackDestinationSecretStore } from '../../modules/notifications/adapter-out/secrets-manager/slack-destination-secret-store'
+import { createSlackTestMessageSender } from '../../modules/notifications/adapter-out/slack/slack-channel-post-sender'
 import { getConfiguredNotificationsTableName } from '../../modules/notifications/notifications'
 import {
   DynamoDbAgentRunStore,
@@ -629,11 +636,31 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
 }
 
 /**
+ * Creates the reader of the File types each Workspace accepts, from its tenant profile.
+ *
+ * @param tenantAdministration - Tenant administration client that reads the profile.
+ * @returns A reader that returns the defaults only when the Workspace has no saved settings; any
+ *   read failure propagates so that uploads fail closed.
+ */
+function createFileTypeSettingsSource(
+  tenantAdministration: WorkspaceDependencies['tenantAdministration'],
+): FileTypeSettingsSource {
+  return {
+    readFileTypeSettings: async (workspaceId) =>
+      (await tenantAdministration.getProfile(workspaceId))?.fileTypes ??
+        DEFAULT_WORKSPACE_FILE_TYPE_SETTINGS,
+  }
+}
+
+/**
  * Creates the production Work Item and collaboration adapter bundle.
  *
+ * @param fileTypeSettings - Reader of the File types each Workspace accepts; the defaults when omitted.
  * @returns Work Item dependencies backed by configured production adapters.
  */
-export function createProductionWorkItemDependencies(): WorkItemDependencies {
+export function createProductionWorkItemDependencies(
+  fileTypeSettings?: FileTypeSettingsSource,
+): WorkItemDependencies {
   const teamIssues = new DynamoDbTeamIssuesClient()
   const projectDirectory = new DynamoDbProjectDirectoryClient()
   const workspaceAccess = new DynamoDbWorkspaceAccessClient()
@@ -651,7 +678,7 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     teamIssues,
     realtimeTickets: new DynamoDbRealtimeTicketsClient(),
     collaboration: new DynamoDbCollaborationClient(),
-    fileProofing: createDefaultFileProofingClient(),
+    fileProofing: createDefaultFileProofingClient(fileTypeSettings),
     notifications: new DynamoDbNotificationsClient(),
     pushSubscriptions: new DynamoDbPushSubscriptionStore(
       createDynamoDbDocumentClient(),
@@ -661,6 +688,13 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       createDynamoDbDocumentClient(),
       getConfiguredNotificationsTableName(),
     ),
+    channelDestinations: new DynamoDbChannelPostStore(
+      createDynamoDbDocumentClient(),
+      getConfiguredNotificationsTableName(),
+      loadServerConfig().environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY || undefined,
+    ),
+    notificationDestinationSecrets: new SecretsManagerSlackDestinationSecretStore(createSecretsManagerClient()),
+    notificationDestinationTestSender: createSlackTestMessageSender(),
     agentRuns: new DynamoDbAgentRunStore(
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
@@ -1847,7 +1881,9 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
     operational: createProductionOperationalDependencies(),
     authentication: createProductionAuthenticationDependencies(),
     workspace,
-    workItems: createProductionWorkItemDependencies(),
+    workItems: createProductionWorkItemDependencies(
+      createFileTypeSettingsSource(workspace.tenantAdministration),
+    ),
     automation: createProductionAutomationDependencies(),
     timeTracking: { timeTrackingService },
     capacityPlanning: {
@@ -1896,7 +1932,9 @@ export function createProductionAppDependencies(): AppDependencies {
     operational: createProductionOperationalDependencies(),
     authentication: createProductionAuthenticationDependencies(),
     workspace,
-    workItems: createProductionWorkItemDependencies(),
+    workItems: createProductionWorkItemDependencies(
+      createFileTypeSettingsSource(workspace.tenantAdministration),
+    ),
     automation: createProductionAutomationDependencies(),
     timeTracking: { timeTrackingService },
     capacityPlanning: {
@@ -2112,6 +2150,13 @@ export function overrideAppDependencies(
       ...(overrides.collaboration ? { collaboration: overrides.collaboration } : {}),
       ...(overrides.fileProofing ? { fileProofing: overrides.fileProofing } : {}),
       ...(overrides.notifications ? { notifications: overrides.notifications } : {}),
+      ...(overrides.channelDestinations ? { channelDestinations: overrides.channelDestinations } : {}),
+      ...(overrides.notificationDestinationSecrets
+        ? { notificationDestinationSecrets: overrides.notificationDestinationSecrets }
+        : {}),
+      ...(overrides.notificationDestinationTestSender
+        ? { notificationDestinationTestSender: overrides.notificationDestinationTestSender }
+        : {}),
       ...(overrides.agentRuns ? { agentRuns: overrides.agentRuns } : {}),
       ...(overrides.agentRunUsage ? { agentRunUsage: overrides.agentRunUsage } : {}),
       ...(overrides.focusState ? { focusState: overrides.focusState } : {}),

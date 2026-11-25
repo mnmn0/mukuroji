@@ -258,6 +258,8 @@ function createTestRouter(input: {
   authenticateManagement?: PublicApiDependencies['authenticateManagement']
   /** Workspace lifecycle guard used by the focused router test. */
   enforceActiveWorkspace?: PublicApiDependencies['enforceActiveWorkspace']
+  /** Credential owner membership guard used by the deactivated-owner test. */
+  requireActiveCredentialSubject?: PublicApiDependencies['requireActiveCredentialSubject']
   /** Credential request limiter used by admission-order tests. */
   rateLimits?: PublicApiDependencies['rateLimits']
   platform?: InMemoryDeveloperPlatformStorage
@@ -274,6 +276,9 @@ function createTestRouter(input: {
     authenticateManagement: input.authenticateManagement ??
       (async () => input.managementPrincipal ?? managementPrincipal),
     enforceActiveWorkspace: input.enforceActiveWorkspace ?? (async () => undefined),
+    ...(input.requireActiveCredentialSubject
+      ? { requireActiveCredentialSubject: input.requireActiveCredentialSubject }
+      : {}),
     workItems: input.workItems ?? createDefaultWorkItemService(),
     ...(input.agentRuns ? { agentRuns: input.agentRuns } : {}),
     ...(input.agentTelemetry ? { agentTelemetry: input.agentTelemetry } : {}),
@@ -542,6 +547,30 @@ describe('public API router', () => {
       detail: 'This Workspace is closing.',
     })
     expect(observations).toEqual(['workspace-1'])
+  })
+
+  test('refuses a credential whose owner is no longer an active member', async () => {
+    const subjects: string[] = []
+    let ownerActive = true
+    const { platform, router } = createTestRouter({
+      async requireActiveCredentialSubject(credential) {
+        subjects.push(`${credential.workspaceId}/${credential.subjectUserId}`)
+        if (!ownerActive) {
+          throw new PublicApiServiceError(403, 'forbidden', 'The credential owner is not an active Workspace member.')
+        }
+      },
+    })
+    const apiKey = await createApiKey(platform, ['work-items:read'])
+    const request = () => router.request('http://localhost/v1/work-items?teamId=team-1', {
+      headers: { Authorization: `Bearer ${apiKey.secret}` },
+    })
+
+    expect((await request()).status).toBe(200)
+    ownerActive = false
+    const refused = await request()
+    expect(refused.status).toBe(403)
+    expect(await refused.json()).toMatchObject({ code: 'forbidden' })
+    expect(subjects).toEqual(['workspace-1/user-1', 'workspace-1/user-1'])
   })
 
   test('returns canonical schedules, including explicitly unscheduled Work Items', async () => {
@@ -1967,6 +1996,27 @@ describe('public API router', () => {
     const link = await created.json() as { id: string }
     expect(link.id).toBeString()
 
+    // A calendar event link is always created by Mukuroji, so an existing event ID is refused.
+    const existingEvent = await router.request(
+      'http://localhost/v1/work-items/work-item-1/external-links?teamId=team-1',
+      {
+        method: 'POST',
+        headers: {
+          ...authorization,
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'link-existing-calendar-event',
+        },
+        body: JSON.stringify({
+          installationId: installation.id,
+          resourceType: 'calendar-event',
+          externalId: 'existing-event',
+          externalUrl: 'https://calendar.google.com/event?eid=existing-event',
+          syncDirection: 'inbound',
+        }),
+      },
+    )
+    expect(existingEvent.status).toBe(400)
+
     const list = await router.request(
       'http://localhost/v1/work-items/work-item-1/external-links?teamId=team-1',
       { headers: authorization },
@@ -2682,6 +2732,64 @@ describe('public API router', () => {
       headers: { Authorization: 'Bearer session-token' },
     })
     expect(hidden.status).toBe(404)
+  })
+
+  test('creates a separate calendar event for each credential that reuses an idempotency key', async () => {
+    const operationIds: string[] = []
+    const notUsed = async (): Promise<never> => {
+      throw new Error('not used')
+    }
+    const connectorAuthorization: ConnectorAuthorizationService = {
+      begin: notUsed,
+      completeCallback: notUsed,
+      abortCallback: notUsed,
+      reauthorize: notUsed,
+      disconnect: notUsed,
+      listConflicts: notUsed,
+      resolveConflict: notUsed,
+      async createLinkedResource(input) {
+        operationIds.push(input.operationId)
+        const externalId = `event-${operationIds.length}`
+        return { externalId, externalUrl: `https://calendar.google.com/event?eid=${externalId}` }
+      },
+    }
+    const { platform, router } = createTestRouter({ connectorAuthorization })
+    const installation = await platform.installConnector({
+      workspaceId: 'workspace-1',
+      installedByUserId: 'user-1',
+      input: {
+        category: 'calendar',
+        provider: 'google-calendar',
+        name: 'Team calendar',
+        scopes: ['https://www.googleapis.com/auth/calendar.events'],
+        credential: 'connector-credential',
+      },
+    })
+    const scopes: ApiScope[] = ['work-items:read', 'work-items:write', 'integrations:read', 'integrations:write']
+    const keys = [await createApiKey(platform, scopes), await createApiKey(platform, scopes)]
+
+    for (const key of keys) {
+      const created = await router.request(
+        'http://localhost/v1/work-items/work-item-1/external-links?teamId=team-1',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${key.secret}`,
+            'Content-Type': 'application/json',
+            'Idempotency-Key': 'shared-calendar-key',
+          },
+          body: JSON.stringify({
+            installationId: installation.id,
+            resourceType: 'calendar-event',
+            syncDirection: 'bidirectional',
+          }),
+        },
+      )
+      expect(created.status).toBe(201)
+    }
+
+    expect(operationIds).toHaveLength(2)
+    expect(operationIds[0]).not.toBe(operationIds[1])
   })
 
   test('retains the local connector credential when provider disconnect fails', async () => {

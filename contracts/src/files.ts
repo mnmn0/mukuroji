@@ -135,6 +135,10 @@ export type FileAttachment = {
    */
   retentionUntil?: string
   /**
+   * 現在 version に残る未解決 annotation の件数です。一覧 API だけが返します。
+   */
+  unresolvedAnnotationCount?: number
+  /**
    * 現在 user に許可された操作です。
    */
   capabilities: FileAttachmentCapabilities
@@ -171,9 +175,13 @@ export type AnnotationAnchor = {
  */
 export type FileAnnotationCapabilities = {
   /**
-   * Annotation を resolve できるかどうかです。
+   * Annotation を resolve / reopen できるかどうかです。
    */
   canResolve: boolean
+  /**
+   * Annotation を削除できるかどうかです。作成者だけに許可します。
+   */
+  canDelete: boolean
 }
 
 /**
@@ -212,6 +220,10 @@ export type FileAnnotation = {
    * Resolve された日時です。
    */
   resolvedAt?: string
+  /**
+   * Resolve した Workspace member key です。
+   */
+  resolvedByMemberKey?: string
   /**
    * 現在 user に許可された操作です。
    */
@@ -390,7 +402,122 @@ export type ApprovalRequest = ApprovalSubject & {
    */
   completedAt?: string
   /**
+   * File version subject に残る未解決 annotation の件数です。scope の一覧 API だけが返します。
+   */
+  unresolvedAnnotationCount?: number
+  /**
    * 現在 user に許可された操作です。
    */
   capabilities: ApprovalCapabilities
+}
+
+/**
+ * Project の成果物一覧で表示する、現在 version の承認状態です。
+ * `none` は現在 version に承認依頼がない（または取り消された）ことを表します。
+ */
+export type ProjectDeliverableApprovalState =
+  | 'none'
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'changes-requested'
+
+/**
+ * Project の成果物一覧の承認状態による絞り込みです。`unapproved` は `approved` 以外を返します。
+ */
+export type ProjectDeliverableApprovalFilter =
+  | 'all'
+  | 'unapproved'
+  | 'pending'
+  | 'approved'
+
+/**
+ * 成果物一覧の 1 page で読む Work Item 数の既定値です。
+ */
+export const PROJECT_DELIVERABLE_PAGE_DEFAULT_LIMIT = 50
+
+/**
+ * 成果物一覧の 1 page で読む Work Item 数の上限です。
+ */
+export const PROJECT_DELIVERABLE_PAGE_MAX_LIMIT = 100
+
+/**
+ * 成果物を所有する resource です。
+ */
+export type ProjectDeliverableOwner =
+  | {
+      /**
+       * Project に直接添付した file を示します。
+       */
+      kind: 'project'
+      /**
+       * Project を所有する Team ID です。
+       */
+      teamId: string
+      /**
+       * Project ID です。
+       */
+      projectId: string
+    }
+  | {
+      /**
+       * Work Item（またはその comment）に添付した file を示します。
+       */
+      kind: 'work-item'
+      /**
+       * Work Item を所有する Team ID です。
+       */
+      teamId: string
+      /**
+       * Work Item ID です。
+       */
+      issueId: string
+      /**
+       * 表示用の Work Item key です。
+       */
+      key?: string
+      /**
+       * Work Item のタイトルです。
+       */
+      title: string
+    }
+
+/**
+ * Project の成果物一覧の 1 行です。
+ */
+export type ProjectDeliverable = {
+  /**
+   * 成果物の file です。`unresolvedAnnotationCount` を含みます。
+   */
+  file: FileAttachment
+  /**
+   * File を所有する Project または Work Item です。
+   */
+  owner: ProjectDeliverableOwner
+  /**
+   * 現在 version の承認状態です。
+   */
+  approvalState: ProjectDeliverableApprovalState
+  /**
+   * 承認状態を決めた approval request の ID です。
+   */
+  approvalId?: string
+  /**
+   * 現在 version に残る未解決 annotation の件数です。
+   */
+  unresolvedAnnotationCount: number
+}
+
+/**
+ * Project の成果物一覧の page です。
+ */
+export type ProjectDeliverablePage = {
+  /**
+   * この page の成果物です。更新日の新しい順に並びます。
+   */
+  deliverables: ProjectDeliverable[]
+  /**
+   * 続きの page を読む opaque cursor です。
+   */
+  nextCursor?: string
 }

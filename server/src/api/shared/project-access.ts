@@ -2,6 +2,7 @@ import { type CuratedContextActorSnapshot, type EnterprisePermissionId } from '@
 import type { Context } from 'hono'
 import { type AppDependencies } from '../../app/composition/app-dependencies'
 import {
+  createOrgStructureRevisionConditionCheck,
   ProjectDataError,
   projectRoleWeights,
   type ProjectAccessEntry,
@@ -17,6 +18,7 @@ import {
   type WorkspaceMemberStatus,
   type WorkspaceRole,
 } from '../../modules/workspace-access/workspace-access'
+import { isManagerProjectAccess } from '../../modules/workspace-access/domain/member-deactivation-blockers'
 import { type CustomerAuthorizationScope } from '../../modules/customers'
 import { type TriageAuthorizationConditionChecks } from '../../modules/triage'
 import {
@@ -39,6 +41,7 @@ import {
   createWorkspaceMutationContextForActor,
   findTeamProjectAccess,
   projectAccessAllows,
+  projectAccessAppliesToTeam,
   type TeamPermissionContext,
   type TeamPermissionReadContext,
   toWorkspaceAccessErrorResponse,
@@ -88,6 +91,11 @@ export type ProjectPrincipal = {
    * 認証・認可時に読んだ Enterprise CONTROL revision です。
    */
   enterpriseIdentityControlRevision?: number
+  /**
+   * OrgUnit structure revision read to expand the principal's OrgUnit scopes (ADR 0097). Present
+   * only when an OrgUnit scope was resolved, so mutations fence on it at commit time.
+   */
+  enterpriseOrgStructureRevision?: number
   /**
    * Current request の enterprise authorization で評価した resource です。
    */
@@ -176,7 +184,7 @@ export const documentProjectRolesCacheTtlMs = 1_000
 
 /** Workspace resource そのものに Enterprise permission があるか判定します。 */
 export function hasEnterpriseWorkspacePermission(
-  principal: WorkspacePrincipal,
+  principal: ProjectPrincipal,
   permission: EnterprisePermissionId,
 ) {
   return principal.enterpriseRouteAuthorizedAtResource === true &&
@@ -315,7 +323,7 @@ export function hasEnterprisePermissionAtWorkspace(
  * @returns Whether the principal holds the permission at that resource.
  */
 export function hasEnterprisePermissionAtResource(
-  principal: WorkspacePrincipal,
+  principal: ProjectPrincipal,
   permission: EnterprisePermissionId,
   resource: EnterpriseAuthorizationResource,
 ): boolean {
@@ -453,6 +461,42 @@ export function createEnterpriseControlAuthorizationConditionCheck(
     )
   }
   return createEnterpriseControlRevisionConditionCheck(principal.directoryId, controlRevision)
+}
+
+/**
+ * Creates the commit-time fence on the OrgUnit structure that expanded the principal's OrgUnit
+ * scopes (ADR 0097), so a Team removed from an OrgUnit after authorization rejects the mutation.
+ *
+ * @param principal - Authorized Workspace principal.
+ * @returns One condition check when an OrgUnit scope was resolved, otherwise none.
+ */
+export function createOrgStructureAuthorizationConditionChecks(
+  principal: Pick<WorkspacePrincipal, 'directoryId' | 'enterpriseOrgStructureRevision'>,
+) {
+  const revision = principal.enterpriseOrgStructureRevision
+  if (revision === undefined) return []
+  return [createOrgStructureRevisionConditionCheck(
+    getEnv('PROJECT_DIRECTORY_TABLE_NAME') ?? 'mukuroji-project-directory-local',
+    principal.directoryId,
+    revision,
+  )]
+}
+
+/**
+ * Creates every commit-time Enterprise authorization fence of a principal: the CONTROL revision
+ * and, when OrgUnit scopes were resolved, the OrgUnit structure revision.
+ *
+ * @param principal - Enterprise-authorized Workspace principal.
+ * @returns Condition checks to add to the mutation transaction.
+ */
+export function createEnterpriseAuthorizationConditionChecks(
+  principal: WorkspacePrincipal,
+): TriageAuthorizationConditionChecks {
+  const controlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
+  return [
+    ...(controlCheck ? [controlCheck] : []),
+    ...createOrgStructureAuthorizationConditionChecks(principal),
+  ]
 }
 
 /**
@@ -650,7 +694,7 @@ export async function requireWorkspaceMemberHasNoManagedProjects(
   memberKey: string,
 ) {
   const managedProject = (await workspaceDependencies.projectDirectory.getProjectAccessList(directoryId, memberKey))
-    .find((access) => access.role === 'manager')
+    .find(isManagerProjectAccess)
 
   if (managedProject) {
     throw new WorkspaceAccessError(
@@ -1318,6 +1362,71 @@ export function canAccessAssignedProject(
   const projectAccess = findTeamProjectAccess(context, assignedProjectId)
 
   return projectAccess !== undefined && projectAccessAllows(projectAccess, minimumRole)
+}
+
+/**
+ * Checks whether the principal manages a Work Item for workflow transition rules.
+ *
+ * A Work Item in a Project needs the manager role on that Project. A Work Item without a Project needs
+ * the manager role on the Team, which is a manager role on any of its Projects or the enterprise
+ * `teams.manage` permission. The context may have been resolved for a lower role, so the enterprise
+ * permission is read from the principal again.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Team permission context of the principal.
+ * @param projectId - Project the Work Item is assigned to, if any.
+ * @returns `true` when the principal manages the Work Item.
+ */
+export function principalManagesTeamWorkItem(
+  principal: ProjectPrincipal,
+  context: TeamPermissionContext,
+  projectId: string | undefined,
+): boolean {
+  if (principal.isSystemAdmin) return true
+  const teamId = context.team.id
+  if (
+    principal.enterpriseTeamAccesses?.some((access) =>
+      access.teamId === teamId && access.permissions.includes('teams.manage')) ||
+    principal.enterpriseRouteAuthorizedAtResource &&
+      (
+        principal.enterpriseAuthorizationResource?.kind === 'workspace' ||
+        principal.enterpriseAuthorizationResource?.kind === 'team' &&
+          principal.enterpriseAuthorizationResource.targetId === teamId
+      ) &&
+      principal.enterprisePermissions?.includes('teams.manage')
+  ) {
+    return true
+  }
+  // The context's enterprise Project roles come from the permission that granted this route, such
+  // as `work-items.write`, so an enterprise Project manager is judged from the assignments instead.
+  if (principal.enterpriseAuthorizationEvaluation !== undefined) {
+    /** Checks one enterprise permission on a resource of this Team. */
+    const allows = (permission: EnterprisePermissionId, resource: EnterpriseAuthorizationResource) =>
+      hasEnterprisePermissionAtResource(principal, permission, resource)
+    const teamResource: EnterpriseAuthorizationResource = {
+      workspaceId: principal.directoryId,
+      kind: 'team',
+      targetId: teamId,
+    }
+    /** Checks `projects.manage` on one Project of this Team. */
+    const managesEnterpriseProject = (candidateProjectId: string) => allows('projects.manage', {
+      workspaceId: principal.directoryId,
+      kind: 'project',
+      targetId: candidateProjectId,
+      parentTeamId: teamId,
+    })
+    if (allows('teams.manage', teamResource)) return true
+    if (projectId ? managesEnterpriseProject(projectId) : context.team.projects.some((project) =>
+      managesEnterpriseProject(project.id))) {
+      return true
+    }
+  }
+  if (projectId) {
+    const access = findTeamProjectAccess(context, projectId)
+    return access !== undefined && projectAccessAllows(access, 'manager')
+  }
+  return context.projectAccesses?.some((access) =>
+    projectAccessAppliesToTeam(access, teamId) && projectAccessAllows(access, 'manager')) ?? false
 }
 
 /**

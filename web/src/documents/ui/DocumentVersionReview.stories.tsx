@@ -85,7 +85,18 @@ function VersionReviewStoryFrame({ children }: { /** Story content. */ children:
   }
   return (
     <MemoryRouter>
-      <SWRConfig value={{ fallback, provider: () => new Map() }}>{children}</SWRConfig>
+      {/* The fixtures stand in for the API, so the story never revalidates against it. */}
+      <SWRConfig
+        value={{
+          fallback,
+          provider: () => new Map(),
+          revalidateOnMount: false,
+          revalidateOnFocus: false,
+          revalidateOnReconnect: false,
+        }}
+      >
+        {children}
+      </SWRConfig>
     </MemoryRouter>
   )
 }
@@ -115,6 +126,7 @@ const meta = {
 
 export default meta
 
+/** Story type shared by the version review dialog stories, typed from {@link meta}. */
 type Story = StoryObj<typeof meta>
 
 /** Read-only preview of the pinned version. */

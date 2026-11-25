@@ -1,4 +1,5 @@
 import type {
+  AutomationRule,
   AutomationTemplate,
   AutomationTemplateApplication,
   UpdateAutomationTemplateInput,
@@ -7,7 +8,9 @@ import { useMemo, useRef, useState } from 'react'
 import { createMutationRequestRunner, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import type { ProjectDirectoryTeam } from '../../projects/api'
+import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import { AutomationManagementPanel } from './AutomationManagementPanel'
+import type { AutomationRuleEditorOptions } from './AutomationRuleDefinitionEditor'
 import { readAutomationManagementTab } from '../model/tabs'
 import {
   AutomationApiError,
@@ -16,6 +19,10 @@ import {
   createAutomationRule,
   createAutomationTemplate,
   createRecurringWork,
+  deleteAutomationRule,
+  deleteAutomationTemplate,
+  deleteRecurringWork,
+  dryRunAutomationRule,
   duplicateAutomationTemplate,
   getAutomationTemplateApplication,
   pauseAutomationInboundWebhookEndpoint,
@@ -29,7 +36,15 @@ import {
   updateRecurringWork,
 } from '../api'
 import { runAutomationManagementMutation } from '../mutations/runAutomationManagementMutation'
-import { useAutomationManagement } from '../queries/useAutomationManagement'
+import {
+  loadMoreOwnedAutomationExecutions,
+  useAutomationManagement,
+} from '../queries/useAutomationManagement'
+import {
+  selectOwnedAutomationData,
+  selectTeamTemplateOptions,
+  selectWorkspaceTemplateOptions,
+} from '../model/ownedDefinitions'
 import { useAutomationPlanningParents } from '../queries/useAutomationPlanningParents'
 
 /** Automation management panel container の props です。 */
@@ -42,6 +57,11 @@ export type AutomationManagementPanelContainerProps = {
   canManage: boolean
   /** Recurring Work selector に表示する Team 一覧です。 */
   teams: ProjectDirectoryTeam[]
+  /**
+   * Team の設定から開いたときの Team ID です。指定すると、その Team が所有する rule・template・
+   * recurring Work・実行履歴だけを表示し、作成する定義をその Team の所有にします。
+   */
+  ownerTeamId?: string
 }
 
 /** Automation API と Settings panel を接続する container です。 */
@@ -49,17 +69,36 @@ export function AutomationManagementPanelContainer({
   accessToken,
   canManage,
   locale,
+  ownerTeamId,
   teams,
 }: AutomationManagementPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const mutationRunner = useRef(createMutationRequestRunner()).current
   const [busyOperation, setBusyOperation] = useState<string>()
   const [mutationErrorMessage, setMutationErrorMessage] = useState<string>()
-  const { data, error, isLoading, mutate } = useAutomationManagement(
+  const isTeamScope = ownerTeamId !== undefined
+  const { data: loadedData, error, isLoading, mutate } = useAutomationManagement(
     accessToken,
     teams,
-    canManage,
+    canManage && !isTeamScope,
+    ownerTeamId,
   )
+  const data = useMemo(
+    () => loadedData && isTeamScope ? selectOwnedAutomationData(loadedData, ownerTeamId) : loadedData,
+    [isTeamScope, loadedData, ownerTeamId],
+  )
+  const templateOptions = useMemo(
+    () => loadedData
+      ? isTeamScope
+        ? selectTeamTemplateOptions(loadedData.templates, ownerTeamId)
+        : selectWorkspaceTemplateOptions(loadedData.templates)
+      : undefined,
+    [isTeamScope, loadedData, ownerTeamId],
+  )
+  const canManageWorkspace = canManage && !isTeamScope
+  /** Adds the owner Team of the Team settings view to a new definition. */
+  const withOwner = <TInput extends object>(input: TInput): TInput & { ownerTeamId?: string } =>
+    ownerTeamId === undefined ? input : { ...input, ownerTeamId }
 
   async function runMutation<TResult>(
     operationKey: string,
@@ -89,10 +128,60 @@ export function AutomationManagementPanelContainer({
     }
   }
 
+  /** Searches older runs of the Team and appends them to the loaded history. */
+  async function loadMoreExecutions(teamId: string) {
+    setBusyOperation('execution:load-more')
+    setMutationErrorMessage(undefined)
+    try {
+      await mutate(
+        async (current) => current
+          ? await loadMoreOwnedAutomationExecutions(accessToken, teamId, current)
+          : current,
+        { revalidate: false },
+      )
+    } catch (loadError) {
+      setMutationErrorMessage(readErrorMessage(loadError, t('automation.error.load')))
+    } finally {
+      setBusyOperation((current) => current === 'execution:load-more' ? undefined : current)
+    }
+  }
+
   const initialTab = readInitialTab()
+  const workspaceAccess = useWorkspaceAccess(accessToken, canManage)
+  const ruleEditorOptions = useMemo<AutomationRuleEditorOptions>(() => ({
+    members: (workspaceAccess.data?.members ?? [])
+      .filter((member) => member.status === 'active')
+      .map((member) => ({ id: member.memberKey, label: member.name ?? member.email })),
+    teams: teams.map((team) => ({ id: team.id, label: team.name })),
+    projects: listProjectOptions(teams),
+    statuses: data?.statusOptions ?? [],
+    customFields: data?.customFieldOptions ?? [],
+    workItemTemplates: [],
+  }), [data, teams, workspaceAccess.data])
+  /**
+   * Narrows the editor choices to what the edited rule's owner may use: a Team rule only reaches its
+   * own Team's Projects and the templates it may use, a Workspace rule only Workspace templates.
+   */
+  const ruleEditorOptionsFor = useMemo(() => (rule: AutomationRule): AutomationRuleEditorOptions => {
+    const allTemplates = loadedData?.templates ?? []
+    const usableTemplates = rule.ownerTeamId === undefined
+      ? selectWorkspaceTemplateOptions(allTemplates)
+      : selectTeamTemplateOptions(allTemplates, rule.ownerTeamId)
+    const editorTeams = rule.ownerTeamId === undefined
+      ? teams
+      : teams.filter((team) => team.id === rule.ownerTeamId)
+    return {
+      ...ruleEditorOptions,
+      teams: editorTeams.map((team) => ({ id: team.id, label: team.name })),
+      projects: listProjectOptions(editorTeams),
+      workItemTemplates: usableTemplates
+        .filter((template) => template.kind === 'work-item' && template.enabled)
+        .map((template) => ({ id: template.id, label: template.name })),
+    }
+  }, [loadedData, ruleEditorOptions, teams])
   const planningParentsQuery = useAutomationPlanningParents(
     accessToken,
-    canManage && (data?.templates ?? []).some(hasPlanningEntities),
+    canManageWorkspace && (data?.templates ?? []).some(hasPlanningEntities),
   )
 
   return (
@@ -102,15 +191,22 @@ export function AutomationManagementPanelContainer({
         ? readErrorMessage(error, t('automation.error.load'))
         : mutationErrorMessage}
       executions={data?.executions ?? []}
+      onLoadMoreExecutions={ownerTeamId !== undefined && loadedData?.executionsNextCursor
+        ? () => loadMoreExecutions(ownerTeamId)
+        : undefined}
       initialTab={initialTab}
       isLoading={isLoading}
       locale={locale}
-      canViewWebhooks={canManage}
+      canViewWebhooks={canManageWorkspace}
       readOnly={!canManage}
       recurringWork={data?.recurringWork ?? []}
+      ruleEditorOptions={ruleEditorOptions}
+      ruleEditorOptionsFor={ruleEditorOptionsFor}
       rules={data?.rules ?? []}
       teams={teams.map((team) => ({ id: team.id, name: team.name }))}
       templates={data?.templates ?? []}
+      templateOptions={templateOptions}
+      teamScoped={isTeamScope}
       webhooks={data?.webhooks ?? []}
       workflowTargets={data?.workflowTargets ?? []}
       onRefresh={async () => {
@@ -118,8 +214,8 @@ export function AutomationManagementPanelContainer({
       }}
       onCreateRule={canManage ? (input) => runMutation(
         'rule:create',
-        input,
-        (context) => createAutomationRule(accessToken, input, context),
+        withOwner(input),
+        (context) => createAutomationRule(accessToken, withOwner(input), context),
       ) : undefined}
       onToggleRule={canManage ? (rule) => {
         const input = {
@@ -133,12 +229,26 @@ export function AutomationManagementPanelContainer({
           (context) => updateAutomationRule(accessToken, rule.id, input, context),
         )
       } : undefined}
-      onCreateWebhook={canManage ? (input) => runMutation(
+      onUpdateRule={canManage ? (rule, input) => runMutation(
+        `rule:update:${rule.id}`,
+        input,
+        (context) => updateAutomationRule(accessToken, rule.id, input, context),
+      ) : undefined}
+      onDeleteRule={canManage ? (rule) => {
+        const input = { expectedRevision: rule.revision }
+        return runMutation(
+          `rule:delete:${rule.id}`,
+          input,
+          (context) => deleteAutomationRule(accessToken, rule.id, input, context),
+        )
+      } : undefined}
+      onDryRunRule={canManage ? (input) => dryRunAutomationRule(accessToken, input) : undefined}
+      onCreateWebhook={canManageWorkspace ? (input) => runMutation(
         'webhook:create',
         input,
         (context) => createAutomationInboundWebhookEndpoint(accessToken, input, context),
       ) : undefined}
-      onPauseWebhook={canManage ? (endpoint) => {
+      onPauseWebhook={canManageWorkspace ? (endpoint) => {
         const input = { expectedRevision: endpoint.revision }
         return runMutation(
           `webhook:pause:${endpoint.id}`,
@@ -151,7 +261,7 @@ export function AutomationManagementPanelContainer({
           ),
         )
       } : undefined}
-      onResumeWebhook={canManage ? (endpoint) => {
+      onResumeWebhook={canManageWorkspace ? (endpoint) => {
         const input = { expectedRevision: endpoint.revision }
         return runMutation(
           `webhook:resume:${endpoint.id}`,
@@ -164,7 +274,7 @@ export function AutomationManagementPanelContainer({
           ),
         )
       } : undefined}
-      onRotateWebhook={canManage ? (endpoint) => {
+      onRotateWebhook={canManageWorkspace ? (endpoint) => {
         const input = { expectedRevision: endpoint.revision }
         return runMutation(
           `webhook:rotate:${endpoint.id}`,
@@ -177,7 +287,7 @@ export function AutomationManagementPanelContainer({
           ),
         )
       } : undefined}
-      onRevokeWebhook={canManage ? (endpoint) => {
+      onRevokeWebhook={canManageWorkspace ? (endpoint) => {
         const input = { expectedRevision: endpoint.revision }
         return runMutation(
           `webhook:revoke:${endpoint.id}`,
@@ -192,8 +302,8 @@ export function AutomationManagementPanelContainer({
       } : undefined}
       onCreateTemplate={canManage ? (input) => runMutation(
         'template:create',
-        input,
-        (context) => createAutomationTemplate(accessToken, input, context),
+        withOwner(input),
+        (context) => createAutomationTemplate(accessToken, withOwner(input), context),
       ) : undefined}
       onToggleTemplate={canManage ? (template) => {
         const input = {
@@ -212,23 +322,31 @@ export function AutomationManagementPanelContainer({
         { expectedRevision: template.revision },
         (context) => duplicateAutomationTemplate(accessToken, template.id, context),
       ) : undefined}
+      onDeleteTemplate={canManage ? (template) => {
+        const input = { expectedRevision: template.revision }
+        return runMutation(
+          `template:delete:${template.id}`,
+          input,
+          (context) => deleteAutomationTemplate(accessToken, template.id, input, context),
+        )
+      } : undefined}
       onUpdateTemplate={canManage ? (template, input) => runMutation(
         `template:update:${template.id}`,
         input,
         (context) => updateAutomationTemplate(accessToken, template.id, input, context),
       ) : undefined}
-      onApplyTemplate={canManage ? (template, input): Promise<AutomationTemplateApplication> => runMutation(
+      onApplyTemplate={canManageWorkspace ? (template, input): Promise<AutomationTemplateApplication> => runMutation(
         `template:apply:${template.id}`,
         input,
         (context) => applyAutomationTemplate(accessToken, template.id, input, context),
       ) : undefined}
-      onRefreshTemplateApplication={canManage
+      onRefreshTemplateApplication={canManageWorkspace
         ? (applicationId) => getAutomationTemplateApplication(accessToken, applicationId)
         : undefined}
-      onPreviewTemplateApplication={canManage
+      onPreviewTemplateApplication={canManageWorkspace
         ? (template, input) => previewAutomationTemplateApplication(accessToken, template.id, input)
         : undefined}
-      planningParents={canManage
+      planningParents={canManageWorkspace
         ? {
             parents: planningParentsQuery.data,
             isLoading: planningParentsQuery.isLoading,
@@ -240,8 +358,8 @@ export function AutomationManagementPanelContainer({
         : undefined}
       onCreateRecurringWork={canManage ? (input) => runMutation(
         'recurring:create',
-        input,
-        (context) => createRecurringWork(accessToken, input, context),
+        withOwner(input),
+        (context) => createRecurringWork(accessToken, withOwner(input), context),
       ) : undefined}
       onToggleRecurringWork={canManage ? (definition) => {
         const input = {
@@ -253,6 +371,14 @@ export function AutomationManagementPanelContainer({
           `recurring:toggle:${definition.id}`,
           input,
           (context) => updateRecurringWork(accessToken, definition.id, input, context),
+        )
+      } : undefined}
+      onDeleteRecurringWork={canManage ? (definition) => {
+        const input = { expectedRevision: definition.revision }
+        return runMutation(
+          `recurring:delete:${definition.id}`,
+          input,
+          (context) => deleteRecurringWork(accessToken, definition.id, input, context),
         )
       } : undefined}
       onRetryExecution={canManage ? (execution) => runMutation(
@@ -273,6 +399,21 @@ export function AutomationManagementPanelContainer({
 function hasPlanningEntities(template: AutomationTemplate) {
   return template.kind === 'project' &&
     ((template.payload.phases?.length ?? 0) > 0 || (template.payload.milestones?.length ?? 0) > 0)
+}
+
+/**
+ * Lists each Project once, labelled with its Team, for the rule editor's Project picker.
+ *
+ * @param teams - Teams with their Projects.
+ * @returns Project options in Team order.
+ */
+function listProjectOptions(teams: ProjectDirectoryTeam[]) {
+  const seen = new Set<string>()
+  return teams.flatMap((team) => team.projects.flatMap((project) => {
+    if (seen.has(project.id)) return []
+    seen.add(project.id)
+    return [{ id: project.id, label: `${team.name} / ${project.name}` }]
+  }))
 }
 
 function readInitialTab() {

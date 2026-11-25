@@ -9,14 +9,16 @@ const {
   resetTestApp,
 } = createApiTestHarness()
 import {
+  type DirectoryAuthorizationConditionChecks,
   DynamoDbProjectDirectoryClient,
 } from './project-directory-client'
-import type {
+import { createPlanningUpdateProjectTargetRecordKey } from '../../../planning'
+import {
   DynamoDBClient,
 } from '@aws-sdk/client-dynamodb'
-import type {
+import {
   DynamoDBDocumentClient,
-  TransactWriteCommandInput,
+  type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
   PROJECT_QUICK_ACCESS_IDENTIFIER_MAX_LENGTH,
@@ -2486,6 +2488,32 @@ test('DynamoDB directory client keeps at least one project manager', async () =>
   expect(sentInputs).toHaveLength(2)
 })
 
+test('DynamoDB directory client only lowers an existing role for a demotion-only update (ADR 0095)', async () => {
+  let includeTargetMember = true
+  const transactions: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      if ('KeyConditionExpression' in command.input) {
+        return { Items: createProjectMemberFixtureItems({ includeTargetMember }) }
+      }
+      if ('TransactItems' in command.input) transactions.push(command.input)
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+  const update = (role: 'manager' | 'member') => client.updateProjectMember(
+    'user#demo@example.com', 'refero', 'demo@example.com', { email: 'demo@example.com', role }, 1, undefined, { demotionOnly: true },
+  )
+
+  await expect(update('manager')).rejects.toMatchObject({ code: 'ProjectMemberDemotionOnly', status: 409 })
+  expect(transactions).toHaveLength(0)
+  await expect(update('member')).resolves.toBeDefined()
+  expect(transactions).toHaveLength(1)
+  includeTargetMember = false
+  await expect(update('member')).rejects.toMatchObject({ code: 'ProjectMemberDemotionOnly', status: 409 })
+  expect(transactions).toHaveLength(1)
+})
+
 test('DynamoDB directory client treats manager guard transaction cancellation as last manager conflict', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   let queryReads = 0
@@ -2993,4 +3021,215 @@ test('DynamoDB directory client does not reread manager state when cancellation 
     code: 'TransactionCanceledException',
   })
   expect(sentInputs).toHaveLength(2)
+})
+
+/** Workspace of the transaction-limit fixtures. */
+const TRANSACTION_LIMIT_DIRECTORY_ID = 'user#demo@example.com'
+
+/** Archive time of the archived Team in the transaction-limit fixtures. */
+const TRANSACTION_LIMIT_ARCHIVED_AT = '2026-07-01T00:00:00.000Z'
+
+/** Directory client over an in-memory Team and the transaction sizes it sent. */
+type TransactionLimitFixture = {
+  /** Directory client whose DynamoDB calls are answered in memory. */
+  client: DynamoDbProjectDirectoryClient
+  /** Number of actions of each transaction the client sent, in order. */
+  transactItemCounts: number[]
+}
+
+/**
+ * Narrows an intercepted SDK value to a plain record.
+ *
+ * @param value - Value to inspect.
+ * @returns Whether the value is a non-array object.
+ */
+function isInterceptedRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Creates a directory client over one Team whose active Projects each have a Project update
+ * target. DynamoDB calls are answered before marshalling, so the fixture reads and returns native
+ * values, and every transaction's action count is recorded instead of being sent.
+ *
+ * @param projectCount - Number of active Projects, each with one Project update target.
+ * @param teamArchived - Whether the Team and its update targets are already archived.
+ * @returns The client and the recorded transaction sizes.
+ */
+function createTeamWithPlanningTargetsFixture(
+  projectCount: number,
+  teamArchived: boolean,
+): TransactionLimitFixture {
+  const projectIds = Array.from(
+    { length: projectCount },
+    (_, index) => `project-${String(index + 1).padStart(3, '0')}`,
+  )
+  const projectIdByTargetRecordKey = new Map(projectIds.map((projectId) => [
+    createPlanningUpdateProjectTargetRecordKey('core-team', projectId),
+    projectId,
+  ]))
+  const directoryItems = [
+    {
+      directoryId: TRANSACTION_LIMIT_DIRECTORY_ID,
+      entryKey: '000010#000000#TEAM#core-team',
+      entryType: 'team',
+      teamId: 'core-team',
+      teamSortOrder: 10,
+      nameJa: 'コアチーム',
+      nameEn: 'Core Team',
+      expanded: true,
+      ...(teamArchived ? { archivedAt: TRANSACTION_LIMIT_ARCHIVED_AT } : {}),
+    },
+    ...projectIds.map((projectId, index) => ({
+      directoryId: TRANSACTION_LIMIT_DIRECTORY_ID,
+      entryKey: `000010#${String((index + 1) * 10).padStart(6, '0')}#PROJECT#${projectId}`,
+      entryType: 'project',
+      teamId: 'core-team',
+      teamSortOrder: 10,
+      projectId,
+      projectSortOrder: (index + 1) * 10,
+      nameJa: projectId,
+      nameEn: projectId,
+      tone: 'blue',
+    })),
+  ]
+  const transactItemCounts: number[] = []
+
+  /**
+   * Answers one intercepted DynamoDB call from the fixture rows.
+   *
+   * @param input - Unmarshalled command input.
+   * @returns The command output.
+   */
+  function answer(input: Record<string, unknown>): Record<string, unknown> {
+    if (Array.isArray(input.TransactItems)) {
+      transactItemCounts.push(input.TransactItems.length)
+      return {}
+    }
+    if ('KeyConditionExpression' in input) {
+      const values = isInterceptedRecord(input.ExpressionAttributeValues)
+        ? input.ExpressionAttributeValues
+        : {}
+      return { Items: values[':directoryId'] === TRANSACTION_LIMIT_DIRECTORY_ID ? directoryItems : [] }
+    }
+    const recordKey = isInterceptedRecord(input.Key) ? input.Key.recordKey : undefined
+    if (recordKey === 'META') {
+      return { Item: { entryType: 'planning-meta', revision: 7 } }
+    }
+    const projectId = typeof recordKey === 'string'
+      ? projectIdByTargetRecordKey.get(recordKey)
+      : undefined
+    if (projectId === undefined) return {}
+    return {
+      Item: {
+        workspaceId: TRANSACTION_LIMIT_DIRECTORY_ID,
+        recordKey,
+        entryType: 'planning-update-target',
+        target: { type: 'project', teamId: 'core-team', projectId },
+        ...(teamArchived ? { archivedAt: TRANSACTION_LIMIT_ARCHIVED_AT } : {}),
+      },
+    }
+  }
+
+  const dynamoDbClient = new DynamoDBClient({
+    region: 'us-east-1',
+    credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+  })
+  const documentClient = DynamoDBDocumentClient.from(dynamoDbClient)
+  documentClient.middlewareStack.add((_next) => async (args) => {
+    const input = isInterceptedRecord(args.input) ? args.input : {}
+    return { output: { $metadata: {}, ...answer(input) }, response: {} }
+  }, { step: 'initialize', priority: 'high', name: 'directoryTransactionLimitInterceptor' })
+
+  return {
+    client: new DynamoDbProjectDirectoryClient(
+      'DirectoryTable',
+      documentClient,
+      dynamoDbClient,
+      false,
+      'AuditTable',
+      'WorkspaceAccessTable',
+      'PlanningTable',
+    ),
+    transactItemCounts,
+  }
+}
+
+/**
+ * Creates the most authorization fences a directory change carries: the caller's membership,
+ * the Enterprise CONTROL revision, and the OrgUnit structure revision.
+ *
+ * @returns Three condition checks.
+ */
+function createMaximumDirectoryAuthorizationChecks(): DirectoryAuthorizationConditionChecks {
+  return [
+    {
+      ConditionCheck: {
+        TableName: 'WorkspaceAccessTable',
+        Key: { workspaceId: TRANSACTION_LIMIT_DIRECTORY_ID, recordKey: 'MEMBER#demo@example.com' },
+        ConditionExpression: '#version = :expectedVersion',
+        ExpressionAttributeNames: { '#version': 'version' },
+        ExpressionAttributeValues: { ':expectedVersion': 1 },
+      },
+    },
+    {
+      ConditionCheck: {
+        TableName: 'EnterpriseIdentityTable',
+        Key: { scopeKey: `WORKSPACE#${TRANSACTION_LIMIT_DIRECTORY_ID}`, recordKey: 'CONTROL' },
+        ConditionExpression: '#controlRevision = :expectedControlRevision',
+        ExpressionAttributeNames: { '#controlRevision': 'controlRevision' },
+        ExpressionAttributeValues: { ':expectedControlRevision': 2 },
+      },
+    },
+    {
+      ConditionCheck: {
+        TableName: 'DirectoryTable',
+        Key: { directoryId: TRANSACTION_LIMIT_DIRECTORY_ID, entryKey: 'ORG_STRUCTURE' },
+        ConditionExpression: '#revision = :expectedRevision',
+        ExpressionAttributeNames: { '#revision': 'revision' },
+        ExpressionAttributeValues: { ':expectedRevision': 3 },
+      },
+    },
+  ]
+}
+
+test('archives a Team only while its restore fits with every authorization fence', async () => {
+  const fitting = createTeamWithPlanningTargetsFixture(94, false)
+  await expect(
+    fitting.client.archiveTeam(
+      TRANSACTION_LIMIT_DIRECTORY_ID,
+      'core-team',
+      createDirectoryMutationAuditContext(),
+      7,
+    ),
+  ).resolves.toMatchObject({ teamId: 'core-team' })
+  expect(fitting.transactItemCounts).toEqual([97])
+
+  const tooLarge = createTeamWithPlanningTargetsFixture(95, false)
+  await expect(
+    tooLarge.client.archiveTeam(
+      TRANSACTION_LIMIT_DIRECTORY_ID,
+      'core-team',
+      createDirectoryMutationAuditContext(),
+      7,
+    ),
+  ).rejects.toMatchObject({ status: 413, code: 'PlanningProjectTargetArchiveLimitExceeded' })
+  expect(tooLarge.transactItemCounts).toEqual([])
+})
+
+test('restores the largest archivable Team with the membership, CONTROL, and OrgUnit fences', async () => {
+  const fixture = createTeamWithPlanningTargetsFixture(94, true)
+  const authorizationChecks = createMaximumDirectoryAuthorizationChecks()
+
+  await expect(
+    fixture.client.restoreTeam(
+      TRANSACTION_LIMIT_DIRECTORY_ID,
+      'core-team',
+      createDirectoryMutationAuditContext(),
+      authorizationChecks,
+    ),
+  ).resolves.toEqual({ teamId: 'core-team' })
+  // Team, audit event, Planning revision, 94 targets, and 3 authorization fences.
+  expect(fixture.transactItemCounts).toEqual([3 + 94 + authorizationChecks.length])
+  expect(fixture.transactItemCounts).toEqual([100])
 })

@@ -36,6 +36,7 @@ import {
 } from './work-item-access'
 import {
   assertWorkItemConfigurationUsage,
+  AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
   prepareConfiguredCreateWorkItem,
 } from './work-item-configuration'
 import { readNewWorkItemAcceptanceCriteria } from './work-item-acceptance-criteria'
@@ -416,6 +417,7 @@ async function validateAutomationWorkItemConfigurationUsage(
         team,
       ),
       { configuration },
+      AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
     )
     readNewWorkItemAcceptanceCriteria(configuredBody.acceptanceCriteria)
     await requireActiveWorkspaceAssignee(
@@ -478,7 +480,8 @@ async function validateAutomationWorkItemConfigurationUsage(
   for (const rule of rules) {
     if (!rule.enabled) continue
     try {
-      await validateRuleCreateActions(rule)
+      // A Team rule creates in its owner Team when the payload names no Team (ADR 0087).
+      await validateRuleCreateActions(rule, rule.ownerTeamId)
     } catch (error) {
       throw createAutomationConfigurationUsageError(
         `Enabled Automation Rule "${rule.id}" create actions`,
@@ -541,7 +544,7 @@ async function validateAutomationWorkItemConfigurationUsage(
         }
         await validateRuleCreateActions(
           rule,
-          readAutomationMetadataText(event, 'teamId'),
+          readAutomationMetadataText(event, 'teamId') ?? rule.ownerTeamId,
         )
       }
     } catch (error) {

@@ -1,10 +1,11 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import {
   WorkItemExternalLinksPanel,
 } from './WorkItemExternalLinksPanel'
 import { createWorkItemExternalLinksLabels } from './externalLinkLabels'
 import {
+  externalLinkCalendarInstallationFixture,
   externalLinkInstallationFixtures,
   externalWorkItemLinkFixtures,
 } from '../externalLinksFixtures'
@@ -137,5 +138,38 @@ export const DisconnectedLinkedSource: Story = {
       ...installation,
       status: 'disconnected' as const,
     })),
+  },
+}
+
+/**
+ * Calendar account を選ぶと ID と URL の入力を隠し、Work Item の日付から予定を作成します。
+ */
+export const CreateCalendarEvent: Story = {
+  args: {
+    installations: [
+      ...externalLinkInstallationFixtures,
+      externalLinkCalendarInstallationFixture,
+    ],
+    onCreate: fn(async () => undefined),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.click(canvas.getByRole('button', { name: labels.addLink }))
+    await expect(canvas.getByRole('textbox', { name: labels.externalUrl })).toBeVisible()
+    await userEvent.selectOptions(
+      canvas.getByRole('combobox', { name: labels.installation }),
+      externalLinkCalendarInstallationFixture.id,
+    )
+    await expect(canvas.getByRole('combobox', { name: labels.resourceType })).toHaveValue('calendar-event')
+    await expect(canvas.getByText(labels.calendarEventHint)).toBeVisible()
+    await expect(canvas.queryByRole('textbox', { name: labels.externalId })).toBeNull()
+    await expect(canvas.queryByRole('textbox', { name: labels.externalUrl })).toBeNull()
+    await userEvent.click(canvas.getByRole('button', { name: labels.createLink }))
+    await expect(args.onCreate).toHaveBeenCalledWith({
+      installationId: externalLinkCalendarInstallationFixture.id,
+      resourceType: 'calendar-event',
+      syncDirection: 'bidirectional',
+    })
   },
 }

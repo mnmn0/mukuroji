@@ -66,11 +66,21 @@ export type WhiteboardDiffSummary = {
 }
 
 /**
+ * A title that differs between the two compared versions.
+ */
+export type DocumentTitleChange = {
+  /** Title of the older version. */
+  before: string
+  /** Title of the newer version. */
+  after: string
+}
+
+/**
  * Result of comparing two Document versions.
  */
 export type DocumentVersionDiff = {
-  /** Title of the older version when it differs from the newer one. */
-  previousTitle?: string
+  /** Titles of the older and newer versions when they differ. */
+  titleChange?: DocumentTitleChange
   /** Block-level comparison for pages and templates, in the newer version's order. */
   blocks: DocumentBlockDiffEntry[]
   /** Element counts for Whiteboards; absent for other kinds. */
@@ -94,16 +104,18 @@ export function diffDocumentVersions(
   before: DocumentDetail,
   after: DocumentDetail,
 ): DocumentVersionDiff {
-  const previousTitle = before.title === after.title ? undefined : before.title
+  const titleChange = before.title === after.title
+    ? undefined
+    : { before: before.title, after: after.title }
   const blocks = diffDocumentBlocks(readBlocks(before), readBlocks(after))
   const whiteboard = before.kind === 'whiteboard' || after.kind === 'whiteboard'
     ? diffWhiteboard(before, after)
     : undefined
-  const hasChanges = previousTitle !== undefined ||
+  const hasChanges = titleChange !== undefined ||
     blocks.some((entry) => entry.kind !== 'unchanged') ||
     (whiteboard !== undefined && hasWhiteboardChanges(whiteboard))
   return {
-    ...(previousTitle === undefined ? {} : { previousTitle }),
+    ...(titleChange === undefined ? {} : { titleChange }),
     blocks,
     ...(whiteboard === undefined ? {} : { whiteboard }),
     hasChanges,

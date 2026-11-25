@@ -9,6 +9,7 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  ScanCommand,
   TransactWriteCommand,
   UpdateCommand,
   type TransactWriteCommandInput,
@@ -33,7 +34,12 @@ import {
 import {
   type DocumentAuthorizationRevisionMutationPort,
 } from '../documents'
-import type { WorkspaceRole } from './domain/workspace-role'
+import { canWorkspaceRoleManageMember, type WorkspaceRole } from './domain/workspace-role'
+import {
+  canMemberAccessExpire,
+  isCanonicalUtcTimestamp,
+  isMemberAccessExpired,
+} from './domain/member-access-expiry'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 export type { WorkspaceRole } from './domain/workspace-role'
@@ -41,6 +47,11 @@ export type { WorkspaceRole } from './domain/workspace-role'
 const INVITATION_ACCEPTANCE_LOCK_MS = 5 * 60_000
 const INVITATION_PROVISIONING_LEASE_MS = 5 * 60_000
 const WORKSPACE_IDENTITY_LIFECYCLE_VERSION = 2
+/**
+ * Audit event that records, as its receipt, the credentials a member-wide revocation is about to
+ * revoke; each revocation writes its own event.
+ */
+const MEMBER_CREDENTIAL_REVOCATION_EVENT_TYPE = 'member.credential-revocation-started'
 const MANUAL_COGNITO_CLEANUP_MESSAGE =
   'Manual Cognito cleanup is required. After removing the user or Workspace claims in Cognito, retry revocation to verify completion.'
 const WORKSPACE_INVITATION_AUDIT_FIELDS = [
@@ -68,6 +79,7 @@ const WORKSPACE_MEMBER_AUDIT_FIELDS = [
   'provisioningSource',
   'externalIdentityId',
   'deactivatedAt',
+  'accessExpiresAt',
 ] as const
 const WORKSPACE_AUDIT_REDACT_FIELDS = [
   'email',
@@ -123,6 +135,11 @@ export type WorkspaceMember = {
   updatedAt: string
   /** 利用停止日時の ISO 8601 timestamp です。 */
   deactivatedAt?: string
+  /**
+   * When the member's access ends (ISO 8601). From then on every membership check treats the
+   * member as deactivated, and the scheduled job writes the deactivation (ADR 0095).
+   */
+  accessExpiresAt?: string
   /**
    * When directory deprovisioning signed the member out everywhere (ISO 8601).
    *
@@ -239,12 +256,23 @@ export type WorkspaceAccessCapabilities = {
   canManageAdmins: boolean
 }
 
+/**
+ * Member row of the administration snapshot, with what only administrators may see.
+ */
+export type WorkspaceAccessMember = WorkspaceMember & {
+  /**
+   * When the member last signed in (ISO 8601), shown to owners and admins only. Absent when no
+   * sign-in has been recorded since the time was first kept, or for other viewers.
+   */
+  lastSignedInAt?: string
+}
+
 /** Workspace access 画面用の snapshot response です。 */
 export type WorkspaceAccessResponse = {
   /** ログイン中ユーザーの active membership です。 */
   currentMember: WorkspaceMember
   /** Workspace の member 一覧です。 */
-  members: WorkspaceMember[]
+  members: WorkspaceAccessMember[]
   /** Workspace の invitation 一覧です。 */
   invitations: WorkspaceInvitation[]
   /** ログイン中 member の操作権限です。 */
@@ -331,6 +359,24 @@ export type UpdateWorkspaceMemberInput = {
   authorizationConditionChecks?: readonly WorkspaceAccessTransactWriteItem[]
 }
 
+/** Input that sets or clears a member's access expiry. */
+export type UpdateWorkspaceMemberAccessExpiryInput = {
+  /** New expiry as a canonical UTC timestamp; undefined clears it. */
+  accessExpiresAt?: string
+  /** Member version read before the change. */
+  expectedVersion: number
+}
+
+/** Input of the scheduled deactivation of a member whose access expired. */
+export type ExpireWorkspaceMemberInput = {
+  /** Member version read before the deactivation. */
+  expectedVersion: number
+  /** Planning revision read while confirming the member owns no Planning entity. */
+  expectedPlanningRevision: number
+  /** Document ACL generation read while confirming private Documents keep a manager. */
+  expectedDocumentAuthorizationRevision: number
+}
+
 /** Input that changes a member's display name. */
 export type UpdateWorkspaceMemberNameInput = {
   /** New display name; undefined or blank removes it so the member is shown by email. */
@@ -359,6 +405,14 @@ export type ReconcileDirectoryWorkspaceMemberInput = {
    * Guest downgrade 時に private Document manager 検証へ束縛する ACL generation です。
    */
   expectedDocumentAuthorizationRevision?: number
+}
+
+/** Credentials a member-wide revocation request set out to revoke, as its receipt records them. */
+export type MemberCredentialRevocationRecord = {
+  /** IDs of the API keys. */
+  apiKeyIds: string[]
+  /** IDs of the OAuth applications. */
+  oauthAppIds: string[]
 }
 
 /** Directory reconciliation で member を停止する入力です。 */
@@ -486,8 +540,56 @@ export interface WorkspaceAccessClient {
     action: WorkspaceMemberCredentialAction,
     auditContext?: MutationAuditContext,
   ): Promise<void>
-  /** 指定 member が active な場合だけ返します。 */
+  /**
+   * 指定 member が active な場合だけ返します。A member whose access expiry has passed is not
+   * active.
+   */
   getActiveMember(workspaceId: string, memberKey: string): Promise<WorkspaceMember | undefined>
+  /**
+   * Sets or clears a member's access expiry.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param actorMemberKey - Administrator making the change.
+   * @param targetMemberKey - Member whose expiry changes.
+   * @param input - New expiry and the member version read before the change.
+   * @param auditContext - Audit context of the request.
+   * @returns The updated member.
+   */
+  updateMemberAccessExpiry?(
+    workspaceId: string,
+    actorMemberKey: string,
+    targetMemberKey: string,
+    input: UpdateWorkspaceMemberAccessExpiryInput,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceMember>
+  /**
+   * Lists the active members of every Workspace whose access expires at or before an instant.
+   *
+   * @param before - Latest expiry to include.
+   * @returns Each such member with its Workspace.
+   */
+  listMembersWithAccessExpiringBefore?(before: Date): Promise<Array<{
+    /** Workspace of the member. */
+    workspaceId: string
+    /** Member whose access expires. */
+    member: WorkspaceMember
+  }>>
+  /**
+   * Deactivates a member whose access expiry has passed, as the scheduled system actor.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member to deactivate.
+   * @param input - Versions the caller read while checking the member can be deactivated.
+   * @param auditContext - Audit context of the scheduled run.
+   * @returns The deactivated member, or undefined when the member is gone, already
+   *   deactivated, or no longer expired.
+   */
+  expireMember?(
+    workspaceId: string,
+    memberKey: string,
+    input: ExpireWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceMember | undefined>
   /** 管理画面用の member / invitation snapshot を取得します。 */
   getAccessSnapshot(workspaceId: string, actorMemberKey: string): Promise<WorkspaceAccessResponse>
   /** Project assignment 候補に利用できる active member を取得します。 */
@@ -628,6 +730,38 @@ export interface WorkspaceAccessClient {
     auditContext?: MutationAuditContext,
   ): Promise<WorkspaceMember>
   /**
+   * Reads the credentials an earlier request with the same idempotency key set out to revoke.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member whose credentials are revoked.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   * @returns The recorded credentials, or undefined when no request with the key was recorded.
+   * @throws WorkspaceAccessError 409 when the key was used for another request.
+   */
+  findMemberCredentialRevocation?(
+    workspaceId: string,
+    memberKey: string,
+    auditContext: MutationAuditContext,
+  ): Promise<MemberCredentialRevocationRecord | undefined>
+  /**
+   * Records, under the request's idempotency key, the credentials a member-wide revocation
+   * revokes, before it revokes them.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member whose credentials are revoked.
+   * @param credentials - Credentials the request revokes.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   * @returns The recorded credentials: these, or those of a concurrent request with the same key;
+   *   undefined when the store keeps no audit events.
+   * @throws WorkspaceAccessError 409 when the key was used for another request.
+   */
+  recordMemberCredentialRevocation?(
+    workspaceId: string,
+    memberKey: string,
+    credentials: MemberCredentialRevocationRecord,
+    auditContext: MutationAuditContext,
+  ): Promise<MemberCredentialRevocationRecord | undefined>
+  /**
    * Records that the member was signed out everywhere, so locally verified access tokens of
    * earlier sign-ins (enterprise SSO) are refused like Cognito global sign-out refuses the rest.
    *
@@ -635,6 +769,14 @@ export interface WorkspaceAccessClient {
    * @param memberKey - Member that was signed out.
    */
   revokeMemberSignIns?(workspaceId: string, memberKey: string): Promise<void>
+  /**
+   * Records the time of an active member's new sign-in, which administrators see as the last
+   * sign-in. It does not change the member's version, so it never conflicts with an update.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member that signed in.
+   */
+  recordMemberSignIn?(workspaceId: string, memberKey: string): Promise<void>
   /** Directory authority から owner 以外の member を冪等に停止します。 */
   deprovisionDirectoryMember?(
     workspaceId: string,
@@ -808,10 +950,12 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     return response.Item ? toWorkspaceMember(response.Item) : undefined
   }
 
-  /** 指定 member が active な場合だけ返します。 */
+  /** 指定 member が active で、access expiry が過ぎていない場合だけ返します。 */
   async getActiveMember(workspaceId: string, memberKey: string) {
     const member = await this.getMember(workspaceId, memberKey)
-    return member?.status === 'active' ? member : undefined
+    return member?.status === 'active' && !isMemberAccessExpired(member, this.clock())
+      ? member
+      : undefined
   }
 
   /**
@@ -841,6 +985,38 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     } catch (error) {
       // A member without a record has no Workspace session to refuse, and a member whose cutoff
       // is already later keeps it.
+      if (isAwsError(error, 'ConditionalCheckFailedException')) return
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /**
+   * Records the time of an active member's new sign-in on the member row.
+   *
+   * The time only moves forward and the member's `version` and `updatedAt` stay as they are, so
+   * a concurrent role or name change is not refused because of a sign-in.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member that signed in.
+   */
+  async recordMemberSignIn(workspaceId: string, memberKey: string) {
+    await this.ensureLocalTable()
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalizeRequired(workspaceId, 'Workspace ID'),
+          recordKey: createMemberRecordKey(normalizeMemberKey(memberKey)),
+        },
+        UpdateExpression: 'SET lastSignedInAt = :now',
+        ConditionExpression:
+          'attribute_exists(recordKey) AND #status = :active AND ' +
+          '(attribute_not_exists(lastSignedInAt) OR lastSignedInAt < :now)',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: { ':active': 'active', ':now': this.clock().toISOString() },
+      }))
+    } catch (error) {
+      // A missing or deactivated member has no sign-in to show, and a later time already kept wins.
       if (isAwsError(error, 'ConditionalCheckFailedException')) return
       throw toWorkspaceAccessError(error)
     }
@@ -903,9 +1079,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   /** 管理画面用の Workspace access snapshot を取得します。 */
   async getAccessSnapshot(workspaceId: string, actorMemberKey: string) {
     const items = await this.queryItems(workspaceId)
-    const members = items
-      .filter((item) => isRecord(item) && item.entryType === 'workspace-member')
-      .map(toWorkspaceMember)
+    const memberItems = items.filter((item) => isRecord(item) && item.entryType === 'workspace-member')
+    const members = memberItems.map(toWorkspaceMember)
     const invitations = items
       .filter((item) => isRecord(item) && item.entryType === 'workspace-invitation')
       .map((item) => toWorkspaceInvitation(item, this.clock()))
@@ -916,18 +1091,28 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       throw new WorkspaceAccessError(403, 'WorkspaceAccessDenied', 'Workspace access is denied.')
     }
 
+    const canSeeSignIns = currentMember.role === 'owner' || currentMember.role === 'admin'
+    const listedMembers: WorkspaceAccessMember[] = members.map((member, index) => {
+      const lastSignedInAt = canSeeSignIns ? readLastSignedInAt(memberItems[index]) : undefined
+      return lastSignedInAt ? { ...member, lastSignedInAt } : member
+    })
+
     return {
       currentMember,
-      members: members.sort(compareWorkspaceMembers),
+      members: listedMembers.sort(compareWorkspaceMembers),
       invitations: invitations.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
       capabilities: capabilitiesForRole(currentMember.role),
     } satisfies WorkspaceAccessResponse
   }
 
-  /** active member だけを取得します。 */
+  /** active member だけを取得します。access expiry が過ぎた member は含みません。 */
   async listActiveMembers(workspaceId: string) {
     const items = await this.queryItems(workspaceId, 'MEMBER#')
-    return items.map(toWorkspaceMember).filter((member) => member.status === 'active').sort(compareWorkspaceMembers)
+    const now = this.clock()
+    return items
+      .map(toWorkspaceMember)
+      .filter((member) => member.status === 'active' && !isMemberAccessExpired(member, now))
+      .sort(compareWorkspaceMembers)
   }
 
   /**
@@ -1700,6 +1885,13 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     const existingMember = await this.getMember(normalizedWorkspaceId, memberKey)
 
     if (existingMember?.status === 'active') {
+      if (isMemberAccessExpired(existingMember, this.clock())) {
+        throw new WorkspaceAccessError(
+          403,
+          'WorkspaceMemberAccessExpired',
+          'Workspace access has expired.',
+        )
+      }
       return existingMember
     }
 
@@ -2382,6 +2574,9 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           }
         : undefined
     const becameDeactivated = target.status !== 'deactivated' && nextStatus === 'deactivated'
+    // Reactivation starts without an expiry, so a member whose access expired is not refused
+    // again at once; the administrator sets a new one when needed.
+    const becameReactivated = target.status === 'deactivated' && nextStatus === 'active'
     const nextMember = {
       ...target,
       role: nextRole,
@@ -2393,6 +2588,11 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         : nextStatus === 'deactivated'
           ? target.deactivatedAt
           : undefined,
+      // An owner cannot expire, so promoting a member to owner also clears the expiry.
+      accessExpiresAt: becameReactivated ||
+          (nextStatus === 'active' && !canMemberAccessExpire(nextRole))
+        ? undefined
+        : target.accessExpiresAt,
     } satisfies WorkspaceMember
     const roleChanged = nextRole !== target.role
     const statusChanged = nextStatus !== target.status
@@ -2457,7 +2657,9 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           ? 'SET #role = :role, #status = :status, updatedAt = :now, deactivatedAt = :now, version = version + :one'
           : nextStatus === 'deactivated'
             ? 'SET #role = :role, #status = :status, updatedAt = :now, version = version + :one'
-            : 'SET #role = :role, #status = :status, updatedAt = :now, version = version + :one REMOVE deactivatedAt',
+            : nextMember.accessExpiresAt === undefined
+              ? 'SET #role = :role, #status = :status, updatedAt = :now, version = version + :one REMOVE deactivatedAt, accessExpiresAt'
+              : 'SET #role = :role, #status = :status, updatedAt = :now, version = version + :one REMOVE deactivatedAt',
         ConditionExpression: 'attribute_exists(workspaceId) AND version = :expectedVersion',
         ExpressionAttributeNames: { '#role': 'role', '#status': 'status' },
         ExpressionAttributeValues: {
@@ -2581,6 +2783,350 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   }
 
   /**
+   * Sets or clears a member's access expiry.
+   *
+   * Owners change every member's expiry and admins change those of members and guests, as with
+   * role changes. An owner cannot be given an expiry, and no one sets their own.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param actorMemberKey - Member key of the signed-in administrator.
+   * @param targetMemberKey - Member whose expiry changes.
+   * @param input - New expiry (undefined clears it) and the member version read before the change.
+   * @param auditContext - Audit context of the request.
+   * @returns The updated member, the unchanged member when the expiry is the same (its audit event
+   *   still binds the idempotency key to the input), or the current member when a retry finds that
+   *   the same request already committed.
+   * @throws WorkspaceAccessError 403 `WorkspaceRoleDenied` when the actor may not manage the
+   *   target, 409 `WorkspaceMemberAccessExpiryNotAllowed` for an owner, a deactivated member, or
+   *   the actor, 409 `WorkspaceVersionConflict` when the member changed since it was read, and 409
+   *   `WorkspaceIdempotencyConflict` when the idempotency key was used for another change.
+   */
+  async updateMemberAccessExpiry(
+    workspaceId: string,
+    actorMemberKey: string,
+    targetMemberKey: string,
+    input: UpdateWorkspaceMemberAccessExpiryInput,
+    auditContext?: MutationAuditContext,
+  ) {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const actor = await this.requireActiveActor(normalizedWorkspaceId, actorMemberKey)
+    const target = await this.getMember(normalizedWorkspaceId, normalizeMemberKey(targetMemberKey))
+
+    if (!target) {
+      throw new WorkspaceAccessError(404, 'WorkspaceMemberNotFound', 'Workspace member was not found.')
+    }
+    assertCanUpdateMember(actor, target, target.role)
+    if (
+      actor.memberKey === target.memberKey ||
+      target.status !== 'active' ||
+      (input.accessExpiresAt !== undefined && !canMemberAccessExpire(target.role))
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceMemberAccessExpiryNotAllowed',
+        'An access expiry can be set only on another active member who is not an owner.',
+      )
+    }
+    if (target.version !== input.expectedVersion) {
+      const replayed = await this.findReplayedMemberUpdate(
+        normalizedWorkspaceId,
+        target,
+        'member.access-expiry-changed',
+        input.expectedVersion,
+        auditContext,
+      )
+      if (replayed) return replayed
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceVersionConflict',
+        'Workspace member changed. Reload and try again.',
+      )
+    }
+    if (input.accessExpiresAt === target.accessExpiresAt) {
+      return await this.recordUnchangedMemberUpdate(
+        normalizedWorkspaceId,
+        actor,
+        target,
+        'member.access-expiry-changed',
+        input.expectedVersion,
+        false,
+        auditContext,
+      )
+    }
+
+    const nowIso = this.clock().toISOString()
+    const nextMember = {
+      ...target,
+      accessExpiresAt: input.accessExpiresAt,
+      version: target.version + 1,
+      updatedAt: nowIso,
+    } satisfies WorkspaceMember
+    const memberAuditPut = this.createWorkspaceAuditPut(auditContext, {
+      directoryId: normalizedWorkspaceId,
+      eventType: 'member.access-expiry-changed',
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, target.memberKey),
+      action: 'access-expiry-changed',
+      occurredAt: nowIso,
+      changes: createAuditFieldChanges(
+        target,
+        nextMember,
+        WORKSPACE_MEMBER_AUDIT_FIELDS,
+        WORKSPACE_AUDIT_REDACT_FIELDS,
+      ),
+      metadata: { kind: 'workspace-member', expectedVersion: input.expectedVersion },
+      sequence: 0,
+    })
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      this.actorCondition(normalizedWorkspaceId, actor),
+      {
+        Update: {
+          TableName: this.tableName,
+          Key: {
+            workspaceId: normalizedWorkspaceId,
+            recordKey: createMemberRecordKey(target.memberKey),
+          },
+          UpdateExpression: input.accessExpiresAt === undefined
+            ? 'SET updatedAt = :now, version = version + :one REMOVE accessExpiresAt'
+            : 'SET accessExpiresAt = :accessExpiresAt, updatedAt = :now, version = version + :one',
+          // The role is pinned too, so a member promoted to owner meanwhile gets no expiry.
+          ConditionExpression:
+            'attribute_exists(workspaceId) AND version = :expectedVersion AND #status = :active AND #role = :role',
+          ExpressionAttributeNames: { '#status': 'status', '#role': 'role' },
+          ExpressionAttributeValues: {
+            ...(input.accessExpiresAt === undefined
+              ? {}
+              : { ':accessExpiresAt': input.accessExpiresAt }),
+            ':now': nowIso,
+            ':one': 1,
+            ':expectedVersion': input.expectedVersion,
+            ':active': 'active',
+            ':role': target.role,
+          },
+        },
+      },
+    ]
+    if (memberAuditPut) transactItems.push(memberAuditPut)
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+      return nextMember
+    } catch (error) {
+      if (isConditionalTransactionCancellation(error)) {
+        // A concurrent send of the same request may have committed first. The event can also exist
+        // at the expected version when the key was first used for an unchanged expiry.
+        const current = await this.getMember(normalizedWorkspaceId, target.memberKey)
+        const replayed = current
+          ? await this.findReplayedMemberUpdate(
+            normalizedWorkspaceId,
+            current,
+            'member.access-expiry-changed',
+            input.expectedVersion,
+            auditContext,
+            true,
+          )
+          : undefined
+        if (replayed) return replayed
+        await this.classifyMemberUpdateConflict(
+          normalizedWorkspaceId,
+          actor,
+          target,
+          input.expectedVersion,
+          false,
+        )
+      }
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /**
+   * Lists the active members of every Workspace whose access expires at or before an instant.
+   *
+   * Scans the Workspace access table with a filter, reading every page; the table holds only
+   * member, invitation, and Workspace rows, so the scheduled job reads it whole (ADR 0095).
+   *
+   * @param before - Latest expiry to include.
+   * @returns Each such member with its Workspace, ordered by Workspace and expiry.
+   */
+  async listMembersWithAccessExpiringBefore(before: Date) {
+    await this.ensureLocalTable()
+    const members: Array<{ workspaceId: string; member: WorkspaceMember }> = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new ScanCommand({
+        TableName: this.tableName,
+        FilterExpression:
+          'entryType = :member AND #status = :active AND attribute_exists(accessExpiresAt) AND accessExpiresAt <= :before',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':member': 'workspace-member',
+          ':active': 'active',
+          ':before': before.toISOString(),
+        },
+        ExclusiveStartKey: exclusiveStartKey,
+        ConsistentRead: true,
+      }))
+      for (const item of response.Items ?? []) {
+        const workspaceId = isRecord(item) && typeof item.workspaceId === 'string'
+          ? item.workspaceId
+          : undefined
+        if (!workspaceId) throw invalidWorkspaceDataError()
+        members.push({ workspaceId, member: toWorkspaceMember(item) })
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return members.sort((left, right) =>
+      left.workspaceId.localeCompare(right.workspaceId) ||
+      (left.member.accessExpiresAt ?? '').localeCompare(right.member.accessExpiresAt ?? '') ||
+      left.member.memberKey.localeCompare(right.member.memberKey)
+    )
+  }
+
+  /**
+   * Deactivates a member whose access expiry has passed, as the scheduled system actor.
+   *
+   * The transaction requires the member to be still active, unchanged, not an owner, and expired,
+   * and it fences the Planning revision and the Document ACL generation the caller read while
+   * confirming the member owns nothing that would be left without an owner. Earlier sign-ins are
+   * refused from then on, as for directory deprovisioning.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member to deactivate.
+   * @param input - Versions the caller read.
+   * @param auditContext - Audit context of the scheduled run.
+   * @returns The deactivated member, or undefined when the member is gone, already deactivated,
+   *   or no longer expired.
+   * @throws WorkspaceAccessError 409 when the member or a fenced revision changed.
+   */
+  async expireMember(
+    workspaceId: string,
+    memberKey: string,
+    input: ExpireWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
+  ) {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const normalizedMemberKey = normalizeMemberKey(memberKey)
+    const existing = await this.getMember(normalizedWorkspaceId, normalizedMemberKey)
+    const now = this.clock()
+    if (
+      !existing ||
+      existing.status !== 'active' ||
+      existing.role === 'owner' ||
+      existing.accessExpiresAt === undefined ||
+      !isMemberAccessExpired(existing, now)
+    ) {
+      return undefined
+    }
+    if (existing.version !== input.expectedVersion) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceVersionConflict',
+        'Workspace member changed. Reload and try again.',
+      )
+    }
+    const documentAuthorizationRevision = requireDocumentAuthorizationRevision(
+      input.expectedDocumentAuthorizationRevision,
+    )
+    const nowIso = now.toISOString()
+    const signInsRevokedAt = laterSignInCutoff(nowIso, existing.signInsRevokedAt)
+    const nextMember = {
+      ...existing,
+      status: 'deactivated',
+      version: existing.version + 1,
+      updatedAt: nowIso,
+      deactivatedAt: nowIso,
+      signInsRevokedAt,
+    } satisfies WorkspaceMember
+    const membershipConditions = await this.prepareMembershipMutation(
+      normalizedWorkspaceId,
+      existing.memberKey,
+      'deactivate',
+      nowIso,
+    )
+    const auditPut = this.createWorkspaceAuditPut(auditContext, {
+      directoryId: normalizedWorkspaceId,
+      eventType: 'member.access-expired',
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, existing.memberKey),
+      action: 'access-expired',
+      occurredAt: nowIso,
+      changes: createAuditFieldChanges(
+        existing,
+        nextMember,
+        WORKSPACE_MEMBER_AUDIT_FIELDS,
+        WORKSPACE_AUDIT_REDACT_FIELDS,
+      ),
+      metadata: { kind: 'workspace-member', source: 'access-expiry' },
+      sequence: 0,
+    })
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
+      Update: {
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalizedWorkspaceId,
+          recordKey: createMemberRecordKey(existing.memberKey),
+        },
+        UpdateExpression:
+          'SET #status = :deactivated, updatedAt = :now, deactivatedAt = :now, signInsRevokedAt = :signInsRevokedAt, version = version + :one',
+        ConditionExpression:
+          'version = :expectedVersion AND #status = :active AND #role <> :owner AND accessExpiresAt <= :now AND (attribute_not_exists(signInsRevokedAt) OR signInsRevokedAt < :signInsRevokedAt)',
+        ExpressionAttributeNames: { '#role': 'role', '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':deactivated': 'deactivated',
+          ':active': 'active',
+          ':now': nowIso,
+          ':signInsRevokedAt': signInsRevokedAt,
+          ':one': 1,
+          ':owner': 'owner',
+          ':expectedVersion': input.expectedVersion,
+        },
+      },
+    }, createPlanningRevisionMutation(
+      this.planningTableName,
+      normalizedWorkspaceId,
+      input.expectedPlanningRevision,
+      nowIso,
+    ), this.prepareDocumentAuthorizationRevisionMutation(
+      normalizedWorkspaceId,
+      documentAuthorizationRevision,
+      nowIso,
+    )]
+    transactItems.push(...membershipConditions)
+    if (auditPut) transactItems.push(auditPut)
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+      return nextMember
+    } catch (error) {
+      if (isConditionalTransactionCancellation(error)) {
+        if (isTransactionConditionalFailureAt(error, 1)) {
+          throw new WorkspaceAccessError(
+            409,
+            'PlanningRevisionConflict',
+            'Planning changed. Reload and try again.',
+            { cause: error },
+          )
+        }
+        if (isTransactionConditionalFailureAt(error, 2)) {
+          throw new WorkspaceAccessError(
+            409,
+            'DocumentAuthorizationRevisionConflict',
+            'Document permissions changed. Reload and try again.',
+            { cause: error },
+          )
+        }
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceVersionConflict',
+          'Workspace member changed. Reload and try again.',
+          { cause: error },
+        )
+      }
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /**
    * Changes a member's display name, or removes it so the member is shown by email.
    *
    * Members change their own name. Owners change every member's name, and admins change the
@@ -2624,7 +3170,13 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
     const name = normalizeOptional(input.name)
     if (target.version !== input.expectedVersion) {
-      const replayed = await this.findReplayedMemberRename(normalizedWorkspaceId, target, input, auditContext)
+      const replayed = await this.findReplayedMemberUpdate(
+        normalizedWorkspaceId,
+        target,
+        'member.renamed',
+        input.expectedVersion,
+        auditContext,
+      )
       if (replayed) return replayed
       throw new WorkspaceAccessError(
         409,
@@ -2634,7 +3186,15 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
 
     if (name === target.name) {
-      return await this.recordUnchangedMemberRename(normalizedWorkspaceId, actor, target, input, isSelf, auditContext)
+      return await this.recordUnchangedMemberUpdate(
+        normalizedWorkspaceId,
+        actor,
+        target,
+        'member.renamed',
+        input.expectedVersion,
+        isSelf,
+        auditContext,
+      )
     }
 
     const nowIso = this.clock().toISOString()
@@ -2704,7 +3264,14 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         const current = await this.getMember(normalizedWorkspaceId, target.memberKey)
         // The event can exist at the expected version when the key was first used for an unchanged name.
         const replayed = current
-          ? await this.findReplayedMemberRename(normalizedWorkspaceId, current, input, auditContext, true)
+          ? await this.findReplayedMemberUpdate(
+            normalizedWorkspaceId,
+            current,
+            'member.renamed',
+            input.expectedVersion,
+            auditContext,
+            true,
+          )
           : undefined
         if (replayed) return replayed
         await this.classifyMemberUpdateConflict(
@@ -2720,38 +3287,43 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   }
 
   /**
-   * Answers a rename to the name the member already has. Nothing on the member row changes, but the
-   * request's audit event is still written, with no field changes, so its idempotency key stays
-   * bound to this input: the same key sent later with another name is refused rather than applied.
+   * Answers a member update that changes nothing, such as a rename to the name the member already
+   * has or an access expiry set to the value it already has (or cleared when there is none).
+   * Nothing on the member row changes, but the request's audit event is still written, with no
+   * field changes, so its idempotency key stays bound to this input: the same key sent later with
+   * another value is refused rather than applied, and a retry after a later change of the member is
+   * recognized as already answered.
    *
    * @param workspaceId - Normalized Workspace ID.
    * @param actor - Active actor as read.
    * @param target - Member as read, already at the expected version.
-   * @param input - Requested change.
-   * @param isSelf - Whether members rename themselves.
+   * @param eventType - Audit event type of the update, such as `member.renamed`.
+   * @param expectedVersion - Member version the request was based on.
+   * @param isSelf - Whether members update themselves, which skips the actor condition.
    * @param auditContext - Audit context of the request, carrying its idempotency key.
    * @returns The unchanged member.
    * @throws WorkspaceAccessError 409 when the member or actor changed, or the key was used for another change.
    */
-  private async recordUnchangedMemberRename(
+  private async recordUnchangedMemberUpdate(
     workspaceId: string,
     actor: WorkspaceMember,
     target: WorkspaceMember,
-    input: UpdateWorkspaceMemberNameInput,
+    eventType: 'member.renamed' | 'member.access-expiry-changed',
+    expectedVersion: number,
     isSelf: boolean,
     auditContext: MutationAuditContext | undefined,
   ): Promise<WorkspaceMember> {
     const auditPut = this.createWorkspaceAuditPut(auditContext, {
       directoryId: workspaceId,
-      eventType: 'member.renamed',
+      eventType,
       entityType: 'member',
       entityId: this.createMemberAuditEntityId(workspaceId, target.memberKey),
-      action: 'renamed',
+      action: eventType === 'member.renamed' ? 'renamed' : 'access-expiry-changed',
       occurredAt: this.clock().toISOString(),
       changes: [],
       metadata: {
         kind: 'workspace-member',
-        expectedVersion: input.expectedVersion,
+        expectedVersion,
         unchanged: true,
         ...(isSelf ? { source: 'self' } : {}),
       },
@@ -2765,7 +3337,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         TableName: this.tableName,
         Key: { workspaceId, recordKey: createMemberRecordKey(target.memberKey) },
         ConditionExpression: 'attribute_exists(workspaceId) AND version = :expectedVersion',
-        ExpressionAttributeValues: { ':expectedVersion': input.expectedVersion },
+        ExpressionAttributeValues: { ':expectedVersion': expectedVersion },
       },
     })
     transactItems.push(auditPut)
@@ -2776,41 +3348,45 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       if (isConditionalTransactionCancellation(error)) {
         const current = await this.getMember(workspaceId, target.memberKey)
         const replayed = current
-          ? await this.findReplayedMemberRename(workspaceId, current, input, auditContext, true)
+          ? await this.findReplayedMemberUpdate(workspaceId, current, eventType, expectedVersion, auditContext, true)
           : undefined
         if (replayed) return replayed
-        await this.classifyMemberUpdateConflict(workspaceId, actor, target, input.expectedVersion, false)
+        await this.classifyMemberUpdateConflict(workspaceId, actor, target, expectedVersion, false)
       }
       throw toWorkspaceAccessError(error)
     }
   }
 
   /**
-   * Recognizes a retry of a rename that already committed, so that a lost response does not turn
-   * a saved name into a version conflict. The rename's audit event has an ID derived from the
-   * request's idempotency key and records the version the change started from; finding it proves
-   * that this request, not a concurrent edit, moved the member past the expected version.
+   * Recognizes a retry of a member update, such as a rename or an access expiry change, that
+   * already committed, so that a lost response does not turn a saved change into a version
+   * conflict. The update's audit event has an ID derived from the request's idempotency key and
+   * records the version the change started from; finding it proves that this request, not a
+   * concurrent edit, moved the member past the expected version.
    *
    * @param workspaceId - Normalized Workspace ID.
    * @param current - Member row as it is now.
-   * @param input - Requested change, with the version it was based on.
+   * @param eventType - Audit event type the update writes, such as `member.renamed`.
+   * @param expectedVersion - Member version the request was based on.
    * @param auditContext - Audit context of the request, carrying its idempotency key.
    * @param atAnyVersion - Also look when the member is still at the expected version, which only an
-   *   unchanged-name request leaves behind; otherwise such a member cannot have been renamed yet.
+   *   unchanged request (same name or same expiry) leaves behind; otherwise such a member cannot
+   *   have been updated yet.
    * @returns The current member when the request already committed, otherwise undefined.
    * @throws WorkspaceAccessError 409 when the same idempotency key was used for another change.
    */
-  private async findReplayedMemberRename(
+  private async findReplayedMemberUpdate(
     workspaceId: string,
     current: WorkspaceMember,
-    input: UpdateWorkspaceMemberNameInput,
+    eventType: 'member.renamed' | 'member.access-expiry-changed',
+    expectedVersion: number,
     auditContext: MutationAuditContext | undefined,
     atAnyVersion = false,
   ): Promise<WorkspaceMember | undefined> {
     if (!this.auditTableName || !auditContext) return undefined
-    if (!atAnyVersion && current.version <= input.expectedVersion) return undefined
+    if (!atAnyVersion && current.version <= expectedVersion) return undefined
     const entityId = this.createMemberAuditEntityId(workspaceId, current.memberKey)
-    const eventId = createAuditEventId(auditContext, 'member.renamed', { type: 'member', id: entityId }, 0)
+    const eventId = createAuditEventId(auditContext, eventType, { type: 'member', id: entityId }, 0)
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.auditTableName,
       Key: { directoryId: workspaceId, eventId },
@@ -2818,13 +3394,13 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }))
     if (!response.Item) return undefined
     const event = normalizeAuditEvent(response.Item)
-    if (event.eventType !== 'member.renamed' || event.entity.id !== entityId) return undefined
-    // The request fingerprint covers the requested name and version, so the same key sent with
+    if (event.eventType !== eventType || event.entity.id !== entityId) return undefined
+    // The request fingerprint covers the requested change and version, so the same key sent with
     // another change is refused whatever happened to the member since.
     if (
       event.requestFingerprint !== auditContext.requestFingerprint ||
       event.actor.id !== auditContext.actor.id ||
-      event.metadata?.expectedVersion !== input.expectedVersion
+      event.metadata?.expectedVersion !== expectedVersion
     ) {
       throw new WorkspaceAccessError(
         409,
@@ -2833,6 +3409,111 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       )
     }
     return current
+  }
+
+  /**
+   * Reads the credentials an earlier request with the same idempotency key set out to revoke.
+   *
+   * The receipt is an audit event whose ID is derived from the request's idempotency key, so a
+   * replay after a lost response revokes the same credentials instead of scanning again and
+   * catching credentials created since.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member whose credentials are revoked.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   * @returns The recorded credentials, or undefined when no request with the key was recorded.
+   * @throws WorkspaceAccessError 409 when the key was used for another request.
+   */
+  async findMemberCredentialRevocation(
+    workspaceId: string,
+    memberKey: string,
+    auditContext: MutationAuditContext,
+  ): Promise<MemberCredentialRevocationRecord | undefined> {
+    if (!this.auditTableName) return undefined
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const entityId = this.createMemberAuditEntityId(normalizedWorkspaceId, normalizeMemberKey(memberKey))
+    const eventId = createAuditEventId(
+      auditContext,
+      MEMBER_CREDENTIAL_REVOCATION_EVENT_TYPE,
+      { type: 'member', id: entityId },
+      0,
+    )
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.auditTableName,
+      Key: { directoryId: normalizedWorkspaceId, eventId },
+      ConsistentRead: true,
+    }))
+    if (!response.Item) return undefined
+    const event = normalizeAuditEvent(response.Item)
+    if (
+      event.eventType !== MEMBER_CREDENTIAL_REVOCATION_EVENT_TYPE ||
+      event.entity.id !== entityId ||
+      event.requestFingerprint !== auditContext.requestFingerprint ||
+      event.actor.id !== auditContext.actor.id
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceIdempotencyConflict',
+        'This idempotency key was already used for a different operation.',
+      )
+    }
+    const apiKeyIds = event.metadata?.apiKeyIds
+    const oauthAppIds = event.metadata?.oauthAppIds
+    if (!isStringArray(apiKeyIds) || !isStringArray(oauthAppIds)) throw invalidWorkspaceDataError()
+    return { apiKeyIds, oauthAppIds }
+  }
+
+  /**
+   * Records, under the request's idempotency key, the credentials a member-wide revocation
+   * revokes, before it revokes them, so a replay finishes the same set.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member whose credentials are revoked.
+   * @param credentials - Credentials the request revokes.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   * @returns The recorded credentials: these, or those of a concurrent request with the same key;
+   *   undefined when the client keeps no audit events.
+   * @throws WorkspaceAccessError 409 when the key was used for another request.
+   */
+  async recordMemberCredentialRevocation(
+    workspaceId: string,
+    memberKey: string,
+    credentials: MemberCredentialRevocationRecord,
+    auditContext: MutationAuditContext,
+  ): Promise<MemberCredentialRevocationRecord | undefined> {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const normalizedMemberKey = normalizeMemberKey(memberKey)
+    const auditPut = this.createWorkspaceAuditPut(auditContext, {
+      directoryId: normalizedWorkspaceId,
+      eventType: MEMBER_CREDENTIAL_REVOCATION_EVENT_TYPE,
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, normalizedMemberKey),
+      action: 'credential-revocation-started',
+      occurredAt: this.clock().toISOString(),
+      changes: [],
+      metadata: {
+        kind: 'workspace-member',
+        apiKeyIds: [...credentials.apiKeyIds],
+        oauthAppIds: [...credentials.oauthAppIds],
+      },
+      sequence: 0,
+    })
+    if (!auditPut) return undefined
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: [auditPut] }))
+      return credentials
+    } catch (error) {
+      if (isConditionalTransactionCancellation(error)) {
+        // A concurrent request with the same key recorded first; its set is the one revoked.
+        const recorded = await this.findMemberCredentialRevocation(
+          normalizedWorkspaceId,
+          normalizedMemberKey,
+          auditContext,
+        )
+        if (recorded) return recorded
+      }
+      throw toWorkspaceAccessError(error)
+    }
   }
 
   /** Directory authority から owner 以外の member を冪等に作成または更新します。 */
@@ -2965,6 +3646,13 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       )
     }
 
+    // The directory reporting a user active is its steady state, not a decision to extend access,
+    // so a member whose access expiry passed stays deactivated and unchanged. Only an
+    // administrator's reactivation brings them back and clears the expiry (ADR 0095). Any other
+    // reconciliation, a reactivation included, keeps the expiry an administrator set.
+    if (existing.status === 'deactivated' && isMemberAccessExpired(existing, this.clock())) {
+      return existing
+    }
     const nextMember = {
       ...existing,
       email,
@@ -4101,15 +4789,7 @@ function assertCanUpdateMember(
   target: WorkspaceMember,
   nextRole: WorkspaceRole,
 ) {
-  if (actor.role === 'owner') {
-    return
-  }
-
-  if (
-    actor.role === 'admin' &&
-    (target.role === 'member' || target.role === 'guest') &&
-    (nextRole === 'member' || nextRole === 'guest')
-  ) {
+  if (canWorkspaceRoleManageMember(actor.role, target.role, nextRole)) {
     return
   }
 
@@ -4206,10 +4886,23 @@ function toWorkspaceMember(value: unknown): WorkspaceMember {
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
     deactivatedAt: typeof value.deactivatedAt === 'string' ? value.deactivatedAt : undefined,
+    ...(value.accessExpiresAt === undefined
+      ? {}
+      : { accessExpiresAt: readSignInCutoff(value.accessExpiresAt) }),
     ...(value.signInsRevokedAt === undefined
       ? {}
       : { signInsRevokedAt: readSignInCutoff(value.signInsRevokedAt) }),
   }
+}
+
+/**
+ * Narrows a stored value to a list of strings.
+ *
+ * @param value - Stored value.
+ * @returns Whether every element is a string.
+ */
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((element) => typeof element === 'string')
 }
 
 /**
@@ -4219,10 +4912,25 @@ function toWorkspaceMember(value: unknown): WorkspaceMember {
  * @returns The cutoff.
  */
 function readSignInCutoff(value: unknown) {
-  if (typeof value !== 'string') throw invalidWorkspaceDataError()
-  const time = Date.parse(value)
-  if (Number.isNaN(time) || new Date(time).toISOString() !== value) throw invalidWorkspaceDataError()
+  if (typeof value !== 'string' || !isCanonicalUtcTimestamp(value)) {
+    throw invalidWorkspaceDataError()
+  }
   return value
+}
+
+/**
+ * Reads the recorded last sign-in of a member item. A missing or malformed value reads as no
+ * record instead of failing the member list, because it is only shown for reference.
+ *
+ * @param item - Stored member item.
+ * @returns The canonical UTC timestamp, or undefined.
+ */
+function readLastSignedInAt(item: unknown) {
+  if (!isRecord(item) || typeof item.lastSignedInAt !== 'string') return undefined
+  const time = Date.parse(item.lastSignedInAt)
+  return Number.isNaN(time) || new Date(time).toISOString() !== item.lastSignedInAt
+    ? undefined
+    : item.lastSignedInAt
 }
 
 function toWorkspaceInvitation(value: unknown, now: Date): WorkspaceInvitation {
@@ -4346,6 +5054,7 @@ function toMemberItem(
     createdAt: member.createdAt,
     updatedAt: member.updatedAt,
     ...(member.deactivatedAt ? { deactivatedAt: member.deactivatedAt } : {}),
+    ...(member.accessExpiresAt ? { accessExpiresAt: member.accessExpiresAt } : {}),
     ...(member.signInsRevokedAt ? { signInsRevokedAt: member.signInsRevokedAt } : {}),
     ...(identityOwnership ? { identityOwnership } : {}),
   }

@@ -12,7 +12,7 @@ const versionReviewQueryConfig = {
  * SWR options for the approval list. An approval is decided or cancelled on the Work Item, often
  * in another tab, so the list is read again when the window regains focus.
  */
-export const documentApprovalsQueryConfig = {
+const documentApprovalsQueryConfig = {
   dedupingInterval: 5_000,
   revalidateOnFocus: true,
   shouldRetryOnError: false,

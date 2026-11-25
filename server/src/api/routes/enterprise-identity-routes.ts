@@ -4,6 +4,7 @@ import { request as requestHttps } from 'node:https'
 import { isIP } from 'node:net'
 import {
   ENTERPRISE_PERMISSION_IDS,
+  ENTERPRISE_ROLE_SCOPE_KINDS,
   type EnterpriseBreakGlassAccount,
   type EnterpriseCustomRole,
   type EnterpriseIdentityProvider,
@@ -14,6 +15,7 @@ import {
   type EnterpriseRoleAssignment,
   type EnterpriseRoleId,
   type EnterpriseRoleScope,
+  type EnterpriseRoleScopeKind,
   type EnterpriseScimGroup,
   type EnterpriseScimGroupInput,
   type EnterpriseScimUser,
@@ -78,6 +80,7 @@ import {
 } from '../../modules/workspace-access/document-manager-lifecycle'
 import {
   authenticationDependencies,
+  developerPlatformDependencies,
   enforceActiveTenantForRequest,
   requireAppDependencies,
   workItemDependencies,
@@ -106,7 +109,8 @@ import {
   readJson,
   toAuthErrorResponse,
 } from '../shared/http'
-import { summarizeMfaEnrollment } from '../../modules/workspace-access'
+import { reconcileDirectoryMemberAccess, summarizeMfaEnrollment } from '../../modules/workspace-access'
+import { createDirectoryMemberReconciliationPorts } from '../../app/composition/member-credential-revoker'
 import { resolveTrustedClientAddress } from '../../infrastructure/http/trusted-request-source'
 import { createRequestMemberSignInSecurityPorts } from '../shared/member-sign-in-security'
 import { requireWorkspaceMemberHasNoOwnedPlanningEntities } from '../shared/planning-access'
@@ -906,6 +910,8 @@ function readEnterpriseRoleId(value: unknown) {
     roleId !== 'workspace:guest' &&
     roleId !== 'workspace:portfolio-viewer' &&
     roleId !== 'workspace:auditor' &&
+    roleId !== 'org-unit:manager' &&
+    roleId !== 'org-unit:viewer' &&
     roleId !== 'team:manager' &&
     roleId !== 'team:member' &&
     roleId !== 'project:manager' &&
@@ -922,7 +928,7 @@ function requireEnterpriseAssignableRole(
   snapshot: EnterpriseIdentitySnapshot,
   callerPermissions: readonly EnterprisePermissionId[],
   roleId: EnterpriseRoleId,
-  scopeKind: 'workspace' | 'team' | 'project',
+  scopeKind: EnterpriseRoleScopeKind,
 ) {
   if (
     !canAssignEnterpriseRole(
@@ -958,7 +964,7 @@ async function requireEnterpriseMappingReferences(
   workspaceId: string,
   identityProviderId: string,
   directoryGroupId: string,
-  scopeKind: 'workspace' | 'team' | 'project',
+  scopeKind: EnterpriseRoleScopeKind,
   scopeTargetId: string | undefined,
 ) {
   const provider = snapshot.identityProviders.find((candidate) =>
@@ -982,6 +988,10 @@ async function requireEnterpriseMappingReferences(
     )
   }
   if (scopeKind === 'workspace') return
+  if (scopeKind === 'org-unit') {
+    await requireEnterpriseOrgUnitScope(workspaceId, scopeTargetId, 'EnterpriseMappingScopeNotFound')
+    return
+  }
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja')
   const exists = scopeKind === 'team'
     ? directory.teams.some((team) => team.id === scopeTargetId)
@@ -1025,14 +1035,49 @@ async function requireEnterpriseResourceScope(
  * @returns The scope type, defaulting to Workspace only when it is omitted.
  * @throws EnterpriseIdentityError when the value is not a supported scope type.
  */
-function readEnterpriseRoleAssignmentScopeType(value: unknown): 'workspace' | 'team' | 'project' {
+function readEnterpriseRoleAssignmentScopeType(value: unknown): EnterpriseRoleScopeKind {
   if (value === undefined) return 'workspace'
-  if (value === 'workspace' || value === 'team' || value === 'project') return value
+  const scopeKind = ENTERPRISE_ROLE_SCOPE_KINDS.find((candidate) => candidate === value)
+  if (scopeKind !== undefined) return scopeKind
   throw new EnterpriseIdentityError(
     400,
     'EnterpriseRoleAssignmentScopeInvalid',
-    'Scope type must be workspace, team, or project.',
+    'Scope type must be workspace, org-unit, team, or project.',
   )
+}
+
+/**
+ * Reads the scope type of a directory group mapping request. Unknown values keep their earlier
+ * meaning of a Workspace scope.
+ *
+ * @param value - Untrusted `scopeType` from the request body.
+ * @returns The scope type.
+ */
+function readEnterpriseGroupMappingScopeType(value: unknown): EnterpriseRoleScopeKind {
+  return value === 'org-unit' || value === 'team' || value === 'project' ? value : 'workspace'
+}
+
+/**
+ * Requires an OrgUnit scope to name an OrgUnit of the Workspace's current structure.
+ *
+ * @param workspaceId - Workspace of the assignment or mapping.
+ * @param orgUnitId - Requested OrgUnit ID.
+ * @param code - Error code answered when the OrgUnit does not exist.
+ * @throws EnterpriseIdentityError with status 409 when the OrgUnit does not exist.
+ */
+async function requireEnterpriseOrgUnitScope(
+  workspaceId: string,
+  orgUnitId: string | undefined,
+  code: 'EnterpriseMappingScopeNotFound' | 'EnterpriseResourceScopeNotFound',
+) {
+  const structure = await workspaceDependencies.projectDirectory.getOrgStructure(workspaceId, true)
+  if (!structure.orgUnits.some((orgUnit) => orgUnit.id === orgUnitId)) {
+    throw new EnterpriseIdentityError(
+      409,
+      code,
+      'The selected OrgUnit does not belong to this Workspace.',
+    )
+  }
 }
 
 /**
@@ -1169,17 +1214,21 @@ function canRestoreEnterpriseLegacyAccess(
  *
  * @param workspaceId - Workspace of the assignment.
  * @param scopeKind - Requested scope kind.
- * @param scopeTargetId - Team or Project ID for a narrower scope.
+ * @param scopeTargetId - OrgUnit, Team, or Project ID for a narrower scope.
  * @param scopeParentId - Owning Team ID, required when a Project belongs to several Teams.
  * @returns A scope that the authorization evaluator matches without a legacy fallback.
  */
 async function resolveEnterpriseRoleAssignmentScope(
   workspaceId: string,
-  scopeKind: 'workspace' | 'team' | 'project',
+  scopeKind: EnterpriseRoleScopeKind,
   scopeTargetId: string | undefined,
   scopeParentId: string | undefined,
 ): Promise<EnterpriseRoleScope> {
   if (scopeKind === 'workspace') return { workspaceId, kind: 'workspace' }
+  if (scopeKind === 'org-unit') {
+    await requireEnterpriseOrgUnitScope(workspaceId, scopeTargetId, 'EnterpriseResourceScopeNotFound')
+    return { workspaceId, kind: 'org-unit', targetId: scopeTargetId }
+  }
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja')
   if (scopeKind === 'team') {
     if (!directory.teams.some((team) => team.id === scopeTargetId)) {
@@ -1633,18 +1682,29 @@ async function applyEnterpriseScimUserState(
             memberKey,
           )
         : undefined
-    await workspaceDependencies.workspaceAccess.reconcileDirectoryMember?.(user.workspaceId, {
-      memberKey,
-      email: user.emails[0] ?? user.userName,
-      name: user.displayName,
-      role: workspaceRole,
-      externalIdentityId: user.userId,
-      expectedVersion: existing?.version,
-      expectedPlanningRevision,
-      ...(expectedDocumentAuthorizationRevision === undefined
-        ? {}
-        : { expectedDocumentAuthorizationRevision }),
-    }, auditContext)
+    const reconciliationPorts = createDirectoryMemberReconciliationPorts(
+      workspaceDependencies.workspaceAccess,
+      developerPlatformDependencies,
+    )
+    if (reconciliationPorts) {
+      await reconcileDirectoryMemberAccess(reconciliationPorts, {
+        workspaceId: user.workspaceId,
+        existing,
+        member: {
+          memberKey,
+          email: user.emails[0] ?? user.userName,
+          name: user.displayName,
+          role: workspaceRole,
+          externalIdentityId: user.userId,
+          expectedVersion: existing?.version,
+          expectedPlanningRevision,
+          ...(expectedDocumentAuthorizationRevision === undefined
+            ? {}
+            : { expectedDocumentAuthorizationRevision }),
+        },
+        auditContext,
+      })
+    }
     await authenticationDependencies.cognito.enableWorkspaceUser?.(memberKey)
   } else if (existing) {
     await requireWorkspaceMemberHasNoManagedProjects(user.workspaceId, memberKey)
@@ -2685,6 +2745,7 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           ...view.assignableRoleIds,
           members: {
             workspace: memberAssignableRoleIds(view.assignableRoleIds.members.workspace),
+            'org-unit': memberAssignableRoleIds(view.assignableRoleIds.members['org-unit']),
             team: memberAssignableRoleIds(view.assignableRoleIds.members.team),
             project: memberAssignableRoleIds(view.assignableRoleIds.members.project),
           },
@@ -3539,9 +3600,7 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         principal.directoryId,
         requestIdempotencyKey,
       )
-      const scopeType = body?.scopeType === 'team' || body?.scopeType === 'project'
-        ? body.scopeType
-        : 'workspace'
+      const scopeType = readEnterpriseGroupMappingScopeType(body?.scopeType)
       const directoryGroupId = readEnterpriseText(
         body?.directoryGroupId,
         'Directory group ID',
@@ -3663,9 +3722,7 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           'Directory group mapping changed. Reload and try again.',
         )
       }
-      const scopeType = body?.scopeType === 'team' || body?.scopeType === 'project'
-        ? body.scopeType
-        : 'workspace'
+      const scopeType = readEnterpriseGroupMappingScopeType(body?.scopeType)
       const roleId = readEnterpriseRoleId(body?.roleId)
       requireEnterpriseAssignableRole(
         snapshot,

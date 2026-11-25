@@ -20,7 +20,13 @@ import {
   formatIssueMentionLabel,
   resolveIssueMentionMemberKeys,
 } from '../model/commentMentions'
-import { parseCommentSessionDraft, type CommentSessionDraft } from '../model/commentSessionDraft'
+import {
+  createTargetedCommentSessionDraftKey,
+  parseCommentSessionDraft,
+  parseTargetedCommentSessionDraft,
+  type CommentSessionDraft,
+  type TargetedCommentSessionDraft,
+} from '../model/commentSessionDraft'
 import {
   advanceDeepLinkTraversal,
   type DeepLinkTraversalState,
@@ -529,7 +535,11 @@ export function IssueConversationTab({
     }
   }, [])
 
-  const [isSessionDraftRestored, setIsSessionDraftRestored] = useState(false)
+  const [restoredSessionDraftSlots, setRestoredSessionDraftSlots] = useState<readonly CommentComposerSlot[]>([])
+  /** Records that one composer slot holds input brought back from an ended session. */
+  const markSessionDraftRestored = (slot: CommentComposerSlot) => {
+    setRestoredSessionDraftSlots((slots) => slots.includes(slot) ? slots : [...slots, slot])
+  }
   useSessionDraft<CommentSessionDraft>({
     key: sessionDraftKey,
     value: rootDraft.isDirty
@@ -540,9 +550,72 @@ export function IssueConversationTab({
       // Input typed since the page came back wins over the preserved one.
       if (draftStateRef.current.root.isDirty || !hasDraftContentValue(draft)) return
       updateRootDraft(draft)
-      setIsSessionDraftRestored(true)
+      markSessionDraftRestored('root')
     },
   })
+  useSessionDraft<TargetedCommentSessionDraft>({
+    key: sessionDraftKey ? createTargetedCommentSessionDraftKey(sessionDraftKey, 'reply') : undefined,
+    value: replyDraft?.isDirty
+      ? {
+          bodyMarkdown: replyDraft.bodyMarkdown,
+          commentId: replyDraft.commentId,
+          mentionMemberKeys: replyDraft.mentionMemberKeys,
+        }
+      : undefined,
+    parse: parseTargetedCommentSessionDraft,
+    onRestore: (draft) => {
+      const current = draftStateRef.current
+      if (current.reply?.isDirty || draft.originalVersion !== undefined || !hasDraftContentValue(draft)) return
+      // The target may load later; until then, or when it is gone, the text stays visible as retained.
+      const nextDraft: TargetedCommentComposerDraft = {
+        bodyMarkdown: draft.bodyMarkdown,
+        commentId: draft.commentId,
+        isDirty: true,
+        lifetimeId: createDraftLifetimeId(),
+        mentionMemberKeys: draft.mentionMemberKeys,
+      }
+      setReplyDraft(nextDraft)
+      reportDraftDirty(current.root, nextDraft, current.edit)
+      markSessionDraftRestored('reply')
+    },
+  })
+  useSessionDraft<TargetedCommentSessionDraft>({
+    key: sessionDraftKey ? createTargetedCommentSessionDraftKey(sessionDraftKey, 'edit') : undefined,
+    value: editDraft?.isDirty && editDraft.originalVersion !== undefined
+      ? {
+          bodyMarkdown: editDraft.bodyMarkdown,
+          commentId: editDraft.commentId,
+          mentionMemberKeys: editDraft.mentionMemberKeys,
+          originalBodyMarkdown: editDraft.originalBodyMarkdown ?? '',
+          originalMentionMemberKeys: editDraft.originalMentionMemberKeys ?? [],
+          originalVersion: editDraft.originalVersion,
+        }
+      : undefined,
+    parse: parseTargetedCommentSessionDraft,
+    onRestore: (draft) => {
+      const current = draftStateRef.current
+      if (current.edit?.isDirty || draft.originalVersion === undefined) return
+      // Keeping the version the edit started from shows a conflict when the comment changed since.
+      const nextDraftBaseline: TargetedCommentComposerDraft = {
+        bodyMarkdown: draft.bodyMarkdown,
+        commentId: draft.commentId,
+        isDirty: false,
+        lifetimeId: createDraftLifetimeId(),
+        mentionMemberKeys: draft.mentionMemberKeys,
+        originalBodyMarkdown: draft.originalBodyMarkdown,
+        originalMentionMemberKeys: draft.originalMentionMemberKeys,
+        originalVersion: draft.originalVersion,
+      }
+      const nextDraft = { ...nextDraftBaseline, isDirty: isTargetedDraftDirty(nextDraftBaseline) }
+      if (!nextDraft.isDirty) return
+      setEditDraft(nextDraft)
+      reportDraftDirty(current.root, current.reply, nextDraft)
+      markSessionDraftRestored('edit')
+    },
+  })
+  const hasRestoredSessionDraft = restoredSessionDraftSlots.some((slot) =>
+    slot === 'root' ? rootDraft.isDirty : slot === 'reply' ? replyDraft?.isDirty : editDraft?.isDirty,
+  )
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -710,7 +783,7 @@ export function IssueConversationTab({
         </p>
       ) : null}
       <div className="border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-5 py-4">
-        {isSessionDraftRestored && rootDraft.isDirty ? (
+        {hasRestoredSessionDraft ? (
           <p className="mb-2 text-xs font-semibold text-fg-amber-900" role="status">
             {t('collaboration.composer.sessionDraftRestored')}
           </p>

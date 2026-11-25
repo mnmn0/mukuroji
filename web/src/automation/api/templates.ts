@@ -6,6 +6,7 @@ import {
   type AutomationTemplateApplication,
   type AutomationTemplateKind,
   type CreateAutomationTemplateInput,
+  type DeleteAutomationDefinitionInput,
   type UpdateAutomationTemplateInput,
 } from '@mukuroji/contracts'
 import {
@@ -222,6 +223,30 @@ export function getAutomationTemplateApplication(
 }
 
 /**
+ * Deletes a template; the server refuses one a rule or recurring definition still uses.
+ *
+ * @param accessToken - Access token used for the Authorization header.
+ * @param templateId - Definition to delete.
+ * @param input - Revision the client read.
+ * @param mutationContext - Mutation request context shared between retries.
+ * @returns A promise that resolves after the delete.
+ */
+export async function deleteAutomationTemplate(
+  accessToken: string,
+  templateId: string,
+  input: DeleteAutomationDefinitionInput,
+  mutationContext: MutationRequestContext,
+) {
+  await requestMutation<unknown>(
+    `${automationApiBaseUrl}/automation/templates/${encodeURIComponent(templateId)}`,
+    accessToken,
+    'DELETE',
+    input,
+    mutationContext,
+  )
+}
+
+/**
  * Loads the canonical collection property returned by an automation list endpoint.
  *
  * @param url - Collection endpoint URL.
@@ -263,6 +288,7 @@ function isAutomationTemplate(value: unknown): value is AutomationTemplate {
     typeof value.id === 'string' &&
     typeof value.workspaceId === 'string' &&
     automationTemplateKinds.some((kind) => kind === value.kind) &&
+    isOptionalString(value.ownerTeamId) &&
     typeof value.name === 'string' &&
     typeof value.enabled === 'boolean' &&
     isNonnegativeSafeInteger(value.version) &&

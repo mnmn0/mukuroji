@@ -114,6 +114,8 @@ test('refreshes the access token and carries MFA assurance and idle activity to 
   expect(body.refreshToken).toBeUndefined()
   expect(cognito.refreshes).toEqual([{ refreshToken: 'refresh-1' }])
   expect(calls.workspaceReconciliations).toEqual(['demo@example.com'])
+  // A refresh continues the sign-in, so it does not move the last sign-in.
+  expect(calls.workspaceSignIns).toEqual([])
   expect(await activity.getAuthenticationMethods(
     'user#demo@example.com',
     sessionIdOf(refreshedAccessToken),
@@ -129,6 +131,21 @@ test('refreshes the access token and carries MFA assurance and idle activity to 
     sessionLifetimeMinutes: 480,
     authenticationMethods: [],
   })).rejects.toMatchObject({ code: 'EnterpriseSessionIdleTimeout' })
+})
+
+test('does not count a refresh without the previous access token as a sign-in', async () => {
+  const calls = configureFakeProjectClients(true)
+  configureRefreshingCognito(createAccessToken([], { ...signInClaims, jti: 'access-2' }))
+
+  const response = await app.request('/api/auth/refresh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refreshToken: 'refresh-1' }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(calls.workspaceReconciliations).toEqual(['demo@example.com'])
+  expect(calls.workspaceSignIns).toEqual([])
 })
 
 test('does not lend assurance from an access token of another sign-in', async () => {

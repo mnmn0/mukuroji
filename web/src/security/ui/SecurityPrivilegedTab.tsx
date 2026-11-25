@@ -128,11 +128,14 @@ function SecurityPrivilegedTabContent({
   onRequestRevokeServiceAccount,
   onRequestRotateServiceAccount,
 }: SecurityPrivilegedTabProps) {
+  // Service accounts take Workspace, Team, or Project scopes only.
+  const serviceAccountScopeOptions = scopeOptions.filter(isServiceAccountScopeOption)
   const canManageServiceAccounts =
     snapshot.capabilities.canManagePrivilegedAccess
   const canManageBreakGlass = snapshot.capabilities.canManageBreakGlass
   const defaultServiceAccountScope =
-    scopeOptions.find((scope) => scope.type === 'workspace') ?? scopeOptions[0]
+    serviceAccountScopeOptions.find((scope) => scope.type === 'workspace') ??
+    serviceAccountScopeOptions[0]
   const [serviceAccountName, setServiceAccountName] = useState('')
   const [serviceAccountRoleId, setServiceAccountRoleId] = useState('')
   const [serviceAccountScopeValue, setServiceAccountScopeValue] = useState(
@@ -147,7 +150,7 @@ function SecurityPrivilegedTabContent({
   const [serviceAccountSourceCidrs, setServiceAccountSourceCidrs] = useState('')
   const [breakGlassEmail, setBreakGlassEmail] = useState('')
   const isBusy = Boolean(busyOperation)
-  const selectedServiceAccountScope = scopeOptions.find(
+  const selectedServiceAccountScope = serviceAccountScopeOptions.find(
     (scope) =>
       createEnterpriseSecurityScopeValue(scope) === serviceAccountScopeValue,
   )
@@ -266,7 +269,7 @@ function SecurityPrivilegedTabContent({
               {t('security.privileged.serviceAccountScope')}
               <select
                 className="workbench-input min-h-10 px-3"
-                disabled={isBusy || scopeOptions.length === 0}
+                disabled={isBusy || serviceAccountScopeOptions.length === 0}
                 required
                 value={serviceAccountScopeValue}
                 onChange={(event) => {
@@ -274,7 +277,7 @@ function SecurityPrivilegedTabContent({
                   setServiceAccountRoleId('')
                 }}
               >
-                {scopeOptions.map((scope) => (
+                {serviceAccountScopeOptions.map((scope) => (
                   <option
                     key={createEnterpriseSecurityScopeValue(scope)}
                     value={createEnterpriseSecurityScopeValue(scope)}
@@ -584,4 +587,22 @@ function SecurityPrivilegedTabContent({
       </section>
     </>
   )
+}
+
+/** Scope option a service account can be created at. */
+type ServiceAccountScopeOption = EnterpriseSecurityScopeOption & {
+  /** Workspace, Team, or Project; OrgUnit scopes are not offered to service accounts. */
+  type: 'workspace' | 'team' | 'project'
+}
+
+/**
+ * Tells whether a scope option can hold a service account.
+ *
+ * @param scope - Scope option.
+ * @returns Whether the option is a Workspace, Team, or Project scope.
+ */
+function isServiceAccountScopeOption(
+  scope: EnterpriseSecurityScopeOption,
+): scope is ServiceAccountScopeOption {
+  return scope.type !== 'org-unit'
 }

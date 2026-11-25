@@ -79,6 +79,16 @@ describe('Slack DynamoDB delivery queue', () => {
         .toEqual({ deliveries: [], invalidCount: 1 })
     }
   })
+  test('keeps an access expiry notice\'s member and expiry for the delivery-time recheck', async () => {
+    const notice = { ...row, accessExpiryMemberKey: 'guest@example.test', accessExpiresAt: '2026-09-28T00:00:00.000Z' }
+    expect((await fixture(notice).store.listDue(shard, now, 2)).deliveries[0])
+      .toMatchObject({ accessExpiryMemberKey: 'guest@example.test', accessExpiresAt: '2026-09-28T00:00:00.000Z' })
+    expect((await fixture().store.listDue(shard, now, 2)).deliveries[0]?.accessExpiresAt).toBeUndefined()
+    for (const invalid of [{ accessExpiryMemberKey: ' ' }, { accessExpiryMemberKey: 1 }, { accessExpiresAt: 'soon' }, { accessExpiresAt: 0 }]) {
+      expect(await fixture({ ...notice, ...invalid }).store.listDue(shard, now, 2))
+        .toEqual({ deliveries: [], invalidCount: 1 })
+    }
+  })
   test('distinguishes absent legacy preferences from malformed persisted preferences', async () => {
     const delivery = (await fixture().store.listDue(shard, now, 2)).deliveries[0]
     if (!delivery) throw new Error('Expected delivery')
