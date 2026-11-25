@@ -45,7 +45,8 @@ export async function getMyRequests(accessToken: string, options: GetMyRequestsO
   if (options.limit !== undefined) query.set('limit', String(options.limit))
   const data = await requestJson(`${requestsApiBaseUrl}/my-requests${query.size ? `?${query}` : ''}`, accessToken)
   const record = readRecord(data)
-  const requests = Array.isArray(record.requests) ? record.requests.flatMap((entry) => readMyRequest(entry) ?? []) : []
+  if (!Array.isArray(record.requests)) throw new RequestIntakeApiError(502, 'The request list response is invalid.')
+  const requests = record.requests.flatMap((entry) => readMyRequest(entry) ?? [])
   return {
     requests,
     ...(typeof record.nextCursor === 'string' && record.nextCursor ? { nextCursor: record.nextCursor } : {}),

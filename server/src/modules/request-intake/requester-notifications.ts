@@ -48,6 +48,8 @@ export type RequestRequesterNotificationInput = {
   occurredAt: string
   /** ID that makes the event unique, such as the submission event or Work Item revision. */
   occurrenceId: string
+  /** Correlation ID of the mutation that caused the change, so the notice can be traced to it. */
+  correlationId?: string
 }
 
 const messageCodes: Record<RequestRequesterNotificationKind, NotificationMessageCode> = {
@@ -93,6 +95,7 @@ export function createRequestRequesterNotificationTransactItems(
       body: { submissionId: input.submissionId, kind: input.kind, occurrenceId: input.occurrenceId },
     },
     source: { kind: 'system', method: 'NOTIFY', route },
+    ...(input.correlationId ? { correlationId: input.correlationId } : {}),
   })
   const message = createNotificationMessage(messageCodes[input.kind])
   const event = createAuditEvent({

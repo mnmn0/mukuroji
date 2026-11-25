@@ -77,6 +77,12 @@ describe('my requests API', () => {
     expect(page.requests[0]?.workItem).toEqual({ visibility: 'restricted', completed: true })
   })
 
+  test('treats a list response without requests as an error, not an empty list', async () => {
+    installFetch([{ nextCursor: 'next' }, { requests: [] }])
+    await expect(getMyRequests('token')).rejects.toMatchObject({ status: 502 })
+    await expect(getMyRequests('token')).resolves.toEqual({ requests: [] })
+  })
+
   test('reads the detail thread and sends replies with mutation headers', async () => {
     const calls = installFetch([detail, { replyId: 'reply-1', receivedAt: '2026-07-16T10:00:00.000Z' }])
     const loaded = await getMyRequest('token', 'req/1')
@@ -118,6 +124,32 @@ describe('my requests view', () => {
     expect(markup).toContain('Which laptop?')
     expect(markup).not.toContain('<textarea')
     expect(markup).not.toContain('href="/teams/')
+  })
+
+  test('keeps the loaded detail beside a reload error', () => {
+    const markup = renderToStaticMarkup(
+      <MemoryRouter>
+        <MyRequestsView
+          canLoadMore={false}
+          hasDetailError
+          hasLoadError={false}
+          isDetailLoading={false}
+          isLoading={false}
+          locale="en"
+          onLoadMore={() => undefined}
+          onRetryDetail={() => undefined}
+          onRetryList={() => undefined}
+          onReply={async () => undefined}
+          onSelectRequest={() => undefined}
+          requests={[detail]}
+          selectedRequest={detail}
+          selectedRequestId="req-1"
+          t={createTranslator('en')}
+        />
+      </MemoryRouter>,
+    )
+    expect(markup).toContain('role="alert"')
+    expect(markup).toContain('Which laptop?')
   })
 
   test('announces list and detail loading', () => {

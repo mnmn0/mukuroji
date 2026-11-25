@@ -1275,6 +1275,7 @@ async function requirePlanningProjectScopeIsUnused(
  * @param teamId - Team that owns the Work Item.
  * @param workItem - Work Item before the decision.
  * @param transition - Resolved completion transition.
+ * @param correlationId - Correlation ID of the approval decision, so the notice can be traced.
  * @returns The transition, with the notification items when the Work Item becomes completed.
  */
 async function addSourceRequesterCompletionNotice(
@@ -1282,6 +1283,7 @@ async function addSourceRequesterCompletionNotice(
   teamId: string,
   workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
   transition: FileApprovalCompletionTransition,
+  correlationId: string | undefined,
 ): Promise<FileApprovalCompletionTransition> {
   const createItems = workItemDependencies.teamIssues.createSourceRequesterCompletionTransactionItems
   if (
@@ -1299,6 +1301,7 @@ async function addSourceRequesterCompletionNotice(
     nextRevision: transition.expectedRevision + 1,
     actorUserId: principal.userKey,
     occurredAt: new Date().toISOString(),
+    ...(correlationId ? { correlationId } : {}),
   })
   return items.length > 0 ? { ...transition, completionSideEffectItems: items } : transition
 }
@@ -6066,6 +6069,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const canonicalWorkItem = requireCanonicalFileProofingWorkItem(workItem)
       const body = await readFileProofingJson<CreateFileApprovalDecisionInput>(c.req)
       const input = { ...body } satisfies CreateFileApprovalDecisionInput
+      const decisionAuditContext = createApiMutationContext(c, principal, input)
       let resolvedCompletionTransition: FileApprovalCompletionTransition | undefined
       const resolveCompletionTransition: FileApprovalCompletionTransitionResolver = async (
         completionTransition,
@@ -6082,6 +6086,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
               scope.teamId,
               canonicalWorkItem,
               resolved,
+              decisionAuditContext.correlationId,
             )
           : undefined
         resolvedCompletionTransition = withRequesterNotice
@@ -6092,7 +6097,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         actor,
         readRequiredRouteId(c.req.param('approvalId'), 'Approval ID'),
         input,
-        createApiMutationContext(c, principal, input),
+        decisionAuditContext,
         resolveCompletionTransition,
       )
       if (approval.status === 'approved' && resolvedCompletionTransition) {

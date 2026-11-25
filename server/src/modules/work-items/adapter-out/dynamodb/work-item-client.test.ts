@@ -5255,6 +5255,8 @@ test('DynamoDB Work Item completion notifies the member who sent its source requ
     },
   })
   expect(JSON.stringify(events[0]?.item)).not.toContain(String(currentIssue.title))
+  // The notice keeps the Work Item update's correlation ID, so both can be traced together.
+  expect(events[0]?.item.correlationId).toBe(auditContext.correlationId)
 
   await client.updateTeamIssue('workspace-1', 'core-team', 'request-wi', {
     expectedRevision: 2,

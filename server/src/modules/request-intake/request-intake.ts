@@ -2012,6 +2012,8 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       locale,
       answers,
       consentAccepted: input.consentAccepted === true,
+      // A resend from another member must not receive this request's receipt and thread token.
+      ...(requesterUserId ? { requesterUserId } : {}),
     })
     if (session.usedAt) {
       if (session.inputFingerprint === inputFingerprint && session.receipt) {
@@ -2604,13 +2606,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       Limit: limit,
       ...(startKey ? { ExclusiveStartKey: startKey } : {}),
     }))
-    const submissionIds = (response.Items ?? []).flatMap((item) =>
-      item.entryType === 'requester-submission' &&
-        item.requesterUserId === requester &&
-        typeof item.submissionId === 'string'
-        ? [item.submissionId]
-        : []
-    )
+    const submissionIds = (response.Items ?? []).map((item) => readRequesterIndexRow(item, requester))
     const submissions = (await Promise.all(submissionIds.map(async (submissionId) => {
       try {
         const stored = await this.getStoredSubmission(workspaceId, submissionId)
@@ -4273,6 +4269,27 @@ function createRequesterSubmissionRecordKeyPrefix(requesterUserId: string) {
  */
 function createRequesterSubmissionRecordKey(requesterUserId: string, submissionId: string) {
   return `${createRequesterSubmissionRecordKeyPrefix(requesterUserId)}${requireIdentifier(submissionId, 'Request submission ID')}`
+}
+
+/**
+ * Reads one requester index row, failing closed when it does not belong to the requester's key.
+ *
+ * @param item - Row returned by the requester index query.
+ * @param requester - Normalized member key the query was made for.
+ * @returns The submission ID the row lists.
+ * @throws RequestIntakeError (503) when the row is corrupt or belongs to another key.
+ */
+function readRequesterIndexRow(item: Record<string, unknown>, requester: string): string {
+  const submissionId = item.submissionId
+  if (
+    item.entryType !== 'requester-submission' ||
+    item.requesterUserId !== requester ||
+    typeof submissionId !== 'string' ||
+    item.recordKey !== `${createRequesterSubmissionRecordKeyPrefix(requester)}${submissionId}`
+  ) {
+    throw new RequestIntakeError(503, 'InvalidRequesterIndex', 'Stored requester index row is invalid.')
+  }
+  return submissionId
 }
 
 /**

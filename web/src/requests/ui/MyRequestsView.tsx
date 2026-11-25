@@ -107,8 +107,12 @@ export function MyRequestsView(props: MyRequestsViewProps) {
               {t('requests.mine.back')}
             </button>
             {props.hasDetailError ? (
-              <LoadErrorNotice onRetry={props.onRetryDetail} t={t} />
-            ) : props.selectedRequest ? (
+              // A failed reload keeps the loaded detail, and its reply draft, on screen.
+              <div className={props.selectedRequest ? 'mb-4' : undefined}>
+                <LoadErrorNotice onRetry={props.onRetryDetail} t={t} />
+              </div>
+            ) : null}
+            {props.selectedRequest ? (
               <MyRequestDetailPanel
                 key={props.selectedRequest.id}
                 locale={props.locale}
@@ -116,7 +120,7 @@ export function MyRequestsView(props: MyRequestsViewProps) {
                 request={props.selectedRequest}
                 t={t}
               />
-            ) : props.isDetailLoading ? (
+            ) : props.isDetailLoading && !props.hasDetailError ? (
               <LoadingNotice message={t('requests.mine.detailLoading')} />
             ) : null}
           </>
@@ -259,6 +263,7 @@ function MyRequestDetailPanel({ request, onReply, locale, t }: MyRequestDetailPa
             {t('requests.mine.replyLabel')}
             <textarea
               className="workbench-input min-h-28 px-3 py-2"
+              disabled={isReplying}
               maxLength={4_000}
               onChange={(event) => {
                 setReplyBody(event.target.value)

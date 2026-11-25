@@ -2957,7 +2957,10 @@ test('records the signed-in requester and their index row only for an authentica
     expiresAt: Math.floor(Date.parse('2026-07-16T09:15:00.000Z') / 1_000),
   }
   const version = createStoredVersion()
-  let transactItems: Array<{ Put?: { Item?: Record<string, unknown> } }> = []
+  let transactItems: Array<{
+    Put?: { Item?: Record<string, unknown> }
+    Update?: { ExpressionAttributeValues?: Record<string, unknown> }
+  }> = []
   const client = createClient(createDocumentClient((command) => {
     const key = command.input.Key as { scopeKey?: string; recordKey?: string } | undefined
     if (key?.scopeKey === session.scopeKey) return { Item: session }
@@ -2968,6 +2971,7 @@ test('records the signed-in requester and their index row only for an authentica
       transactItems = command.input.TransactItems as typeof transactItems
       return {}
     }
+    if (command.input.UpdateExpression) return {}
     throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
   }))
   const input = {
@@ -2996,6 +3000,21 @@ test('records the signed-in requester and their index row only for an authentica
     submissionId: submission?.id,
   })
   expect(String(indexRow?.recordKey)).toBe(`REQUESTER#member@example.com#SUBMISSION#${String(submission?.id)}`)
+
+  // Another member resending the same answers with this session gets no receipt or thread token.
+  const sessionValues = transactItems.find(({ Update }) =>
+    Update?.ExpressionAttributeValues?.[':fingerprint'] !== undefined
+  )?.Update?.ExpressionAttributeValues ?? {}
+  session.usedAt = sessionValues[':usedAt']
+  session.inputFingerprint = sessionValues[':fingerprint']
+  session.receipt = sessionValues[':receipt']
+  expect(session.inputFingerprint).toBeString()
+  await expect(client.submit(
+    { ...resolution, accessMode: 'auth-required' },
+    input,
+    { clientKey: 'client-1' },
+    { id: 'someone@example.com' },
+  )).rejects.toMatchObject({ status: 409, code: 'RequestSessionConsumed' })
 })
 
 test('notifies the requester about questions, rejection, and conversion without internal text', async () => {
@@ -3080,6 +3099,12 @@ test('lists, reads, and answers only the requests the member sent', async () => 
   })
   const queries: Record<string, unknown>[] = []
   const transactions: unknown[] = []
+  let indexRows: Record<string, unknown>[] = [{
+    entryType: 'requester-submission',
+    recordKey: 'REQUESTER#member@example.com#SUBMISSION#req-1',
+    requesterUserId: 'member@example.com',
+    submissionId: 'req-1',
+  }]
   const client = createClient(createDocumentClient((command) => {
     const key = command.input.Key as { scopeKey?: string; recordKey?: string } | undefined
     if (key?.recordKey === 'SUBMISSION#req-1') return { Item: own }
@@ -3091,11 +3116,7 @@ test('lists, reads, and answers only the requests the member sent', async () => 
     if (command.input.KeyConditionExpression) {
       queries.push(command.input)
       return {
-        Items: [
-          { entryType: 'requester-submission', requesterUserId: 'member@example.com', submissionId: 'req-1' },
-          // A row that names another member is ignored even under this member's prefix.
-          { entryType: 'requester-submission', requesterUserId: 'someone@example.com', submissionId: 'req-2' },
-        ],
+        Items: indexRows,
         LastEvaluatedKey: { scopeKey: 'WORKSPACE#workspace-1', recordKey: 'REQUESTER#member@example.com#SUBMISSION#req-1' },
       }
     }
@@ -3123,6 +3144,18 @@ test('lists, reads, and answers only the requests the member sent', async () => 
   })
   await expect(client.listRequesterSubmissions('workspace-1', 'someone@example.com', { cursor: page.nextCursor }))
     .rejects.toMatchObject({ status: 400 })
+  // A row that names another member under this member's prefix is corrupt, not an empty page.
+  indexRows = [{
+    entryType: 'requester-submission',
+    recordKey: 'REQUESTER#member@example.com#SUBMISSION#req-2',
+    requesterUserId: 'someone@example.com',
+    submissionId: 'req-2',
+  }]
+  await expect(client.listRequesterSubmissions('workspace-1', 'member@example.com'))
+    .rejects.toMatchObject({ status: 503, code: 'InvalidRequesterIndex' })
+  indexRows = [{ entryType: 'requester-submission', requesterUserId: 'member@example.com' }]
+  await expect(client.listRequesterSubmissions('workspace-1', 'member@example.com'))
+    .rejects.toMatchObject({ status: 503, code: 'InvalidRequesterIndex' })
 
   await expect(client.getRequesterSubmission('workspace-1', 'member@example.com', 'req-1'))
     .resolves.toMatchObject({ id: 'req-1' })

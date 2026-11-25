@@ -1430,6 +1430,8 @@ export type CreateSourceRequesterCompletionTransactionItemsInput = {
   actorUserId: string
   /** When the completion happens. */
   occurredAt: string
+  /** Correlation ID of the mutation that completes the Work Item, when known. */
+  correlationId?: string
 }
 
 export type TeamIssuesClient = {
@@ -1856,6 +1858,7 @@ export class DynamoDbTeamIssuesClient {
       input.actorUserId,
       input.occurredAt,
       `${input.teamId}:${input.issueId}:${input.nextRevision}`,
+      input.correlationId,
     )
   }
 
@@ -1869,6 +1872,7 @@ export class DynamoDbTeamIssuesClient {
    * @param actorUserId - Member who made the change.
    * @param occurredAt - When the change happened.
    * @param occurrenceId - ID that makes this notification unique.
+   * @param correlationId - Correlation ID of the mutation that made the change, when known.
    * @returns Audit outbox items, or none when the Work Item has no signed-in requester.
    */
   private createSourceRequesterNotificationItems(
@@ -1878,6 +1882,7 @@ export class DynamoDbTeamIssuesClient {
     actorUserId: string,
     occurredAt: string,
     occurrenceId: string,
+    correlationId?: string,
   ): NonNullable<TransactWriteCommandInput['TransactItems']> {
     if (!this.auditTableName || !item.sourceRequestId || !item.sourceRequester) return []
     return createRequestRequesterNotificationTransactItems({
@@ -1891,6 +1896,7 @@ export class DynamoDbTeamIssuesClient {
       actorId: actorUserId,
       occurredAt,
       occurrenceId,
+      ...(correlationId ? { correlationId } : {}),
     })
   }
 
@@ -2914,6 +2920,7 @@ export class DynamoDbTeamIssuesClient {
               actorUserId,
               now,
               `${teamId}:${issueId}:created`,
+              auditContext?.correlationId,
             ),
           ],
         }),
@@ -3885,6 +3892,7 @@ export class DynamoDbTeamIssuesClient {
                   actorUserId,
                   afterIssue.updatedAt,
                   `${teamId}:${issueId}:${nextRevision}`,
+                  auditContext?.correlationId,
                 )
               : []),
           ],
