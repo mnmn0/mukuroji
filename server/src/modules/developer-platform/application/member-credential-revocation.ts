@@ -77,7 +77,7 @@ export async function revokeMemberCredentials(
     await ports.apiKeys.revokeApiKey({ workspaceId, apiKeyId: apiKey.id, actorUserId })
   }
   for (const oauthApp of credentials.oauthApps) {
-    await ports.oauthCredentials.revokeOAuthApp({ workspaceId, oauthAppId: oauthApp.id })
+    await ports.oauthCredentials.revokeOAuthApp({ workspaceId, oauthAppId: oauthApp.id, actorUserId })
   }
   return {
     revokedApiKeyIds: credentials.apiKeys.map((apiKey) => apiKey.id),
