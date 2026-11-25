@@ -562,13 +562,87 @@
         ],
         "type": "object"
       },
-      "AgentRunReport": {
+      "AgentRunQuestion": {
         "additionalProperties": false,
-        "description": "Structured report saved with the comment an agent posted for its run.",
+        "description": "A blocker or handoff report of an agent, with the answer a person recorded.",
         "properties": {
           "answer": {
             "$ref": "#/components/schemas/AgentRunReportAnswer"
           },
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRunArtifact"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "changedFileCount": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "commentId": {
+            "description": "Comment saved with the report.",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "progress",
+              "blocker",
+              "verification",
+              "artifact",
+              "handoff"
+            ],
+            "type": "string"
+          },
+          "runId": {
+            "pattern": "^run_[0-9a-f-]{36}$",
+            "type": "string"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "sequence": {
+            "description": "Server-assigned position of the report within its run, starting at 1.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "verifications": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRunVerification"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "workItemId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "runId",
+          "teamId",
+          "workItemId",
+          "sequence",
+          "kind",
+          "commentId",
+          "verifications",
+          "artifacts",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "AgentRunReport": {
+        "additionalProperties": false,
+        "description": "Structured report saved with the comment an agent posted for its run.",
+        "properties": {
           "artifacts": {
             "items": {
               "$ref": "#/components/schemas/AgentRunArtifact"
@@ -4668,7 +4742,7 @@
           },
           "items": {
             "items": {
-              "$ref": "#/components/schemas/AgentRunReport"
+              "$ref": "#/components/schemas/AgentRunQuestion"
             },
             "maxItems": 20,
             "type": "array"
