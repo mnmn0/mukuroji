@@ -1255,6 +1255,7 @@ function createPublicWorkItemTypeCatalog(
             statuses: workflow.statuses,
           },
           customFields,
+          allowedChildTypeIds: [...type.allowedChildTypeIds],
         }
       }),
   }

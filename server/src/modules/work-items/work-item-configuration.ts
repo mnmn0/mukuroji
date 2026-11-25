@@ -772,6 +772,14 @@ export type WorkItemRelationAuditInput = {
    * its current watchers are notified either way.
    */
   notificationEndpoints?: ReadonlyMap<string, WorkItemRelationNotificationEndpoint>
+  /**
+   * Builds writes committed in the same transaction as the relation pair, such as the request's
+   * idempotency receipt, so a lost response can be replayed instead of repeating the mutation.
+   */
+  createCoWrites?: (
+    relation: WorkItemRelation,
+    reciprocalRelation: WorkItemRelation,
+  ) => Promise<NonNullable<TransactWriteCommandInput['TransactItems']>>
 }
 
 /**
@@ -911,8 +919,10 @@ type RelationTransactionInput = {
   edgeMutations: NonNullable<TransactWriteCommandInput['TransactItems']>
   /** Configuration guards appended after the relation rows. */
   configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
-  /** Endpoint audit events appended after every other item. */
+  /** Endpoint audit events appended after the relation rows and guards. */
   auditPuts: NonNullable<TransactWriteCommandInput['TransactItems']>
+  /** Caller writes, such as an idempotency receipt, appended after every other item. */
+  coWrites?: NonNullable<TransactWriteCommandInput['TransactItems']>
   /** Classifies a canceled transaction after re-reading its fences. */
   classifyCancellation: () => Promise<Error>
 }
@@ -2077,6 +2087,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         describeRelationAuditChange(relation, 'added'),
         describeRelationAuditChange(reciprocalRelation, 'added'),
       ], endpoints),
+      coWrites: await audit?.createCoWrites?.(relation, reciprocalRelation),
       classifyCancellation: () => this.classifyRelationTransactionCancellation(
         workspaceId,
         teamId,
@@ -2176,6 +2187,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         ],
         endpoints,
       ),
+      coWrites: await audit?.createCoWrites?.(relation, reciprocalRelation),
       classifyCancellation: () => this.classifyRelationTransactionCancellation(
         workspaceId,
         teamId,
@@ -3396,6 +3408,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       ...input.edgeMutations,
       ...input.configurationConditionChecks,
       ...input.auditPuts,
+      ...(input.coWrites ?? []),
     ]
     if (transactItems.length > DYNAMODB_TRANSACTION_ITEM_LIMIT) {
       throw new WorkItemConfigurationError(

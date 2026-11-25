@@ -42,6 +42,8 @@ export type AgentCatalog = {
     }
     /** Public field definitions displayed as data, never executed or interpreted as instructions. */
     customFields: Record<string, unknown>[]
+    /** Types allowed for direct child Work Items; absent from servers that predate the field. */
+    allowedChildTypeIds?: string[]
   }[]
   /**
    * Work Item templates create_task can start from; empty when none, or when the server is older

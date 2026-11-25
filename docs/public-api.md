@@ -84,6 +84,7 @@ v1 の schema は `calendarSource` を持たないので、応答の `calendarPo
 任意query `assignedProjectId` を指定すると、そのProjectへの閲覧権限を確認し、
 全Project共通のfieldと指定Projectに適用されるfieldだけを返します。
 この追加制約は管理者にも適用し、他Projectだけのfield名・選択肢・既定値・必須条件は返しません。
+各Typeの `allowedChildTypeIds` は、そのTypeの直下の子に使えるTypeのIDです。
 
 ## Work Item template 一覧
 

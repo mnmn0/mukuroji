@@ -673,6 +673,7 @@ export interface PublicWorkItemRelationService {
    * @param workItemId - Work Item named in the path.
    * @param input - Relation type from that Work Item's point of view and the other Work Item.
    * @param context - Request, correlation, and idempotency identifiers for the audit events.
+   * @param idempotency - Replay receipt committed with the relation, when the request carries one.
    * @returns The created relation.
    */
   createRelation(
@@ -681,6 +682,7 @@ export interface PublicWorkItemRelationService {
     workItemId: string,
     input: CreatePublicWorkItemRelationRequest,
     context: PublicMutationContext,
+    idempotency?: IdempotencyMutationToken,
   ): Promise<PublicWorkItemRelationMutation>
   /**
    * Removes a relation between two Work Items of one Team.
@@ -690,6 +692,7 @@ export interface PublicWorkItemRelationService {
    * @param targetWorkItemId - Other Work Item.
    * @param type - Relation type from the named Work Item's point of view.
    * @param context - Request, correlation, and idempotency identifiers for the audit events.
+   * @param idempotency - Replay receipt committed with the deletion, when the request carries one.
    * @returns The removed relation.
    */
   deleteRelation(
@@ -699,6 +702,7 @@ export interface PublicWorkItemRelationService {
     targetWorkItemId: string,
     type: PublicWorkItemRelationType,
     context: PublicMutationContext,
+    idempotency?: IdempotencyMutationToken,
   ): Promise<PublicWorkItemRelationMutation>
 }
 
@@ -1608,9 +1612,9 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
     const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
     const body = readCreatePublicWorkItemRelationRequest(await readJson(c))
-    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, ...body }, async (context) => ({
+    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, ...body }, async (context, idempotency) => ({
       status: 201,
-      body: await relations.createRelation(credential, teamId, workItemId, body, context),
+      body: await relations.createRelation(credential, teamId, workItemId, body, context, idempotency),
     }), {
       authorizeReplay: () => relations.authorizeRelationChange(credential, teamId, workItemId, body.targetWorkItemId),
     })
@@ -1623,9 +1627,9 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
     const targetWorkItemId = readRouteId(c.req.param('targetWorkItemId'), 'Target Work Item ID')
     const type = readPublicWorkItemRelationType(c.req.param('relationType'))
-    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, targetWorkItemId, type }, async (context) => ({
+    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, targetWorkItemId, type }, async (context, idempotency) => ({
       status: 200,
-      body: await relations.deleteRelation(credential, teamId, workItemId, targetWorkItemId, type, context),
+      body: await relations.deleteRelation(credential, teamId, workItemId, targetWorkItemId, type, context, idempotency),
     }), {
       authorizeReplay: () => relations.authorizeRelationChange(credential, teamId, workItemId, targetWorkItemId),
     })

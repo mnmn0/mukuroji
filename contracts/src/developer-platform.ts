@@ -1685,6 +1685,8 @@ export type PublicWorkItemTypeSchema = {
   workflow: Pick<WorkflowDefinition, 'id' | 'name' | 'initialStatusId' | 'statuses'>
   /** Custom fields and validation/options accepted by this Work Item Type. */
   customFields: PublicCustomFieldDefinition[]
+  /** Type identifiers allowed for direct child Work Items of this Type. */
+  allowedChildTypeIds: string[]
 }
 
 /** Public API response containing the current creation schema for one Team. */

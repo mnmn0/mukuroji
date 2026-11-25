@@ -2,12 +2,13 @@ import {
   PUBLIC_WORK_ITEM_LISTED_RELATION_TYPES,
   type CreatePublicWorkItemRelationRequest,
   type PublicWorkItemRelation,
+  type PublicWorkItemRelationMutation,
   type PublicWorkItemRelationType,
   type WorkItemRelation,
   type WorkItemRelationType,
 } from '@mukuroji/contracts'
 import { createMutationAuditContext } from '../../modules/audit/audit'
-import type { AuthenticatedDeveloperCredential } from '../../modules/developer-platform/application/ports'
+import type { AuthenticatedDeveloperCredential, IdempotencyMutationToken } from '../../modules/developer-platform/application/ports'
 import type {
   PublicMutationContext,
   PublicWorkItemRelationService,
@@ -34,6 +35,7 @@ import {
 } from './project-access'
 import { projectWorkItemMutationSearchDocumentBestEffort } from './search-access'
 import { getWorkItemConfigurationTableName } from './work-item-configuration'
+import { createWorkItemIdempotencyTransaction } from './work-item-access'
 
 /** Work Items read at once while checking which relation targets the owner can read. */
 const RELATION_TARGET_READ_CONCURRENCY = 10
@@ -84,6 +86,51 @@ function toPublicRelation(relation: WorkItemRelation): PublicWorkItemRelation {
     type: relation.type,
     targetWorkItemId: relation.targetWorkItemId,
     ...(relation.createdAt === undefined ? {} : { createdAt: relation.createdAt }),
+  }
+}
+
+/**
+ * Builds the response of a relation mutation, naming the relation from the path Work Item's side.
+ *
+ * @param teamId - Team that owns both Work Items.
+ * @param workItemId - Work Item named in the path.
+ * @param relation - Stored relation.
+ * @param reciprocalRelation - Its reciprocal row.
+ * @returns The response body.
+ */
+function toRelationMutation(
+  teamId: string,
+  workItemId: string,
+  relation: WorkItemRelation,
+  reciprocalRelation: WorkItemRelation,
+): PublicWorkItemRelationMutation {
+  const named = relation.sourceWorkItemId === workItemId ? relation : reciprocalRelation
+  return { schemaVersion: 1, teamId, workItemId, relation: toPublicRelation(named) }
+}
+
+/**
+ * Creates the builder of the idempotency receipt committed with a relation mutation, so a retry
+ * after a lost response replays it instead of failing as a duplicate or a missing relation.
+ *
+ * @param workspaceId - Workspace that scopes the request.
+ * @param teamId - Team that owns both Work Items.
+ * @param workItemId - Work Item named in the path.
+ * @param status - Response status the receipt replays.
+ * @param idempotency - Idempotency token of the request, if any.
+ * @returns Builder of the receipt writes, or undefined when the request carries no token.
+ */
+function createRelationReceiptWrites(
+  workspaceId: string,
+  teamId: string,
+  workItemId: string,
+  status: 200 | 201,
+  idempotency: IdempotencyMutationToken | undefined,
+) {
+  const transaction = createWorkItemIdempotencyTransaction(workspaceId, idempotency)
+  if (!transaction) return undefined
+  return async (relation: WorkItemRelation, reciprocalRelation: WorkItemRelation) => {
+    const receipt = await transaction.prepare({ status, body: toRelationMutation(teamId, workItemId, relation, reciprocalRelation) })
+    return receipt ? [receipt.transactWriteItem] : []
   }
 }
 
@@ -277,7 +324,7 @@ export function createCanonicalPublicRelationService(): PublicWorkItemRelationSe
       await authorizeEndpoints(principal, teamId, workItemId, targetWorkItemId)
     },
 
-    async createRelation(credential, teamId, workItemId, input: CreatePublicWorkItemRelationRequest, context) {
+    async createRelation(credential, teamId, workItemId, input: CreatePublicWorkItemRelationRequest, context, idempotency) {
       const principal = await resolveRelationWriter(credential, teamId)
       const stored = toStoredRelationDirection(workItemId, input.targetWorkItemId, input.type)
       const path = `/api/v1/work-items/${encodeURIComponent(workItemId)}/relations`
@@ -326,16 +373,16 @@ export function createCanonicalPublicRelationService(): PublicWorkItemRelationSe
               targetWorkItemId: input.targetWorkItemId,
             }),
             actorMemberKey: principal.userKey,
+            createCoWrites: createRelationReceiptWrites(principal.directoryId, teamId, workItemId, 201, idempotency),
           },
         )
         return { endpoints, response }
       })
       await refreshSearchDocuments(principal.directoryId, [endpoints.source, endpoints.target], 'Public API relation creation')
-      const named = response.relation.sourceWorkItemId === workItemId ? response.relation : response.reciprocalRelation
-      return { schemaVersion: 1, teamId, workItemId, relation: toPublicRelation(named) }
+      return toRelationMutation(teamId, workItemId, response.relation, response.reciprocalRelation)
     },
 
-    async deleteRelation(credential, teamId, workItemId, targetWorkItemId, type, context) {
+    async deleteRelation(credential, teamId, workItemId, targetWorkItemId, type, context, idempotency) {
       const principal = await resolveRelationWriter(credential, teamId)
       const path = `/api/v1/work-items/${encodeURIComponent(workItemId)}/relations/${encodeURIComponent(targetWorkItemId)}/${type}`
       const { endpoints, response } = await retryRelationConflicts(async () => {
@@ -366,13 +413,13 @@ export function createCanonicalPublicRelationService(): PublicWorkItemRelationSe
               endpoint.id,
               toNotificationEndpoint(teamId, endpoint),
             ])),
+            createCoWrites: createRelationReceiptWrites(principal.directoryId, teamId, workItemId, 200, idempotency),
           },
         )
         return { endpoints, response }
       })
       await refreshSearchDocuments(principal.directoryId, [endpoints.source, endpoints.target], 'Public API relation deletion')
-      const named = response.relation.sourceWorkItemId === workItemId ? response.relation : response.reciprocalRelation
-      return { schemaVersion: 1, teamId, workItemId, relation: toPublicRelation(named) }
+      return toRelationMutation(teamId, workItemId, response.relation, response.reciprocalRelation)
     },
   }
 }

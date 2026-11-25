@@ -743,12 +743,12 @@ describe('public API router', () => {
         async authorizeRelationChange(_credential, teamId, workItemId, targetWorkItemId) {
           calls.push(`authorize ${teamId}/${workItemId}->${targetWorkItemId}`)
         },
-        async createRelation(_credential, teamId, workItemId, input, context) {
-          calls.push(`create ${teamId}/${workItemId} ${input.type} ${input.targetWorkItemId} ${context.idempotencyKey}`)
+        async createRelation(_credential, teamId, workItemId, input, context, idempotency) {
+          calls.push(`create ${teamId}/${workItemId} ${input.type} ${input.targetWorkItemId} ${context.idempotencyKey} ${idempotency?.idempotencyKey}`)
           return { schemaVersion: 1, teamId, workItemId, relation: { type: input.type, targetWorkItemId: input.targetWorkItemId } }
         },
-        async deleteRelation(_credential, teamId, workItemId, targetWorkItemId, type) {
-          calls.push(`delete ${teamId}/${workItemId} ${type} ${targetWorkItemId}`)
+        async deleteRelation(_credential, teamId, workItemId, targetWorkItemId, type, _context, idempotency) {
+          calls.push(`delete ${teamId}/${workItemId} ${type} ${targetWorkItemId} ${idempotency?.idempotencyKey}`)
           return { schemaVersion: 1, teamId, workItemId, relation: { type, targetWorkItemId } }
         },
       },
@@ -797,9 +797,9 @@ describe('public API router', () => {
     expect(deleteInvalid.status).toBe(400)
     expect(calls).toEqual([
       'list team-1/task-1',
-      'create team-1/task-1 child task-3 relation-key',
+      'create team-1/task-1 child task-3 relation-key relation-key',
       'authorize team-1/task-1->task-3',
-      'delete team-1/task-1 blockedBy task-2',
+      'delete team-1/task-1 blockedBy task-2 delete-key',
     ])
   })
 
@@ -1113,6 +1113,7 @@ describe('public API router', () => {
           type: 'select',
           options: [{ id: 'high', name: 'High', sortOrder: 0 }],
         }],
+        allowedChildTypeIds: ['incident'],
       }],
     } satisfies PublicWorkItemTypeCatalog
     const { platform, router } = createTestRouter({
