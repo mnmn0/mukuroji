@@ -157,7 +157,9 @@ export class GoogleCalendarEventProtocol implements ConnectorResourceProtocol {
 
   /**
    * Creates the event with an ID derived from the operation, so a retry finds the event the
-   * first attempt created instead of adding another.
+   * first attempt created instead of adding another. A retry returns that event as it is now,
+   * without writing to it: someone may have changed it since, and the sync engine compares its
+   * dates with the Work Item's.
    *
    * @param request - Authenticated provider requester.
    * @param mutation - Work Item contents and the stable operation ID.
@@ -174,12 +176,7 @@ export class GoogleCalendarEventProtocol implements ConnectorResourceProtocol {
       allowedStatuses: [409],
     })
     if (response.status !== 409) return readGoogleEvent(response.payload)
-    const existing = await request({
-      method: 'PATCH',
-      path: `calendars/primary/events/${id}`,
-      body: createGooglePatchBody(mutation),
-    })
-    return readGoogleEvent(existing.payload)
+    return this.read(request, mutation.resourceType, id)
   }
 }
 
@@ -227,7 +224,7 @@ export class MicrosoftGraphCalendarEventProtocol implements ConnectorResourcePro
     return {
       items: items
         .filter((item) => !(isObject(item) && item.isCancelled === true))
-        .map(readGraphEvent),
+        .map((item) => readGraphEvent(item)),
       ...(typeof nextLink === 'string' && nextLink !== ''
         ? { nextCursor: toGraphCursor(nextLink) }
         : {}),
@@ -288,7 +285,7 @@ export class MicrosoftGraphCalendarEventProtocol implements ConnectorResourcePro
     })
     if (response.status === 404 || response.status === 410) throw missingEvent()
     if (response.status === 412) throw eventChanged()
-    return readGraphEvent(response.payload)
+    return readGraphEvent(response.payload, readGraphWriteTimeZone(mutation))
   }
 
   /**
@@ -310,7 +307,7 @@ export class MicrosoftGraphCalendarEventProtocol implements ConnectorResourcePro
       },
       headers: GRAPH_UTC_PREFERENCE,
     })
-    return readGraphEvent(response.payload)
+    return readGraphEvent(response.payload, readGraphWriteTimeZone(mutation))
   }
 }
 
@@ -363,7 +360,7 @@ function createGooglePatchBody(mutation: ConnectorCreateMutation) {
  */
 function createGraphEventBody(mutation: ConnectorCreateMutation) {
   const schedule = requireSchedule(mutation.schedule)
-  const timeZone = schedule.timeZone ?? 'UTC'
+  const timeZone = readGraphWriteTimeZone(mutation)
   return {
     subject: readTitle(mutation.title),
     body: { contentType: 'text', content: readDescription(mutation.description) },
@@ -378,6 +375,16 @@ function createGraphEventBody(mutation: ConnectorCreateMutation) {
       { id: GRAPH_TIME_ZONE_PROPERTY_ID, value: timeZone },
     ],
   }
+}
+
+/**
+ * Returns the time zone a Graph write records the event's dates in.
+ *
+ * @param mutation - Work Item contents.
+ * @returns The Work Item calendar's IANA time zone, or `UTC`.
+ */
+function readGraphWriteTimeZone(mutation: ConnectorCreateMutation) {
+  return requireSchedule(mutation.schedule).timeZone ?? 'UTC'
 }
 
 /**
@@ -411,15 +418,19 @@ function readGoogleEvent(value: unknown): ConnectorExternalRecord {
  * Reads a Microsoft Graph event into a normalized record.
  *
  * @param value - Event resource.
+ * @param writtenTimeZone - Time zone a write just recorded. Create and update responses leave the
+ *   extended property out, so without it a UTC answer would be read a day early in Asia/Tokyo.
  * @returns The calendar-event record.
  */
-function readGraphEvent(value: unknown): ConnectorExternalRecord {
+function readGraphEvent(value: unknown, writtenTimeZone?: string): ConnectorExternalRecord {
   const event = requireObject(value, 'Microsoft Graph event')
   const properties = Array.isArray(event.singleValueExtendedProperties)
     ? event.singleValueExtendedProperties
     : []
   const originValue = readGraphProperty(properties, GRAPH_ORIGIN_PROPERTY_ID)
-  const timeZone = readTimeZone(readGraphProperty(properties, GRAPH_TIME_ZONE_PROPERTY_ID))
+  const timeZone = readTimeZone(
+    readGraphProperty(properties, GRAPH_TIME_ZONE_PROPERTY_ID) ?? writtenTimeZone,
+  )
   return {
     externalId: readEventId(event.id),
     resourceType: 'calendar-event',

@@ -906,6 +906,32 @@ test('rejects Public Work Item deletion while an incident schedule dependency ex
   expect(calls.issueDeletes).toEqual([])
 })
 
+test('refuses calendar dates longer than the planning horizon without writing them', async () => {
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    detailSchedule: createDefaultUnscheduledWorkItemSchedule(),
+  })
+  setTestAppDependencies(createInMemoryDeveloperPlatformAdapters())
+  const gateway = createCanonicalConnectorWorkItemGateway()
+  const workspaceId = 'user#demo@example.com'
+  const refused = await runWithTestAppDependencies(async () => {
+    const current = await gateway.get(workspaceId, 'core-team', 'onboarding-friction')
+    return gateway.applyExternal({
+      workspaceId,
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      actorUserId: 'demo@example.com',
+      expectedRevision: current.revision,
+      // An event over the planning horizon is dates the Work Item cannot take, not a failure.
+      patch: { schedule: { startDate: '2026-06-18', endDate: '2200-06-18' } },
+      operationId: 'calendar-move-over-horizon',
+    })
+  })
+
+  expect(refused).toMatchObject({ kind: 'rejected', reason: 'calendar-dates-invalid' })
+  expect(calls.issueUpdates).toEqual([])
+})
+
 test('refuses calendar dates for a Work Item with schedule dependencies without writing them', async () => {
   const calls = configureFakeProjectClients(true, { teamIssueCount: 2 })
   const planning = new InMemoryPlanningClient()

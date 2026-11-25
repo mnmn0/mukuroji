@@ -96,9 +96,7 @@ export function createWorkItemExternalLinksLabels(
 
   return {
     title: ja ? '外部リンク' : 'External links',
-    description: ja
-      ? 'Issue、merge request、commit、deploy、カレンダーの予定をこの Work Item と同期します。'
-      : 'Synchronize issues, merge requests, commits, deployments, and calendar events with this Work Item.',
+    description: t('workItems.externalLinks.description'),
     readOnly: ja ? '参照のみ' : 'Read only',
     loading: ja ? '外部リンクを読み込み中' : 'Loading external links',
     loadError: ja ? '外部リンクを読み込めませんでした。' : 'External links could not be loaded.',

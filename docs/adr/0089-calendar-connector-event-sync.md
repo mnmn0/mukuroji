@@ -30,10 +30,18 @@ Developer Platform には GitHub / GitLab 向けの connector の仕組み（OAu
   絞り、自分が作った予定だけを読む。outbound の origin marker も `mukurojiOrigin` に入れる。
 - `calendar-event` のリンクは Mukuroji が作った予定だけにする。作成では `externalId` と `externalUrl` を受け付けず
   （`400`）、Work Item の日付で予定を作ってからリンクする。既存の予定は印がなく poll で読めないため。
-  - Google では event ID を操作 ID の sha256 から決め、再送で 409 が返ったら同じ ID に PATCH する。
+  - Google では event ID を操作 ID の sha256 から決め、再送で 409 が返ったら同じ ID の予定を読んで返す。
+    最初の作成の後で誰かが予定を変えていることがあるため、書き込みはしない。
   - Outlook では `transactionId` を同じ値にする。
   - 予定の作成後にリンクの作成が失敗すると、予定だけが残ることがある。これは許容する。
+- 予定の題名と説明は Work Item が持つ。outbound の更新では日付と一緒に書き直し、予定側で変えた題名は
+  次の outbound で Work Item の題名に戻る。
 - Inbound の同期で変えるのは日付だけにする。予定の題名を変えても Work Item の題名は変えない。
+  - 予定の日付が最後に同期した日付のままなら（題名だけ変わった場合など）、Work Item は変えずに新しい ETag を
+    記録し、Work Item の日付がその後で変わっていれば予定へ書く。outbound が `412` になった場合も、予定を
+    読み直して日付が同期したままなら、新しい ETag でもう一度書く。
+  - Work Item の日付が最後に同期した日付のままなら（題名だけ変えた場合など）、読んだ Work Item の revision を
+    条件に予定の日付を反映する。
   - 期限だけの Work Item は、予定の最終日を期限にする。
   - 期間のある Work Item は、予定の期間に合わせて稼働日数を計算し直す。期間に稼働日がなければ拒否する。
   - 日付のない Work Item は、予定が 1 日なら期限、複数日なら期間にする。
@@ -49,18 +57,31 @@ Developer Platform には GitHub / GitLab 向けの connector の仕組み（OAu
   Work Item も変わっていれば競合として記録する。
 - 予定を作って link を保存したら、作成に使った Work Item の revision と作成した予定を link の最初の同期状態として
   保存する。最初の poll より前に Work Item の日付が変わっても、作成時の日付へ戻さない。
+  - 同期状態のないカレンダーの link を poll が先に読んだ場合は、その予定と今の Work Item revision を最初の
+    同期状態にし、日付が違えば（双方向なら）Work Item の日付を予定へ書く。予定は Mukuroji が Work Item から
+    作ったものなので、Work Item より新しい日付を持たない。
+  - 作成の再送が、最初の試行で古い日付から作った予定を返した場合は、その予定を同期済みとして保存しない。
+    最初の poll が上の規則で Work Item の日付を書く。
 - ETag は順序を持たないので、カレンダーの予定は保存済みの version と同じときだけ「変更なし」とみなす
   （他の connector の数値・文字列の大小比較は使わない）。
   順序がないため、poll は予定を読む前に各 link の同期状態の revision を控え、処理する時点で変わっていれば
   （その間に outbound の書き込みが確定した）その予定を古いとみなして飛ばし、次の poll で読み直す。
 - 競合の解決中に予定が動いた場合（`412`）は、予定を 1 件読み直して競合の外部側の値と version を新しくし、
   解決をやり直してもらう。競合中の link は poll されないので、ここで読み直さないと古い ETag のまま失敗し続ける。
+  - 予定を読んだ後に Work Item も読み直して競合に保存する。予定を読めなかった場合も Work Item 側は新しくする。
+    解決中に Work Item が変わって revision が合わなかった場合も同じく Work Item 側を新しくする。
+  - 競合の解決で予定に書くときは、link の向き（inbound だけの link を含む）にかかわらず、競合で表示した ETag を
+    条件にする。
+  - 解決の claim を取った後で競合を読み直し、読んだ時点から競合が新しくなっていれば何もせずに失敗させる。
+    同じ解決の再送は先の試行の claim を解放しない。
 - 日付の競合は「マージ」で開始日と終了日を選び直せる。カレンダーの競合のマージは `schedule` だけ、他の
   connector の競合のマージは title・description・status だけを受け付ける。
 - Google の PATCH は `start`・`end` を項目ごとにマージするので、`dateTime` と `timeZone` を `null` で消してから
   `date` を書く。カレンダーで時刻つきに変えられた予定も終日に戻る。
 - Graph は日時を UTC で返すよう `Prefer: outlook.timezone="UTC"` を送り、予定を書いたときの IANA time zone を
-  extended property `mukurojiTimeZone` に記録して、読むときにその time zone の日付へ戻す。
+  extended property `mukurojiTimeZone` に記録して、読むときにその time zone の日付へ戻す。作成・更新の応答には
+  この property が含まれないので、書いた time zone で読む。
+- 計画できる期間を超える長さの予定の日付は、稼働日のない日付と同じく拒否して競合にする。
 
 ## 検討した選択肢
 

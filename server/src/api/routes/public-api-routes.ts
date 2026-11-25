@@ -46,6 +46,7 @@ import {
   type TeamIssueResponseItem,
   type WorkItemIdempotencyTransaction,
   type WorkItemAuthorizationSnapshot,
+  WorkItemScheduleError,
 } from '../../modules/work-items'
 import {
   WorkspaceAccessError,
@@ -2847,6 +2848,11 @@ async function readConnectorScheduleChange(
     if (error instanceof ConnectorRuntimeError && error.code === 'ConnectorCalendarDatesInvalid') {
       return { kind: 'rejected', reason: 'calendar-dates-invalid' }
     }
+    // An event that spans more than the planning horizon is dates the Work Item cannot take, not
+    // a failure of the poll.
+    if (error instanceof WorkItemScheduleError && error.code === 'InvalidWorkItemScheduleRange') {
+      return { kind: 'rejected', reason: 'calendar-dates-invalid' }
+    }
     throw error
   }
   if (!changesWorkItemSchedulePlacement(schedule, current)) return { kind: 'accepted', schedule }
@@ -3205,6 +3211,13 @@ const lazyConnectorAuthorization: ConnectorAuthorizationService = {
     return (await requireConfiguredConnectorAuthorization())
       .resolveConflict(principal, conflictId, input)
   },
+  /**
+   * Creates the provider resource of a new link through the sync engine.
+   *
+   * @param input - Workspace, installation, Work Item, resource type, and operation ID.
+   * @returns The resource's ID and URL, and the baseline that pairs it with the Work Item
+   *   revision it was created from.
+   */
   async createLinkedResource(input) {
     const resource = await (await requireConfiguredConnectorSyncEngine()).createLinkedResource(input)
     return {
@@ -3213,6 +3226,13 @@ const lazyConnectorAuthorization: ConnectorAuthorizationService = {
       baseline: resource,
     }
   },
+  /**
+   * Records the baseline of a link created with `createLinkedResource` as its first synchronized
+   * state, carrying the Work Item revision the resource was created from.
+   *
+   * @param input - Workspace, created link, and baseline.
+   * @returns Nothing.
+   */
   async initializeLinkedResourceSync(input) {
     await (await requireConfiguredConnectorSyncEngine()).initializeLinkedResourceSync({
       workspaceId: input.workspaceId,
