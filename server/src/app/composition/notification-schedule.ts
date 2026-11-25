@@ -1,8 +1,10 @@
 import {
+  createDynamoDbMemberProjectReader,
   createDynamoDbProjectManagerReader,
   createDynamoDbScheduledWorkItemSource,
   createDynamoDbWeeklyReportRosterReader,
   createNotificationScheduleHandler,
+  type ScheduledMemberAccessExpiryReader,
 } from '../../modules/notifications'
 import { DynamoDbTenantAdministrationClient } from '../../modules/tenant-administration'
 import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
@@ -24,6 +26,36 @@ import type {
   NotificationScheduleEvent,
   NotificationScheduleResult,
 } from '../../modules/notifications/adapter-in/schedules/notification-schedule'
+
+/**
+ * Builds the reader of members whose access ends soon for the notification schedule.
+ *
+ * @param workspaceAccess - Lists members whose access ends at or before an instant.
+ * @param readMemberProjects - Reads a member's active Projects and their managers.
+ * @returns The reader the schedule uses for access expiry notices (ADR 0095).
+ */
+export function createMemberAccessExpiryReader(
+  workspaceAccess: Pick<DynamoDbWorkspaceAccessClient, 'listMembersWithAccessExpiringBefore'>,
+  readMemberProjects: ScheduledMemberAccessExpiryReader['readMemberProjects'],
+): ScheduledMemberAccessExpiryReader {
+  return {
+    async listMembersExpiringBetween(after, before) {
+      return (await workspaceAccess.listMembersWithAccessExpiringBefore(before))
+        .flatMap(({ workspaceId, member }) => {
+          const accessExpiresAt = member.accessExpiresAt
+          if (accessExpiresAt === undefined || Date.parse(accessExpiresAt) <= after.getTime()) return []
+          const displayName = member.name?.trim()
+          return [{
+            workspaceId,
+            memberKey: member.memberKey,
+            ...(displayName ? { displayName } : {}),
+            accessExpiresAt,
+          }]
+        })
+    },
+    readMemberProjects,
+  }
+}
 
 /** Runs retention independently so a Customer failure cannot suppress notifications. */
 export function createRetentionAwareNotificationScheduleHandler(
@@ -75,7 +107,8 @@ export function createProductionNotificationScheduleHandler() {
   const tenantAdministration = new DynamoDbTenantAdministrationClient(tenantAdministrationTableName, documentClient)
   const workspaceAccessTableName = environment.WORKSPACE_ACCESS_TABLE_NAME?.trim()
   if (!workspaceAccessTableName) throw new Error('WORKSPACE_ACCESS_TABLE_NAME is required.')
-  // Read-only: the schedule lists active members for their current display names (ADR 0074).
+  // Read-only: the schedule lists active members for their current display names (ADR 0074)
+  // and members whose access ends soon (ADR 0095).
   const workspaceAccess = new DynamoDbWorkspaceAccessClient(workspaceAccessTableName, documentClient)
   const notificationHandler = createNotificationScheduleHandler(
     documentClient,
@@ -107,6 +140,10 @@ export function createProductionNotificationScheduleHandler() {
       }),
       readMemberNames: createWorkspaceMemberNameReader(workspaceAccess),
     }),
+    createMemberAccessExpiryReader(
+      workspaceAccess,
+      createDynamoDbMemberProjectReader({ documentClient, tableName: projectDirectoryTableName }),
+    ),
   )
   return createRetentionAwareNotificationScheduleHandler(
     customerClient,

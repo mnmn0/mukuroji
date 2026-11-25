@@ -6,6 +6,7 @@ import { registerDocumentsRoutes } from './routes/documents-routes'
 import { registerAuthenticationRoutes } from './routes/authentication-routes'
 import { registerAccountSecurityRoutes } from './routes/account-security-routes'
 import { registerWorkspaceRoutes } from './routes/workspace-routes'
+import { registerWorkspaceMemberOffboardingRoutes } from './routes/workspace-member-offboarding-routes'
 import { registerAnalyticsRoutes } from './routes/analytics-routes'
 import { registerAuditRoutes } from './routes/audit-routes'
 import { registerTenantAdministrationRoutes } from './routes/tenant-administration-routes'
@@ -174,6 +175,7 @@ registerDocumentsRoutes(routeApp)
 registerAuthenticationRoutes(routeApp)
 registerAccountSecurityRoutes(routeApp)
 registerWorkspaceRoutes(routeApp)
+registerWorkspaceMemberOffboardingRoutes(routeApp)
 registerAnalyticsRoutes(routeApp)
 registerAuditRoutes(routeApp)
 registerTenantAdministrationRoutes(routeApp)

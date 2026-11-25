@@ -24,6 +24,9 @@ import {
   InMemoryPlanningClient,
 } from '../../../planning/planning'
 import {
+  createInMemoryDeveloperPlatformAdapters,
+} from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
+import {
   afterEach,
   expect,
   test,
@@ -355,7 +358,25 @@ test('binds member deactivation after private Document manager transfer to its A
   const calls = configureFakeProjectClients(true, {
     projectAccesses: [],
   })
+  const platform = createInMemoryDeveloperPlatformAdapters()
+  const ownKey = await platform.apiKeys.createApiKey({
+    workspaceId: 'user#demo@example.com',
+    createdByUserId: 'sato@example.com',
+    input: { name: 'Sato CI', scopes: ['work-items:read'] },
+  })
+  const otherKey = await platform.apiKeys.createApiKey({
+    workspaceId: 'user#demo@example.com',
+    createdByUserId: 'demo@example.com',
+    input: { name: 'Team CI', scopes: ['work-items:read'] },
+  })
+  const ownApp = await platform.oauthCredentials.createOAuthApp({
+    workspaceId: 'user#demo@example.com',
+    createdByUserId: 'sato@example.com',
+    input: { name: 'Sato sync', grantTypes: ['client_credentials'], scopes: ['work-items:read'] },
+  })
   setTestAppDependencies({
+    apiKeys: platform.apiKeys,
+    oauthCredentials: platform.oauthCredentials,
     documents: {
       ...createDocumentFake(),
       async getAuthorizationRevision() {
@@ -391,6 +412,14 @@ test('binds member deactivation after private Document manager transfer to its A
     memberKey: 'sato@example.com',
     status: 'deactivated',
   }])
+  // The deactivated member's API keys and OAuth apps are revoked; other members' keys are not.
+  const apiKeys = await platform.apiKeys.listApiKeys('user#demo@example.com')
+  expect(apiKeys.find((apiKey) => apiKey.id === ownKey.apiKey.id)?.status).toBe('revoked')
+  expect(apiKeys.find((apiKey) => apiKey.id === otherKey.apiKey.id)?.status).toBe('active')
+  expect((await platform.oauthCredentials.listOAuthApps('user#demo@example.com'))
+    .find((oauthApp) => oauthApp.id === ownApp.oauthApp.id)?.status).toBe('revoked')
+  await expect(platform.apiKeys.authenticateApiKey({ credential: ownKey.secret }))
+    .rejects.toThrow()
 })
 
 test('retries private Document manager validation when eligibility changes before the ACL snapshot', async () => {

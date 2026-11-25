@@ -10,6 +10,8 @@ import {
   calculateAuditExpiresAt,
   createAuditEvent,
   createMutationAuditContext,
+  createWorkspaceMemberAuditEntityId,
+  readWorkspaceAuditPseudonymKey,
 } from '../../../audit'
 import {
   createPlanningUpdateNextNotificationAtRecordKey,
@@ -45,6 +47,11 @@ import {
   type TimesheetReminderCandidate,
 } from '../../application/timesheet-reminders'
 import type { ScheduledWeeklyReportReader } from '../../application/ports/weekly-report-reminder-reader'
+import {
+  evaluateMemberAccessExpiryNotices,
+  type MemberAccessExpiryNoticeCandidate,
+  type ScheduledMemberAccessExpiryReader,
+} from '../../application/member-access-expiry-notices'
 import {
   evaluateWeeklyReportReminders,
   resolveWeeklyReportReminderRuns,
@@ -145,6 +152,16 @@ export type NotificationScheduleRunOptions = {
    * reminder is emitted.
    */
   weeklyReportReader?: ScheduledWeeklyReportReader
+  /**
+   * Reads members whose access ends soon and the Projects they belong to; without it no access
+   * expiry notice is emitted.
+   */
+  memberAccessExpiryReader?: ScheduledMemberAccessExpiryReader
+  /**
+   * Workspace Audit pseudonym key that names the member in an access expiry notice. Without it the
+   * key is read from `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` when a notice is due.
+   */
+  workspaceAuditPseudonymKey?: string
 }
 
 /** 期限通知 schedule の完了結果です。 */
@@ -276,6 +293,15 @@ export const WEEKLY_REPORT_REMINDER_REASON = 'weekly-report'
 /** Recipient reason of a weekly report escalation to a manager. */
 export const WEEKLY_REPORT_ESCALATION_REASON = 'weekly-report-escalation'
 
+/** Audit event type that tells a Project manager a member's access ends soon (ADR 0095). */
+export const MEMBER_ACCESS_EXPIRING_EVENT_TYPE = 'workspace-member.access-expiring'
+
+/** Recipient reason of a member access expiry notice to a Project manager. */
+export const MEMBER_ACCESS_EXPIRY_REASON = 'member-access-expiry'
+
+/** Days before a member's access ends when the managers of their Projects are told. */
+export const MEMBER_ACCESS_EXPIRY_NOTICE_DAYS = 7
+
 const scheduleActorId = 'system:notification-schedule'
 const scheduleActorMemberKey = 'system'
 const defaultScanPageSize = 100
@@ -293,6 +319,7 @@ const maximumPlanningNotificationOffsetHours = 24 * 365
  * @param reminderSettingsReader Optional Team and personal reminder override reader.
  * @param timesheetReader Optional unsubmitted time entry reader for timesheet reminders.
  * @param weeklyReportReader Optional roster and submission reader for weekly report reminders.
+ * @param memberAccessExpiryReader Optional reader of members whose access ends soon.
  * @returns An EventBridge-compatible notification schedule handler.
  */
 export function createNotificationScheduleHandler(
@@ -303,6 +330,7 @@ export function createNotificationScheduleHandler(
   reminderSettingsReader?: ScheduledReminderSettingsReader,
   timesheetReader?: ScheduledTimesheetReader,
   weeklyReportReader?: ScheduledWeeklyReportReader,
+  memberAccessExpiryReader?: ScheduledMemberAccessExpiryReader,
 ) {
   return async (
     event: NotificationScheduleEvent = {},
@@ -338,6 +366,7 @@ export function createNotificationScheduleHandler(
       ...(timesheetReader ? { timesheetReader } : {}),
       timesheetReminderHour: readTimesheetReminderHour(),
       ...(weeklyReportReader ? { weeklyReportReader } : {}),
+      ...(memberAccessExpiryReader ? { memberAccessExpiryReader } : {}),
       reminderPolicy: readReminderPolicyDefaultsFromEnvironment(),
     })
 }
@@ -611,6 +640,36 @@ export async function runNotificationSchedule(
       result,
       scanPageSize,
     })
+  }
+
+  // Managers learn a week ahead that a member's access ends, so they can hand work over. One
+  // notice per member, expiry, and manager; a changed expiry is announced again.
+  const memberAccessExpiryReader = options.memberAccessExpiryReader
+  if (memberAccessExpiryReader) {
+    const expiring = await memberAccessExpiryReader.listMembersExpiringBetween(
+      now,
+      new Date(now.getTime() + MEMBER_ACCESS_EXPIRY_NOTICE_DAYS * 86_400_000),
+    )
+    // Read only when a notice is due, so a run with no expiring member needs no key.
+    let pseudonymKey = options.workspaceAuditPseudonymKey
+    for (const member of expiring) {
+      const projects = await memberAccessExpiryReader.readMemberProjects(member.workspaceId, member.memberKey)
+      for (const candidate of evaluateMemberAccessExpiryNotices(member, projects)) {
+        pseudonymKey ??= readWorkspaceAuditPseudonymKey()
+        await putScheduledAuditEvent(
+          options.documentClient,
+          auditEventsTableName,
+          createMemberAccessExpiryAuditEvent(
+            candidate,
+            pseudonymKey,
+            now,
+            auditRetentionDays,
+            options.requestId,
+          ),
+          result,
+        )
+      }
+    }
   }
 
   // Weekly report reminders run last, so a failure here cannot hold back the other notifications
@@ -1413,6 +1472,94 @@ function createWeeklyReportReminderAuditEvent(
       weeklyReportWeekStart: candidate.weekStart,
       weeklyReportAuthorMemberKey: candidate.authorMemberKey,
       notificationCandidates: [{ memberKey: candidate.recipientMemberKey, reason }],
+    },
+    expiresAt: calculateAuditExpiresAt(occurredAt, auditRetentionDays),
+    outboxStatus: 'pending',
+  })
+}
+
+/**
+ * Creates the audit event that tells a Project manager a member's access ends soon.
+ *
+ * The event ID is derived from the Workspace, member, expiry, and recipient, so retries and
+ * later runs before the same expiry are duplicates. The notice is authorized against a Project
+ * the recipient manages and the member belongs to.
+ *
+ * @param candidate - Member, expiry, recipient, and Project.
+ * @param pseudonymKey - Workspace Audit pseudonym key.
+ * @param now - Schedule execution instant.
+ * @param auditRetentionDays - Audit event retention.
+ * @param requestId - Schedule execution ID.
+ * @returns Audit event row.
+ */
+function createMemberAccessExpiryAuditEvent(
+  candidate: MemberAccessExpiryNoticeCandidate,
+  pseudonymKey: string,
+  now: Date,
+  auditRetentionDays: number,
+  requestId?: string,
+) {
+  // Member keys are email addresses, so the entity ID is the keyed Workspace member pseudonym
+  // that every Audit writer uses for this member.
+  const entityId = createWorkspaceMemberAuditEntityId(
+    candidate.workspaceId,
+    candidate.memberKey,
+    pseudonymKey,
+  )
+  const occurredAt = now.toISOString()
+  const idempotencyDigest = createHash('sha256').update([
+    candidate.workspaceId,
+    entityId,
+    MEMBER_ACCESS_EXPIRING_EVENT_TYPE,
+    candidate.memberKey,
+    candidate.accessExpiresAt,
+    candidate.recipientMemberKey,
+  ].join('\0')).digest('hex')
+  const context = createMutationAuditContext({
+    workspaceId: candidate.workspaceId,
+    actor: {
+      id: scheduleActorId,
+      kind: 'system',
+      displayName: 'Mukuroji notification schedule',
+    },
+    idempotencyKey: `notification-schedule-v1:${idempotencyDigest}`,
+    occurredAt,
+    request: {
+      method: 'SCHEDULE',
+      path: '/internal/notification-schedule',
+      body: { entityId, projectId: candidate.projectId, reason: MEMBER_ACCESS_EXPIRY_REASON },
+    },
+    source: {
+      kind: 'system',
+      method: 'SCHEDULE',
+      route: '/internal/notification-schedule',
+      ...(requestId ? { requestId } : {}),
+    },
+  })
+  // The notice names the UTC calendar date of the expiry.
+  const date = candidate.accessExpiresAt.slice(0, 10)
+  const message = candidate.memberDisplayName
+    ? createNotificationMessage('workspace-member.access-expiring', { member: candidate.memberDisplayName, date })
+    : createNotificationMessage('workspace-member.access-expiring-unnamed', { date })
+  return createAuditEvent({
+    context,
+    eventType: MEMBER_ACCESS_EXPIRING_EVENT_TYPE,
+    entity: { type: 'member-access', id: entityId },
+    action: 'access-expiry-notice',
+    changes: [],
+    summary: formatNotificationMessage(message, 'en'),
+    metadata: {
+      notificationMessage: message,
+      actorMemberKey: scheduleActorMemberKey,
+      teamId: candidate.teamId,
+      // The recipient manages this Project and the member belongs to it.
+      projectId: candidate.projectId,
+      deepLink: `/teams/${encodeURIComponent(candidate.teamId)}/members`,
+      // The projection and the external channels reread this member's expiry before they notify,
+      // so a notice whose expiry was cleared or moved after this scan is dropped.
+      accessExpiryMemberKey: candidate.memberKey,
+      accessExpiresAt: candidate.accessExpiresAt,
+      notificationCandidates: [{ memberKey: candidate.recipientMemberKey, reason: MEMBER_ACCESS_EXPIRY_REASON }],
     },
     expiresAt: calculateAuditExpiresAt(occurredAt, auditRetentionDays),
     outboxStatus: 'pending',
