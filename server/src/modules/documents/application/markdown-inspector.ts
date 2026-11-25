@@ -290,20 +290,44 @@ function applyReferenceEdits(
 }
 
 /**
- * Tells whether Markdown starts a new top-level block at an offset.
+ * Tells whether two Markdown texts joined by a blank line keep the top-level blocks each has on its
+ * own: the same blocks starting at the same source, with the same list numbering and heading
+ * levels.
+ *
+ * @param previous - Markdown that comes first.
+ * @param next - Markdown that follows after a blank line.
+ * @returns Whether joining them changes neither.
+ */
+function keepsMarkdownBlocksApart(previous: string, next: string): boolean {
+  const apart = [
+    ...summarizeTopLevelBlocks(previous, 0),
+    ...summarizeTopLevelBlocks(next, previous.length + 2),
+  ]
+  const together = summarizeTopLevelBlocks(`${previous}\n\n${next}`, 0)
+  return together.length === apart.length && together.every((summary, index) => summary === apart[index])
+}
+
+/**
+ * Describes the top-level blocks of Markdown by kind, start, list numbering, and heading level.
  *
  * @param text - Markdown text.
- * @param offset - Offset to look at.
- * @returns Whether no top-level block starts before the offset and ends after it.
+ * @param shift - Offset added to the starts, where the text starts in a joined text.
+ * @returns One description per top-level block, in order.
  */
-function startsMarkdownBlockAt(text: string, offset: number): boolean {
+function summarizeTopLevelBlocks(text: string, shift: number): string[] {
   const root = parseMarkdown(text)
   const children = isMarkdownNodeRecord(root) && Array.isArray(root.children) ? root.children : []
-  return children.every((child: unknown) => {
-    if (!isMarkdownNodeRecord(child)) return false
+  return children.map((child: unknown) => {
+    if (!isMarkdownNodeRecord(child)) return 'unknown'
+    // Only the start is compared: where a block ends can take in trailing blank lines once joined.
     const start = readMarkdownOffset(child.position, 'start')
-    const end = readMarkdownOffset(child.position, 'end')
-    return start !== undefined && end !== undefined && (end <= offset || start >= offset)
+    return JSON.stringify([
+      child.type,
+      start === undefined ? null : start + shift,
+      child.ordered ?? null,
+      child.start ?? null,
+      child.depth ?? null,
+    ])
   })
 }
 
@@ -312,5 +336,5 @@ export const markdownInspector: MarkdownInspector = {
   findHtml: findMarkdownHtmlRanges,
   findOpenBlock: findMarkdownOpenBlock,
   localizeReferences: localizeMarkdownReferences,
-  startsBlockAt: startsMarkdownBlockAt,
+  keepsBlocksApart: keepsMarkdownBlocksApart,
 }

@@ -17,7 +17,7 @@ const plainMarkdownInspector: MarkdownInspector = {
   findHtml: () => [],
   findOpenBlock: () => undefined,
   localizeReferences: (text) => text,
-  startsBlockAt: () => true,
+  keepsBlocksApart: () => true,
 }
 
 test('reduces independent stale-base operations without mutating the input snapshot', () => {

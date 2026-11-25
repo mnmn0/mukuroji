@@ -7,6 +7,7 @@ import {
   titleFromMarkdownFileName,
 } from '../src/documents/model/markdownImport'
 import { DocumentHome } from '../src/documents/ui/DocumentHome'
+import { SafeMarkdown } from '../src/shared/ui/SafeMarkdown'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
 /**
@@ -341,5 +342,104 @@ describe('Markdown import', () => {
     )
     expect(withFolder).toContain('フォルダごと取り込む')
     expect(withFolder).toContain('フォルダを取り込む')
+  })
+})
+
+/**
+ * Markdown export of a page whose paragraph blocks use references, footnotes, and lists; pinned by
+ * the server's block-scoped export test, which also exports {@link BLOCK_SCOPED_IMPORT} back to it.
+ */
+const BLOCK_SCOPED_EXPORT = [
+  '# Document',
+  'See [guide](<https://example.com/a>).',
+  'See [guide](<https://example.com/b> "B \\& \\"t\\"").',
+  '[ref](</c d>) and [ref](</c d>) and [![pic](</i.png>)](</c d>)',
+  'text [nodef] here',
+  'note[^5-1]\n\n[^5-1]: first',
+  'other[^6-1]\n\n[^6-1]: second',
+  '1. Alpha',
+  '[mukuroji-block-boundary]: #',
+  '1. Beta',
+  '- a\n\n- b',
+  '[mukuroji-block-boundary]: #',
+  '- item',
+  '[mukuroji-block-boundary]: #',
+  '  continued',
+].join('\n\n') + '\n'
+
+/** Paragraph blocks of the exported page, as the app stores them before the export. */
+const BLOCK_SCOPED_ORIGINAL = [
+  'See [guide][ref].\n\n[ref]: https://example.com/a',
+  'See [guide][ref].\n\n[ref]: https://example.com/b "B & \\"t\\""',
+  '[ref][] and [ref] and [![pic][img]][ref]\n\n[ref]: </c d>\n[img]: /i.png',
+  'text [nodef] here',
+  'note[^n]\n\n[^n]: first',
+  'other[^n]\n\n[^n]: second',
+  '1. Alpha',
+  '1. Beta',
+  '- a\n\n- b',
+  '- item',
+  '  continued',
+]
+
+/** Paragraph blocks the import makes from {@link BLOCK_SCOPED_EXPORT}. */
+const BLOCK_SCOPED_IMPORT = [
+  'See [guide](<https://example.com/a>).',
+  'See [guide](<https://example.com/b> "B \\& \\"t\\"").',
+  '[ref](</c d>) and [ref](</c d>) and [![pic](</i.png>)](</c d>)',
+  'text [nodef] here',
+  'note[^5-1]\n\n[^5-1]: first',
+  'other[^6-1]\n\n[^6-1]: second',
+  '1. Alpha',
+  '1. Beta',
+  '- a\n\n- b',
+  '- item',
+  '  continued',
+]
+
+/**
+ * Renders paragraph Markdown as a Document page does, with footnote labels left out, since a
+ * label is not shown and only names the link between a footnote and its reference.
+ *
+ * @param markdown - Paragraph Markdown.
+ * @returns The rendered HTML.
+ */
+function renderParagraph(markdown: string) {
+  return renderToStaticMarkup(<SafeMarkdown bodyMarkdown={markdown} rawHtml="escape" />)
+    .replace(/(fn(?:ref)?-)[^"#]+/gu, '$1label')
+}
+
+describe('Markdown import of a file whose blocks reference each other', () => {
+  test('uses a reference definition from another part of the file as an inline link', () => {
+    expect(blocksOf('[guide][ref]\n\n[ref]: https://example.com')).toEqual([
+      { id: 'block-1', text: '[guide](<https://example.com>)', type: 'paragraph' },
+    ])
+    expect(blocksOf('![pic][img] and [x]\n\n[img]: /i.png "Pic"\n[x]: <a b>')).toEqual([
+      { id: 'block-1', text: '![pic](</i.png> "Pic") and [x](<a b>)', type: 'paragraph' },
+    ])
+  })
+
+  test('keeps a footnote definition with the block that uses it', () => {
+    expect(blocksOf('One[^a] and two[^b].\n\nMiddle\n\n[^a]: First\n\n[^b]: Second')).toEqual([
+      { id: 'block-1', text: 'One[^a] and two[^b].\n\n[^a]: First\n\n[^b]: Second', type: 'paragraph' },
+      { id: 'block-2', text: 'Middle', type: 'paragraph' },
+    ])
+  })
+
+  test('keeps a loose list in one block and drops the block boundary of an export', () => {
+    expect(blocksOf('- a\n\n- b\n\n[mukuroji-block-boundary]: #\n\n- c')).toEqual([
+      { id: 'block-1', text: '- a\n\n- b', type: 'paragraph' },
+      // The second item was scanned as its own block before it was joined, so it used an ID.
+      { id: 'block-3', text: '- c', type: 'paragraph' },
+    ])
+  })
+
+  test('reads an exported page back into blocks that render as the page did', () => {
+    const result = convert(BLOCK_SCOPED_EXPORT)
+    if (!result.ok) throw new Error(`conversion failed: ${result.code}`)
+    expect(result.title).toBe('Document')
+    expect(result.blocks.map((block) => block.type === 'paragraph' ? block.text : block.type))
+      .toEqual(BLOCK_SCOPED_IMPORT)
+    expect(BLOCK_SCOPED_IMPORT.map(renderParagraph)).toEqual(BLOCK_SCOPED_ORIGINAL.map(renderParagraph))
   })
 })

@@ -6008,36 +6008,31 @@ test('exports the text of an HTML node as literal Markdown that imports back unc
   expect(renderDocumentExport(imported, 'markdown', markdownInspector).content).toBe(exported)
 })
 
-test('keeps each paragraph block\'s references, footnotes, and indentation to itself in the export', () => {
+test('keeps each paragraph block\'s references, footnotes, and structure to itself in the export', () => {
   const page = createPage({
     blocks: [
-      { id: 'block-1', type: 'paragraph', text: '[guide][ref]\n\n[ref]: https://example.com/a' },
-      { id: 'block-2', type: 'paragraph', text: '[guide][ref]\n\n[ref]: https://example.com/b "B & \\"t\\""' },
-      { id: 'block-3', type: 'paragraph', text: '[ref][] and [ref] and [![pic][img]][ref]\n\n[ref]: </c d>\n[img]: /i.png' },
-      { id: 'block-4', type: 'paragraph', text: 'text [nodef] here' },
-      { id: 'block-5', type: 'paragraph', text: '[nodef]: https://example.com/leak' },
-      { id: 'block-6', type: 'paragraph', text: 'note[^n]\n\n[^n]: first' },
-      { id: 'block-7', type: 'paragraph', text: 'other[^n]\n\n[^n]: second' },
-      { id: 'block-8', type: 'paragraph', text: '- item' },
-      { id: 'block-9', type: 'paragraph', text: '[unused]: /u' },
-      { id: 'block-10', type: 'paragraph', text: '  continued' },
-    ],
+      'See [guide][ref].\n\n[ref]: https://example.com/a',
+      'See [guide][ref].\n\n[ref]: https://example.com/b "B & \\"t\\""',
+      '[ref][] and [ref] and [![pic][img]][ref]\n\n[ref]: </c d>\n[img]: /i.png',
+      'text [nodef] here',
+      '[nodef]: https://example.com/leak',
+      'note[^n]\n\n[^n]: first',
+      'other[^n]\n\n[^n]: second',
+      '1. Alpha',
+      '1. Beta',
+      '- a\n\n- b',
+      '- item',
+      '[unused]: /u',
+      '  continued',
+    ].map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
   })
   const exported = renderDocumentExport(page, 'markdown', markdownInspector).content
-  // A link or image that used a definition of its block becomes inline, and the definitions go,
-  // so the first definition of a label in the file no longer wins for every block.
-  const expectedBlocks = [
-    '[guide](<https://example.com/a>)',
-    '[guide](<https://example.com/b> "B \\& \\"t\\"")',
-    '[ref](</c d>) and [ref](</c d>) and [![pic](</i.png>)](</c d>)',
-    'text [nodef] here',
-    // The block that held only a definition shows nothing and is left out.
-    'note[^5-1]\n\n[^5-1]: first',
-    'other[^6-1]\n\n[^6-1]: second',
-    '- item',
-    '&#32;&#32;continued',
-  ]
-  expect(exported).toBe(`# Document\n\n${expectedBlocks.join('\n\n')}\n`)
+  // Links and images that used a definition of their block become inline and the definitions go,
+  // so the first definition of a label in the file no longer wins for every block. A block that
+  // held only a definition shows nothing and is left out. Footnotes get labels of their block.
+  // Neighbours that Markdown would read as one block, such as two lists, get a definition between
+  // them that shows nothing.
+  expect(exported).toBe(BLOCK_SCOPED_EXPORT)
   const links = readMarkdownNodes(exported)
     .filter((node) => node.type === 'link' || node.type === 'image')
     .map((node) => [node.type, node.url, node.title ?? null])
@@ -6055,18 +6050,57 @@ test('keeps each paragraph block\'s references, footnotes, and indentation to it
   expect(readMarkdownNodes(exported)
     .filter((node) => node.type === 'footnoteDefinition')
     .map((node) => node.identifier)).toEqual(['5-1', '6-1'])
-  // The indented block starts its own paragraph instead of continuing the list item.
-  expect(readMarkdownNodes(exported).filter((node) => node.type === 'listItem')).toHaveLength(1)
-  expect(readMarkdownText('&#32;&#32;continued')).toBe('  continued')
+  // Each block keeps its own lists: two lists numbered from 1, a loose list, and a list the
+  // indented paragraph does not continue.
+  const lists = readMarkdownNodes(exported).filter((node) => node.type === 'list')
+  expect(lists.map((node) => [node.ordered, node.start, Array.isArray(node.children) ? node.children.length : 0]))
+    .toEqual([[true, 1, 1], [true, 1, 1], [false, null, 2], [false, null, 1]])
+  expect(readMarkdownNodes(exported).at(-1)).toMatchObject({ type: 'text', value: 'continued' })
   expect(findMarkdownHtml(exported)).toEqual([])
 
-  // Exporting the exported blocks again gives the same file: inline links need no rewriting, and
-  // the footnote labels of a block are renamed to the same labels.
+  // Import drops the definitions and keeps a footnote with the block that uses it
+  // (web/test/documentsMarkdownImport.test.tsx imports this file into these blocks). Exporting the
+  // imported page gives the same file.
   const imported = createPage({
-    blocks: expectedBlocks.map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
+    blocks: BLOCK_SCOPED_IMPORT
+      .map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
   })
   expect(renderDocumentExport(imported, 'markdown', markdownInspector).content).toBe(exported)
 })
+
+/** Markdown export of the page in the block-scoped export test; the web import test reads it too. */
+const BLOCK_SCOPED_EXPORT = [
+  '# Document',
+  'See [guide](<https://example.com/a>).',
+  'See [guide](<https://example.com/b> "B \\& \\"t\\"").',
+  '[ref](</c d>) and [ref](</c d>) and [![pic](</i.png>)](</c d>)',
+  'text [nodef] here',
+  'note[^5-1]\n\n[^5-1]: first',
+  'other[^6-1]\n\n[^6-1]: second',
+  '1. Alpha',
+  '[mukuroji-block-boundary]: #',
+  '1. Beta',
+  '- a\n\n- b',
+  '[mukuroji-block-boundary]: #',
+  '- item',
+  '[mukuroji-block-boundary]: #',
+  '  continued',
+].join('\n\n') + '\n'
+
+/** Paragraph blocks the web import makes from {@link BLOCK_SCOPED_EXPORT}. */
+const BLOCK_SCOPED_IMPORT = [
+  'See [guide](<https://example.com/a>).',
+  'See [guide](<https://example.com/b> "B \\& \\"t\\"").',
+  '[ref](</c d>) and [ref](</c d>) and [![pic](</i.png>)](</c d>)',
+  'text [nodef] here',
+  'note[^5-1]\n\n[^5-1]: first',
+  'other[^6-1]\n\n[^6-1]: second',
+  '1. Alpha',
+  '1. Beta',
+  '- a\n\n- b',
+  '- item',
+  '  continued',
+]
 
 /**
  * Lists every node of parsed Markdown, outermost first.
@@ -6206,8 +6240,11 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
   // A fence left open is closed inside its own paragraph, so it cannot pair with the next one.
   expect(markdown.content).toContain('\n```\n```\n\n```\n<img src=x onerror=alert(1)>\n```\n')
   // An indented paragraph after a list would continue the list item and close its open fence once
-  // joined, so it is written as plain text that starts its own block.
-  expect(markdown.content).toContain('\n- ```\n\n&#32;&#32;\\`\\`\\`\n  \\<img src=x onerror=alert(2)\\>\n')
+  // joined, so a definition that shows nothing is written between them. The paragraph then stays
+  // the fenced code it is in the app, and its `<img>` stays code.
+  expect(markdown.content).toContain(
+    '\n- ```\n\n[mukuroji-block-boundary]: #\n\n  ```\n  <img src=x onerror=alert(2)>\n```\n',
+  )
   expect(markdown.content).toContain('\n## After\n')
   // The exported file has no raw HTML for any Markdown renderer.
   expect(findMarkdownHtml(markdown.content)).toEqual([])

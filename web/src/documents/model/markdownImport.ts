@@ -4,6 +4,11 @@ import type {
   DocumentHeadingBlock,
   DocumentTableRow,
 } from '@mukuroji/contracts'
+import {
+  readMarkdownImportStructure,
+  type MarkdownImportStructure,
+  type MarkdownLineRange,
+} from './markdownStructure'
 
 /**
  * Largest Markdown file the import accepts, in bytes. A stored page must fit
@@ -132,6 +137,12 @@ const THEMATIC_BREAK = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/u
 /** One cell of a table delimiter row, such as `---` or `:-:`. */
 const DELIMITER_CELL = /^:?-+:?$/u
 
+/**
+ * Markdown that can tie blank-separated parts of a file together: a reference or footnote
+ * definition, a footnote reference, or a list item.
+ */
+const MAY_SPAN_BLOCKS = /^ {0,3}\[|\[\^|^[ \t]*(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/mu
+
 /** Code-fence language identifiers the server accepts. */
 const SAFE_LANGUAGE = /^[A-Za-z0-9][A-Za-z0-9_+.-]{0,99}$/u
 
@@ -157,15 +168,28 @@ export function convertMarkdownToDocument(
   if (new TextEncoder().encode(source).length > MARKDOWN_IMPORT_MAX_BYTES) {
     return { ok: false, code: 'too-large' }
   }
-  const lines = source.replace(/^\uFEFF/u, '').split(/\r\n?|\n/u)
-  if (lines.every((line) => line.trim() === '')) {
+  const sourceLines = source.replace(/^\uFEFF/u, '').split(/\r\n?|\n/u)
+  if (sourceLines.every((line) => line.trim() === '')) {
     return { ok: false, code: 'empty' }
   }
-  const scanned = scanBlocks(lines, options.createId, options.resolveLink)
+  const text = sourceLines.join('\n')
+  // Each block is rendered on its own, so the file's reference definitions are applied before it
+  // is split, and blocks the file joins, such as a loose list or a footnote, are put back together.
+  // The file is parsed only when it has a definition, a footnote, or a list item, and only after a
+  // line scan with throwaway IDs has rejected oversized tables.
+  const spans = MAY_SPAN_BLOCKS.test(text)
+  if (spans) {
+    const checked = scanBlocks(sourceLines, () => 'unused', options.resolveLink)
+    if (!checked.ok) return checked
+  }
+  const structure = spans ? readMarkdownImportStructure(text) : undefined
+  const scanned = scanBlocks(structure?.text.split('\n') ?? sourceLines, options.createId, options.resolveLink)
   if (!scanned.ok) return scanned
+  let body = structure === undefined
+    ? scanned.blocks
+    : keepFileBlocksTogether(scanned.blocks, scanned.paragraphLines, structure)
 
   let title = options.fallbackTitle
-  let body = scanned.blocks
   let titleTaken = false
   const first = body[0]
   const topLevelCount = body.filter(
@@ -233,17 +257,21 @@ function scanBlocks(
   createId: (prefix: string) => string,
   resolveLink?: (href: string) => string | undefined,
 ):
-  | { ok: true; blocks: ScannedBlock[] }
+  | { ok: true; blocks: ScannedBlock[]; paragraphLines: Map<string, MarkdownLineRange> }
   | { ok: false; code: 'table-too-large' } {
   const blocks: ScannedBlock[] = []
+  /** Source lines of each paragraph block, by block ID. */
+  const paragraphLines = new Map<string, MarkdownLineRange>()
   /** Rewrites link targets with the resolver, or keeps the text as written. */
   const rewrite: LinkRewriter = resolveLink
     ? (raw) => rewriteLinkTargets(raw, resolveLink)
     : (raw) => raw
   let paragraph: string[] = []
+  let paragraphFirstLine = 0
   const flushParagraph = () => {
     if (paragraph.length === 0) return
     const raw = paragraph.join('\n')
+    const range = { first: paragraphFirstLine, last: paragraphFirstLine + paragraph.length - 1 }
     paragraph = []
     const link = readStandaloneLink(raw)
     const url = link
@@ -259,8 +287,10 @@ function scanBlocks(
       })
       return
     }
+    const id = createId('block')
+    paragraphLines.set(id, range)
     blocks.push({
-      id: createId('block'),
+      id,
       type: 'paragraph',
       // Paragraphs are shown as Markdown, so escapes such as `\*` stay to keep text literal.
       text: rewrite(raw),
@@ -355,11 +385,95 @@ function scanBlocks(
       continue
     }
 
+    if (paragraph.length === 0) paragraphFirstLine = index
     paragraph.push(line)
     index += 1
   }
   flushParagraph()
-  return { ok: true, blocks }
+  return { ok: true, blocks, paragraphLines }
+}
+
+/**
+ * Puts back together the paragraph blocks that the file joins but blank lines split: paragraphs
+ * of one top-level block, such as the items of a loose list, become one block, and a footnote
+ * definition is added to each block that uses it, since each block is rendered on its own.
+ *
+ * @param blocks - Scanned blocks, in order.
+ * @param paragraphLines - Source lines of each paragraph block, by block ID.
+ * @param structure - Structure of the whole file.
+ * @returns The blocks with split paragraphs joined and footnotes moved to their use.
+ */
+function keepFileBlocksTogether(
+  blocks: readonly ScannedBlock[],
+  paragraphLines: ReadonlyMap<string, MarkdownLineRange>,
+  structure: MarkdownImportStructure,
+): ScannedBlock[] {
+  const lines = new Map(paragraphLines)
+  const joined: ScannedBlock[] = []
+  for (const block of blocks) {
+    const previous = joined.at(-1)
+    const previousLines = previous?.type === 'paragraph' ? lines.get(previous.id) : undefined
+    const blockLines = block.type === 'paragraph' ? lines.get(block.id) : undefined
+    if (
+      previous?.type === 'paragraph' && block.type === 'paragraph' && previousLines && blockLines &&
+      structure.topLevelBlocks.some((range) => range.first <= previousLines.last && range.last >= blockLines.first)
+    ) {
+      joined[joined.length - 1] = {
+        ...previous,
+        text: `${previous.text}${'\n'.repeat(blockLines.first - previousLines.last)}${block.text}`,
+      }
+      lines.set(previous.id, { first: previousLines.first, last: blockLines.last })
+      continue
+    }
+    joined.push(block)
+  }
+
+  const paragraphs = joined.filter(isScannedParagraph)
+  /**
+   * Finds the paragraph block that holds a source line.
+   *
+   * @param line - Source line.
+   * @returns The block, or `undefined` when no paragraph block holds the line.
+   */
+  const paragraphAt = (line: number) => paragraphs.find((block) => {
+    const range = lines.get(block.id)
+    return range !== undefined && range.first <= line && line <= range.last
+  })
+  const attachments = new Map<string, string[]>()
+  const moved = new Set<string>()
+  for (const block of paragraphs) {
+    const range = lines.get(block.id)
+    if (!range) continue
+    const used = new Set(structure.footnoteReferences
+      .filter(({ line }) => range.first <= line && line <= range.last)
+      .map(({ identifier }) => identifier))
+    for (const identifier of used) {
+      const definition = structure.footnoteDefinitions.find((candidate) => candidate.identifier === identifier)
+      if (!definition || (range.first <= definition.first && definition.first <= range.last)) continue
+      const holder = paragraphAt(definition.first)
+      if (!holder || holder === block) continue
+      const attached = attachments.get(block.id) ?? []
+      if (!attached.includes(holder.id)) attachments.set(block.id, [...attached, holder.id])
+      moved.add(holder.id)
+    }
+  }
+  const textOf = new Map(paragraphs.map((block) => [block.id, block.text]))
+  return joined.flatMap((block): ScannedBlock[] => {
+    if (block.type !== 'paragraph') return [block]
+    if (moved.has(block.id) && !attachments.has(block.id)) return []
+    const attached = (attachments.get(block.id) ?? []).map((id) => textOf.get(id) ?? '')
+    return [{ ...block, text: [block.text, ...attached].join('\n\n') }]
+  })
+}
+
+/**
+ * Tells whether a scanned block is a paragraph.
+ *
+ * @param block - Scanned block.
+ * @returns Whether the block is a paragraph block.
+ */
+function isScannedParagraph(block: ScannedBlock): block is Extract<ScannedBlock, { type: 'paragraph' }> {
+  return block.type === 'paragraph'
 }
 
 /**

@@ -1203,6 +1203,8 @@ function renderMarkdown(
   markdown: MarkdownInspector,
 ): string {
   const parts = [`# ${escapeMarkdownText(title)}`]
+  /** Plain-text fallbacks of paragraph parts, by part index. */
+  const plainParts = new Map<number, string>()
   for (const block of blocks) {
     switch (block.type) {
       case 'paragraph': {
@@ -1213,15 +1215,8 @@ function renderMarkdown(
         const rendered = renderMarkdownParagraph(block.text, markdown, String(parts.length))
         // An empty paragraph, such as one that held only definitions, shows nothing and is left out.
         if (rendered === '') break
-        // An indented first line can continue the list or footnote of the block before it; such a
-        // paragraph is written as plain text that starts its own block. Only the block before needs
-        // checking, since no block before it is let continue into the next one.
-        const previous = `${parts.at(-1) ?? ''}\n\n`
-        parts.push(
-          /^[ \t]/u.test(rendered) && !markdown.startsBlockAt(`${previous}${rendered}`, previous.length)
-            ? renderPlainMarkdownParagraph(block.text)
-            : rendered,
-        )
+        plainParts.set(parts.length, renderPlainMarkdownParagraph(block.text))
+        parts.push(rendered)
         break
       }
       case 'heading':
@@ -1269,7 +1264,7 @@ function renderMarkdown(
   }
   // Each paragraph was checked on its own; the assembled file is checked again, so a construct
   // that spans blocks can never leave raw HTML. Only the `<br>` of table cells is expected.
-  return escapeMarkdownHtml(`${parts.join('\n\n')}\n`, (text) =>
+  return escapeMarkdownHtml(`${joinMarkdownBlocks(parts, plainParts, markdown)}\n`, (text) =>
     markdown.findHtml(text).filter(({ start, end }) => text.slice(start, end) !== '<br>'))
 }
 
@@ -1612,14 +1607,14 @@ export type MarkdownInspector = {
    */
   localizeReferences: (text: string, scope: string) => string | undefined
   /**
-   * Tells whether Markdown starts a new top-level block at an offset, so nothing before it
-   * continues into the text from there.
+   * Tells whether two Markdown texts joined by a blank line keep the top-level blocks each has on
+   * its own: the same number and kinds of blocks, and the same list numbering.
    *
-   * @param text - Markdown text.
-   * @param offset - Offset to look at.
-   * @returns Whether no top-level block spans the offset.
+   * @param previous - Markdown that comes first.
+   * @param next - Markdown that follows after a blank line.
+   * @returns Whether joining them changes neither.
    */
-  startsBlockAt: (text: string, offset: number) => boolean
+  keepsBlocksApart: (previous: string, next: string) => boolean
 }
 
 /**
@@ -1636,7 +1631,10 @@ function renderMarkdownParagraph(text: string, markdown: MarkdownInspector, scop
   // Each block is rendered on its own in the app, so its reference definitions and footnotes must
   // not reach the other blocks of the joined file.
   const localized = markdown.localizeReferences(text, scope)
-  if (localized === undefined) return renderPlainMarkdownParagraph(text)
+  // A shortcut reference named like the block boundary would link to it in the joined file.
+  if (localized === undefined || /mukuroji-block-boundary/iu.test(localized)) {
+    return renderPlainMarkdownParagraph(text)
+  }
   let rendered = escapeMarkdownHtml(localized, markdown.findHtml)
   let open = markdown.findOpenBlock(rendered)
   if (open?.closingFence !== undefined) {
@@ -1644,6 +1642,49 @@ function renderMarkdownParagraph(text: string, markdown: MarkdownInspector, scop
     open = markdown.findOpenBlock(rendered)
   }
   return open === undefined ? rendered : renderPlainMarkdownParagraph(text)
+}
+
+/**
+ * Reference definition written between two blocks that Markdown would otherwise read as one, such
+ * as two lists. A definition shows nothing and ends every list, quote, and footnote before it, so
+ * each block keeps the structure it has in the app; import drops it with the other definitions.
+ */
+const MARKDOWN_BLOCK_BOUNDARY = '[mukuroji-block-boundary]: #'
+
+/**
+ * Joins the Markdown of the blocks with blank lines, so each block keeps the structure it has on
+ * its own, as the app renders every block separately. Where two neighbours would merge, such as
+ * two lists or an indented paragraph after a list, {@link MARKDOWN_BLOCK_BOUNDARY} is written
+ * between them; a paragraph that still merges is written as plain text. Only neighbours are
+ * compared, since no block is let continue into the next one.
+ *
+ * @param parts - Markdown of each block, in order.
+ * @param plainParts - Plain-text fallbacks of paragraph parts, by index.
+ * @param markdown - Reads Markdown with the app's Markdown grammar.
+ * @returns The joined Markdown.
+ */
+function joinMarkdownBlocks(
+  parts: readonly string[],
+  plainParts: ReadonlyMap<number, string>,
+  markdown: MarkdownInspector,
+): string {
+  const joined: string[] = []
+  for (const [index, part] of parts.entries()) {
+    const previous = joined.at(-1)
+    if (previous === undefined || markdown.keepsBlocksApart(previous, part)) {
+      joined.push(part)
+      continue
+    }
+    if (
+      markdown.keepsBlocksApart(previous, MARKDOWN_BLOCK_BOUNDARY) &&
+      markdown.keepsBlocksApart(MARKDOWN_BLOCK_BOUNDARY, part)
+    ) {
+      joined.push(MARKDOWN_BLOCK_BOUNDARY, part)
+      continue
+    }
+    joined.push(plainParts.get(index) ?? part)
+  }
+  return joined.join('\n\n')
 }
 
 /**
