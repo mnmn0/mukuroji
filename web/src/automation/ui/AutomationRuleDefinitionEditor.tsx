@@ -1060,7 +1060,7 @@ function DryRunSection({ canRun, draft, onDryRun, options, rule, t }: DryRunSect
             onChange={(event) => setWorkItemId(event.target.value)}
             onKeyDown={(event) => {
               // The section sits inside the save form; Enter here runs the dry run instead of saving.
-              if (event.key !== 'Enter') return
+              if (event.key !== 'Enter' || event.nativeEvent.isComposing) return
               event.preventDefault()
               if (!running) void run()
             }}
