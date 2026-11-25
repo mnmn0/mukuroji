@@ -1025,9 +1025,9 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         const current = await resolveWriter(credential, teamId)
         const latest = await loadAuthorizedTeamIssue(current, teamId, workItemId, 'member')
         const latestSettings = await store.getSettings(principal.directoryId, teamId)
+        requireAcceptingNewRuns(latestSettings)
         // A change of assignee, status, or revision is reported as such.
         requireResumable(principal, latest.detail.issue, detail.issue.revision, latestSettings.resumableStatusIds)
-        requireAcceptingNewRuns(latestSettings)
         if (latestSettings.revision !== settings.revision) {
           throw new AgentRunError('conflict', 'Agent settings changed during the request. Retry the resume.')
         }
