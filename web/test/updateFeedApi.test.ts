@@ -51,3 +51,31 @@ test('accepts explained personal signals and rejects corrupt attention without r
     await expect(getUpdateFeed('session', 'for-me')).rejects.toMatchObject({ status: 502 })
   }
 })
+
+test('rejects a corrupt acknowledgement even on an entry without a published update', async () => {
+  const [published] = updateFeedFixture.entries
+  if (!published) throw new Error('The Update Feed fixture requires one entry.')
+  const acknowledgement = { memberKey: 'lead@example.com', acknowledgedAt: '2026-08-11T09:00:00Z' }
+  const acknowledged = { ...updateFeedFixture, entries: [{ ...published, acknowledgement }] }
+  globalThis.fetch = async () => Response.json(acknowledged)
+  expect(await getUpdateFeed('session', 'for-me')).toEqual(acknowledged)
+
+  const unpublished = {
+    target: published.target,
+    title: published.title,
+    health: published.health,
+    updateState: 'missing',
+    relevance: published.relevance,
+    reasons: published.reasons,
+  }
+  globalThis.fetch = async () => Response.json({ ...updateFeedFixture, entries: [unpublished] })
+  expect((await getUpdateFeed('session', 'for-me')).entries).toEqual([unpublished])
+  for (const entry of [
+    { ...published, acknowledgement: { memberKey: 'lead@example.com', acknowledgedAt: 'invalid' } },
+    { ...unpublished, acknowledgement: {} },
+    { ...unpublished, acknowledgement },
+  ]) {
+    globalThis.fetch = async () => Response.json({ ...updateFeedFixture, entries: [entry] })
+    await expect(getUpdateFeed('session', 'for-me')).rejects.toMatchObject({ status: 502 })
+  }
+})

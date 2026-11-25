@@ -5,6 +5,7 @@ export {
   InMemoryTimeTrackingRepository,
   TimeTrackingError,
   TimeTrackingService,
+  splitTimeEntryByLocalDate,
   type CloseTimePeriodInput,
   type CreateTimeEntryInput,
   type ListTimeEntriesInput,

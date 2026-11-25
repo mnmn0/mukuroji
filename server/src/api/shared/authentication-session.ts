@@ -22,6 +22,7 @@ import {
 } from './enterprise-access'
 import { createWorkspaceMutationContext, type ProjectPrincipal } from './project-access'
 import { getEnv } from './runtime-config'
+import { recordSignInSucceeded } from './sign-in-audit'
 import { decodeJwtPayload, readNumericClaim, readUserAttribute } from './token-claims'
 
 /**
@@ -30,7 +31,8 @@ import { decodeJwtPayload, readNumericClaim, readUserAttribute } from './token-c
 export type AuthenticationSessionContinuation = {
   /**
    * Access token the client used before the refresh; it may already be expired. Absent when the
-   * client did not send one, so nothing carries over.
+   * client did not send one, so nothing carries over. A refresh without it still passes a
+   * continuation, so it is not recorded as a new sign-in.
    */
   previousAccessToken?: string
 }
@@ -126,6 +128,8 @@ export async function createAuthenticationResponse(
         expiresAt,
       })
     }
+    // A refresh keeps the session of an earlier sign-in, so only a new session is recorded.
+    if (!continuation) await recordSignInSucceeded(c, principal, authenticationMethods)
   }
 
   return {

@@ -14,10 +14,11 @@ import { TeamMonthlySummaryContainer } from '../../features/time-tracking/ui/Tea
 import { TeamWeeklyReportsContainer } from '../../features/time-tracking/ui/TeamWeeklyReportsContainer'
 import { TeamWeeklySummaryContainer } from '../../features/time-tracking/ui/TeamWeeklySummaryContainer'
 import { TimeApprovalQueueContainer } from '../../features/time-tracking/ui/TimeApprovalQueueContainer'
+import { TimePeriodCloseContainer } from '../../features/time-tracking/ui/TimePeriodCloseContainer'
 import { TimeReportContainer } from '../../features/time-tracking/ui/TimeReportContainer'
 import { TimeTrackingViewTabs, type TimeTrackingView } from '../../features/time-tracking/ui/TimeTrackingViewTabs'
 import { selectIndirectTimeEntryTargets, selectTimeEntryWorkItemChoices } from '../../features/time-tracking/model/timeEntryWorkItemOptions'
-import { resolveWeekStart, shiftWeek } from '../../features/time-tracking/model/timePeriod'
+import { resolveBrowserTimeZone, resolveWeekStart, shiftWeek } from '../../features/time-tracking/model/timePeriod'
 import { useTeamMonthlySummary, useTeamWeeklySummary } from '../../features/time-tracking/queries/useWeeklyReports'
 import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import { useWorkspaceTimeEntryCategories } from '../../workspace/queries/useWorkspaceTimeEntryCategories'
@@ -74,6 +75,7 @@ export function TeamTimeTrackingPage() {
   const viewParam = searchParams.get('view')
   const view: TimeTrackingView = viewParam === 'approvals' ||
     viewParam === 'report' ||
+    viewParam === 'periods' ||
     viewParam === 'weekly-report' ||
     viewParam === 'team-weekly-reports' ||
     viewParam === 'weekly-summary' ||
@@ -110,7 +112,7 @@ export function TeamTimeTrackingPage() {
   // The weekly and monthly summaries are counted on the server, so they do not read the Team's Work Items here.
   const workItems = useWorkspaceWorkItems(
     accessToken,
-    enabled && view !== 'weekly-summary' && view !== 'monthly-summary',
+    enabled && view !== 'weekly-summary' && view !== 'monthly-summary' && view !== 'periods',
     false,
     teamWorkItemFilter,
   )
@@ -224,6 +226,7 @@ export function TeamTimeTrackingPage() {
     if (candidate === 'report') {
       return createTeamTimeTrackingPath(teamId, 'report', undefined, { ...reportRange, groupBy: reportGroupBy })
     }
+    if (candidate === 'periods') return createTeamTimeTrackingPath(teamId, 'periods')
     if (candidate === 'monthly-summary') return createTeamTimeTrackingPath(teamId, 'monthly-summary', requestedMonth === null ? undefined : month)
     if (candidate === 'weekly-report' && exactReportWeekDay !== undefined) {
       return createTeamTimeTrackingPath(teamId, 'weekly-report', reportWeekStart, undefined, true)
@@ -282,6 +285,14 @@ export function TeamTimeTrackingPage() {
               projects={teamProjects}
               range={reportRange}
               teamId={teamId}
+            />
+          ) : view === 'periods' ? (
+            <TimePeriodCloseContainer
+              accessToken={accessToken}
+              key={`${teamId}:periods`}
+              locale={workspace.locale}
+              teamId={teamId}
+              timeZone={workspace.timeZone ?? resolveBrowserTimeZone()}
             />
           ) : view === 'monthly-summary' ? (
             <TeamMonthlySummaryContainer

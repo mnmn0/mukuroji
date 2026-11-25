@@ -35,6 +35,51 @@ export type PublicTeamProject = {
   plannedEndDate?: string
 }
 
+/** Workspace member named in a Project charter, as `GET /api/v1/projects/{projectId}/charter` returns it. */
+export type PublicProjectCharterPerson = {
+  /** Workspace member ID of the person. */
+  memberId: string
+  /** Name or email captured when the charter was saved. */
+  displayName: string
+}
+
+/**
+ * Response of `GET /api/v1/projects/{projectId}/charter`: the same charter and lifecycle state the
+ * Web charter panel shows.
+ */
+export type PublicProjectCharter = {
+  /** Response schema version. */
+  schemaVersion: 1
+  /** Team that owns the Project. */
+  teamId: string
+  /** Project whose charter is returned. */
+  projectId: string
+  /** Lifecycle state of the Project. */
+  lifecycleState: ProjectLifecycleState
+  /** Revision shared by charter and lifecycle changes. */
+  revision: number
+  /** ISO 8601 timestamp of the last charter or lifecycle change, when one was recorded. */
+  updatedAt?: string
+  /** Workspace-unique Project code. */
+  code?: string
+  /** What the Project delivers. */
+  description?: string
+  /** Why the Project exists. */
+  purpose?: string
+  /** Accountable Project manager. */
+  owner?: PublicProjectCharterPerson
+  /** Sponsor who approved or funds the Project. */
+  sponsor?: PublicProjectCharterPerson
+  /** Planned start date in `YYYY-MM-DD`. */
+  plannedStartDate?: string
+  /** Planned end date in `YYYY-MM-DD`. */
+  plannedEndDate?: string
+  /** Classification tags in the order they were entered. */
+  tags: string[]
+  /** Related source repository HTTPS URLs. */
+  repositoryUrls: string[]
+}
+
 /** Team listed by `GET /api/v1/teams`, with the Projects in it the credential owner can view. */
 export type PublicTeam = {
   /** Team ID, used as `teamId` by the other Public API operations. */

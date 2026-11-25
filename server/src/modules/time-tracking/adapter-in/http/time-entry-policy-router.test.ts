@@ -44,6 +44,8 @@ function createFixture(scope: { canManage: boolean; wholeTeam: boolean }, timeZo
     canManageRates: async () => scope.canManage,
     getAccessibleProjectIds: async () => undefined,
     canManageWholeTeam: async () => scope.wholeTeam,
+    canManageWorkspacePeriods: async () => false,
+    listWorkspaceTeams: async () => [],
     getManagedProjectIds: async () => undefined,
     verifyProject: async () => {},
     verifyWorkItem: async () => undefined,

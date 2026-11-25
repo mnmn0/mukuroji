@@ -3,6 +3,8 @@ import type {
   PlanningHealth,
   PlanningUpdateState,
   PlanningUpdateTargetSummary,
+  ProjectCustomerLinks,
+  ProjectLinkedCustomer,
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../api/directory'
 import { ResponsiveDisclosure } from '../../shared/ui/ResponsiveDisclosure'
@@ -87,6 +89,8 @@ export type ProjectDirectoryViewProps = {
   planningUpdateTargets?: readonly PlanningUpdateTargetSummary[]
   /** Opens the selected Project's Planning update detail. */
   onOpenPlanningUpdate?: (project: ProjectDirectoryRow) => void
+  /** Customers linked to each Project by Customer Requests, when the viewer may read Customers. */
+  projectCustomerLinks?: readonly ProjectCustomerLinks[]
 }
 
 const statusFilters: readonly ProjectDirectoryStatusFilter[] = [
@@ -184,6 +188,7 @@ export function ProjectDirectoryView({
   onTeamChange,
   onToggleQuickAccess,
   planningUpdateTargets = [],
+  projectCustomerLinks = [],
 }: ProjectDirectoryViewProps) {
   const [archiveTarget, setArchiveTarget] = useState<ProjectDirectoryRow>()
   const [isArchiving, setIsArchiving] = useState(false)
@@ -405,6 +410,7 @@ export function ProjectDirectoryView({
                 key={row.key}
                 project={row}
                 planningUpdate={findProjectPlanningUpdate(planningUpdateTargets, row)}
+                linkedCustomers={projectCustomerLinks.find((links) => links.projectId === row.projectId)?.customers}
                 t={t}
                 onArchiveProject={onArchiveProject
                   ? () => {
@@ -473,6 +479,8 @@ type ProjectDirectoryListRowProps = {
   project: ProjectDirectoryRow
   /** Latest/cadence projection for this Team-qualified Project. */
   planningUpdate?: PlanningUpdateTargetSummary
+  /** Customers linked to the Project by Customer Requests. */
+  linkedCustomers?: readonly ProjectLinkedCustomer[]
   /** Whether a quick-access request is currently being persisted. */
   isQuickAccessSaving: boolean
   /** Whether Quick Access is not ready and the star cannot be changed. */
@@ -489,6 +497,27 @@ type ProjectDirectoryListRowProps = {
   onArchiveProject?: () => void
 }
 
+/** Number of linked Customer names a directory row shows before summarizing the rest. */
+const LINKED_CUSTOMER_NAMES_SHOWN = 2
+
+/**
+ * Joins the first linked Customer names and counts the rest.
+ *
+ * @param customers - Customers linked to the Project, ordered by name.
+ * @param t - Translator for the remainder label.
+ * @returns Names such as `Acme, Globex +2`.
+ */
+function formatLinkedCustomerNames(
+  customers: readonly ProjectLinkedCustomer[],
+  t: (key: MessageKey) => string,
+): string {
+  const names = customers.slice(0, LINKED_CUSTOMER_NAMES_SHOWN).map((customer) => customer.name).join(', ')
+  const rest = customers.length - LINKED_CUSTOMER_NAMES_SHOWN
+  return rest > 0
+    ? `${names} ${formatProjectDirectoryMessage(t('projects.directory.customersMore'), { count: String(rest) })}`
+    : names
+}
+
 /**
  * Renders one Project row without duplicating its content for mobile layouts.
  *
@@ -500,6 +529,7 @@ function ProjectDirectoryListRow({
   isQuickAccessUnavailable,
   project,
   planningUpdate,
+  linkedCustomers = [],
   t,
   onArchiveProject,
   onOpenProject,
@@ -581,6 +611,17 @@ function ProjectDirectoryListRow({
           {project.code ? (
             <span className="rounded-full border border-[var(--workbench-border)] px-2 py-0.5 font-mono text-[11px] font-semibold text-[var(--workbench-muted)]">
               {project.code}
+            </span>
+          ) : null}
+          {linkedCustomers.length > 0 ? (
+            <span
+              className="max-w-full truncate rounded-full border border-[var(--workbench-border)] px-2 py-0.5 text-[11px] font-semibold text-[var(--workbench-muted)]"
+              data-testid={`project-customers-${project.teamId}-${project.projectId}`}
+              title={linkedCustomers.map((customer) => customer.name).join(', ')}
+            >
+              {formatProjectDirectoryMessage(t('projects.directory.customers'), {
+                names: formatLinkedCustomerNames(linkedCustomers, t),
+              })}
             </span>
           ) : null}
           <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${planningUpdateHealthClassNames[updateHealth]}`}>

@@ -35,6 +35,9 @@ import {
   type TimeEntrySource,
   type TimeEntryStatus,
   type TimePeriodClose,
+  type WorkspaceTimePeriodResult,
+  type WorkspaceTimePeriodTeamResult,
+  type WorkspaceTimePeriodTeamState,
   type TimeRateCard,
   type TimeRateCardJobRoleRate,
   type TimeRateCardMemberRate,
@@ -552,6 +555,48 @@ export type ReopenTimePeriodInput = {
   idempotencyKey?: string
 }
 
+/** A request to close one month for every listed Team of a Workspace. */
+export type CloseWorkspaceTimePeriodInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Teams of the Workspace whose month is closed. */
+  teamIds: readonly string[]
+  /** Month to close as `YYYY-MM`. */
+  month: string
+  /** IANA timezone that defines the month boundaries for every Team. */
+  timeZone: string
+  /** Workspace administrator closing the month. */
+  actorUserId: string
+  /**
+   * Read-only checks on the caller's authorization rows, committed with each Team's close so a
+   * caller whose Workspace role changed during the loop stops closing the remaining Teams.
+   */
+  authorizationConditionChecks?: readonly TimeTrackingAuthorizationConditionCheck[]
+  /** Correlation ID of the request, written to the log of each Team that fails. */
+  correlationId?: string
+}
+
+/** A request to reopen one month for every listed Team of a Workspace. */
+export type ReopenWorkspaceTimePeriodInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Teams of the Workspace whose month is reopened. */
+  teamIds: readonly string[]
+  /** Closed month as `YYYY-MM`. */
+  month: string
+  /** Workspace administrator reopening the month. */
+  actorUserId: string
+  /** Required explanation recorded in each Team's audit event. */
+  reason: string
+  /**
+   * Read-only checks on the caller's authorization rows, committed with each Team's reopen so a
+   * caller whose Workspace role changed during the loop stops reopening the remaining Teams.
+   */
+  authorizationConditionChecks?: readonly TimeTrackingAuthorizationConditionCheck[]
+  /** Correlation ID of the request, written to the log of each Team that fails. */
+  correlationId?: string
+}
+
 /** Configuration for appending time-tracking mutations to the shared audit table. */
 export type TimeTrackingAuditOptions = {
   /** Shared audit events table name. */
@@ -742,8 +787,13 @@ export interface TimeTrackingRepository {
     idempotencyPut?: AuditTransactWriteItem,
     periodGuard?: TimePeriodGuard,
   ): Promise<void>
-  /** Reads a Team or Project budget. */
-  getBudget(workspaceId: string, scopeType: 'team' | 'project', scopeId: string): Promise<TimeBudget | undefined>
+  /**
+   * Reads a Team or Project budget.
+   *
+   * Project IDs are unique only within their Team, so a Project budget is read by the Team and
+   * Project pair.
+   */
+  getBudget(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string): Promise<TimeBudget | undefined>
   /** Saves a Team or Project budget with optimistic concurrency and optional audit. */
   saveBudget(budget: TimeBudget, expectedRevision: number, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
   /** Reads a Team's rate card. */
@@ -758,9 +808,19 @@ export interface TimeTrackingRepository {
   /** Lists the closed months of a Team in month order. */
   listPeriodCloses(workspaceId: string, teamId: string): Promise<TimePeriodClose[]>
   /** Stores a month close and rejects a month that is already closed. */
-  createPeriodClose(close: TimePeriodClose, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
+  createPeriodClose(
+    close: TimePeriodClose,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+    authorizationChecks?: readonly TimeTrackingAuthorizationConditionCheck[],
+  ): Promise<void>
   /** Removes a month close only while it is the same close that was read. */
-  deletePeriodClose(close: TimePeriodClose, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
+  deletePeriodClose(
+    close: TimePeriodClose,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+    authorizationChecks?: readonly TimeTrackingAuthorizationConditionCheck[],
+  ): Promise<void>
   /** Reads a Team's time entry policy, or undefined while the Team uses the defaults. */
   getEntryPolicy(workspaceId: string, teamId: string): Promise<StoredTeamTimeEntryPolicy | undefined>
   /** Saves a Team's time entry policy with optimistic concurrency and optional audit. */
@@ -1459,6 +1519,31 @@ export class TimeTrackingService {
     )
   }
 
+  /**
+   * Reads the budget of a Team or of one Project of the Team.
+   *
+   * The caller has already decided that the reader may see the amount.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team that owns the scope.
+   * @param scopeType - Budget scope.
+   * @param scopeId - Team or Project identifier.
+   * @returns The budget, or undefined when none is stored.
+   */
+  async getBudget(
+    workspaceId: string,
+    teamId: string,
+    scopeType: 'team' | 'project',
+    scopeId: string,
+  ): Promise<TimeBudget | undefined> {
+    return await this.repository.getBudget(
+      readIdentifier(workspaceId, 'Workspace ID'),
+      readIdentifier(teamId, 'Team ID'),
+      scopeType,
+      readIdentifier(scopeId, 'Budget scope ID'),
+    )
+  }
+
   /** Saves a budget without the public idempotency wrapper. */
   private async saveBudgetInternal(
     input: SaveTimeBudgetInput,
@@ -1483,7 +1568,7 @@ export class TimeTrackingService {
     if (input.periodFrom && input.periodTo && input.periodFrom > input.periodTo) {
       throw new TimeTrackingError(400, 'InvalidBudgetPeriod', 'Budget period start must not be after its end.')
     }
-    const current = await this.repository.getBudget(workspaceId, input.scopeType, scopeId)
+    const current = await this.repository.getBudget(workspaceId, resolvedTeamId, input.scopeType, scopeId)
     if (current && current.revision !== expectedRevision) {
       throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
     }
@@ -1493,6 +1578,7 @@ export class TimeTrackingService {
     const budget: TimeBudget = {
       schemaVersion: 1,
       workspaceId,
+      teamId: resolvedTeamId,
       scopeType: input.scopeType,
       scopeId,
       amountMinor,
@@ -1709,6 +1795,7 @@ export class TimeTrackingService {
   private async closePeriodInternal(
     input: CloseTimePeriodInput,
     completion?: TimeTrackingIdempotencyCompletion,
+    authorizationChecks: readonly TimeTrackingAuthorizationConditionCheck[] = [],
   ): Promise<TimePeriodClose> {
     validateTimeZone(input.timeZone)
     const close: TimePeriodClose = {
@@ -1724,7 +1811,7 @@ export class TimeTrackingService {
     monthBounds(close.month, close.timeZone)
     const auditPut = this.createPeriodAuditPut(close, 'closed', close.closedBy, input.idempotencyKey ?? this.createId(), close.closedAt)
     const idempotencyPut = completion ? await completion(close) : undefined
-    await this.repository.createPeriodClose(close, auditPut, idempotencyPut)
+    await this.repository.createPeriodClose(close, auditPut, idempotencyPut, authorizationChecks)
     return close
   }
 
@@ -1750,6 +1837,7 @@ export class TimeTrackingService {
   private async reopenPeriodInternal(
     input: ReopenTimePeriodInput,
     completion?: TimeTrackingIdempotencyCompletion,
+    authorizationChecks: readonly TimeTrackingAuthorizationConditionCheck[] = [],
   ): Promise<TimePeriodClose> {
     const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
     const teamId = readIdentifier(input.teamId, 'Team ID')
@@ -1770,8 +1858,101 @@ export class TimeTrackingService {
       reason,
     )
     const idempotencyPut = completion ? await completion(close) : undefined
-    await this.repository.deletePeriodClose(close, auditPut, idempotencyPut)
+    await this.repository.deletePeriodClose(close, auditPut, idempotencyPut, authorizationChecks)
     return close
+  }
+
+  /**
+   * Reads one month's close state for every listed Team of a Workspace.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamIds - Teams to read.
+   * @param month - Month as `YYYY-MM`.
+   * @returns Each Team with its close, in Team order.
+   */
+  async listWorkspacePeriodCloses(
+    workspaceId: string,
+    teamIds: readonly string[],
+    month: string,
+  ): Promise<WorkspaceTimePeriodTeamState[]> {
+    const resolvedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
+    const resolvedMonth = readMonth(month)
+    return await Promise.all(readWorkspaceTeamIds(teamIds).map(async (teamId) => {
+      const close = (await this.repository.listPeriodCloses(resolvedWorkspaceId, teamId))
+        .find((candidate) => candidate.month === resolvedMonth)
+      return close ? { teamId, close } : { teamId }
+    }))
+  }
+
+  /**
+   * Closes one month for every listed Team, recording each Team's close in its own audit event.
+   *
+   * A Team whose month is already closed keeps its close. A Team that fails is reported, and the
+   * other Teams are still closed, so a retry closes only what is left.
+   *
+   * @param input - Teams, month, timezone, and closing administrator.
+   * @returns The outcome for each Team.
+   */
+  async closeWorkspacePeriod(input: CloseWorkspaceTimePeriodInput): Promise<WorkspaceTimePeriodResult> {
+    const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
+    const month = readMonth(input.month)
+    validateTimeZone(input.timeZone)
+    monthBounds(month, input.timeZone)
+    const actorUserId = readIdentifier(input.actorUserId, 'Actor user ID')
+    const results: WorkspaceTimePeriodTeamResult[] = []
+    for (const teamId of readWorkspaceTeamIds(input.teamIds)) {
+      try {
+        await this.closePeriodInternal(
+          { workspaceId, teamId, month, timeZone: input.timeZone, actorUserId },
+          undefined,
+          input.authorizationConditionChecks,
+        )
+        results.push({ teamId, status: 'closed' })
+      } catch (error) {
+        if (error instanceof TimeTrackingError && error.code === 'TimePeriodAlreadyClosed') {
+          results.push({ teamId, status: 'already-closed' })
+        } else {
+          logWorkspacePeriodFailure('close', { workspaceId, teamId, month, correlationId: input.correlationId }, error)
+          results.push({ teamId, status: 'failed' })
+        }
+      }
+    }
+    return { month, results, partialFailure: results.some((result) => result.status === 'failed') }
+  }
+
+  /**
+   * Reopens one month for every listed Team, recording the reason in each Team's audit event.
+   *
+   * @param input - Teams, month, reason, and reopening administrator.
+   * @returns The outcome for each Team.
+   */
+  async reopenWorkspacePeriod(input: ReopenWorkspaceTimePeriodInput): Promise<WorkspaceTimePeriodResult> {
+    const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
+    const month = readMonth(input.month)
+    const actorUserId = readIdentifier(input.actorUserId, 'Actor user ID')
+    if (typeof input.reason !== 'string' || input.reason.trim() === '') {
+      throw new TimeTrackingError(400, 'ReopenReasonRequired', 'A reason is required to reopen a closed month.')
+    }
+    readText(input.reason, 'Reason', MAX_DESCRIPTION_LENGTH)
+    const results: WorkspaceTimePeriodTeamResult[] = []
+    for (const teamId of readWorkspaceTeamIds(input.teamIds)) {
+      try {
+        await this.reopenPeriodInternal(
+          { workspaceId, teamId, month, actorUserId, reason: input.reason },
+          undefined,
+          input.authorizationConditionChecks,
+        )
+        results.push({ teamId, status: 'reopened' })
+      } catch (error) {
+        if (error instanceof TimeTrackingError && error.code === 'TimePeriodNotClosed') {
+          results.push({ teamId, status: 'not-closed' })
+        } else {
+          logWorkspacePeriodFailure('reopen', { workspaceId, teamId, month, correlationId: input.correlationId }, error)
+          results.push({ teamId, status: 'failed' })
+        }
+      }
+    }
+    return { month, results, partialFailure: results.some((result) => result.status === 'failed') }
   }
 
   /**
@@ -1990,8 +2171,8 @@ export class TimeTrackingService {
     const budget = !includeBudget
       ? undefined
       : input.budgetScope === 'project' && input.budgetScopeId
-        ? await this.repository.getBudget(input.workspaceId, 'project', input.budgetScopeId)
-        : await this.repository.getBudget(input.workspaceId, 'team', input.teamId)
+        ? await this.repository.getBudget(input.workspaceId, input.teamId, 'project', input.budgetScopeId)
+        : await this.repository.getBudget(input.workspaceId, input.teamId, 'team', input.teamId)
     const totalEstimateMinutes = [...new Set(entries.flatMap((entry) => entry.workItemId === undefined ? [] : [entry.workItemId]))]
       .reduce((sum, workItemId) => sum + (estimateByWorkItem.get(workItemId) ?? 0), 0)
     const totalActualCostByCurrency = input.includeCosts
@@ -2032,7 +2213,7 @@ export class TimeTrackingService {
     validateTimeZone(input.timeZone)
     const budgets = new Map<string, TimeBudget>()
     for (const projectId of input.projectIds) {
-      const budget = await this.repository.getBudget(input.workspaceId, 'project', projectId)
+      const budget = await this.repository.getBudget(input.workspaceId, input.teamId, 'project', projectId)
       if (budget) budgets.set(projectId, budget)
     }
     const result = new Map<string, ProjectBudgetConsumption>()
@@ -2556,8 +2737,8 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Reads a budget. */
-  async getBudget(workspaceId: string, scopeType: 'team' | 'project', scopeId: string) {
-    const budget = this.budgets.get(budgetKey(workspaceId, scopeType, scopeId))
+  async getBudget(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string) {
+    const budget = this.budgets.get(budgetKey(workspaceId, teamId, scopeType, scopeId))
     return budget ? clone(budget) : undefined
   }
 
@@ -2568,7 +2749,7 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
     _auditPut?: AuditTransactWriteItem,
     _idempotencyPut?: AuditTransactWriteItem,
   ) {
-    const key = budgetKey(budget.workspaceId, budget.scopeType, budget.scopeId)
+    const key = budgetKey(budget.workspaceId, budget.teamId, budget.scopeType, budget.scopeId)
     const current = this.budgets.get(key)
     if ((current?.revision ?? 0) !== expectedRevision) throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
     this.budgets.set(key, clone(budget))
@@ -2926,10 +3107,10 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Reads a Team or Project budget. */
-  async getBudget(workspaceId: string, scopeType: 'team' | 'project', scopeId: string) {
+  async getBudget(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string) {
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
-      Key: { workspaceId, recordKey: `${BUDGET_PREFIX}${scopeType}#${scopeId}` },
+      Key: { workspaceId, recordKey: budgetRecordKey(teamId, scopeType, scopeId) },
       ConsistentRead: true,
     }))
     return response.Item ? readStoredBudget(response.Item) : undefined
@@ -2946,7 +3127,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
       const put = {
         Put: {
           TableName: this.tableName,
-          Item: { ...budget, recordKey: `${BUDGET_PREFIX}${budget.scopeType}#${budget.scopeId}` },
+          Item: { ...budget, recordKey: budgetRecordKey(budget.teamId, budget.scopeType, budget.scopeId) },
           ...(expectedRevision === 0
             ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
             : {
@@ -3083,11 +3264,12 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     return closes
   }
 
-  /** Stores a month close with a conditional put, in a transaction when audited. */
+  /** Stores a month close with a conditional put, in a transaction when audited or fenced. */
   async createPeriodClose(
     close: TimePeriodClose,
     auditPut?: AuditTransactWriteItem,
     idempotencyPut?: AuditTransactWriteItem,
+    authorizationChecks: readonly TimeTrackingAuthorizationConditionCheck[] = [],
   ): Promise<void> {
     try {
       const put = {
@@ -3097,14 +3279,20 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
           ConditionExpression: 'attribute_not_exists(recordKey)',
         },
       }
-      if (auditPut || idempotencyPut) {
+      if (auditPut || idempotencyPut || authorizationChecks.length > 0) {
         await this.documentClient.send(new TransactWriteCommand({
-          TransactItems: [put, ...(auditPut ? [auditPut] : []), ...(idempotencyPut ? [idempotencyPut] : [])],
+          TransactItems: [
+            put,
+            ...authorizationChecks,
+            ...(auditPut ? [auditPut] : []),
+            ...(idempotencyPut ? [idempotencyPut] : []),
+          ],
         }))
       } else {
         await this.documentClient.send(new PutCommand(put.Put))
       }
     } catch (error) {
+      if (isAuthorizationCheckOnlyFailure(error, 1, authorizationChecks.length)) throw periodAuthorizationChangedError()
       throw mapConditionalWriteError(error, 'TimePeriodAlreadyClosed', `${close.month} is already closed.`)
     }
   }
@@ -3114,6 +3302,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     close: TimePeriodClose,
     auditPut?: AuditTransactWriteItem,
     idempotencyPut?: AuditTransactWriteItem,
+    authorizationChecks: readonly TimeTrackingAuthorizationConditionCheck[] = [],
   ): Promise<void> {
     try {
       const deletion = {
@@ -3124,14 +3313,20 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
           ExpressionAttributeValues: { ':closedAt': close.closedAt },
         },
       }
-      if (auditPut || idempotencyPut) {
+      if (auditPut || idempotencyPut || authorizationChecks.length > 0) {
         await this.documentClient.send(new TransactWriteCommand({
-          TransactItems: [deletion, ...(auditPut ? [auditPut] : []), ...(idempotencyPut ? [idempotencyPut] : [])],
+          TransactItems: [
+            deletion,
+            ...authorizationChecks,
+            ...(auditPut ? [auditPut] : []),
+            ...(idempotencyPut ? [idempotencyPut] : []),
+          ],
         }))
       } else {
         await this.documentClient.send(new DeleteCommand(deletion.Delete))
       }
     } catch (error) {
+      if (isAuthorizationCheckOnlyFailure(error, 1, authorizationChecks.length)) throw periodAuthorizationChangedError()
       throw mapConditionalWriteError(error, 'TimePeriodCloseConflict', `${close.month} was changed by another request.`)
     }
   }
@@ -3317,6 +3512,52 @@ function historyActionFor(action: TransitionTimeEntryInput['action']): TimeEntry
 }
 
 /**
+ * Creates the error for a month close or reopen whose caller lost the access it was checked with.
+ *
+ * @returns A 409 error that asks the caller to reload.
+ */
+function periodAuthorizationChangedError(): TimeTrackingError {
+  return new TimeTrackingError(
+    409,
+    'TimePeriodAuthorizationChanged',
+    'Your access changed before the month was closed or reopened. Reload and try again.',
+  )
+}
+
+/**
+ * Logs one Team that a Workspace-wide close or reopen could not change, with identifiers only.
+ *
+ * @param action - Close or reopen.
+ * @param target - Workspace, failed Team, month, and the request's correlation ID.
+ * @param error - Failure; only its stable code, or the error class name, is logged.
+ */
+function logWorkspacePeriodFailure(
+  action: 'close' | 'reopen',
+  target: { workspaceId: string; teamId: string; month: string; correlationId: string | undefined },
+  error: unknown,
+): void {
+  console.error(JSON.stringify({
+    event: 'workspace-time-period.team-failed',
+    action,
+    workspaceId: target.workspaceId,
+    teamId: target.teamId,
+    month: target.month,
+    ...(target.correlationId ? { correlationId: target.correlationId } : {}),
+    errorCode: error instanceof TimeTrackingError ? error.code : 'UnexpectedError',
+  }))
+}
+
+/**
+ * Validates and de-duplicates the Teams of a Workspace-wide month operation.
+ *
+ * @param teamIds - Team identifiers from the Workspace directory.
+ * @returns Unique Team identifiers in sorted order.
+ */
+function readWorkspaceTeamIds(teamIds: readonly string[]): string[] {
+  return [...new Set(teamIds.map((teamId) => readIdentifier(teamId, 'Team ID')))].sort()
+}
+
+/**
  * Validates a calendar month.
  *
  * @param value - Candidate month.
@@ -3486,6 +3727,18 @@ function aggregateCalendarEntries(
   return [...grouped.values()]
     .sort((left, right) => left.key.localeCompare(right.key))
     .map((group) => toSummaryGroup(group, includeCosts))
+}
+
+/**
+ * Splits a time entry at local midnight the way time reports do, so another report can count
+ * an entry that crosses midnight on each day it covers.
+ *
+ * @param entry - Entry to split.
+ * @param timeZone - IANA timezone that defines the days.
+ * @returns One segment per local date with its whole minutes and its share of the entry.
+ */
+export function splitTimeEntryByLocalDate(entry: TimeEntry, timeZone: string): Array<{ date: string; minutes: number; ratio: number }> {
+  return splitEntryByLocalDate(entry, timeZone, entry.startAt, entry.endAt)
 }
 
 /** Splits one interval at timezone-aware local midnight boundaries. */
@@ -4294,6 +4547,7 @@ function readStoredBudget(value: unknown): TimeBudget {
   return {
     schemaVersion: 1,
     workspaceId: readString(record.workspaceId, 'Stored budget Workspace ID'),
+    teamId: readString(record.teamId, 'Stored budget Team ID'),
     scopeType: readScopeType(record.scopeType),
     scopeId: readString(record.scopeId, 'Stored budget scope ID'),
     amountMinor: readNumber(record.amountMinor, 'Stored budget amount'),
@@ -4517,9 +4771,26 @@ function timerKey(workspaceId: string, userId: string): string {
   return `${workspaceId}\0${userId}`
 }
 
-/** Builds a budget key. */
-function budgetKey(workspaceId: string, scopeType: 'team' | 'project', scopeId: string): string {
-  return `${workspaceId}\0${scopeType}\0${scopeId}`
+/** Builds the in-memory key of a budget from its Team-qualified scope. */
+function budgetKey(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string): string {
+  return `${workspaceId}\0${budgetRecordKey(teamId, scopeType, scopeId)}`
+}
+
+/**
+ * Builds the DynamoDB sort key of a budget.
+ *
+ * A Team budget is keyed by its Team. A Project budget is keyed by the Team and the Project,
+ * because Project IDs are unique only within their Team.
+ *
+ * @param teamId - Team that owns the scope.
+ * @param scopeType - Budget scope.
+ * @param scopeId - Team or Project identifier.
+ * @returns The sort key.
+ */
+function budgetRecordKey(teamId: string, scopeType: 'team' | 'project', scopeId: string): string {
+  return scopeType === 'team'
+    ? `${BUDGET_PREFIX}team#${scopeId}`
+    : `${BUDGET_PREFIX}project#${teamId}#${scopeId}`
 }
 
 /** Builds the DynamoDB sort key of a month close. */

@@ -193,3 +193,51 @@ test('reaction activity preserves authorization and receipt indices and rejects 
   incomplete = true
   await expect(store.addUpdateReaction('workspace', input, 'reader', hooks, hooks.authorizationConditionChecks)).rejects.toMatchObject({ status: 503 })
 })
+
+test('commits one acknowledgement row with its comment and records it in compact activity', async () => {
+  const { source } = await fixture()
+  let writes: TransactWriteCommandInput['TransactItems']
+  let failAcknowledgement = false
+  const store = client(async (command) => {
+    if (command instanceof GetCommand) return command.input.Key?.recordKey === source.recordKey ? { Item: source } : {}
+    if (!(command instanceof TransactWriteCommand)) throw new Error('Unexpected command')
+    writes = command.input.TransactItems
+    if (failAcknowledgement) {
+      throw Object.assign(new Error('Transaction cancelled'), { name: 'TransactionCanceledException', CancellationReasons: (writes ?? []).map((_, index) => ({ Code: index === 3 ? 'ConditionalCheckFailed' : 'None' })) })
+    }
+    return {}
+  })
+  const input = { target, updateVersion: 1, id: 'ack', body: '確認しました', acknowledgement: true as const }
+  const comment = await store.createUpdateComment('workspace', input, 'Lead')
+  expect(comment).toMatchObject({ acknowledgement: true, authorMemberKey: 'lead' })
+  expect(writes).toHaveLength(6)
+  expect(writes?.[3]?.Put).toMatchObject({
+    ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+    Item: { recordKey: 'UPDATE_ACK#PROJECT#team#project#0000000000000001', entryType: 'planning-update-acknowledgement', memberKey: 'lead', commentId: 'ack', acknowledgedAt: now },
+  })
+  expect(writes?.[5]?.Put?.Item).toMatchObject({ acknowledgement: { memberKey: 'lead', at: now }, commentAt: now })
+  failAcknowledgement = true
+  await expect(store.createUpdateComment('workspace', { ...input, id: 'ack-2' }, 'lead')).rejects.toMatchObject({ status: 409, code: 'PlanningUpdateAlreadyAcknowledged' })
+})
+
+test('attaches acknowledgements to one history page with a bounded range query', async () => {
+  const { memory } = await fixture()
+  const [update] = (await memory.listUpdates('workspace', { target })).updates
+  if (!update) throw new Error('Missing update fixture')
+  const queries: unknown[] = []
+  const store = client(async (command) => {
+    if (!(command instanceof QueryCommand)) throw new Error('Unexpected command')
+    queries.push(command.input)
+    if (command.input.ExpressionAttributeValues?.[':recordPrefix'] === 'UPDATE#PROJECT#team#project#') {
+      return { Items: [{ workspaceId: 'workspace', recordKey: 'UPDATE#PROJECT#team#project#0000000000000001', entryType: 'planning-update', ...update }] }
+    }
+    return { Items: [{ workspaceId: 'workspace', recordKey: 'UPDATE_ACK#PROJECT#team#project#0000000000000001', entryType: 'planning-update-acknowledgement', target, updateVersion: 1, memberKey: 'lead', commentId: 'ack', acknowledgedAt: now }] }
+  })
+  const page = await store.listUpdates('workspace', { target })
+  expect(page.updates).toMatchObject([{ version: 1, acknowledgement: { memberKey: 'lead', commentId: 'ack', acknowledgedAt: now } }])
+  expect(queries[1]).toMatchObject({
+    KeyConditionExpression: 'workspaceId = :workspaceId AND recordKey BETWEEN :lowest AND :highest',
+    ExpressionAttributeValues: { ':lowest': 'UPDATE_ACK#PROJECT#team#project#0000000000000001', ':highest': 'UPDATE_ACK#PROJECT#team#project#0000000000000001' },
+    ConsistentRead: true,
+  })
+})

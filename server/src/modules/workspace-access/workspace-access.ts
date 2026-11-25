@@ -137,8 +137,18 @@ export type WorkspaceMember = {
  *
  * - `password-reset-requested`: invalidated the password and sent a reset code
  * - `mfa-reset`: removed the registered authenticator app (TOTP)
+ * - `system-administrator-granted`: added the member to the system administrator group
+ * - `system-administrator-revoked`: removed the member from the system administrator groups
  */
-export type WorkspaceMemberCredentialAction = 'password-reset-requested' | 'mfa-reset'
+export type WorkspaceMemberCredentialAction =
+  | 'password-reset-requested'
+  | 'mfa-reset'
+  | WorkspaceMemberSystemAdministratorAction
+
+/** Owner-only actions that change whether a member is a system administrator (ADR 0067). */
+export type WorkspaceMemberSystemAdministratorAction =
+  | 'system-administrator-granted'
+  | 'system-administrator-revoked'
 
 /**
  * How far an administrator credential action under one idempotency key got.
@@ -148,6 +158,15 @@ export type WorkspaceMemberCredentialAction = 'password-reset-requested' | 'mfa-
  * - `completed`: the Cognito change finished
  */
 export type WorkspaceMemberCredentialProgress = 'none' | 'recorded' | 'completed'
+
+/** Options of recording an administrator credential action. */
+export type WorkspaceMemberCredentialRecordOptions = {
+  /**
+   * Records the action as already finished, for a request whose requested state is already in
+   * place, so that a retry with the same key returns it instead of resuming a change.
+   */
+  completed?: boolean
+}
 
 /** Result of recording a credential action for a member. */
 export type WorkspaceMemberCredentialRecord = {
@@ -416,6 +435,8 @@ export interface WorkspaceAccessClient {
    * @param targetMemberKey - Member key of the target member.
    * @param action - Action to record.
    * @param auditContext - Audit context of the request.
+   * @param options - `completed` records the action as already finished, for a request that
+   *   needs no change in Cognito, so that no retry can resume it.
    * @returns The checked target member, and whether the action was already recorded or completed.
    * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
    *   holds the lease.
@@ -426,6 +447,7 @@ export interface WorkspaceAccessClient {
     targetMemberKey: string,
     action: WorkspaceMemberCredentialAction,
     auditContext?: MutationAuditContext,
+    options?: WorkspaceMemberCredentialRecordOptions,
   ): Promise<WorkspaceMemberCredentialRecord>
   /**
    * Reads how far an administrator credential action under the same idempotency key got.
@@ -1889,6 +1911,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
    * @param targetMemberKey - Member key of the target member.
    * @param action - Action to record.
    * @param auditContext - Audit context of the request.
+   * @param options - `completed` writes the progress record as finished, with no lease, for a
+   *   request that needs no change in Cognito.
    * @returns The checked target member, and whether the action was already recorded or completed.
    * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
    *   holds the lease, and 503 `AccountSecurityUnavailable` when no audit table is configured,
@@ -1900,6 +1924,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     targetMemberKey: string,
     action: WorkspaceMemberCredentialAction,
     auditContext?: MutationAuditContext,
+    options: WorkspaceMemberCredentialRecordOptions = {},
   ) {
     const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
     const actor = await this.requireActiveActor(normalizedWorkspaceId, actorMemberKey)
@@ -1910,14 +1935,24 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
 
     if (actor.memberKey === target.memberKey) {
-      throw new WorkspaceAccessError(
-        409,
-        'WorkspaceSelfCredentialReset',
-        'Change your own password and MFA from your account settings.',
-      )
+      throw isSystemAdministratorAction(action)
+        ? new WorkspaceAccessError(
+          409,
+          'WorkspaceSelfSystemAdministratorChange',
+          'Ask another owner to change whether you are a system administrator.',
+        )
+        : new WorkspaceAccessError(
+          409,
+          'WorkspaceSelfCredentialReset',
+          'Change your own password and MFA from your account settings.',
+        )
     }
 
-    assertCanManageMemberCredentials(actor, target)
+    if (isSystemAdministratorAction(action)) {
+      assertCanManageSystemAdministrator(actor, target, action)
+    } else {
+      assertCanManageMemberCredentials(actor, target)
+    }
 
     const auditPut = this.createMemberCredentialAuditPut(
       normalizedWorkspaceId,
@@ -1955,9 +1990,10 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
                 memberKey: target.memberKey,
                 actorKey: auditItem.actorKey,
                 action,
-                status: 'recorded',
+                ...(options.completed
+                  ? { status: 'completed' }
+                  : { status: 'recorded', leaseUntil: now.getTime() + credentialActionLeaseMs }),
                 recordedAt: now.toISOString(),
-                leaseUntil: now.getTime() + credentialActionLeaseMs,
                 // The record answers retries for as long as the audit event keeps the key taken.
                 ...(typeof auditItem.expiresAt === 'number' ? { expiresAt: auditItem.expiresAt } : {}),
               },
@@ -1966,7 +2002,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           },
         ],
       }))
-      return { member: target, alreadyRecorded: false, completed: false }
+      return { member: target, alreadyRecorded: false, completed: options.completed === true }
     } catch (error) {
       const replayed = !isTransactionConditionalFailureAt(error, 0) &&
         !isTransactionConditionalFailureAt(error, 1) &&
@@ -4041,6 +4077,49 @@ function capabilitiesForRole(role: WorkspaceRole): WorkspaceAccessCapabilities {
  * @param actor - Active administrator performing the action.
  * @param target - Active member whose credentials change.
  */
+/**
+ * Tells whether a recorded member action changes system administrator membership.
+ *
+ * @param action - Recorded member action.
+ * @returns True for the system administrator grant and revoke.
+ */
+export function isSystemAdministratorAction(
+  action: WorkspaceMemberCredentialAction,
+): action is WorkspaceMemberSystemAdministratorAction {
+  return action === 'system-administrator-granted' || action === 'system-administrator-revoked'
+}
+
+/**
+ * Checks that the actor may grant or revoke system administrator access for the target.
+ *
+ * Only an owner may do either, and a guest cannot be granted it (ADR 0067).
+ *
+ * @param actor - Active actor member as read.
+ * @param target - Active target member as read.
+ * @param action - Grant or revoke.
+ * @throws WorkspaceAccessError 403 for a non-owner actor and 409 for a guest grant.
+ */
+function assertCanManageSystemAdministrator(
+  actor: WorkspaceMember,
+  target: WorkspaceMember,
+  action: WorkspaceMemberSystemAdministratorAction,
+) {
+  if (actor.role !== 'owner') {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'Only an owner can change who is a system administrator.',
+    )
+  }
+  if (action === 'system-administrator-granted' && target.role === 'guest') {
+    throw new WorkspaceAccessError(
+      409,
+      'WorkspaceGuestSystemAdministrator',
+      'A guest cannot be a system administrator. Change the role first.',
+    )
+  }
+}
+
 function assertCanManageMemberCredentials(actor: WorkspaceMember, target: WorkspaceMember) {
   if (actor.role === 'owner') {
     return

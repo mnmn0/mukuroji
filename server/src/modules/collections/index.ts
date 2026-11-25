@@ -7,6 +7,7 @@ export {
   listCollections,
   removeCollectionItem,
   updateCollection,
+  type CollectionAuditWrite,
   type CollectionMutationContext,
   type CollectionsStore,
   type ReadCollectionWorkItem,
