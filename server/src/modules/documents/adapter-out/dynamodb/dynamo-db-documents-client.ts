@@ -39,6 +39,7 @@ import {
   type DocumentScope,
   type DocumentTreeResponse,
   type DocumentVersion,
+  type DocumentVersionDetail,
   type DocumentVersionsResponse,
   type WhiteboardContent,
 } from '@mukuroji/contracts'
@@ -68,6 +69,7 @@ import type {
   ExportDocumentRequest,
   GetDocumentCommentWindowRevisionRequest,
   GetDocumentRequest,
+  GetDocumentVersionRequest,
   HeartbeatDocumentPresenceRequest,
   InstantiateDocumentTemplateRequest,
   ListDocumentBacklinksRequest,
@@ -75,6 +77,8 @@ import type {
   ListDocumentVersionsRequest,
   ListDocumentsRequest,
   ListRecentDocumentsRequest,
+  PinDocumentVersionRequest,
+  PrepareDocumentVersionApprovalRequest,
   PrepareDocumentOperationsResponse,
   PrepareDocumentWorkItemDeletionFenceRequest,
   RenderedDocumentExport,
@@ -450,8 +454,8 @@ type StoredDocumentVersionItem = {
   entryType: 'document-version'
   /** Version metadata です。 */
   version: DocumentVersion
-  /** DynamoDB TTL epoch seconds です。 */
-  expiresAtEpoch: number
+  /** DynamoDB TTL epoch seconds です。名前を付けて固定した version にはありません。 */
+  expiresAtEpoch?: number
 }
 
 /**
@@ -470,7 +474,32 @@ type StoredDocumentVersionSnapshotItem = {
   document: DocumentDetail
   /** Snapshot 時点の element revision map です。 */
   elementRevisions: Record<string, number>
-  /** Delta retention より長く base snapshot を残す DynamoDB TTL epoch seconds です。 */
+  /**
+   * Delta retention より長く base snapshot を残す DynamoDB TTL epoch seconds です。
+   * 名前を付けて固定した version の snapshot にはありません。
+   */
+  expiresAtEpoch?: number
+}
+
+/**
+ * Durable receipt of one version pin request, keyed by the actor's Idempotency-Key.
+ */
+type StoredDocumentVersionPinReceiptItem = {
+  /** DynamoDB partition key です。 */
+  workspaceId: string
+  /** `VERSION_PIN_RECEIPT#<documentId>#<digest>` 形式の sort key です。 */
+  recordKey: string
+  /** Row discriminator です。 */
+  entryType: 'document-version-pin-receipt'
+  /** Pin した member key です。 */
+  actorKey: string
+  /** Pin した version ID です。 */
+  versionId: string
+  /** Request に含まれていた version 名です。 */
+  name: string
+  /** 確定した pin の日時です。 */
+  pinnedAt: string
+  /** DynamoDB TTL epoch seconds です。 */
   expiresAtEpoch: number
 }
 
@@ -812,6 +841,15 @@ type WorkItemBacklinkTargetDelta = {
   targetId: string
   /** Transaction が増減する backlink row 数です。 */
   delta: number
+}
+
+/**
+ * DynamoDB transaction contribution that binds a Document version approval request to the
+ * requester's Document edit permission and to the version staying pinned.
+ */
+export type DocumentVersionApprovalTransactWrite = {
+  /** Condition checks to add to the approval creation transaction. */
+  conditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
 }
 
 /** DynamoDB transaction contribution used to fence Work Item deletion. */
@@ -2291,6 +2329,282 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       }),
     )
     return this.projectDocument(input.workspaceId, next, input.access)
+  }
+
+  /**
+   * Returns one retained version with a read-only snapshot of its content.
+   *
+   * The snapshot keeps its content fields, while access-controlled fields such as
+   * scope, permission, and capabilities come from the current projection so a
+   * historical snapshot never widens what the viewer can see or do.
+   *
+   * @param input - Version to read and the viewer's authorization snapshot.
+   * @returns Version metadata and the read-only Document snapshot.
+   */
+  async getVersion(input: GetDocumentVersionRequest): Promise<DocumentVersionDetail> {
+    await this.ensureTable()
+    const current = await this.get({
+      workspaceId: input.workspaceId,
+      documentId: input.documentId,
+      access: input.access,
+      includeArchived: true,
+    })
+    const versionItem = await this.findVersion(input.workspaceId, input.documentId, input.versionId)
+    const snapshot: DocumentDetail = {
+      ...structuredClone(versionItem.document),
+      id: current.id,
+      scope: structuredClone(current.scope),
+      position: current.position,
+      permission: structuredClone(current.permission),
+      createdByUserId: current.createdByUserId,
+      createdAt: current.createdAt,
+      favorite: current.favorite,
+      capabilities: EMPTY_DOCUMENT_CAPABILITIES,
+    }
+    delete snapshot.lastOpenedAt
+    if (current.parentId === undefined) delete snapshot.parentId
+    else snapshot.parentId = current.parentId
+    if (current.archivedAt === undefined) delete snapshot.archivedAt
+    else snapshot.archivedAt = current.archivedAt
+    return {
+      version: versionItem.version,
+      document: snapshot,
+    }
+  }
+
+  /**
+   * Names a retained version and keeps it beyond the version retention period.
+   *
+   * The version metadata loses its TTL and an exact full snapshot without a TTL
+   * is written, so the version can be read without the delta chain that later
+   * expires. Pinning an already pinned version renames it.
+   *
+   * @param input - Version to pin, its validated name, and the editor's authorization snapshot.
+   * @returns Pinned version metadata.
+   */
+  async pinVersion(input: PinDocumentVersionRequest): Promise<DocumentVersion> {
+    await this.ensureTable()
+    const authorization =
+      await this.requireMutableDocument(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'edit',
+        true,
+      )
+    const receiptKey = input.idempotencyKey === undefined
+      ? undefined
+      : versionPinReceiptKey(input.documentId, input.access.memberKey, input.idempotencyKey)
+    const replayed = receiptKey === undefined
+      ? undefined
+      : await this.readVersionPinReplay(input, receiptKey)
+    if (replayed !== undefined) return replayed
+    const versionItem = await this.findVersion(input.workspaceId, input.documentId, input.versionId)
+    const now = this.now()
+    const nowEpoch = Math.floor(now.getTime() / 1_000)
+    const version: DocumentVersion = {
+      ...versionItem.version,
+      name: input.name,
+      pinnedAt: now.toISOString(),
+      pinnedByUserId: input.access.memberKey,
+    }
+    const receipt: StoredDocumentVersionPinReceiptItem | undefined = receiptKey === undefined
+      ? undefined
+      : {
+          workspaceId: input.workspaceId,
+          recordKey: receiptKey,
+          entryType: 'document-version-pin-receipt',
+          actorKey: input.access.memberKey,
+          versionId: version.id,
+          name: input.name,
+          pinnedAt: version.pinnedAt ?? now.toISOString(),
+          expiresAtEpoch: nowEpoch + DOCUMENT_OPERATION_RECEIPT_RETENTION_DAYS * SECONDS_PER_DAY,
+        }
+    const metadata: StoredDocumentVersionItem = {
+      workspaceId: input.workspaceId,
+      recordKey: versionKey(input.documentId, version.revision),
+      entryType: 'document-version',
+      version,
+    }
+    const snapshot: StoredDocumentVersionSnapshotItem = {
+      workspaceId: input.workspaceId,
+      recordKey: versionSnapshotKey(input.documentId, version.revision),
+      entryType: 'document-version-snapshot',
+      version,
+      document: structuredClone(versionItem.document),
+      elementRevisions: { ...versionItem.elementRevisions },
+    }
+    assertDynamoItemSize(metadata)
+    assertDynamoItemSize(snapshot)
+    const guards = mergeAuthorizationGuards(
+      input.workspaceId,
+      input.access.authorizationSnapshots,
+      documentAuthorizationSnapshotGuards(
+        this.tableName,
+        input.workspaceId,
+        [authorization],
+      ),
+    )
+    try {
+      await this.client.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: metadata,
+              ConditionExpression:
+                'attribute_exists(workspaceId) AND (attribute_not_exists(expiresAtEpoch) OR expiresAtEpoch > :nowEpoch)',
+              ExpressionAttributeValues: {
+                ':nowEpoch': nowEpoch,
+              },
+            },
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: snapshot,
+            },
+          },
+          ...(receipt === undefined
+            ? []
+            : [{
+                Put: {
+                  TableName: this.tableName,
+                  Item: receipt,
+                  ConditionExpression:
+                    'attribute_not_exists(workspaceId) OR expiresAtEpoch <= :operationReceiptNowEpoch',
+                  ExpressionAttributeValues: {
+                    ':operationReceiptNowEpoch': nowEpoch,
+                  },
+                },
+              }]),
+          ...authorizationGuardConditionChecks(guards),
+        ],
+      }))
+    } catch (error) {
+      if (isOnlyTransactionConditionalFailureAt(error, 0)) {
+        throw new DocumentError(404, 'DocumentVersionNotFound', 'Document version was not found.')
+      }
+      if (receiptKey !== undefined && isOnlyTransactionConditionalFailureAt(error, 2)) {
+        const raced = await this.readVersionPinReplay(input, receiptKey)
+        if (raced !== undefined) return raced
+      }
+      if (isConditionalFailure(error)) {
+        throw new DocumentError(
+          409,
+          'DocumentAuthorizationChanged',
+          'Authorization changed while pinning the Document version.',
+        )
+      }
+      throw normalizeDynamoError(error)
+    }
+    return version
+  }
+
+  /**
+   * Verifies that the requester can edit the Document and that the version is pinned, and returns
+   * condition checks that keep both true until the approval request is saved.
+   *
+   * The checks pin the authorization rows read here, so an approval request fails when the
+   * requester's Document permission changes between this check and the approval transaction.
+   *
+   * @param input - Version to request approval for and the requester's authorization snapshot.
+   * @returns Condition checks for the approval creation transaction.
+   * @throws DocumentError when the requester cannot edit the Document or the version is not pinned.
+   */
+  async prepareVersionApprovalTransactWrite(
+    input: PrepareDocumentVersionApprovalRequest,
+  ): Promise<DocumentVersionApprovalTransactWrite> {
+    await this.ensureTable()
+    const authorization = await this.requireMutableDocument(
+      input.workspaceId,
+      input.documentId,
+      input.access,
+      'edit',
+    )
+    const versionItem = await this.findVersion(input.workspaceId, input.documentId, input.versionId)
+    if (versionItem.version.name === undefined) {
+      throw new DocumentError(
+        409,
+        'DocumentVersionNotPinned',
+        'Only a named version can be requested for approval.',
+      )
+    }
+    const guards = mergeAuthorizationGuards(
+      input.workspaceId,
+      input.access.authorizationSnapshots,
+      documentAuthorizationSnapshotGuards(this.tableName, input.workspaceId, [authorization]),
+    )
+    return {
+      conditionChecks: [
+        {
+          ConditionCheck: {
+            TableName: this.tableName,
+            Key: {
+              workspaceId: input.workspaceId,
+              recordKey: versionKey(input.documentId, versionItem.version.revision),
+            },
+            ConditionExpression: 'attribute_exists(#version.#name)',
+            ExpressionAttributeNames: { '#version': 'version', '#name': 'name' },
+          },
+        },
+        ...authorizationGuardConditionChecks(guards),
+      ],
+    }
+  }
+
+  /**
+   * Returns the stored result of a version pin request that already used this Idempotency-Key.
+   *
+   * A replay never writes again, so a retried pin cannot overwrite a later rename. The key is
+   * bound to the actor, Document, version, and name; reusing it for another version or name is a
+   * conflict.
+   *
+   * @param input - Pin request being retried.
+   * @param receiptKey - Receipt sort key derived from the actor and Idempotency-Key.
+   * @returns The stored pinned version, or undefined when the key has no live receipt.
+   * @throws DocumentError when the key was used for a different pin request.
+   */
+  private async readVersionPinReplay(
+    input: PinDocumentVersionRequest,
+    receiptKey: string,
+  ): Promise<DocumentVersion | undefined> {
+    const result = await this.client.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId: input.workspaceId, recordKey: receiptKey },
+      ConsistentRead: true,
+    }))
+    const receipt = result.Item
+    if (
+      !isRecord(receipt) ||
+      receipt.entryType !== 'document-version-pin-receipt' ||
+      typeof receipt.expiresAtEpoch !== 'number' ||
+      receipt.expiresAtEpoch <= Math.floor(this.now().getTime() / 1_000)
+    ) {
+      return undefined
+    }
+    const requestedRevision = parseVersionRevision(input.documentId, input.versionId)
+    if (
+      receipt.actorKey !== input.access.memberKey ||
+      receipt.name !== input.name ||
+      typeof receipt.versionId !== 'string' ||
+      requestedRevision === undefined ||
+      receipt.versionId !== `${input.documentId}:${requestedRevision}` ||
+      typeof receipt.pinnedAt !== 'string'
+    ) {
+      throw new DocumentError(
+        409,
+        'IdempotencyKeyReused',
+        'The idempotency key has already been used with different input.',
+      )
+    }
+    const current = await this.findVersion(input.workspaceId, input.documentId, receipt.versionId)
+    return {
+      ...current.version,
+      name: input.name,
+      pinnedAt: receipt.pinnedAt,
+      pinnedByUserId: input.access.memberKey,
+    }
   }
 
   /** Favorite または recent preference を保存します。 */
@@ -7752,6 +8066,18 @@ function versionPutActions(
         'attribute_not_exists(workspaceId)',
     },
   }))
+}
+
+/**
+ * Builds the sort key of a version pin receipt, binding the Idempotency-Key to its actor.
+ *
+ * @param documentId - Document whose version is pinned.
+ * @param actorKey - Member key of the actor.
+ * @param idempotencyKey - Client Idempotency-Key.
+ * @returns The receipt sort key.
+ */
+function versionPinReceiptKey(documentId: string, actorKey: string, idempotencyKey: string): string {
+  return `VERSION_PIN_RECEIPT#${encodeKeyPart(documentId)}#${sha256(`${actorKey}\0${idempotencyKey}`)}`
 }
 
 function versionSnapshotKey(documentId: string, revision: number): string {

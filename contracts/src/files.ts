@@ -243,7 +243,7 @@ export type ApprovalRequestStatus = ApprovalReviewerStatus | 'cancelled'
 /**
  * Approval が判断対象にする resource の種別です。
  */
-export type ApprovalSubjectType = 'file-version' | 'work-item'
+export type ApprovalSubjectType = 'file-version' | 'work-item' | 'document-version'
 
 /**
  * Approval request を作成した主体の種別です。
@@ -303,6 +303,10 @@ type ApprovalSubject =
        * 対象 version ID です。
        */
       versionId: string
+      /**
+       * File version subject では指定しません。
+       */
+      documentId?: never
     }
   | {
       /**
@@ -317,10 +321,32 @@ type ApprovalSubject =
        * Work Item subject では指定しません。
        */
       versionId?: never
+      /**
+       * Work Item subject では指定しません。
+       */
+      documentId?: never
+    }
+  | {
+      /**
+       * 名前を付けて固定した Document version の approval を示します。
+       */
+      subjectType: Extract<ApprovalSubjectType, 'document-version'>
+      /**
+       * Document version subject では指定しません。
+       */
+      fileId?: never
+      /**
+       * 対象 Document ID です。
+       */
+      documentId: string
+      /**
+       * 対象 Document version ID（`<documentId>:<revision>`）です。
+       */
+      versionId: string
     }
 
 /**
- * Work Item 自体または特定 File version に対する approval request です。
+ * Work Item 自体、特定 File version、または固定した Document version に対する approval request です。
  */
 export type ApprovalRequest = ApprovalSubject & {
   /**

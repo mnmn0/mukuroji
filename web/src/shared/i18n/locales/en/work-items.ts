@@ -338,6 +338,8 @@ export const workItemsMessages = {
   'approval.requester.automation': 'Automation',
   'approval.subject.workItem': 'Work Item',
   'approval.subject.fileUnavailable': 'File version',
+  'approval.subject.documentVersion': 'Document version',
+  'approval.subject.openDocumentVersion': 'Open the Document version',
   'approval.completionTransition': 'State after full approval',
   'approval.completionTransition.none': 'Do not change state',
   'approval.comment': 'Decision comment (optional)',
