@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import type { FileAttachment, FileScanStatus } from '@mukuroji/contracts'
+import type { EnterprisePermissionId, EnterpriseRoleAssignment, FileAttachment, FileScanStatus } from '@mukuroji/contracts'
 import { createApiTestHarness } from './test-support/api-test-harness'
 import { createCanonicalPublicAttachmentService } from './shared/public-attachment-access'
 import { FileProofingError, type FileProofingActor, type FileProofingScope } from '../modules/files/file-proofing'
 import type { MutationAuditContext } from '../modules/audit/audit'
 import type { AuthenticatedDeveloperCredential } from '../modules/developer-platform/application/ports'
+import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
 
 const {
   configureFakeProjectClients,
@@ -59,6 +60,55 @@ function createFile(id: string, scanStatus: FileScanStatus): FileAttachment {
     updatedAt: NOW,
     capabilities: { canDownload: true, canUploadVersion: false, canDelete: false, canAnnotate: false, canRequestApproval: false },
   }
+}
+
+/** One Enterprise custom role granted to the credential owner at one Team or Project. */
+type ProjectRoleGrant = {
+  /** Custom role ID. */
+  roleId: `custom:${string}`
+  /** Permissions of the role. */
+  permissions: EnterprisePermissionId[]
+  /** Kind of the scope the role is granted at. */
+  kind: 'team' | 'project'
+  /** Team or Project the role is granted at. */
+  targetId: string
+}
+
+/**
+ * Creates an Enterprise identity whose only grants are the given Team- or Project-scoped custom roles.
+ *
+ * @param grants - Roles and the scopes they apply to.
+ * @returns Enterprise identity client.
+ */
+async function createProjectRoleIdentity(grants: readonly ProjectRoleGrant[]) {
+  const identity = new InMemoryEnterpriseIdentityClient()
+  for (const grant of grants) {
+    await identity.putCustomRole({
+      workspaceId, roleId: grant.roleId, name: grant.roleId, permissions: grant.permissions,
+      guestAssignable: false, revision: 1, createdAt: NOW, updatedAt: NOW,
+    })
+  }
+  return new Proxy(identity, {
+    get(target, property) {
+      if (property === 'getSnapshot') {
+        return async (requestedWorkspaceId: string) => {
+          const snapshot = await target.getSnapshot(requestedWorkspaceId)
+          const roleAssignments = grants.map((grant): EnterpriseRoleAssignment => ({
+            workspaceId,
+            assignmentId: `${grant.roleId}-assignment`,
+            principalKind: 'member',
+            principalId: 'demo@example.com',
+            roleId: grant.roleId,
+            scope: { workspaceId, kind: grant.kind, targetId: grant.targetId },
+            source: 'direct',
+          }))
+          return { ...snapshot, roleAssignments }
+        }
+      }
+      const value = Reflect.get(target, property, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
 }
 
 /** Configures a member who can view Work Items of the refero Project. */
@@ -123,10 +173,49 @@ describe('public attachment service', () => {
     expect(listed).toBe(false)
   })
 
+  test('evaluates the file permission at the Work Item\'s own Project', async () => {
+    configureFakeProjectClients(false, { directoryId: workspaceId, workspaceRole: 'member', projectAccesses: [] })
+    let listed = 0
+    setTestAppDependencies({
+      fileProofing: createFileProofingStub({
+        async list() {
+          listed += 1
+          return { files: [createFile('spec', 'available')], approvals: [], capabilities: { canUpload: false, canRequestApproval: false, canGrantGuestAccess: false } }
+        },
+      }),
+    })
+    /**
+     * Lists task-1's attachments with the files.read grant at the given scope.
+     *
+     * @param kind - Scope kind of the files.read grant.
+     * @param targetId - Team or Project of the files.read grant.
+     * @returns The listed attachment IDs.
+     */
+    const listWithFileGrantAt = async (kind: 'team' | 'project', targetId: string) => {
+      setTestAppDependencies({
+        enterpriseIdentity: await createProjectRoleIdentity([
+          { roleId: 'custom:work-item-reader', permissions: ['work-items.read'], kind: 'project', targetId: 'refero' },
+          { roleId: 'custom:file-reader', permissions: ['files.read'], kind, targetId },
+        ]),
+      })
+      const list = await runWithTestAppDependencies(() => createCanonicalPublicAttachmentService()
+        .listWorkItemAttachments(credential, 'core-team', 'task-1'))
+      return list.items.map((item) => item.id)
+    }
+
+    // A file grant in another Project of the Team does not open task-1's files.
+    expect(await listWithFileGrantAt('project', 'other-project')).toEqual([])
+    expect(listed).toBe(0)
+    expect(await listWithFileGrantAt('project', 'refero')).toEqual(['spec'])
+    // A Team grant covers the Team's Projects.
+    expect(await listWithFileGrantAt('team', 'core-team')).toEqual(['spec'])
+    expect(listed).toBe(2)
+  })
+
   test('issues an audited download URL for a clean current version and hides the rest', async () => {
     configureViewer()
     const accesses: { fileId: string; versionId: string; disposition: string; auditContext?: MutationAuditContext }[] = []
-    let blockAfterListing = false
+    let failAfterListing: FileProofingError | undefined
     setTestAppDependencies({
       fileProofing: createFileProofingStub({
         async list() {
@@ -137,7 +226,7 @@ describe('public attachment service', () => {
           }
         },
         async createAccess(_scope, _actor, fileId, versionId, disposition, auditContext) {
-          if (blockAfterListing) throw new FileProofingError(423, 'FileThreatDetected', 'Malware scanning blocked this file.')
+          if (failAfterListing) throw failAfterListing
           accesses.push({ fileId, versionId, disposition, ...(auditContext ? { auditContext } : {}) })
           return { url: 'https://files.example.test/spec?signature=redacted', expiresAt: '2026-07-18T00:05:00.000Z' }
         },
@@ -165,8 +254,11 @@ describe('public attachment service', () => {
     expect(accesses[0]?.auditContext).toMatchObject({ workspaceId, correlationId: 'corr-1', source: { kind: 'api', requestId: 'request-1' } })
     await expect(download('pending')).rejects.toMatchObject({ status: 404 })
     await expect(download('missing')).rejects.toMatchObject({ status: 404 })
-    blockAfterListing = true
+    failAfterListing = new FileProofingError(423, 'FileThreatDetected', 'Malware scanning blocked this file.')
     await expect(download('spec')).rejects.toMatchObject({ status: 404 })
+    // A file that changed after the listing read it is a conflict the client can retry.
+    failAfterListing = new FileProofingError(409, 'FileVersionConflict', 'The file changed.')
+    await expect(download('spec')).rejects.toMatchObject({ status: 409, code: 'conflict' })
     expect(accesses).toHaveLength(1)
   })
 })

@@ -48,13 +48,16 @@ async function resolveCredentialFileAccess(
     permission: 'work-items.read', teamId, evaluateProjectScopes: true,
   })
   const { detail } = await loadAuthorizedTeamIssue(workItemPrincipal, teamId, workItemId, 'viewer')
+  const projectId = detail.issue.assignedProjectId
   let principal
   try {
+    // The file permission is evaluated at the Work Item's own Project, or at its Team when it has none,
+    // so a file grant in another Project of the Team never opens these files.
     principal = await resolveDeveloperCredentialPrincipal(credential, {
       permission: 'files.read',
       alternativePermissions: ['files.write'],
       teamId,
-      evaluateProjectScopes: true,
+      ...(projectId ? { projectId } : {}),
     })
   } catch (error) {
     // Enterprise RBAC that grants no file permission hides every file, like a hidden file.
@@ -67,7 +70,7 @@ async function resolveCredentialFileAccess(
       teamId,
       kind: 'work-item',
       issueId: workItemId,
-      ...(detail.issue.assignedProjectId ? { projectId: detail.issue.assignedProjectId } : {}),
+      ...(projectId ? { projectId } : {}),
     },
     actor: {
       memberKey: principal.userKey,
@@ -163,6 +166,10 @@ export function createCanonicalPublicAttachmentService(): PublicAttachmentServic
         // The scan can still block the object after the listing read it; that is not downloadable.
         if (error instanceof FileProofingError && (error.status === 403 || error.status === 404 || error.status === 423)) {
           throw attachmentNotFound()
+        }
+        // The file changed after it was read; the client can list the attachments again and retry.
+        if (error instanceof FileProofingError && error.status === 409) {
+          throw new PublicApiServiceError(409, 'conflict', 'The attachment changed. List the attachments again and retry.')
         }
         throw error
       }
