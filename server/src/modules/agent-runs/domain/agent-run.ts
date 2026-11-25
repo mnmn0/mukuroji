@@ -592,6 +592,7 @@ export function createDefaultAgentSettings(teamId: string): AgentSettings {
     projectBriefs: {},
     fileFailedRunsToTriage: false,
     fileStalledRunsToTriage: false,
+    notifyAssigneeOfRunEvents: false,
   }
 }
 
@@ -698,7 +699,7 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
     [
       'expectedRevision', 'leaseMinutes', 'allowTakeoverAfterLeaseExpiry', 'readyStatusIds', 'resumableStatusIds',
       'requireAcceptanceCriteria', 'acceptanceCriteriaFieldId', 'brief', 'projectBriefs',
-      'fileFailedRunsToTriage', 'fileStalledRunsToTriage',
+      'fileFailedRunsToTriage', 'fileStalledRunsToTriage', 'notifyAssigneeOfRunEvents',
     ],
     'Agent settings',
   )
@@ -725,7 +726,7 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
       pointer: '/requireAcceptanceCriteria',
     })
   }
-  for (const field of ['fileFailedRunsToTriage', 'fileStalledRunsToTriage'] as const) {
+  for (const field of ['fileFailedRunsToTriage', 'fileStalledRunsToTriage', 'notifyAssigneeOfRunEvents'] as const) {
     if (value[field] !== undefined && typeof value[field] !== 'boolean') {
       throw new AgentRunError('validation_failed', `${field} must be a boolean.`, { pointer: `/${field}` })
     }
@@ -748,6 +749,7 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
     projectBriefs,
     fileFailedRunsToTriage: value.fileFailedRunsToTriage === true,
     fileStalledRunsToTriage: value.fileStalledRunsToTriage === true,
+    notifyAssigneeOfRunEvents: value.notifyAssigneeOfRunEvents === true,
   }
 }
 
@@ -797,6 +799,8 @@ export type ValidatedAgentSettingsUpdate = UpdateAgentSettingsRequest & {
   fileFailedRunsToTriage: boolean
   /** Whether stalled runs are filed to Triage. */
   fileStalledRunsToTriage: boolean
+  /** Whether the assignee is notified of blocker and handoff reports, failed finishes, and stalls. */
+  notifyAssigneeOfRunEvents: boolean
   /**
    * Projects whose briefs were kept from the saved settings because the editor cannot see them;
    * a retry is not compared on these briefs.
@@ -833,6 +837,7 @@ export function createSavedAgentSettings(
     projectBriefs: { ...update.projectBriefs },
     fileFailedRunsToTriage: update.fileFailedRunsToTriage,
     fileStalledRunsToTriage: update.fileStalledRunsToTriage,
+    notifyAssigneeOfRunEvents: update.notifyAssigneeOfRunEvents,
     updatedAt: now.toISOString(),
     updatedBy: actorMemberKey,
   }

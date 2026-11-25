@@ -38,6 +38,7 @@ describe('Agent settings draft', () => {
       projectBriefs: agentSettingsFixture.projectBriefs,
       fileFailedRunsToTriage: true,
       fileStalledRunsToTriage: false,
+      notifyAssigneeOfRunEvents: false,
     })
   })
 
@@ -58,9 +59,11 @@ describe('Agent settings draft', () => {
       projectBriefs: { 'project-console': 'Use the design system.' },
       fileFailedRunsToTriage: true,
       fileStalledRunsToTriage: false,
+      notifyAssigneeOfRunEvents: false,
     })
     expect(isAgentSettingsDraftChanged(agentSettingsFixture, cleared)).toBeTrue()
     expect(isAgentSettingsDraftChanged(agentSettingsFixture, { ...draft, fileStalledRunsToTriage: true })).toBeTrue()
+    expect(isAgentSettingsDraftChanged(agentSettingsFixture, { ...draft, notifyAssigneeOfRunEvents: true })).toBeTrue()
     expect(isAgentSettingsDraftChanged(agentSettingsFixture, { ...draft, resumableStatusIds: [] })).toBeTrue()
   })
 

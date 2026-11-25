@@ -401,6 +401,23 @@ export function AgentSettingsPanel({
                     {t('agentSettings.triage.stalled')}
                   </label>
                 </fieldset>
+
+                <fieldset className="grid gap-3" disabled={disabled}>
+                  <legend className="text-base font-semibold text-[var(--workbench-text)]">{t('agentSettings.notifications.title')}</legend>
+                  <label className="flex min-h-[44px] items-start gap-3 text-sm font-semibold text-[var(--workbench-text)]">
+                    <input
+                      aria-describedby={`${idPrefix}-notifications-help`}
+                      checked={draft.notifyAssigneeOfRunEvents}
+                      className="mt-0.5 h-5 w-5 accent-[var(--workbench-primary)]"
+                      type="checkbox"
+                      onChange={(event) => onDraftChange({ ...draft, notifyAssigneeOfRunEvents: event.target.checked })}
+                    />
+                    {t('agentSettings.notifications.assignee')}
+                  </label>
+                  <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]" id={`${idPrefix}-notifications-help`}>
+                    {t('agentSettings.notifications.help')}
+                  </p>
+                </fieldset>
               </div>
             ) : null}
           </div>

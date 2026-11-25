@@ -33,6 +33,8 @@ const classificationCases: Array<[{ eventType: string, reasons: string[] }, Noti
     [{ eventType: 'weekly-report.submission-escalation', reasons: ['weekly-report-escalation'] }, 'reminder'],
     [{ eventType: 'analytics.report.delivered', reasons: ['recipient'] }, 'other'],
     [{ eventType: 'work-item.updated', reasons: ['contributor'] }, 'assignment'],
+    [{ eventType: 'agent-run.reported', reasons: ['agent-run-blocker'] }, 'status'],
+    [{ eventType: 'agent-run.stalled', reasons: ['agent-run-stalled'] }, 'status'],
 ]
 
 describe('classifyNotificationCategory', () => {

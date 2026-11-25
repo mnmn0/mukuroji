@@ -35,6 +35,7 @@ const defaultSettings: AgentSettings = {
   projectBriefs: {},
   fileFailedRunsToTriage: false,
   fileStalledRunsToTriage: false,
+  notifyAssigneeOfRunEvents: false,
 }
 
 /** Storybook metadata for the Team Agent settings panel. */

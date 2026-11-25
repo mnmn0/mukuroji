@@ -43,6 +43,8 @@ export type AgentSettingsDraft = {
   fileFailedRunsToTriage: boolean
   /** Whether stalled runs are filed to Triage. */
   fileStalledRunsToTriage: boolean
+  /** Whether the assignee is notified of blocker and handoff reports, failed finishes, and stalls. */
+  notifyAssigneeOfRunEvents: boolean
 }
 
 /** Result of checking a draft against the limits the server enforces. */
@@ -127,6 +129,7 @@ export function createAgentSettingsDraft(settings: AgentSettings): AgentSettings
     projectBriefs: { ...settings.projectBriefs },
     fileFailedRunsToTriage: settings.fileFailedRunsToTriage,
     fileStalledRunsToTriage: settings.fileStalledRunsToTriage,
+    notifyAssigneeOfRunEvents: settings.notifyAssigneeOfRunEvents,
   }
 }
 
@@ -209,6 +212,7 @@ export function createUpdateAgentSettingsRequest(
     projectBriefs,
     fileFailedRunsToTriage: draft.fileFailedRunsToTriage,
     fileStalledRunsToTriage: draft.fileStalledRunsToTriage,
+    notifyAssigneeOfRunEvents: draft.notifyAssigneeOfRunEvents,
   }
 }
 
@@ -406,6 +410,7 @@ function createDraftComparisonKey(draft: AgentSettingsDraft): string {
     draft.requireAcceptanceCriteria,
     draft.fileFailedRunsToTriage,
     draft.fileStalledRunsToTriage,
+    draft.notifyAssigneeOfRunEvents,
     draft.acceptanceCriteriaFieldId,
     isBlank(draft.brief) ? '' : draft.brief,
     Object.entries(draft.projectBriefs)

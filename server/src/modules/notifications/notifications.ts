@@ -12,6 +12,7 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import { getConfiguredDynamoDbEndpoint } from '../audit'
 import {
+  AGENT_RUN_NOTIFICATION_REASONS,
   isCanonicalWorkItemKey,
   parseNotificationMessage,
   type NotificationCategoryChannels,
@@ -902,7 +903,7 @@ export function getConfiguredNotificationsTableName(
 /** Reasons whose sole recipient must still be the current Work Item assignee. */
 const currentAssigneeNotificationReasons = new Set([
   'assignee', 'assignment', 'baseline-slip', 'due', 'due-date-change', 'due-soon', 'overdue', 'schedule-change',
-  'stale', 'status-change',
+  'stale', 'status-change', ...AGENT_RUN_NOTIFICATION_REASONS,
 ])
 
 /**
