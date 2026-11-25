@@ -145,6 +145,7 @@ import { DocumentError } from '../../modules/documents'
 import type { WorkItemImportLink } from '../../modules/work-items/work-item-import-structure'
 import {
   applyWorkItemImportLink,
+  readWorkItemImportRowAcceptanceCriteria,
   validateWorkItemImportLinks,
   type WorkItemImportLinkRow,
 } from './work-item-import-links'
@@ -3118,6 +3119,9 @@ async function validatePublicImport(
       ? await workspaceDependencies.workspaceAccess.listActiveMembers(principal.directoryId)
       : undefined,
   )
+  // A row's criteria are created with the Work Item, so a status that requires them is judged with
+  // them; the later criteria link then finds them in place and changes nothing.
+  const acceptanceCriteriaByRow = readWorkItemImportRowAcceptanceCriteria(preview.links)
   for (const row of preview.rows) {
     if (!row.input) continue
     const matched = matchWorkItemImportPeople(row.input, matchMember)
@@ -3125,11 +3129,13 @@ async function validatePublicImport(
       errorsByRow.get(row.row)?.push(...matched.mismatches.map((mismatch) => toWorkItemImportMemberError(row.row, mismatch)))
       continue
     }
+    const rowAcceptanceCriteria = acceptanceCriteriaByRow.get(row.row)
     const candidate: CreateWorkItemInput = {
       ...matched.people,
       ...(row.input.assignedProjectId === undefined && input.assignedProjectId
         ? { assignedProjectId: input.assignedProjectId }
         : {}),
+      ...(rowAcceptanceCriteria ? { acceptanceCriteria: rowAcceptanceCriteria } : {}),
     }
     mappedByRow.set(row.row, { ...candidate })
     try {

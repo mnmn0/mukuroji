@@ -1296,7 +1296,9 @@ export function TeamIssueScreen({
           target,
           isConflict ? 'WorkItemRevisionConflict' : 'TeamTaskActionMutationFailed',
           isConflict ? 'conflict' : 'unknown',
-          isConflict ? t('tasks.action.conflict') : t('taskViews.action.failed'),
+          isConflict
+            ? t('tasks.action.conflict')
+            : describeWorkflowRuleRejection(error, t) ?? t('taskViews.action.failed'),
           isConflict,
         ))
         if (canDismissOwner) clearSelectedIssueIfAllowed(issueId)
@@ -1676,13 +1678,14 @@ export function TeamIssueScreen({
                             undefined,
                             'TeamTaskCreateFailed',
                             'unknown',
-                            t('issues.error.create'),
+                            describeWorkflowRuleRejection(error, t) ?? t('issues.error.create'),
                           ))
                           if (canDismissOwner) dismissCreateIssueEditor()
                         }
                         if (!claimedContext) {
                           setCreateErrorMessage(
-                            error instanceof Error ? error.message : t('issues.error.create'),
+                            describeWorkflowRuleRejection(error, t)
+                              ?? (error instanceof Error ? error.message : t('issues.error.create')),
                           )
                         }
                       }

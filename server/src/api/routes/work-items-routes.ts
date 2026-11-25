@@ -5298,6 +5298,10 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const changesAssignedProject =
         'assignedProjectId' in configuredBody &&
         readAssignedProjectId(configuredBody.assignedProjectId) !== detail.issue.assignedProjectId
+      const changesWorkflowStatus =
+        'workflowStatusId' in configuredBody &&
+        configuredBody.workflowStatusId !== undefined &&
+        configuredBody.workflowStatusId !== detail.issue.workflowStatusId
       if (changesSchedule) {
         try {
           authorizationSnapshot = await createDependencyFencedWorkItemAuthorizationSnapshot(
@@ -5321,7 +5325,9 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           }
           throw error
         }
-      } else if (changesAssignedProject) {
+      } else if (changesAssignedProject || changesWorkflowStatus) {
+        // A status change was judged against the caller's roles, so a role change before the commit
+        // fails the write instead of letting a manager-only transition through.
         authorizationSnapshot = await createPlanningFencedWorkItemAuthorizationSnapshot(principal)
       }
 
@@ -6035,8 +6041,12 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         // The decider changes the status, so the workflow's transition actor roles apply to them.
         // A reviewer may hold no Team role; then only the assignee role can hold, so a failed read
         // leaves the manager role unmet instead of blocking a decision no rule restricts.
+        // A reviewer may hold no Team role; only that denial falls back, and other failures surface.
         const deciderContext = await requireTeamPermission(principal, scope.teamId, 'viewer')
-          .catch(() => undefined)
+          .catch((error: unknown) => {
+            if (error instanceof ProjectDataError && error.status === 403) return undefined
+            throw error
+          })
         const resolved = await resolveFileApprovalCompletionTransitionForDecision(
           principal.directoryId,
           scope.teamId,

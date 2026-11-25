@@ -62,7 +62,7 @@ export function readWorkflowRuleConditions(data: unknown): WorkflowRuleUnmetCond
   ) {
     return []
   }
-  return data.unmetConditions.slice(0, 64).flatMap((candidate): WorkflowRuleUnmetCondition[] => {
+  return data.unmetConditions.slice(0, 100).flatMap((candidate): WorkflowRuleUnmetCondition[] => {
     if (!isRecord(candidate) || typeof candidate.message !== 'string') return []
     if (candidate.rule === 'transition-actor' && Array.isArray(candidate.allowedActorRoles)) {
       const allowedActorRoles = candidate.allowedActorRoles.filter(isWorkflowTransitionActorRole)

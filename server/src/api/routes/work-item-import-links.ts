@@ -3,6 +3,7 @@ import {
   WORK_ITEM_TEAM_RELATION_LINK_LIMIT,
   type PlanningWorkItemSummary,
   type ResolvedWorkItemConfiguration,
+  type WorkItemAcceptanceCriterionCreateInput,
   type WorkItemRelationType,
   type WorkItemSchedule,
 } from '@mukuroji/contracts'
@@ -412,6 +413,29 @@ async function createImportDependency(
     workItemState,
     createPlanningCallerAuthorizationConditionChecks(principal),
   )
+}
+
+/**
+ * Reads the acceptance criteria each import row creates, keyed by row.
+ *
+ * A row is created with its criteria, so a status that requires them judges the row with them, and
+ * the criteria link that follows finds them in place.
+ *
+ * @param links - Links the import preview resolved.
+ * @returns Non-empty criteria by source row.
+ */
+export function readWorkItemImportRowAcceptanceCriteria(
+  links: readonly WorkItemImportLink[],
+): Map<number, WorkItemAcceptanceCriterionCreateInput[]> {
+  const criteriaByRow = new Map<number, WorkItemAcceptanceCriterionCreateInput[]>()
+  for (const link of links) {
+    if (link.kind !== 'acceptance-criteria' || link.criteria.length === 0) continue
+    criteriaByRow.set(
+      link.row,
+      link.criteria.map((criterion) => ({ text: criterion.text, satisfied: criterion.satisfied })),
+    )
+  }
+  return criteriaByRow
 }
 
 /**
