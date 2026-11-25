@@ -238,6 +238,44 @@ test('applies transition actor roles to the person whose approval decision chang
   expect(await response.json()).toMatchObject({ code: 'WorkflowTransitionActorDenied' })
 })
 
+test('fences the decider\'s roles in the approval decision that changes the status', async () => {
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    detailAssigneeUserId: 'sato@example.com',
+    detailWorkflowStatusIds: ['in-progress'],
+  })
+  const configuration = configureRules({ allowedActorRoles: ['project-manager'] })
+  const resolvedChecks: unknown[] = []
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async decideApproval(_scope, _actor, _approvalId, _input, _auditContext, resolver) {
+        const transition = await resolver?.('review')
+        resolvedChecks.push(...(transition?.configurationConditionChecks ?? []))
+        return createApprovalRequestFixture({ status: 'approved' })
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/approvals/approval-1/decisions', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision: 'approve', expectedRevision: 1 }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(resolvedChecks).toContainEqual({
+    ConditionCheck: expect.objectContaining({
+      Key: { workspaceId: 'user#demo@example.com', recordKey: 'MEMBER#demo@example.com' },
+      ExpressionAttributeValues: expect.objectContaining({ ':expectedVersion': 1 }),
+    }),
+  })
+})
+
 test('rejects creating a Work Item in a restricted status even when the creator assigns themselves', async () => {
   configureFakeProjectClients(true, { role: 'member' })
   const configuration = configureRules({})

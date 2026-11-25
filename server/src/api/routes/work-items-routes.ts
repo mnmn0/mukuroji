@@ -213,6 +213,7 @@ import {
 } from '../shared/http'
 import { readAuditEventQuery, readLocale, readRequiredRouteId } from '../shared/input-parsing'
 import {
+  createPlanningCallerAuthorizationConditionChecks,
   createPlanningFencedWorkItemAuthorizationSnapshot,
   filterPlanningSnapshotForPrincipal,
   withPlanningLegacyReadScope,
@@ -6047,13 +6048,27 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             if (error instanceof ProjectDataError && error.status === 403) return undefined
             throw error
           })
-        const resolved = await resolveFileApprovalCompletionTransitionForDecision(
+        const transition = await resolveFileApprovalCompletionTransitionForDecision(
           principal.directoryId,
           scope.teamId,
           canonicalWorkItem,
           completionTransition,
           createPersonWorkflowRulePrincipal(principal, deciderContext),
         )
+        // The transition was judged against the decider's roles, so a role change before the
+        // decision commits fails it. The decision already writes Planning META, so only the caller's
+        // member row and enterprise CONTROL revision are checked here.
+        const resolved = transition && {
+          ...transition,
+          configurationConditionChecks: [
+            ...transition.configurationConditionChecks,
+            ...createPlanningCallerAuthorizationConditionChecks(
+              principal,
+              [],
+              principal.principalKind !== 'service-account',
+            ),
+          ],
+        }
         resolvedCompletionTransition = resolved
         return resolved
       }
