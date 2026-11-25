@@ -104,6 +104,12 @@ SSOを使わなければ削除し、`bun run floci:up` で生成設定を更新�
 独立したstate secret、Hosted UI、外部IdPを含む5項目の設定を揃えます。Flociが作る検証用OAuth
 clientだけでは外部SSOを有効にしません。
 
+### Coding agent の環境（Codex / Claude Code / Kiro）
+
+Claude Code と Kiro を含む coding agent ごとの準備（setup、review Skill の導入と照合、MCP 設定）は
+[docs/coding-agents.md](docs/coding-agents.md) にまとめています。新しく環境を用意するときはそちらから
+始めてください。以下は Codex cloud の補足です。
+
 ### Codex cloud とレビュー Skill
 
 Codex cloud のカスタムセットアップスクリプトには、以下を指定できます。
