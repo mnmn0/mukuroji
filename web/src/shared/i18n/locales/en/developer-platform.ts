@@ -20,4 +20,7 @@ export const developerPlatformMessages = {
   'developerPlatform.webhookEvents.relationRemoved.description': 'A related or duplicate link was removed.',
   'developerPlatform.webhookEvents.siblingOrderChanged.label': 'Sibling order changed',
   'developerPlatform.webhookEvents.siblingOrderChanged.description': 'A Work Item moved among its siblings.',
+  'developerPlatform.importProgress.summary': 'Created {rows} of {totalRows} rows and set {links} of {totalLinks} parents, dependencies, and relations.',
+  'developerPlatform.importProgress.loadFailed': 'The import progress could not be loaded.',
+  'developerPlatform.importProgress.retry': 'Load again',
 } as const

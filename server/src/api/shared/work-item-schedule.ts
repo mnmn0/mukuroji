@@ -82,6 +82,7 @@ const publicWorkItemCreateFields: Readonly<Record<keyof PublicCreateTeamIssueReq
   assignedProjectId: true,
   assigneeUserId: true,
   contributorAssignments: true,
+  acceptanceCriteria: true,
   schedule: true,
   priority: true,
   workflowStatusId: true,

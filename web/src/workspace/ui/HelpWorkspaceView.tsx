@@ -77,6 +77,71 @@ const roleGuides: readonly RoleGuide[] = [
 ]
 
 /**
+ * A Workspace feature explained on the help view with a short summary, its screen, and its guide section.
+ */
+type FeatureGuide = {
+  /** Translation key for the one-line feature summary. */
+  descriptionKey: MessageKey
+  /** Guide file and heading anchor inside `docs/guide/`, such as `member.md#フォーカス`. */
+  guidePath: string
+  /** Translation key for the feature name. */
+  titleKey: MessageKey
+  /** Application route that opens the feature. */
+  to: string
+}
+
+const featureGuides: readonly FeatureGuide[] = [
+  {
+    descriptionKey: 'workspace.help.featureProjectsDescription',
+    guidePath: 'pm.md#1-project-を作る',
+    titleKey: 'workspace.help.featureProjectsTitle',
+    to: '/projects',
+  },
+  {
+    descriptionKey: 'workspace.help.featurePlanningDescription',
+    guidePath: 'pm.md#5-計画phasemilestonecycleを置く',
+    titleKey: 'workspace.help.featurePlanningTitle',
+    to: '/planning',
+  },
+  {
+    descriptionKey: 'workspace.help.featureUpdatesDescription',
+    guidePath: 'pm.md#7-毎週近況を公開する',
+    titleKey: 'workspace.help.featureUpdatesTitle',
+    to: '/updates',
+  },
+  {
+    descriptionKey: 'workspace.help.featureReportsDescription',
+    guidePath: 'pm.md#8-レポートで振り返る',
+    titleKey: 'workspace.help.featureReportsTitle',
+    to: '/reports',
+  },
+  {
+    descriptionKey: 'workspace.help.featureMyTasksDescription',
+    guidePath: 'member.md#マイタスク',
+    titleKey: 'workspace.help.featureMyTasksTitle',
+    to: '/my-tasks',
+  },
+  {
+    descriptionKey: 'workspace.help.featureFocusDescription',
+    guidePath: 'member.md#フォーカス',
+    titleKey: 'workspace.help.featureFocusTitle',
+    to: '/focus',
+  },
+  {
+    descriptionKey: 'workspace.help.featureInboxDescription',
+    guidePath: 'member.md#受信箱と通知',
+    titleKey: 'workspace.help.featureInboxTitle',
+    to: '/inbox',
+  },
+  {
+    descriptionKey: 'workspace.help.featureSettingsDescription',
+    guidePath: 'admin.md#権限のしくみ',
+    titleKey: 'workspace.help.featureSettingsTitle',
+    to: '/settings',
+  },
+]
+
+/**
  * Props for the Workspace help view.
  */
 export type HelpWorkspaceViewProps = {
@@ -89,7 +154,8 @@ export type HelpWorkspaceViewProps = {
 }
 
 /**
- * Renders coding-agent setup, role-specific user guides, and Workspace support destinations.
+ * Renders coding-agent setup, role-specific user guides, per-feature summaries linked to their
+ * screens and guide sections, and Workspace support destinations.
  *
  * @param props - Translator, running build identity, and whether to show the coding-agent guide.
  * @returns The Workspace help navigation view.
@@ -128,6 +194,47 @@ export function HelpWorkspaceView({
                   {t(guide.descriptionKey)}
                 </span>
               </a>
+            </li>
+          ))}
+        </ul>
+      </section>
+      <section aria-labelledby="feature-guides-title" className="grid min-w-0 gap-4" id="feature-guides">
+        <header>
+          <h2 className="text-xl font-semibold tracking-tight text-[var(--workbench-text)]" id="feature-guides-title">
+            {t('workspace.help.featureGuidesTitle')}
+          </h2>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--workbench-muted)]">
+            {t('workspace.help.featureGuidesDescription')}
+          </p>
+        </header>
+        <ul className="grid list-none grid-cols-2 gap-4 p-0 max-[820px]:grid-cols-1">
+          {featureGuides.map((feature, index) => (
+            <li className="workbench-panel grid min-w-0 gap-2 p-5" key={feature.to}>
+              <strong className="text-base font-semibold text-[var(--workbench-text)]" id={`feature-guide-${index}`}>
+                {t(feature.titleKey)}
+              </strong>
+              <span className="text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+                {t(feature.descriptionKey)}
+              </span>
+              <span className="flex flex-wrap gap-x-4 gap-y-1 text-sm font-semibold">
+                <Link
+                  aria-describedby={`feature-guide-${index}`}
+                  className="text-[var(--workbench-primary-text)]"
+                  to={feature.to}
+                >
+                  {t('workspace.help.featureOpen')}
+                </Link>
+                <a
+                  aria-describedby={`feature-guide-${index}`}
+                  className="text-[var(--workbench-primary-text)]"
+                  href={`${roleGuideBaseUrl}${feature.guidePath}`}
+                  rel="noopener noreferrer"
+                  target="_blank"
+                >
+                  {t('workspace.help.featureGuide')}
+                  <span aria-hidden="true"> ↗</span>
+                </a>
+              </span>
             </li>
           ))}
         </ul>

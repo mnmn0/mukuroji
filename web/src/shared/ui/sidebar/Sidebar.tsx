@@ -1,4 +1,8 @@
-import type { DirectoryArchiveImpactTarget } from '@mukuroji/contracts'
+import {
+  PROJECT_INITIAL_LIFECYCLE_STATES,
+  type DirectoryArchiveImpactTarget,
+  type ProjectLifecycleState,
+} from '@mukuroji/contracts'
 import { useEffect, useId, useRef, useState } from 'react'
 import type { ComponentType, FormEvent, ReactNode, RefObject } from 'react'
 import {
@@ -109,6 +113,18 @@ export type SidebarTeamViewId = 'overview' | 'triage' | 'factory' | 'issues' | '
 type SidebarCreateMode = 'team' | 'project'
 
 /**
+ * サイドバーの新規登録ダイアログで入力したプロジェクトです。
+ */
+type SidebarCreateProjectInput = {
+  /** ユーザーが入力したプロジェクト名です。 */
+  name: string
+  /** サイドバー上のプロジェクト表示色です。 */
+  tone: SidebarProjectTone
+  /** 作成直後のライフサイクル状態です。 */
+  lifecycleState: ProjectLifecycleState
+}
+
+/**
  * 新規登録モーダルで使う表示文言です。
  */
 export type SidebarCreateLabels = {
@@ -156,6 +172,14 @@ export type SidebarCreateLabels = {
    * プロジェクト色ごとの表示名です。
    */
   toneLabels: Record<SidebarProjectTone, string>
+  /**
+   * 作成時のライフサイクル選択のラベルです。
+   */
+  lifecycle: string
+  /**
+   * 作成時に選べるライフサイクル状態ごとの表示名です。
+   */
+  lifecycleLabels: Partial<Record<ProjectLifecycleState, string>>
   /**
    * チーム登録ボタンの文言です。
    */
@@ -468,7 +492,7 @@ export type SidebarProps = {
    */
   onCreateProject?: (
     teamId: string,
-    input: { name: string; tone: SidebarProjectTone },
+    input: SidebarCreateProjectInput,
   ) => void | Promise<void>
   /**
    * チームをアーカイブするときに呼ばれます。
@@ -644,6 +668,12 @@ const defaultLabels: SidebarLabels = {
       purple: 'ニュートラル',
       green: '緑',
       yellow: '黄',
+    },
+    lifecycle: '開始時のライフサイクル',
+    lifecycleLabels: {
+      proposed: '提案中',
+      approved: '承認済み',
+      active: '実行中',
     },
     createTeam: 'チームを登録',
     createProject: 'プロジェクトを登録',
@@ -1759,7 +1789,7 @@ function SidebarRegistrationModal({
   teams: SidebarTeam[]
   onCreateProject?: (
     teamId: string,
-    input: { name: string; tone: SidebarProjectTone },
+    input: SidebarCreateProjectInput,
   ) => void | Promise<void>
   onCreateTeam?: (input: { name: string }) => void | Promise<void>
   onRequestClose: () => void
@@ -1889,6 +1919,8 @@ function SidebarRegistrationModal({
     const name = String(formData.get('projectName') ?? '').trim()
     const toneValue = String(formData.get('tone') ?? selectedTone)
     const tone = isProjectTone(toneValue) ? toneValue : 'blue'
+    const lifecycleValue = String(formData.get('lifecycleState') ?? 'active')
+    const lifecycleState = PROJECT_INITIAL_LIFECYCLE_STATES.find((state) => state === lifecycleValue) ?? 'active'
 
     setProjectErrorMessage(undefined)
     if (!teamId) {
@@ -1903,7 +1935,7 @@ function SidebarRegistrationModal({
     isSavingProjectRef.current = true
     setIsSavingProject(true)
     void Promise.resolve()
-      .then(() => onCreateProject(teamId, { name, tone }))
+      .then(() => onCreateProject(teamId, { name, tone, lifecycleState }))
       .then(() => {
         form.reset()
         setSelectedTone('blue')
@@ -2040,6 +2072,21 @@ function SidebarRegistrationModal({
                   data-autofocus
                   autoFocus
                 />
+              </label>
+              <label className="grid gap-2 text-[13px] font-semibold text-[var(--workbench-text)]">
+                {labels.lifecycle}
+                <select
+                  className="workbench-input h-11 px-3 text-[14px] disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-fg-slate-500"
+                  name="lifecycleState"
+                  defaultValue="active"
+                  disabled={teams.length === 0}
+                >
+                  {PROJECT_INITIAL_LIFECYCLE_STATES.map((state) => (
+                    <option key={state} value={state}>
+                      {labels.lifecycleLabels[state] ?? state}
+                    </option>
+                  ))}
+                </select>
               </label>
               <fieldset className="grid gap-2">
                 <legend className="text-[13px] font-semibold text-[var(--workbench-text)]">{labels.tone}</legend>

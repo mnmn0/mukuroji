@@ -147,6 +147,55 @@ describe('Public API directory', () => {
       .listProjectRaidLog(credential, 'core-team', 'refero'))).rejects.toMatchObject({ status: 403 })
   })
 
+  test('reads the Project charter for a viewer, hides a Project the owner cannot see, and refuses a guest', async () => {
+    configureFakeProjectClients(true, {
+      directoryId: workspaceId,
+      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+      role: 'viewer',
+      workspaceRole: 'member',
+      teamProjects: [
+        { id: 'refero', name: 'Refero', tone: 'blue' },
+        { id: 'hidden', name: 'Hidden', tone: 'blue' },
+      ],
+      projectLifecycleStates: { 'core-team/refero': 'on-hold' },
+    })
+    const charter = await runWithTestAppDependencies(() => createCanonicalPublicDirectoryService()
+      .getProjectCharter(credential, 'core-team', 'refero'))
+    expect(charter).toEqual({
+      schemaVersion: 1,
+      teamId: 'core-team',
+      projectId: 'refero',
+      lifecycleState: 'on-hold',
+      revision: 0,
+      tags: [],
+      repositoryUrls: [],
+    })
+    await expect(runWithTestAppDependencies(() => createCanonicalPublicDirectoryService()
+      .getProjectCharter(credential, 'core-team', 'hidden'))).rejects.toMatchObject({ status: 403 })
+
+    resetTestApp()
+    configureFakeProjectClients(true, {
+      directoryId: workspaceId,
+      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+      role: 'viewer',
+      workspaceRole: 'guest',
+    })
+    await expect(runWithTestAppDependencies(() => createCanonicalPublicDirectoryService()
+      .getProjectCharter(credential, 'core-team', 'refero'))).rejects.toMatchObject({ status: 403 })
+  })
+
+  test('lets a Workspace administrator without a Project role read the charter, as on the Web', async () => {
+    configureFakeProjectClients(true, {
+      directoryId: workspaceId,
+      projectAccesses: [],
+      role: 'viewer',
+      workspaceRole: 'admin',
+    })
+    const charter = await runWithTestAppDependencies(() => createCanonicalPublicDirectoryService()
+      .getProjectCharter(credential, 'core-team', 'refero'))
+    expect(charter).toMatchObject({ schemaVersion: 1, teamId: 'core-team', projectId: 'refero' })
+  })
+
   test('resolves a readable key and answers 404 alike for unused, stale, and unreadable keys', async () => {
     const locations = {
       'CT-11': { key: 'CT-11', teamId: 'core-team', workItemId: 'onboarding-friction' },

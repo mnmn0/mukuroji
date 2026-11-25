@@ -719,5 +719,8 @@ export function createDeveloperPlatformLabels(
     importReportSummary: ja
       ? '{total} 行中 {valid} 行が有効です。{invalid} 行を修正してください。'
       : '{valid} of {total} rows are valid. {invalid} rows need attention.',
+    importProgressSummary: t('developerPlatform.importProgress.summary'),
+    importProgressLoadFailed: t('developerPlatform.importProgress.loadFailed'),
+    importProgressRetry: t('developerPlatform.importProgress.retry'),
   }
 }

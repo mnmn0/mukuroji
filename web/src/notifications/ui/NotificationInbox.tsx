@@ -717,6 +717,9 @@ function formatNotificationReason(reason: string, t: (key: MessageKey) => string
   if (normalizedReason.includes('reply')) {
     return t('workspace.inbox.reason.reply')
   }
+  if (normalizedReason === 'contributor') {
+    return t('workspace.inbox.reason.contributor')
+  }
   if (normalizedReason.includes('assign')) {
     return t('workspace.inbox.reason.assignment')
   }
@@ -731,6 +734,9 @@ function formatNotificationReason(reason: string, t: (key: MessageKey) => string
   }
   if (normalizedReason === 'update-owner') {
     return t('workspace.inbox.reason.updateOwner')
+  }
+  if (normalizedReason === 'update-reviewer') {
+    return t('workspace.inbox.reason.updateReviewer')
   }
   if (normalizedReason === 'creator') {
     return t('workspace.inbox.reason.creator')

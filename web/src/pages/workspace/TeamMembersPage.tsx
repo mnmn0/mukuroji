@@ -146,6 +146,7 @@ export function TeamMembersPage() {
           isAssignmentMutationPending={assignmentMutation.isPending}
           onGranularityChange={setGranularity}
           onMoveAssignment={assignmentMutation.move}
+          onChangeAssignmentStatus={assignmentMutation.setStatus}
           onRetry={() => { void workload.mutate() }}
           snapshot={workload.data}
           t={t}

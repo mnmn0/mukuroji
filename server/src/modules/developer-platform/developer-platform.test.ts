@@ -4893,6 +4893,110 @@ describe('API key audit', () => {
   })
 })
 
+describe('OAuth app and Webhook subscription audit', () => {
+  /** Returns the audit outbox items written by DynamoDB transactions so far. */
+  function readAuditItems(commands: Array<{ name: string; input: Record<string, unknown> }>) {
+    return commands
+      .filter(({ name }) => name === 'TransactWriteCommand')
+      .flatMap(({ input }) => input.TransactItems as Array<{
+        Put?: { TableName?: string; Item: Record<string, unknown> }
+      }>)
+      .filter(({ Put }) => Put?.TableName === 'AuditEventsTable')
+      .map(({ Put }) => Put?.Item ?? {})
+  }
+
+  test('records each lifecycle change in the same transaction without secrets or the URL', async () => {
+    const memory = createMemoryDocumentClient()
+    const client = new DynamoDbDeveloperPlatformStorage(
+      'DeveloperPlatformTable',
+      memory.documentClient,
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(31)),
+      () => START,
+      'LookupKeyIndex',
+      'AuditEventsTable',
+    )
+    const created = await client.createOAuthApp({
+      workspaceId: 'workspace-audit',
+      createdByUserId: 'member-1',
+      input: { name: 'CI', grantTypes: ['client_credentials'], scopes: ['work-items:read'] },
+    })
+    const rotated = await client.rotateOAuthClientSecret({
+      workspaceId: 'workspace-audit',
+      oauthAppId: created.oauthApp.id,
+      actorUserId: 'member-1',
+    })
+    await client.revokeOAuthApp({
+      workspaceId: 'workspace-audit',
+      oauthAppId: created.oauthApp.id,
+      actorUserId: 'admin-1',
+    })
+    await client.revokeOAuthApp({
+      workspaceId: 'workspace-audit',
+      oauthAppId: created.oauthApp.id,
+      actorUserId: 'admin-1',
+    })
+    const webhook = await client.createWebhookSubscription({
+      workspaceId: 'workspace-audit',
+      createdByUserId: 'member-1',
+      input: {
+        name: 'Receiver',
+        url: 'https://hooks.example.com/in?token=receiver-token',
+        eventTypes: ['work-item.created'],
+        teamIds: ['team-1'],
+      },
+    })
+    const rotatedWebhook = await client.rotateWebhookSecret({
+      workspaceId: 'workspace-audit',
+      subscriptionId: webhook.subscription.id,
+      actorUserId: 'member-1',
+    })
+    await client.updateWebhookSubscription({
+      workspaceId: 'workspace-audit',
+      subscriptionId: webhook.subscription.id,
+      actorUserId: 'member-1',
+      input: { name: 'Receiver 2', url: 'https://hooks.example.com/next?token=next-token' },
+    })
+    await client.setWebhookSubscriptionStatus({
+      workspaceId: 'workspace-audit',
+      subscriptionId: webhook.subscription.id,
+      actorUserId: 'admin-1',
+      status: 'disabled',
+    })
+
+    const audits = readAuditItems(memory.commands)
+    expect(audits.map((item) => item.eventType)).toEqual([
+      'oauth-app.created',
+      'oauth-app.rotated',
+      'oauth-app.revoked',
+      'webhook-subscription.created',
+      'webhook-subscription.rotated',
+      'webhook-subscription.updated',
+      'webhook-subscription.deleted',
+    ])
+    expect(audits[0]).toMatchObject({
+      entityType: 'oauth-app',
+      entityId: created.oauthApp.id,
+      actor: expect.objectContaining({ id: 'member-1', kind: 'user' }),
+      metadata: expect.objectContaining({ ownerUserId: 'member-1', clientId: created.oauthApp.clientId }),
+    })
+    expect(audits[2]).toMatchObject({ actor: expect.objectContaining({ id: 'admin-1' }) })
+    expect(audits[5]).toMatchObject({
+      entityType: 'webhook-subscription',
+      entityId: webhook.subscription.id,
+      changes: [{ field: 'name', before: 'Receiver', after: 'Receiver 2' }],
+      metadata: expect.objectContaining({ urlChanged: true, teamIds: ['team-1'] }),
+    })
+    expect(audits[6]).toMatchObject({ metadata: expect.objectContaining({ status: 'disabled' }) })
+    const serialized = JSON.stringify(audits)
+    expect(serialized).not.toContain(created.clientSecret)
+    expect(serialized).not.toContain(rotated.clientSecret)
+    expect(serialized).not.toContain(webhook.signingSecret)
+    expect(serialized).not.toContain(rotatedWebhook.signingSecret)
+    expect(serialized).not.toContain('receiver-token')
+    expect(serialized).not.toContain('next-token')
+  })
+})
+
 describe('personal credential policy guard', () => {
   const expiresAt = new Date(START.getTime() + 30 * 24 * 60 * 60 * 1_000).toISOString()
 

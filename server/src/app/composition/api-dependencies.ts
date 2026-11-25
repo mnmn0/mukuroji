@@ -13,6 +13,14 @@ import {
   InMemoryProjectRaidLogStore,
 } from '../../modules/project-raid-log'
 import {
+  DynamoDbCalendarFeedStore,
+  InMemoryCalendarFeedStore,
+} from '../../modules/calendar-feeds'
+import {
+  DynamoDbProjectStatusShareStore,
+  InMemoryProjectStatusShareStore,
+} from '../../modules/project-status-shares'
+import {
   DynamoDbWeeklyReportStore,
   InMemoryWeeklyReportStore,
 } from '../../modules/weekly-reports'
@@ -170,6 +178,10 @@ import {
   type WorkItemConfigurationClient,
 } from '../../modules/work-items/work-item-configuration'
 import {
+  DynamoDbTeamPortfolioSnapshotStore,
+  InMemoryTeamPortfolioSnapshotStore,
+} from '../../modules/portfolio-dashboard'
+import {
   DynamoDbCycleScheduleBaselineStore,
   InMemoryCycleScheduleBaselineStore,
 } from '../../modules/planning'
@@ -218,8 +230,10 @@ import {
   createProductionTenantWorkspaceAccess,
 } from './tenant-administration'
 import {
+  CapacityPlanningError,
   CapacityPlanningService,
   DynamoDbCapacityPlanningRepository,
+  WORKLOAD_ESTIMATES_LIMIT_EXCEEDED,
   InMemoryCapacityPlanningRepository,
   type CapacityPlanningDataSource,
 } from '../../modules/capacity-planning'
@@ -433,10 +447,19 @@ function createCapacityPlanningDataSource(
       }))
     },
     async listEstimates(workspaceId, teamId) {
-      return (await listTeamWorkItemEffort(workspaceId, teamId)).map((effort) => ({
+      const efforts = await listTeamWorkItemEffort(workspaceId, teamId).catch((error: unknown) => {
+        if (error instanceof ProjectDataError && error.code === 'WorkItemListLimitExceeded') {
+          throw new CapacityPlanningError(413, WORKLOAD_ESTIMATES_LIMIT_EXCEEDED, error.message)
+        }
+        throw error
+      })
+      return efforts.map((effort) => ({
         workItemId: effort.workItemId,
         ...(effort.plannedEffortMinutes === undefined ? {} : { estimateMinutes: effort.plannedEffortMinutes }),
         ...(effort.remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes: effort.remainingEffortMinutes }),
+        ...(effort.projectId ? { projectId: effort.projectId } : {}),
+        ...(effort.window ? { window: effort.window } : {}),
+        ...(effort.contributors ? { contributors: effort.contributors } : {}),
       }))
     },
   }
@@ -456,6 +479,7 @@ export function createCapacityPlanningService(
     new DynamoDbCapacityPlanningRepository(
       tableName ?? 'mukuroji-capacity-planning-local',
       createDynamoDbDocumentClient(dynamoDbClient),
+      getConfiguredAuditTableName(),
     ),
     createCapacityPlanningDataSource(timeTrackingService),
   )
@@ -671,6 +695,17 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       createDynamoDbDocumentClient(),
       getConfiguredAuditTableName(),
     ),
+    calendarFeeds: new DynamoDbCalendarFeedStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      getConfiguredAuditTableName(),
+      loadServerConfig().environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY || undefined,
+    ),
+    projectStatusShares: new DynamoDbProjectStatusShareStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      getConfiguredAuditTableName(),
+    ),
     weeklyReports: new DynamoDbWeeklyReportStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
@@ -678,6 +713,11 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       loadServerConfig().environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY || undefined,
     ),
     scheduleBaselines: new DynamoDbProjectScheduleBaselineStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      getConfiguredAuditTableName(),
+    ),
+    portfolioSnapshots: new DynamoDbTeamPortfolioSnapshotStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
       getConfiguredAuditTableName(),
@@ -1962,8 +2002,11 @@ export function createTestAppDependencies(): AppDependencies {
       updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
       savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
       projectRaidLogs: new InMemoryProjectRaidLogStore(),
+      calendarFeeds: new InMemoryCalendarFeedStore(),
+      projectStatusShares: new InMemoryProjectStatusShareStore(),
       weeklyReports: new InMemoryWeeklyReportStore(),
       scheduleBaselines: new InMemoryProjectScheduleBaselineStore(),
+      portfolioSnapshots: new InMemoryTeamPortfolioSnapshotStore(),
       cycleScheduleBaselines: new InMemoryCycleScheduleBaselineStore(),
       collections: new InMemoryCollectionsStore(),
       updateFeedDigest: new InMemoryUpdateFeedDigestStore(),
@@ -2100,8 +2143,11 @@ export function overrideAppDependencies(
       ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
       ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
       ...(overrides.projectRaidLogs ? { projectRaidLogs: overrides.projectRaidLogs } : {}),
+      ...(overrides.calendarFeeds ? { calendarFeeds: overrides.calendarFeeds } : {}),
+      ...(overrides.projectStatusShares ? { projectStatusShares: overrides.projectStatusShares } : {}),
       ...(overrides.weeklyReports ? { weeklyReports: overrides.weeklyReports } : {}),
       ...(overrides.scheduleBaselines ? { scheduleBaselines: overrides.scheduleBaselines } : {}),
+      ...(overrides.portfolioSnapshots ? { portfolioSnapshots: overrides.portfolioSnapshots } : {}),
       ...(overrides.cycleScheduleBaselines ? { cycleScheduleBaselines: overrides.cycleScheduleBaselines } : {}),
       ...(overrides.collections ? { collections: overrides.collections } : {}),
       ...(overrides.updateFeedDigest ? { updateFeedDigest: overrides.updateFeedDigest } : {}),

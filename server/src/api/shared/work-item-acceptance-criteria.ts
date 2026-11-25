@@ -56,3 +56,30 @@ export function readAcceptanceCriteriaChange(
   }
   return criteria
 }
+
+/**
+ * Reads and normalizes the acceptance criteria sent with a new Work Item.
+ *
+ * A new Work Item has no stored criteria, so every entry is a new criterion and an entry that
+ * names an ID is rejected. An empty list means no criteria.
+ *
+ * @param value - Untrusted `acceptanceCriteria` create value.
+ * @returns The normalized criteria with new IDs, or undefined when there are none.
+ * @throws ProjectDataError (400) when the list is invalid.
+ */
+export function readNewWorkItemAcceptanceCriteria(value: unknown): WorkItemAcceptanceCriterion[] | undefined {
+  if (value === undefined) return undefined
+  let criteria: WorkItemAcceptanceCriterion[]
+  try {
+    criteria = normalizeAcceptanceCriteria(value, {
+      existing: [],
+      createCriterionId: () => randomUUID().replaceAll('-', ''),
+    })
+  } catch (error) {
+    if (error instanceof WorkItemAcceptanceCriteriaError) {
+      throw new ProjectDataError(400, error.code, error.message)
+    }
+    throw error
+  }
+  return criteria.length > 0 ? criteria : undefined
+}

@@ -91,6 +91,11 @@ export function buildWorkItemImportWorker(
       memorySize: 1024,
       description: 'Processes durable Work Item imports with resumable row receipts.',
       logGroup: workItemImportLogGroup,
+      // A long import queues its next slice to its own queue, which recursive-loop detection would
+      // stop after about 16 slices. The chain stays bounded: each slice records at least one row or
+      // link before handing off, a job has at most its planned rows and links, and the queue's
+      // redrive policy still moves a failing message to the DLQ.
+      recursiveLoop: lambda.RecursiveLoop.ALLOW,
       bundling: {
         bundleAwsSDK: true,
         minify: true,
@@ -138,6 +143,8 @@ export function buildWorkItemImportWorker(
     }),
   );
   workItemImportQueue.grants.consumeMessages(workItemImportFunction);
+  // A job that outlasts one invocation's slice queues its next slice itself.
+  workItemImportQueue.grants.sendMessages(workItemImportFunction);
   enterpriseIdentityTokenHashKeySecret.grantRead(workItemImportFunction);
   developerPlatformTable.grants.readWriteData(workItemImportFunction);
   workItemsTable.grants.readWriteData(workItemImportFunction);

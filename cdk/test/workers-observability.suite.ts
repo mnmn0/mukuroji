@@ -793,6 +793,7 @@ test('durable Work Item imports use retained versioned sources and an isolated r
     Description: 'Processes durable Work Item imports with resumable row receipts.',
     Handler: 'index.workItemImportHandler',
     MemorySize: 1024,
+    RecursiveLoop: 'Allow',
     Runtime: 'nodejs22.x',
     Timeout: 15 * 60,
     Environment: {
@@ -2034,7 +2035,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 0,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 24);
+  template.resourceCountIs('AWS::SQS::Queue', 26);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -3290,4 +3291,92 @@ test('no Lambda environment references a NoEcho parameter (#494)', () => {
     expect(secret.DeletionPolicy).toBe('Retain');
     expect(secret.UpdateReplacePolicy).toBe('Retain');
   }
+});
+
+test('Web Push notifications drain their own queue and read only the VAPID private key secret', () => {
+  const template = synthesizedTemplate;
+  const { statements } = findScheduledJobPolicy(template, 'PushNotification');
+  const serialized = JSON.stringify(statements);
+  expect(serialized).toContain('/index/PushDeliveryIndex');
+  expect(serialized).not.toContain('/index/EmailDeliveryIndex');
+  expect(serialized).not.toContain('ses:');
+  expect(serialized).not.toContain('dynamodb:Scan');
+  expect(serialized).not.toContain('dynamodb:PutItem');
+  const secretStatements = statements.filter((statement) => JSON.stringify(statement).includes('secretsmanager:'));
+  expect(secretStatements).toHaveLength(1);
+  expect(secretStatements[0]).toMatchObject({ Effect: 'Allow', Action: 'secretsmanager:GetSecretValue' });
+  expect(JSON.stringify(secretStatements[0]?.Resource)).toContain(':secret:mukuroji/web-push/vapid-private-key-??????');
+  expect(statements).toEqual(expect.arrayContaining([
+    // Gone devices are deleted; registrations are never written by the worker.
+    expect.objectContaining({
+      Effect: 'Allow', Action: ['dynamodb:DeleteItem', 'dynamodb:GetItem', 'dynamodb:Query'],
+      Resource: { 'Fn::GetAtt': [expect.stringMatching(/^PushSubscriptionsTable/), 'Arn'] },
+    }),
+  ]));
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: SCHEDULED_JOBS_FUNCTION_DESCRIPTION,
+    Environment: { Variables: Match.objectLike({
+      WEB_PUSH_VAPID_PUBLIC_KEY: { Ref: 'WebPushVapidPublicKey' },
+      WEB_PUSH_VAPID_PRIVATE_KEY_SECRET_ID: 'mukuroji/web-push/vapid-private-key',
+      NOTIFICATION_PUSH_APP_ORIGIN: Match.anyValue(),
+    }) },
+  });
+  // The projection queues push only while a VAPID public key is configured.
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: Match.stringLikeRegexp('^Projects audit outbox events'),
+    Environment: { Variables: Match.objectLike({ WEB_PUSH_VAPID_PUBLIC_KEY: { Ref: 'WebPushVapidPublicKey' } }) },
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    Namespace: 'Mukuroji/Notifications', MetricName: 'OldestDueAgeSeconds',
+    Dimensions: [{ Name: 'Channel', Value: 'Push' }],
+    Threshold: 900, EvaluationPeriods: 3, DatapointsToAlarm: 3,
+  });
+});
+
+test('Email bounces and complaints reach the feedback job through the SES configuration set, EventBridge, and SQS', () => {
+  const template = synthesizedTemplate;
+  template.resourceCountIs('AWS::SES::ConfigurationSet', 1);
+  template.hasResourceProperties('AWS::SES::ConfigurationSet', {
+    SuppressionOptions: { SuppressedReasons: ['BOUNCE', 'COMPLAINT'] },
+  });
+  template.hasResourceProperties('AWS::SES::ConfigurationSetEventDestination', {
+    EventDestination: Match.objectLike({
+      Enabled: true,
+      MatchingEventTypes: ['bounce', 'complaint'],
+      EventBridgeDestination: Match.objectLike({ EventBusArn: Match.anyValue() }),
+    }),
+  });
+  template.hasResourceProperties('AWS::Events::Rule', {
+    EventPattern: {
+      source: ['aws.ses'], 'detail-type': ['Email Bounced', 'Email Complaint Received'],
+      detail: { mail: { tags: { 'ses:configuration-set': [{ Ref: Match.stringLikeRegexp('^NotificationEmailConfigurationSet') }] } } },
+    },
+    Targets: [Match.objectLike({ Arn: { 'Fn::GetAtt': [Match.stringLikeRegexp('^NotificationEmailFeedbackQueue'), 'Arn'] } })],
+  });
+  template.hasResourceProperties('AWS::SQS::Queue', {
+    SqsManagedSseEnabled: true,
+    RedrivePolicy: { deadLetterTargetArn: { 'Fn::GetAtt': [Match.stringLikeRegexp('^NotificationEmailFeedbackDlq'), 'Arn'] }, maxReceiveCount: 5 },
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription: Match.stringLikeRegexp('SES bounce or complaint event could not be read'),
+  });
+  // The feedback job only receives and deletes queue messages and writes suppression rows.
+  const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+    .flatMap((policy) => policy.Properties?.PolicyDocument?.Statement ?? [])
+    .filter((statement: { Resource?: unknown }) => JSON.stringify(statement.Resource).includes('NotificationEmailFeedbackQueue'));
+  expect(statements).toEqual([expect.objectContaining({
+    Effect: 'Allow', Action: ['sqs:DeleteMessage', 'sqs:ReceiveMessage'],
+    Resource: { 'Fn::GetAtt': [expect.stringMatching(/^NotificationEmailFeedbackQueue/), 'Arn'] },
+  })]);
+  // The Email job sends through the configuration set and tags each message for the feedback job.
+  const { statements: emailStatements } = findScheduledJobPolicy(template, 'EmailNotification');
+  const send = emailStatements.find((statement) => JSON.stringify(statement.Action) === '"ses:SendEmail"');
+  expect(JSON.stringify(send?.Resource)).toContain(':configuration-set/');
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: SCHEDULED_JOBS_FUNCTION_DESCRIPTION,
+    Environment: { Variables: Match.objectLike({
+      NOTIFICATION_EMAIL_CONFIGURATION_SET: { Ref: Match.stringLikeRegexp('^NotificationEmailConfigurationSet') },
+      NOTIFICATION_EMAIL_FEEDBACK_QUEUE_URL: { Ref: Match.stringLikeRegexp('^NotificationEmailFeedbackQueue') },
+    }) },
+  });
 });

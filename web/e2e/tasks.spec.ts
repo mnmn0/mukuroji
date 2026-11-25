@@ -1103,7 +1103,8 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
-  await page.route('**/api/planning', async (route) => {
+  // The Project overview reads its Team with `?teamId=`.
+  await page.route(/.*\/api\/planning(?:\?.*)?$/, async (route) => {
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
     expect(route.request().method()).toBe('GET')
 
@@ -1119,14 +1120,26 @@ async function mockAuthenticatedTaskPage(
       return
     }
 
+    const query = new URL(route.request().url()).searchParams
+    const teamId = query.get('teamId')
+    const projectId = query.get('projectId')
     await route.fulfill({
-      json: createMockPlanningSnapshot(
-        taskResponsesByProject,
-        teamIssuesByTeam,
-        workItemScheduleDependencies,
-        workItemScheduleDependencyConflicts,
-        planningRevision,
-      ),
+      json: {
+        ...createMockPlanningSnapshot(
+          taskResponsesByProject,
+          teamIssuesByTeam,
+          workItemScheduleDependencies,
+          workItemScheduleDependencyConflicts,
+          planningRevision,
+        ),
+        ...(teamId === null
+          ? {}
+          : {
+              readScope: projectId === null
+                ? { type: 'team', teamId }
+                : { type: 'project', teamId, projectId },
+            }),
+      },
     })
   })
 
@@ -4273,6 +4286,161 @@ test.describe('authenticated task page', () => {
 
     await page.getByTestId('task-header-project-overview').click()
     await expect(page).toHaveURL('/projects/refero/overview?teamId=core-team')
+  })
+
+  test('Issue #349: 概要から進捗レポートを開き、Markdown を保存して社外共有リンクを発行する', async ({ page }) => {
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [] } })
+    })
+    await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
+      await route.fulfill({ json: { nodes: [] } })
+    })
+    const shares: unknown[] = []
+    let createdBody: unknown
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/status-shares$/, async (route) => {
+      if (route.request().method() === 'POST') {
+        createdBody = route.request().postDataJSON()
+        const share = {
+          id: 'share-1',
+          teamId: 'core-team',
+          projectId: 'refero',
+          label: '顧客A 定例',
+          sections: ['health', 'schedule'],
+          showPeopleNames: false,
+          expiresAt: '2026-12-01T00:00:00.000Z',
+          createdAt: '2026-11-23T00:00:00.000Z',
+          createdByMemberKey: 'member-demo',
+          reportAsOf: '2026-11-23T00:00:00.000Z',
+          viewCount: 0,
+        }
+        shares.unshift(share)
+        await route.fulfill({ status: 201, json: { share, url: '/share/project-status/token-value' } })
+        return
+      }
+      await route.fulfill({ json: { shares } })
+    })
+    await page.goto('/projects/refero/overview?teamId=core-team')
+    await expect(page.getByTestId('project-overview-name')).toHaveText('Refero')
+
+    await page.getByTestId('project-overview-status-report').click()
+    const dialog = page.getByTestId('project-status-report-dialog')
+    await expect(dialog.getByTestId('project-status-report').getByRole('heading', { level: 1 })).toContainText('Refero')
+
+    const download = page.waitForEvent('download')
+    await dialog.getByTestId('project-status-report-export-markdown').click()
+    expect((await download).suggestedFilename()).toMatch(/\.md$/)
+
+    const share = dialog.getByTestId('project-status-share')
+    await share.getByTestId('project-status-share-label').fill('顧客A 定例')
+    await share.getByRole('checkbox', { name: '進捗' }).uncheck()
+    await share.getByTestId('project-status-share-create').click()
+    await expect(share.getByTestId('project-status-share-url')).toHaveValue(/\/share\/project-status\/token-value$/)
+    await expect(share.getByTestId('project-status-share-list')).toContainText('顧客A 定例')
+    expect(createdBody).toMatchObject({
+      label: '顧客A 定例',
+      showPeopleNames: false,
+      sections: expect.not.arrayContaining(['progress']),
+    })
+  })
+
+  test('Issue #349: レポートに使う情報を読み込めなかったら書き出させず、読み込み直すと出す', async ({ page }) => {
+    await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
+      await route.fulfill({ json: { nodes: [] } })
+    })
+    let raidReads = 0
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      raidReads += 1
+      if (raidReads === 1) {
+        await route.fulfill({ status: 503, json: { error: 'ProjectRaidLogUnavailable', message: 'unavailable' } })
+        return
+      }
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [] } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/status-shares$/, async (route) => {
+      await route.fulfill({ json: { shares: [] } })
+    })
+    await page.goto('/projects/refero/overview?teamId=core-team')
+    await expect(page.getByTestId('project-overview-name')).toHaveText('Refero')
+
+    await page.getByTestId('project-overview-status-report').click()
+    const dialog = page.getByTestId('project-status-report-dialog')
+    await expect(dialog.getByTestId('project-status-report-load-error')).toBeVisible()
+    await expect(dialog.getByTestId('project-status-report-export-markdown')).toBeDisabled()
+    await expect(dialog.getByTestId('project-status-share-create')).toBeDisabled()
+
+    await dialog.getByTestId('project-status-report-retry').click()
+    await expect(dialog.getByTestId('project-status-report').getByRole('heading', { level: 1 })).toContainText('Refero')
+    await expect(dialog.getByTestId('project-status-report-export-markdown')).toBeEnabled()
+  })
+
+  test('Issue #349: 予定を読む権限がなくなったら、読み込み済みの予定もレポートから外す', async ({ page }) => {
+    await page.clock.install()
+    await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
+      await route.fulfill({ json: { nodes: [] } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [] } })
+    })
+    let sharedReport: unknown
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/status-shares$/, async (route) => {
+      if (route.request().method() === 'POST') {
+        const body: unknown = route.request().postDataJSON()
+        sharedReport = typeof body === 'object' && body !== null && 'report' in body ? body.report : undefined
+        await route.fulfill({ status: 503, json: { code: 'Unavailable', message: 'Unavailable.' } })
+        return
+      }
+      await route.fulfill({ json: { shares: [] } })
+    })
+    await page.goto('/projects/refero/overview?teamId=core-team')
+    await expect(page.getByTestId('project-overview-name')).toHaveText('Refero')
+    await page.getByTestId('project-overview-status-report').click()
+    const dialog = page.getByTestId('project-status-report-dialog')
+    await expect(dialog.getByTestId('project-status-report-schedule')).toBeVisible()
+
+    // The permission is removed after the first read; SWR keeps the earlier data with the error.
+    let deniedReads = 0
+    await page.route(/.*\/api\/planning(?:\?.*)?$/, async (route) => {
+      deniedReads += 1
+      await route.fulfill({ status: 403, json: { code: 'Forbidden', message: 'Forbidden.' } })
+    })
+    await page.clock.fastForward(15_000)
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await expect.poll(() => deniedReads).toBeGreaterThan(0)
+    await expect(dialog.getByTestId('project-status-report-schedule')).toHaveCount(0)
+    await expect(dialog.getByTestId('project-status-report').getByRole('heading', { level: 1 })).toContainText('Refero')
+    await expect(dialog.getByTestId('project-status-report-export-markdown')).toBeEnabled()
+
+    // The snapshot sent for a share link leaves out the stale schedule too.
+    const share = dialog.getByTestId('project-status-share')
+    await share.getByTestId('project-status-share-label').fill('顧客A')
+    await share.getByTestId('project-status-share-create').click()
+    await expect.poll(() => sharedReport).toBeDefined()
+    expect(sharedReport).toMatchObject({ projectName: 'Refero' })
+    expect(sharedReport).not.toHaveProperty('schedule')
+    expect(sharedReport).not.toHaveProperty('health')
+  })
+
+  test('Issue #349: 読む権限のない Work Item は進捗欄を外してレポートを出す', async ({ page }) => {
+    await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
+      await route.fulfill({ json: { nodes: [] } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [] } })
+    })
+    await page.route(/.*\/api\/projects\/refero\/issues(\?.*)?$/, async (route) => {
+      await route.fulfill({ status: 403, json: { error: 'Forbidden', message: 'Forbidden.' } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/status-shares$/, async (route) => {
+      await route.fulfill({ json: { shares: [] } })
+    })
+    await page.goto('/projects/refero/overview?teamId=core-team')
+    await expect(page.getByTestId('project-overview-name')).toHaveText('Refero')
+
+    await page.getByTestId('project-overview-status-report').click()
+    const dialog = page.getByTestId('project-status-report-dialog')
+    await expect(dialog.getByTestId('project-status-report').getByRole('heading', { level: 1 })).toContainText('Refero')
+    await expect(dialog.getByTestId('project-status-report-progress')).toHaveCount(0)
+    await expect(dialog.getByTestId('project-status-report-export-markdown')).toBeEnabled()
   })
 
   test('Issue #632: Software factory のない deploy では Factory board と Agent Run の入口を出さない', async ({ page }) => {
@@ -9407,6 +9575,91 @@ test.describe('authenticated task page', () => {
     expect((await download).suggestedFilename()).toMatch(/^project-raid-log-\d{4}-\d{2}-\d{2}\.csv$/)
   })
 
+  test('Issue #344: 変更要求を承認すると日程を反映してベースラインを差し替え、承認を記録する', async ({ page }) => {
+    const decisions: unknown[] = []
+    const captures: unknown[] = []
+    const request = {
+      id: 'cr-launch',
+      kind: 'change-request',
+      title: 'リリース日の延期',
+      impact: 4,
+      relatedWorkItemIds: ['wireframe'],
+      scheduleChanges: [{ workItemId: 'wireframe', operation: { type: 'move', targetDate: '2026-12-10' } }],
+      status: 'open',
+      revision: 1,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    }
+    let entries: Record<string, unknown>[] = [request]
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries, viewer: { canEdit: true, canDecide: true } } })
+    })
+    const holds: unknown[] = []
+    let heldRevision = request.revision
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log\/entries\/cr-launch\/approval-hold$/, async (route) => {
+      const body: unknown = route.request().postDataJSON()
+      holds.push(body)
+      heldRevision += 1
+      const entry = {
+        ...request,
+        revision: heldRevision,
+        approvalHold: { heldByMemberId: 'demo@example.com', heldAt: '2026-06-02T00:00:00.000Z', expiresAt: '2026-06-02T00:10:00.000Z' },
+      }
+      entries = [entry]
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entry } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log\/entries\/cr-launch\/decision$/, async (route) => {
+      const body: unknown = route.request().postDataJSON()
+      decisions.push(body)
+      const entry = {
+        ...request,
+        status: 'closed',
+        revision: heldRevision + 1,
+        updatedAt: '2026-06-02T00:00:00.000Z',
+        closedAt: '2026-06-02T00:00:00.000Z',
+        decision: { outcome: 'approved', decidedAt: '2026-06-02T00:00:00.000Z', decidedByMemberId: 'demo@example.com', baselineId: 'baseline-cr' },
+      }
+      entries = [entry]
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entry } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/schedule-baseline$/, async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      captures.push(route.request().postDataJSON())
+      await route.fulfill({
+        status: 201,
+        json: {
+          teamId: 'core-team',
+          projectId: 'refero',
+          baseline: { id: 'baseline-cr', revision: 1, name: '変更要求: リリース日の延期', capturedAt: '2026-06-02T00:00:00.000Z', entries: [] },
+          activeBaselineId: 'baseline-cr',
+          savedBaselines: [{ id: 'baseline-cr', name: '変更要求: リリース日の延期', capturedAt: '2026-06-02T00:00:00.000Z', entryCount: 0 }],
+        },
+      })
+    })
+
+    await page.goto('/projects/refero/issues?teamId=core-team')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByRole('tab', { name: '権限' }).click()
+    const panel = page.getByTestId('project-raid-log')
+    await expect(panel.getByTestId('project-raid-log-entry-schedule')).toContainText('2026-12-10 へ移動')
+    await panel.getByTestId('project-raid-log-approve').click()
+    await expect(panel.getByTestId('project-raid-log-decide-baseline')).toBeChecked()
+    await panel.getByTestId('project-raid-log-approve-confirm').click()
+
+    await expect.poll(() => decisions.length).toBe(1)
+    expect(requestCounts.scheduleConfirms).toBe(1)
+    expect(captures).toEqual([{ name: '変更要求: リリース日の延期' }])
+    // The hold is taken first and renewed before the baseline capture.
+    expect(holds).toEqual([{ expectedRevision: 1 }, { expectedRevision: 2 }])
+    expect(decisions).toEqual([{ expectedRevision: 3, outcome: 'approved', baselineId: 'baseline-cr' }])
+    await panel.getByLabel('クローズ済みも表示').check()
+    await expect(panel.getByTestId('project-raid-log-decision')).toContainText('承認')
+    await expect(panel.getByTestId('project-raid-log-decision')).toContainText('（ベースラインを差し替え）')
+  })
+
   test('タスク split-pane の作成フォームと詳細ペインが長いラベルでも崩れない', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 860 })
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
@@ -13193,6 +13446,54 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('workspace-access-panel')).toBeVisible()
   })
 
+  test('Issue #431: 自分の表示名を変更でき、各設定へ URL の fragment で直接移動できる', async ({ page }) => {
+    const savedBodies: unknown[] = []
+    let profile = {
+      memberKey: 'demo@example.com',
+      email: 'demo@example.com',
+      name: 'Demo User',
+      nameEditable: true,
+      version: 1,
+    }
+    await page.route('**/api/me/profile', async (route) => {
+      if (route.request().method() === 'PUT') {
+        const body: unknown = route.request().postDataJSON()
+        savedBodies.push(body)
+        const name = typeof body === 'object' && body !== null && 'name' in body && typeof body.name === 'string'
+          ? body.name
+          : undefined
+        profile = { ...profile, ...(name ? { name } : {}), version: profile.version + 1 }
+      }
+      await route.fulfill({ json: { profile } })
+    })
+
+    await page.goto('/settings/personal')
+    const nameInput = page.getByTestId('settings-profile-name')
+    await expect(nameInput).toHaveValue('Demo User')
+    await nameInput.fill('デモ 太郎')
+    await page.getByTestId('settings-profile-save').click()
+    await expect(page.getByTestId('settings-profile')).toContainText('表示名を保存しました。')
+    expect(savedBodies).toEqual([{ name: 'デモ 太郎', expectedVersion: 1 }])
+
+    const panelLinks = page.getByTestId('settings-panel-links')
+    await expect(panelLinks.getByTestId('settings-panel-link-notifications')).toHaveAttribute(
+      'href',
+      '/settings/personal#settings-notifications',
+    )
+
+    await page.goto('/settings/workspace#settings-audit-log')
+    await expect(page.locator('#settings-members')).toBeVisible()
+    await page.getByTestId('settings-panel-link-members').click()
+    await expect(page).toHaveURL('/settings/workspace#settings-members')
+    await expect(page.locator('#settings-members')).toBeInViewport()
+
+    // Following the same link again scrolls back to the panel.
+    await page.locator('#settings-audit-log, #settings-automation').last().scrollIntoViewIfNeeded()
+    await expect(page.locator('#settings-members')).not.toBeInViewport()
+    await page.getByTestId('settings-panel-link-members').click()
+    await expect(page.locator('#settings-members')).toBeInViewport()
+  })
+
   test('設定画面で通知 channel・種類ごとの配信先・ミュート・frequency・quiet hours を保存できる', async ({ page }) => {
     const requestCounts = getMockRequestCounts(page)
 
@@ -13243,6 +13544,26 @@ test.describe('authenticated task page', () => {
     await expect(panel.getByTestId('slack-destination-outcome')).toHaveText('テスト通知を送りました。Slack を確認してください。')
     await panel.getByRole('button', { name: '登録を削除', exact: true }).click()
     await expect(panel.getByTestId('slack-destination-status')).toHaveText('Webhook は登録されていません')
+  })
+
+  test('Issue #431: 管理者がメンバーの表示名を修正できる', async ({ page }) => {
+    const renameBodies: unknown[] = []
+    await page.route('**/api/workspace/members/sato%40example.com/name', async (route) => {
+      expect(route.request().method()).toBe('PUT')
+      renameBodies.push(route.request().postDataJSON())
+      await route.fulfill({ json: { member: {} } })
+    })
+
+    await page.goto('/settings/workspace')
+    const row = page.getByTestId('workspace-member-sato-example-com')
+    await expect(row).toBeVisible()
+    await expect(page.getByTestId('workspace-member-demo-example-com')
+      .getByRole('button', { name: '表示名を修正' })).toHaveCount(0)
+    await row.getByRole('button', { name: '表示名を修正' }).click()
+    await row.getByRole('textbox', { name: '表示名' }).fill('佐藤 花子')
+    await row.getByRole('button', { name: '保存', exact: true }).click()
+    await expect(row.getByRole('button', { name: '表示名を修正' })).toBeVisible()
+    expect(renameBodies).toEqual([{ name: '佐藤 花子', expectedVersion: 2 }])
   })
 
   test('設定画面で Workspace member と invitation lifecycle を確認付きで管理できる', async ({ page }) => {
@@ -13335,6 +13656,65 @@ test.describe('authenticated task page', () => {
 
     await expect(page.getByTestId('workspace-member-mfa-summary')).toContainText('1 人')
     await expect(page.getByTestId('workspace-member-mfa-sato-example-com')).toContainText('MFA未登録')
+  })
+
+  test('Issue #239: 利用停止や異動の前にメンバーの担当を別のメンバーへ引き継ぐ', async ({ page }) => {
+    let previewBody: unknown
+    let appliedItems = 0
+    await page.route(/\/api\/bulk-operations\/preview$/u, async (route) => {
+      previewBody = route.request().postDataJSON()
+      const body = previewBody as { action: unknown, items: Array<{ teamId: string, workItemId: string, expectedRevision: number }> }
+      await route.fulfill({
+        json: {
+          action: body.action,
+          canApply: true,
+          items: body.items.map((item) => ({ ...item, retryable: false, status: 'ready', undoable: false })),
+          operationToken: 'handover-preview',
+        },
+      })
+    })
+    await page.route(/\/api\/bulk-operations$/u, async (route) => {
+      const body = route.request().postDataJSON() as { action: unknown, items: Array<{ teamId: string, workItemId: string, expectedRevision: number }> }
+      appliedItems = body.items.length
+      await route.fulfill({
+        status: 201,
+        json: {
+          schemaVersion: 1,
+          id: 'bulk-handover',
+          workspaceId: 'workspace-demo',
+          actorMemberKey: 'demo@example.com',
+          revision: 2,
+          status: 'succeeded',
+          action: body.action,
+          items: body.items.map((item) => ({
+            ...item,
+            resultingRevision: item.expectedRevision + 1,
+            retryable: false,
+            status: 'succeeded',
+            undoable: true,
+          })),
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:01.000Z',
+        },
+      })
+    })
+
+    await page.goto('/settings/workspace')
+    await page.getByTestId('workspace-member-handover-sato-example-com').click()
+    const dialog = page.getByTestId('member-work-handover-dialog')
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByTestId('member-work-handover-summary')).toContainText('責任者')
+    await expect(dialog.getByTestId('member-work-handover-preview')).toBeDisabled()
+    await dialog.getByTestId('member-work-handover-successor').selectOption('demo@example.com')
+    await dialog.getByTestId('member-work-handover-preview').click()
+    await expect(dialog.getByTestId('bulk-operation-review')).toBeVisible()
+    expect(previewBody).toMatchObject({
+      workspaceId: 'workspace-demo',
+      action: { type: 'reassign-member', fromMemberUserId: 'sato@example.com', toMemberUserId: 'demo@example.com' },
+    })
+    await dialog.getByRole('button', { name: '適用' }).click()
+    await expect.poll(() => appliedItems).toBeGreaterThan(0)
+    await expect(dialog.getByTestId('bulk-operation-review')).toContainText('bulk-handover')
   })
 
   test('Issue #432: 一括招待で読込中のファイルより後に選んだ大きすぎるファイルの結果を残す', async ({ page }) => {
