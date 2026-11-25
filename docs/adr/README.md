@@ -114,3 +114,4 @@
 | [0093](0093-project-deliverables-and-project-file-approval.md) | Project の成果物一覧を Work Item の閲覧判定から読み、Project file の承認を Project partition に置く | 提案 |
 | [0094](0094-workspace-file-type-policy.md) | 添付できるファイル形式を contracts の catalog で持ち、Workspace は既定との差分だけを tenant profile に保存する | 提案 |
 | [0096](0096-member-last-sign-in-on-member-row.md) | メンバーの最終ログインを member row に version を変えずに記録し、owner と admin にだけ返す | 提案 |
+| [0097](0097-org-units.md) | OrgUnit（部門）で Team を束ね、部門のロールは配下の Team scope に展開して評価する | 提案 |

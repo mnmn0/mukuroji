@@ -11,6 +11,7 @@ import {
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
 import { createMutationAuditContext } from '../../../audit/audit'
+import { createOrgStructureKey } from '../../../directory/adapter-out/dynamodb/org-structure-item'
 import {
   DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
   DOCUMENT_MAX_BACKLINK_COUNT,
@@ -6096,6 +6097,49 @@ test('allows in-memory enterprise authorization snapshots without a physical con
         configuredTableName
     }
   }
+})
+
+test('fences an OrgUnit-authorized create on the directory module OrgUnit structure row', async () => {
+  const memory = createMemoryDocumentClient()
+  let transaction:
+    | Array<Record<string, Record<string, unknown>>>
+    | undefined
+  const proxyClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      const actions = command.input.TransactItems as
+        | Array<Record<string, Record<string, unknown>>>
+        | undefined
+      if (actions !== undefined) {
+        transaction = structuredClone(actions)
+      }
+      return memory.client.send(command as never)
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = createClient({
+    ...memory,
+    client: proxyClient,
+  })
+
+  await client.create({
+    workspaceId: 'workspace-1',
+    access: {
+      ...ownerAccess,
+      authorizationSnapshots: [{
+        workspaceId: 'workspace-1',
+        orgStructureRevision: 0,
+      }],
+    },
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'OrgUnit authorization',
+    blocks: [],
+  })
+
+  const structureCheck = (transaction ?? [])
+    .flatMap(({ ConditionCheck }) => ConditionCheck === undefined ? [] : [ConditionCheck])
+    .find(({ TableName }) => TableName === 'mukuroji-project-directory-local')
+  // The guard inlines the key, so it must stay the row the directory module writes (ADR 0097).
+  expect(structureCheck?.Key).toEqual(createOrgStructureKey('workspace-1'))
 })
 
 test('deduplicates principal and relation authorization guards in inherited create transactions', async () => {

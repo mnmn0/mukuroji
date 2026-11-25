@@ -7,6 +7,7 @@ import {
   type EnterprisePermissionId,
   type EnterpriseRoleAssignment,
   type EnterpriseRoleId,
+  type EnterpriseRoleScopeKind,
   type EnterpriseRoutePermissionRule,
   type EnterpriseSecurityPolicy,
   ENTERPRISE_BUILT_IN_ROLE_IDS,
@@ -160,6 +161,14 @@ const builtInRolePermissions: Record<
     'work-items.read', 'documents.read', 'files.read', 'requests.read', 'planning.read'],
   // Auditors read the audit log only; exporting it stays with `audit.export` holders.
   'workspace:auditor': ['workspace.read', 'members.read', 'audit.read'],
+  // Department managers hold Team manager access on every Team of their OrgUnit subtree. The
+  // OrgUnit scope is expanded into Team scopes before evaluation (ADR 0097).
+  'org-unit:manager': ['teams.read', 'teams.write', 'teams.manage', 'projects.read',
+    'projects.write', 'projects.manage', 'work-items.read', 'work-items.write', 'documents.read',
+    'documents.write', 'documents.manage', 'files.read', 'files.write', 'files.approve',
+    'planning.read', 'planning.write', 'planning.manage'],
+  'org-unit:viewer': ['teams.read', 'projects.read', 'work-items.read', 'documents.read',
+    'files.read', 'planning.read'],
   'team:manager': ['teams.read', 'teams.write', 'teams.manage', 'projects.read', 'projects.write',
     'projects.manage', 'work-items.read', 'work-items.write', 'documents.read', 'documents.write',
     'documents.manage', 'files.read', 'files.write', 'files.approve', 'planning.read',
@@ -240,7 +249,7 @@ export function resolveEnterpriseRolePermissions(
  */
 export function isEnterpriseRoleCompatibleWithScope(
   roleId: EnterpriseRoleId,
-  scopeKind: 'workspace' | 'team' | 'project',
+  scopeKind: EnterpriseRoleScopeKind,
 ): boolean {
   return roleId.startsWith('custom:') || roleId.startsWith(`${scopeKind}:`)
 }
@@ -258,7 +267,7 @@ export function canAssignEnterpriseRole(
   customRoles: readonly EnterpriseCustomRole[],
   callerPermissions: readonly EnterprisePermissionId[],
   roleId: EnterpriseRoleId,
-  scopeKind: 'workspace' | 'team' | 'project',
+  scopeKind: EnterpriseRoleScopeKind,
 ): boolean {
   const roleExists = roleId.startsWith('custom:')
     ? customRoles.some((role) => role.roleId === roleId)
@@ -658,6 +667,9 @@ function scopeMatches(
 ) {
   if (scope.workspaceId !== resource.workspaceId) return false
   if (scope.kind === 'workspace') return true
+  // An OrgUnit scope reaches resources only after it is expanded into the Team scopes of its
+  // subtree from the current directory, so an unexpanded one grants nothing (deny by default).
+  if (scope.kind === 'org-unit') return false
   if (scope.kind === 'team') {
     return resource.kind === 'team' && scope.targetId === resource.targetId ||
       resource.kind === 'project' && scope.targetId === resource.parentTeamId
