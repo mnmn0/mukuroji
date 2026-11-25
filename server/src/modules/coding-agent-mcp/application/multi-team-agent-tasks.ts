@@ -92,39 +92,72 @@ export function createMultiTeamAgentTasks(teams: readonly TeamWorkItemApi[], sco
   const bound: TeamTasks[] = teams.map((team) => ({ ...team, tasks: createAgentTasks(team.api, scope) }))
   const teamOfTask = new Map<string, TeamTasks>()
   const teamOfRun = new Map<string, TeamTasks>()
+  /** Task IDs that more than one configured Team holds; operations on them are refused. */
+  const ambiguousTasks = new Set<string>()
 
   /**
-   * Remembers the Team of each listed task, so later calls on it need no lookup.
+   * Builds the refusal for a task ID that several configured Teams hold.
+   *
+   * @returns The error.
+   */
+  function ambiguousTask(): AgentTaskError {
+    return new AgentTaskError(
+      'invalid_request',
+      'More than one configured Team has a task with this ID. Run the MCP server for one of those Teams to work on it.',
+    )
+  }
+
+  /**
+   * Remembers the Team of each listed task, so later calls on it need no lookup. A task ID seen in
+   * two Teams is marked ambiguous instead of being routed to either.
    *
    * @param team - Team the tasks were read from.
    * @param ids - Task IDs.
    */
   function rememberTasks(team: TeamTasks, ids: readonly string[]): void {
-    for (const id of ids) teamOfTask.set(id, team)
+    for (const id of ids) {
+      if (ambiguousTasks.has(id)) continue
+      const known = teamOfTask.get(id)
+      if (known !== undefined && known !== team) {
+        ambiguousTasks.add(id)
+        teamOfTask.delete(id)
+        continue
+      }
+      teamOfTask.set(id, team)
+    }
   }
 
   /**
    * Finds the configured Team a task belongs to. A Team that does not hold the task answers
-   * not found (or forbidden), so the first Team that returns it owns it.
+   * not found (or forbidden). Task IDs are unique only within a Team, so every Team is asked, and an
+   * ID that several Teams hold is refused instead of being routed to one of them.
    *
    * @param id - Task ID.
    * @returns The Team of the task.
-   * @throws AgentTaskError not_found when no configured Team holds the task.
+   * @throws AgentTaskError not_found when no configured Team holds the task, or invalid_request when
+   * several do.
    */
   async function teamForTask(id: string): Promise<TeamTasks> {
+    if (ambiguousTasks.has(id)) throw ambiguousTask()
     const known = teamOfTask.get(id)
     if (known) return known
-    for (const team of bound) {
+    const holders = (await Promise.all(bound.map(async (team) => {
       try {
         await team.api.get(id)
       } catch (error) {
-        if (isAbsent(error)) continue
+        if (isAbsent(error)) return undefined
         throw error
       }
-      teamOfTask.set(id, team)
       return team
+    }))).filter((team) => team !== undefined)
+    const [holder, ...others] = holders
+    if (!holder) throw new AgentTaskError('not_found', 'No configured Team has this task, or you cannot view it.')
+    if (others.length > 0) {
+      ambiguousTasks.add(id)
+      throw ambiguousTask()
     }
-    throw new AgentTaskError('not_found', 'No configured Team has this task, or you cannot view it.')
+    teamOfTask.set(id, holder)
+    return holder
   }
 
   /**
@@ -215,13 +248,25 @@ export function createMultiTeamAgentTasks(teams: readonly TeamWorkItemApi[], sco
       }
     },
     /**
-     * Returns the brief of the first configured Team that keeps a brief for the Project, or the
-     * first Team's brief when none does.
+     * Returns the brief of the Team that owns the Project: that Team's brief followed by its Project
+     * brief. The owner is the first configured Team that shows the Project's charter. When no Team
+     * shows it (an older server), the first Team that keeps a brief for the Project is used, then the
+     * first Team.
      *
      * @param projectId - Project ID.
      * @returns The brief, or null when neither brief exists.
      */
     async brief(projectId: string) {
+      const owners = await Promise.all(bound.map(async (team) => {
+        try {
+          return await team.api.projectCharter(projectId) === undefined ? undefined : team
+        } catch (error) {
+          if (isAbsent(error)) return undefined
+          throw error
+        }
+      }))
+      const owner = owners.find((team) => team !== undefined)
+      if (owner) return owner.tasks.brief(projectId)
       for (const team of bound) {
         const settings = await team.api.agentSettings()
         if (Object.hasOwn(settings.projectBriefs, projectId)) return team.tasks.brief(projectId)

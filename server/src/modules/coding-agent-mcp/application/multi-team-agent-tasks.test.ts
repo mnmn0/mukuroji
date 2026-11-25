@@ -46,9 +46,10 @@ function run(teamId: string, workItemId: string, sequence: number): AgentRunReco
  * @param teamId - Team of the port.
  * @param tasks - Tasks the Team holds.
  * @param runs - Active runs of this instance in the Team.
+ * @param projects - Projects of the Team, whose charters it shows.
  * @returns The port and the calls it received.
  */
-function teamApi(teamId: string, tasks: AgentTask[], runs: AgentRunRecord[] = []) {
+function teamApi(teamId: string, tasks: AgentTask[], runs: AgentRunRecord[] = [], projects: string[] = []) {
   const calls: string[] = []
   /** Fails a call the scenario does not expect. */
   const unexpected = async (): Promise<never> => { throw new Error(`Unexpected call in ${teamId}`) }
@@ -106,7 +107,10 @@ function teamApi(teamId: string, tasks: AgentTask[], runs: AgentRunRecord[] = []
     async taskKey() { return undefined },
     async hierarchy() { return undefined },
     async relatedDocuments() { return undefined },
-    async projectCharter() { return undefined },
+    async projectCharter(projectId) {
+      if (!projects.includes(projectId)) return undefined
+      return { schemaVersion: 1, teamId, projectId, lifecycleState: 'active', revision: 1, tags: [], repositoryUrls: [] }
+    },
     document: unexpected,
   }
   return { teamId, api, calls }
@@ -203,6 +207,30 @@ describe('multi-Team agent tasks', () => {
     const tasks = createMultiTeamAgentTasks([teamApi('team-a', []), teamApi('team-b', [])], scope)
     expect(await tasks.brief('project')).toBe('team-b brief\n\nProject brief')
     expect(await tasks.brief('other')).toBe('team-a brief')
+  })
+
+  test('returns the owning Team\'s brief for a Project without its own brief', async () => {
+    const tasks = createMultiTeamAgentTasks([teamApi('team-a', []), teamApi('team-b', [], [], ['owned'])], scope)
+    // team-b owns the Project, so its Team brief applies even though only team-a comes first.
+    expect(await tasks.brief('owned')).toBe('team-b brief')
+  })
+
+  test('refuses a task ID that two configured Teams hold instead of routing it to either', async () => {
+    const teamA = teamApi('team-a', [task('team-a', 'shared')])
+    const teamB = teamApi('team-b', [task('team-b', 'shared')])
+    const tasks = createMultiTeamAgentTasks([teamA, teamB], scope)
+    await expect(tasks.comments('shared')).rejects.toMatchObject({ code: 'invalid_request' })
+    expect([...teamA.calls, ...teamB.calls].filter((call) => call.startsWith('comments:'))).toEqual([])
+
+    // A listing that sees the same ID in two Teams marks it ambiguous too.
+    const listed = createMultiTeamAgentTasks([teamApi('team-a', [task('team-a', 'shared')]), teamApi('team-b', [task('team-b', 'shared')])], scope)
+    let cursor: string | undefined
+    for (let page = 0; page < 3; page += 1) {
+      const result = await listed.list({}, cursor, 10)
+      if (!result.hasMore) break
+      cursor = result.nextCursor
+    }
+    await expect(listed.comments('shared')).rejects.toMatchObject({ code: 'invalid_request' })
   })
 
   test('returns each Team configuration', async () => {

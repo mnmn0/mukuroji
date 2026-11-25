@@ -79,6 +79,8 @@ Team が1つだけなら、ツールと結果は従来と同じです。Project 
 - `list_tasks` は指定した順にTeamを続けて読みます。`nextCursor` には次に読むTeamが含まれます。
 - `get_work_status` は全Teamの件数を足し、進行中のタスクに `teamId` を付けます。
 - タスクIDやRun IDを受け取るツールは、そのタスクやRunを持つTeamを自分で探します。ステータスIDは、そのタスクのTeamのcatalogから選んでください。
+  タスクIDは Team ごとに一意なので、同じIDのタスクを2つ以上のTeamが持つ場合は、どちらにも振り分けずにエラーにします。そのタスクは、そのTeamだけを指定したMCP設定で扱ってください。
+- Project の brief（`mukuroji://project/{projectId}/brief`）は、その Project を持つ Team の brief と Project brief を返します。
 - `create_task` は `teamId` を受け取ります。省略すると、最初に書いたTeamに作ります。
 
 同じメンバーが複数のエージェントを同時に使う場合も、`INSTANCE_ID` が異なれば別のインスタンスとして扱います。
