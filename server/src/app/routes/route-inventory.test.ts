@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(650)
-  expect(new Set(inventory).size).toBe(646)
+  expect(inventory).toHaveLength(652)
+  expect(new Set(inventory).size).toBe(648)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -207,7 +207,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/notification-preferences/slack-destination')
   expect(inventory).toContain('POST /api/teams/:teamId/notification-channel/test')
   expect(inventory).toContain('DELETE /api/teams/:teamId/projects/:projectId/notification-channel')
+  // Attachment refs for coding agents (#409).
+  expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
+  expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'efd3fe6e59fe97a3d784318542113b9f8c460288f381db3f60fd5ac2a1f54598',
+    'f495adc865f1d21d1b512dc6ed6a0a15778a5eec34efc2ed044cb57416ff58e8',
   )
 })

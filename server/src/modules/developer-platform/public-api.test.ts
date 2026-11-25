@@ -46,6 +46,7 @@ import {
   type PublicImportSourceInput,
   type PublicAgentRunService,
   type PublicAgentTelemetryService,
+  type PublicAttachmentService,
   type PublicDocumentService,
   type PublicDirectoryService,
   type PublicWorkItemService,
@@ -246,6 +247,8 @@ function createTestRouter(input: {
   agentTelemetry?: PublicAgentTelemetryService
   /** Document service used by Document route tests. */
   documents?: PublicDocumentService
+  /** Attachment service used by attachment route tests. */
+  attachments?: PublicAttachmentService
   /** Directory service used by Team, Project member, and key route tests. */
   directory?: PublicDirectoryService
   connectorAuthorization?: ConnectorAuthorizationService
@@ -283,6 +286,7 @@ function createTestRouter(input: {
     ...(input.agentRuns ? { agentRuns: input.agentRuns } : {}),
     ...(input.agentTelemetry ? { agentTelemetry: input.agentTelemetry } : {}),
     ...(input.documents ? { documents: input.documents } : {}),
+    ...(input.attachments ? { attachments: input.attachments } : {}),
     ...(input.directory ? { directory: input.directory } : {}),
     openApiDocument: { openapi: '3.1.0' },
     cursorSecret: 'public-api-test-cursor-secret-at-least-32-bytes',
@@ -818,6 +822,72 @@ describe('public API router', () => {
     expect(hidden.status).toBe(404)
     expect(denied.status).toBe(403)
     expect(reads).toEqual(['team-1/work-item-1/document-1', 'team-1/work-item-1/document-2'])
+  })
+
+  test('lists attachments and issues download URLs with the read scope and never caches them', async () => {
+    const calls: string[] = []
+    const { platform, router } = createTestRouter({
+      attachments: {
+        async listWorkItemAttachments(credential, teamId, workItemId) {
+          expect(credential.workspaceId).toBe('workspace-1')
+          calls.push(`list ${teamId}/${workItemId}`)
+          return {
+            items: [{
+              id: 'file-1', name: 'spec.pdf', versionId: 'version-2', versionNumber: 2,
+              contentType: 'application/pdf', sizeBytes: 2048, updatedAt: NOW.toISOString(),
+            }],
+          }
+        },
+        async createWorkItemAttachmentDownload(_credential, teamId, workItemId, fileId, request) {
+          calls.push(`download ${teamId}/${workItemId}/${fileId} ${request.correlationId ?? '-'}`)
+          expect(request.requestId).toBeTruthy()
+          if (fileId !== 'file-1') throw new PublicApiServiceError(404, 'not_found', 'Attachment was not found.')
+          return { fileId, versionId: 'version-2', url: 'https://files.example.test/file-1', expiresAt: NOW.toISOString() }
+        },
+      },
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+
+    const list = await router.request('http://localhost/v1/work-items/work-item-1/attachments?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const download = await router.request('http://localhost/v1/work-items/work-item-1/attachments/file-1/download?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}`, 'X-Correlation-Id': 'corr-1' },
+    })
+    const hidden = await router.request('http://localhost/v1/work-items/work-item-1/attachments/file-2/download?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const denied = await router.request('http://localhost/v1/work-items/work-item-1/attachments?teamId=team-1', {
+      headers: { Authorization: `Bearer ${writer.secret}` },
+    })
+    const missingTeam = await router.request('http://localhost/v1/work-items/work-item-1/attachments', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+
+    expect(list.status).toBe(200)
+    expect(list.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(await list.json()).toEqual({
+      items: [{
+        id: 'file-1', name: 'spec.pdf', versionId: 'version-2', versionNumber: 2,
+        contentType: 'application/pdf', sizeBytes: 2048, updatedAt: NOW.toISOString(),
+      }],
+    })
+    expect(download.status).toBe(200)
+    expect(download.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(await download.json()).toEqual({
+      fileId: 'file-1', versionId: 'version-2', url: 'https://files.example.test/file-1', expiresAt: NOW.toISOString(),
+    })
+    expect(hidden.status).toBe(404)
+    expect(denied.status).toBe(403)
+    expect(missingTeam.status).toBe(400)
+    // Error responses carry the same cache policy as the successful ones.
+    for (const failed of [hidden, denied, missingTeam]) expect(failed.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(calls).toEqual([
+      'list team-1/work-item-1',
+      'download team-1/work-item-1/file-1 corr-1',
+      'download team-1/work-item-1/file-2 -',
+    ])
   })
 
   test('reports Document routes as unavailable when no Document service is configured', async () => {

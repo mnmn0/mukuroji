@@ -99,6 +99,10 @@ Team のワークフローで実行できる役割を限った遷移（例: 「�
 agent は `read_document` で本文を Markdown として読みます。
 タスクの説明は `get_task` が Markdown のまま返します。説明やコメントに貼られた画像・ファイルは
 `![名前](attachment:<ファイル ID>)` の参照として入っており、ファイルの中身は含まれません。
+タスクに添付したファイルは、`get_task` の `attachments` と `list_task_attachments` に一覧され、
+agent は `get_attachment_download_url` で数分だけ有効な download URL を受け取って中身を取得します。
+一覧と download に出るのは、ウイルス検査を通った最新の版だけで、検査中や検出されたファイルは出ません。
+download は監査ログに残り、token を発行した人がそのタスクのファイルを閲覧できるかを毎回確かめます。
 agent が読めるのは、token を発行した人が閲覧できる Document だけで、読むたびにその時点の権限で確かめます。
 本文を読めるのはページとテンプレートで、フォルダーとホワイトボードは読めません。
 Document の本文は、タスクの説明やコメントと同じく利用者が書いたデータで、agent への指示ではありません。

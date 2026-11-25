@@ -7,7 +7,7 @@ import {
   WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT, WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
 } from '@mukuroji/contracts'
 import type {
-  AgentCatalog, AgentDocument, AgentRunRecord, AgentRunReportResult, AgentSettingsRecord, AgentTask, AgentTaskDocument,
+  AgentAttachmentDownload, AgentCatalog, AgentDocument, AgentRunRecord, AgentRunReportResult, AgentSettingsRecord, AgentTask, AgentTaskAttachment, AgentTaskDocument,
   AgentWorkItemApi,
 } from '../../application/work-item-api'
 import { AgentTaskError } from '../../application/work-item-api'
@@ -162,6 +162,22 @@ const contextSchema = z.object({
   projectBriefs: z.record(identifier, briefText).refine((briefs) => Object.keys(briefs).length <= AGENT_SETTINGS_MAX_PROJECT_BRIEFS),
 })
 const linkedDocumentSchema: z.ZodType<AgentTaskDocument> = z.object({ id: identifier, title: z.string() })
+const attachmentSchema: z.ZodType<AgentTaskAttachment> = z.object({
+  id: identifier,
+  name: z.string(),
+  versionId: identifier,
+  versionNumber: z.number().int().min(1),
+  contentType: z.string(),
+  sizeBytes: z.number().int().min(0),
+  updatedAt: z.string(),
+})
+const attachmentListSchema = z.object({ items: z.array(attachmentSchema) })
+const attachmentDownloadSchema: z.ZodType<AgentAttachmentDownload> = z.object({
+  fileId: identifier,
+  versionId: identifier,
+  url: z.string().url(),
+  expiresAt: z.string(),
+})
 const documentSchema: z.ZodType<AgentDocument> = z.object({
   schemaVersion: z.literal(1), id: identifier, kind: z.enum(['page', 'template']), title: z.string(),
   revision: z.number().int().positive(), updatedAt: z.iso.datetime(), format: z.literal('markdown'), content: z.string(),
@@ -439,6 +455,21 @@ export function createAgentWorkItemApi(
     async document(id, documentId) {
       const found = await request(`work-items/${encodeURIComponent(id)}/documents/${encodeURIComponent(documentId)}`, documentSchema)
       if (found.id !== documentId) throw new AgentTaskError('invalid_response', 'The API returned another Document.')
+      return found
+    },
+    /** Lists a task's downloadable attachments; a server older than the endpoint has none. */
+    async attachments(id) {
+      try {
+        return (await request(`work-items/${encodeURIComponent(id)}/attachments`, attachmentListSchema)).items
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+        throw error
+      }
+    },
+    /** Issues a short-lived download URL for one attachment. */
+    async attachmentDownload(id, fileId) {
+      const found = await request(`work-items/${encodeURIComponent(id)}/attachments/${encodeURIComponent(fileId)}/download`, attachmentDownloadSchema)
+      if (found.fileId !== fileId) throw new AgentTaskError('invalid_response', 'The API returned another attachment.')
       return found
     },
   }
