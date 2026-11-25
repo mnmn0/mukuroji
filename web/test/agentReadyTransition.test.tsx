@@ -82,7 +82,7 @@ describe('agent ready action', () => {
     }
     const editable = renderToStaticMarkup(<AgentReadyAction {...props} onMoveToStatus={async () => undefined} />)
     expect(editable).toContain('Make ready for agents')
-    expect(editable).toContain('Moving it to “Ready” lets agents start it.')
+    expect(editable).toContain('Moving it to “Ready” lets agents working for the assignee start it.')
     expect(renderToStaticMarkup(<AgentReadyAction {...props} />)).not.toContain('Make ready for agents')
   })
 

@@ -737,7 +737,7 @@ function IssueDetailContent({
    * @param workflowStatusId - Target workflow status ID.
    */
   const moveToWorkflowStatus = async (workflowStatusId: string) => {
-    if (!onUpdateIssue) return
+    if (!onUpdateIssue || isAiSummaryOperationPending || isIssueUpdatePending) return
     setIssueUpdatePending(true)
     try {
       await onUpdateIssue(issue.id, { workflowStatusId })
@@ -1286,7 +1286,7 @@ function IssueDetailContent({
             accessToken={accessToken}
             configuration={configuration}
             includeDescription={hasDescriptionSection}
-            onMoveToStatus={onUpdateIssue && !isIssueUpdatePending ? moveToWorkflowStatus : undefined}
+            onMoveToStatus={onUpdateIssue && !isIssueUpdatePending && !isAiSummaryOperationPending ? moveToWorkflowStatus : undefined}
             t={t}
             task={issue}
           />
