@@ -6,6 +6,7 @@ import {
   type PlanningHealth,
   type PlanningUpdateState,
   type PlanningUpdateTargetSummary,
+  type ProjectLinkedCustomer,
 } from '@mukuroji/contracts'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router'
@@ -49,6 +50,8 @@ export type ProjectOverviewDocumentsError = 'load' | 'denied'
 
 /** Props for the pure Project overview view. */
 export type ProjectOverviewViewProps = {
+  /** Actions shown next to the Project name, such as opening the status report. */
+  headerActions?: ReactNode
   /** Locale used to format dates. */
   locale: Locale
   /** Resolves localized labels. */
@@ -117,6 +120,15 @@ export type ProjectOverviewViewProps = {
   onRetryMembers?: () => void
   /** Reads the Team's Factory board again after a failure. */
   onRetryAgentRuns?: () => void
+  /**
+   * Customers linked to the Project by Customer Requests. Absent when the viewer may not read
+   * Customers or the links have not loaded, which hides the profile entry.
+   */
+  linkedCustomers?: readonly ProjectLinkedCustomer[]
+  /** Whether reading the Customer links failed; the profile then offers a retry. */
+  linkedCustomersError?: boolean
+  /** Reads the Customer links again after a failure. */
+  onRetryLinkedCustomers?: () => void
 }
 
 /** Badge tokens for reported Project health. */
@@ -167,6 +179,7 @@ export function ProjectOverviewView({
   agentRunsError,
   documents,
   documentsError,
+  headerActions,
   isActionItemsLoading = false,
   isAgentRunsLoading = false,
   isDocumentsLoading = false,
@@ -175,6 +188,9 @@ export function ProjectOverviewView({
   isPlanningError,
   isPlanningLoading,
   isWorkItemsLoading,
+  linkedCustomers,
+  linkedCustomersError = false,
+  onRetryLinkedCustomers,
   locale,
   members,
   membersError,
@@ -217,14 +233,17 @@ export function ProjectOverviewView({
   return (
     <div className="grid gap-5" data-testid="project-overview">
       <section className="workbench-panel grid gap-4 px-5 py-4">
-        <div className="min-w-0">
-          <p className="text-xs font-semibold text-[var(--workbench-muted)]">{team.name}</p>
-          <h2
-            className="mt-1 break-words text-xl font-semibold text-[var(--workbench-text)]"
-            data-testid="project-overview-name"
-          >
-            {project.name}
-          </h2>
+        <div className="flex flex-wrap items-start gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-semibold text-[var(--workbench-muted)]">{team.name}</p>
+            <h2
+              className="mt-1 break-words text-xl font-semibold text-[var(--workbench-text)]"
+              data-testid="project-overview-name"
+            >
+              {project.name}
+            </h2>
+          </div>
+          {headerActions}
         </div>
         <dl className="grid grid-cols-1 gap-3 text-sm min-[600px]:grid-cols-2 min-[1000px]:grid-cols-4">
           <ProfileItem label={t('projects.overview.profile.code')}>
@@ -237,6 +256,34 @@ export function ProjectOverviewView({
           <ProfileItem label={t('projects.overview.profile.lifecycle')}>
             {t(`projects.lifecycle.${lifecycleState}`)}
           </ProfileItem>
+          {linkedCustomersError ? (
+            <ProfileItem label={t('projects.overview.profile.customers')}>
+              <span className="flex flex-wrap items-center gap-2" data-testid="project-overview-customers-error">
+                <span role="alert">{t('projects.directory.customerLinksError')}</span>
+                {onRetryLinkedCustomers ? (
+                  <button className={linkClassName} onClick={onRetryLinkedCustomers} type="button">
+                    {t('workspace.error.retry')}
+                  </button>
+                ) : null}
+              </span>
+            </ProfileItem>
+          ) : linkedCustomers ? (
+            <ProfileItem label={t('projects.overview.profile.customers')}>
+              {linkedCustomers.length > 0 ? (
+                <span className="flex flex-wrap gap-x-3" data-testid="project-overview-customers">
+                  {linkedCustomers.map((customer) => (
+                    <Link
+                      className={linkClassName}
+                      key={customer.customerId}
+                      to={`/customers/${encodeURIComponent(customer.customerId)}`}
+                    >
+                      {customer.name}
+                    </Link>
+                  ))}
+                </span>
+              ) : t('projects.overview.profile.customersUnset')}
+            </ProfileItem>
+          ) : null}
         </dl>
       </section>
 

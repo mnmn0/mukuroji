@@ -36,6 +36,8 @@ const OPTIONAL_API_RUNTIME_VALUE_NAMES: ReadonlySet<string> = new Set([
   'COGNITO_ENTERPRISE_IDP_NAME',
   'ENTERPRISE_SSO_STATE_SECRET',
   'WEB_PUSH_VAPID_PUBLIC_KEY',
+  // Blank until an operator opts in to Email notifications.
+  'NOTIFICATION_EMAIL_SENDER',
 ])
 
 /** Secrets Manager staging label read while a rollout is in flight. */

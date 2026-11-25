@@ -11,6 +11,7 @@ import {
   readPlanningEntityAuditScopes,
   readPlanningMilestoneNotificationKind,
   redactPlanningEntityAuditReferences,
+  toPlanningEntityActivityPageView,
 } from './planning-entity-audit'
 
 /**
@@ -92,6 +93,30 @@ test('hides references to Planning entities the reader cannot see', () => {
   expect(redacted.metadata).toEqual({ teamId: 'team-1' })
   // The stored event is not changed.
   expect(event.metadata).toEqual({ teamId: 'team-1', sourceEntityId: 'hidden-source' })
+})
+
+test('shows the other end of a dependency only when the reader can see it', () => {
+  const event = createEntityEvent('dependency-removed', [], {
+    teamId: 'team-1',
+    dependencyId: 'dependency-1',
+    dependencyRole: 'predecessor',
+    relatedEntityId: 'visible-successor',
+  })
+
+  const visible = toPlanningEntityActivityPageView({
+    events: [redactPlanningEntityAuditReferences(event, new Set(['visible-successor']))],
+  })
+  const hidden = toPlanningEntityActivityPageView({
+    events: [redactPlanningEntityAuditReferences(event, new Set())],
+  })
+
+  expect(visible.events[0]?.metadata).toEqual({
+    teamId: 'team-1',
+    dependencyId: 'dependency-1',
+    dependencyRole: 'predecessor',
+    relatedEntityId: 'visible-successor',
+  })
+  expect(hidden.events[0]?.metadata).toEqual({ teamId: 'team-1', dependencyId: 'dependency-1', dependencyRole: 'predecessor' })
 })
 
 /**

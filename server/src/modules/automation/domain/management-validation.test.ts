@@ -5,6 +5,8 @@ import {
   AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_DEPTH_LIMIT,
   AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_LIMIT,
   createDefaultUnscheduledWorkItemSchedule,
+  WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT,
+  WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
   WORK_ITEM_TITLE_MAX_LENGTH,
   type AutomationProjectTemplateWorkItem,
 } from '@mukuroji/contracts'
@@ -24,6 +26,37 @@ describe('Automation management validation domain', () => {
     expect(() => validateCreateAutomationInboundWebhookEndpointInput({})).toThrow(
       'Inbound webhook endpoint name is required.',
     )
+  })
+
+  test('keeps the contributors a Work Item template starts with and rejects malformed ones', () => {
+    const schedule = createDefaultUnscheduledWorkItemSchedule()
+    const template = (contributorAssignments: unknown) => validateCreateAutomationTemplateInput({
+      kind: 'work-item',
+      name: 'Release template',
+      enabled: true,
+      payload: { title: 'Release', schedule, contributorAssignments },
+    })
+
+    expect(template([
+      { jobRoleId: 'qa', plannedEffortMinutes: 240 },
+      { memberUserId: ' Dev@Example.com ', status: 'in-progress' },
+    ]).payload).toMatchObject({
+      contributorAssignments: [
+        { jobRoleId: 'qa', plannedEffortMinutes: 240 },
+        { memberUserId: 'dev@example.com', status: 'in-progress' },
+      ],
+    })
+    expect(template([]).payload).not.toHaveProperty('contributorAssignments')
+    for (const invalid of [
+      [{}],
+      [{ jobRoleId: 'qa', plannedEffortMinutes: -1 }],
+      [{ jobRoleId: 'qa', status: 'blocked' }],
+      [{ jobRoleId: 'qa', assignmentId: 'a'.repeat(32) }],
+      Array.from({ length: 21 }, () => ({ jobRoleId: 'qa' })),
+      'qa',
+    ]) {
+      expect(() => template(invalid)).toThrow()
+    }
   })
 
   test('normalizes template and application inputs without persistence state', () => {
@@ -70,6 +103,27 @@ describe('Automation management validation domain', () => {
       .toMatchObject({ payload: { title: '🙂'.repeat(WORK_ITEM_TITLE_MAX_LENGTH) } })
     expect(() => validateCreateAutomationTemplateInput(template('a'.repeat(WORK_ITEM_TITLE_MAX_LENGTH + 1))))
       .toThrow(`Work Item template title must be ${WORK_ITEM_TITLE_MAX_LENGTH} characters or fewer.`)
+  })
+
+  test('keeps Work Item template acceptance criteria within the Work Item limits', () => {
+    const template = (acceptanceCriteria: unknown) => ({
+      kind: 'work-item',
+      name: 'Criteria',
+      enabled: true,
+      payload: { title: 'Release', schedule: createDefaultUnscheduledWorkItemSchedule(), acceptanceCriteria },
+    })
+    expect(validateCreateAutomationTemplateInput(template([' Tests pass ', 'Docs updated'])))
+      .toMatchObject({ payload: { acceptanceCriteria: ['Tests pass', 'Docs updated'] } })
+    expect(validateCreateAutomationTemplateInput(template([])).payload).not.toHaveProperty('acceptanceCriteria')
+    for (const invalid of [
+      'Tests pass',
+      ['  '],
+      ['x'.repeat(WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH + 1)],
+      [{ text: 'Tests pass' }],
+      Array.from({ length: WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT + 1 }, (_, index) => `Condition ${index}`),
+    ]) {
+      expect(() => validateCreateAutomationTemplateInput(template(invalid))).toThrow()
+    }
   })
 
   test('rejects a Project template name that Project creation would refuse', () => {

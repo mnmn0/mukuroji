@@ -39,7 +39,9 @@ import {
   AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
   prepareConfiguredCreateWorkItem,
 } from './work-item-configuration'
+import { readNewWorkItemAcceptanceCriteria } from './work-item-acceptance-criteria'
 import { requireActiveWorkspaceAssignee } from './workspace-access'
+import { readContributorAssignmentChange } from './work-item-contributors'
 
 /**
  * Builds the create-boundary body from merged Automation values.
@@ -54,8 +56,12 @@ export function createAutomationWorkItemCreateBody(
 ): CreateTeamIssueRequestBody {
   return {
     ...(idempotencyResourceId === undefined ? {} : { idempotencyResourceId }),
+    ...(values.acceptanceCriteria === undefined
+      ? {}
+      : { acceptanceCriteria: createAutomationAcceptanceCriteriaInput(values.acceptanceCriteria) }),
     assignedProjectId: values.assignedProjectId,
     assigneeUserId: values.assigneeUserId,
+    ...(values.contributorAssignments === undefined ? {} : { contributorAssignments: values.contributorAssignments }),
     customFieldValues: values.customFieldValues,
     description: values.description,
     priority: values.priority,
@@ -64,6 +70,19 @@ export function createAutomationWorkItemCreateBody(
     workItemTypeId: readAutomationText(values.workItemTypeId),
     workflowStatusId: values.workflowStatusId,
   }
+}
+
+/**
+ * Turns Work Item template acceptance criteria texts into new-criterion create input.
+ *
+ * A value that is not a list of texts is passed through unchanged, so the create path rejects it.
+ *
+ * @param value - Merged template or action `acceptanceCriteria` value.
+ * @returns Create input entries, or the original value when it is not a text list.
+ */
+function createAutomationAcceptanceCriteriaInput(value: AutomationValue): unknown {
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string')) return value
+  return value.map((text) => ({ text }))
 }
 
 /**
@@ -400,10 +419,13 @@ async function validateAutomationWorkItemConfigurationUsage(
       { configuration },
       AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
     )
+    readNewWorkItemAcceptanceCriteria(configuredBody.acceptanceCriteria)
     await requireActiveWorkspaceAssignee(
       directoryId,
       readTeamIssueAssigneeUserId(configuredBody),
     )
+    // A template's contributors must keep naming job roles and members the Team can still use.
+    await readContributorAssignmentChange(directoryId, configuredBody, { configuration }, [])
   }
 
   /**

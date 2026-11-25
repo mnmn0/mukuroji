@@ -1,4 +1,4 @@
-import type { TimeTrackingSummary } from '@mukuroji/contracts'
+import type { ProjectBudgetReport, TimeTrackingSummary } from '@mukuroji/contracts'
 
 /** Report period of the report fixtures: the fixture week. */
 export const timeReportFixtureRange = { from: '2026-11-09', to: '2026-11-15' } as const
@@ -55,6 +55,7 @@ export const timeReportFixtureBudgetSummary: TimeTrackingSummary = {
   budget: {
     schemaVersion: 1,
     workspaceId: 'workspace-demo',
+    teamId: 'core-team',
     scopeType: 'team',
     scopeId: 'core-team',
     amountMinor: 500_000,
@@ -64,4 +65,78 @@ export const timeReportFixtureBudgetSummary: TimeTrackingSummary = {
     revision: 2,
     updatedAt: '2026-11-01T00:00:00.000Z',
   },
+}
+
+/** Project budget report of Atlas: a JPY budget, an active baseline, and a slipping schedule. */
+export const projectBudgetReportFixture: ProjectBudgetReport = {
+  teamId: 'core-team',
+  projectId: 'atlas',
+  from: '2026-11-02',
+  to: '2026-11-29',
+  timeZone: 'Asia/Tokyo',
+  interval: 'day',
+  asOf: '2026-11-18',
+  budget: {
+    schemaVersion: 1,
+    workspaceId: 'workspace-demo',
+    teamId: 'core-team',
+    scopeType: 'project',
+    scopeId: 'atlas',
+    amountMinor: 1_200_000,
+    currency: 'JPY',
+    periodFrom: '2026-11-02',
+    periodTo: '2026-11-29',
+    revision: 2,
+    updatedAt: '2026-11-01T00:00:00.000Z',
+  },
+  baseline: {
+    id: 'baseline-1',
+    name: '承認済み計画',
+    capturedAt: '2026-11-01T00:00:00.000Z',
+    entryCount: 8,
+    unscheduledEffortMinutes: 240,
+    canceledEffortMinutes: 0,
+  },
+  actualMinutes: 4_800,
+  uncostedMinutes: 120,
+  actualCostByCurrency: { JPY: 468_000 },
+  budgetConsumedPercent: 39,
+  effortConsumedPercent: 40,
+  earnedValue: {
+    budgetAtCompletionMinutes: 12_000,
+    plannedValueMinutes: 6_000,
+    earnedValueMinutes: 4_320,
+    actualMinutes: 4_800,
+    scheduleVarianceMinutes: -1_680,
+    costVarianceMinutes: -480,
+    schedulePerformanceIndex: 0.72,
+    costPerformanceIndex: 0.9,
+    estimateAtCompletionMinutes: 13_333,
+    estimateToCompleteMinutes: 8_533,
+    varianceAtCompletionMinutes: -1_333,
+    money: {
+      currency: 'JPY',
+      budgetAtCompletionMinor: 1_200_000,
+      plannedValueMinor: 600_000,
+      earnedValueMinor: 432_000,
+      actualCostMinor: 468_000,
+      scheduleVarianceMinor: -168_000,
+      costVarianceMinor: -36_000,
+      costPerformanceIndex: 0.923,
+      estimateAtCompletionMinor: 1_300_000,
+      estimateToCompleteMinor: 832_000,
+      varianceAtCompletionMinor: -100_000,
+    },
+  },
+  points: Array.from({ length: 28 }, (_, index) => {
+    const date = `2026-11-${String(index + 2).padStart(2, '0')}`
+    const planned = Math.round((12_000 - 240) * Math.min(1, (index + 1) / 26))
+    return {
+      date,
+      endDate: date,
+      plannedValueMinutes: planned,
+      plannedValueMinor: Math.round(planned * 100),
+      ...(date <= '2026-11-18' ? { actualMinutes: Math.round(4_800 * (index + 1) / 17), actualCostMinor: Math.round(468_000 * (index + 1) / 17) } : {}),
+    }
+  }),
 }

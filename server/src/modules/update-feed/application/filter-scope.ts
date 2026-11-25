@@ -10,8 +10,8 @@ import type { UpdateFeedFilterScope } from './read-update-feed'
 export async function resolveUpdateFeedFilterScope(summary: PlanningUpdateTargetSummary, snapshot: PlanningSnapshot, canReadScope: (scope: Pick<PlanningEntity, 'teamId' | 'projectId'>) => Promise<boolean>): Promise<UpdateFeedFilterScope> {
   const target = summary.target
   const entity = target.type === 'initiative' ? snapshot.entities.find((item) => item.id === target.entityId && item.type === 'initiative' && !item.archivedAt) : undefined
-  const scope = target.type === 'project' ? target : entity
-  const candidates = target.type === 'project' ? snapshot.entities.filter((item) => !item.archivedAt && item.teamId === target.teamId && item.projectId === target.projectId) : entity ? [entity] : []
+  const scope: Pick<PlanningEntity, 'teamId' | 'projectId'> | undefined = target.type === 'initiative' ? entity : target
+  const candidates = target.type === 'project' ? snapshot.entities.filter((item) => !item.archivedAt && item.teamId === target.teamId && item.projectId === target.projectId) : target.type === 'team' ? snapshot.entities.filter((item) => !item.archivedAt && item.teamId === target.teamId && item.projectId === undefined) : entity ? [entity] : []
   const byId = new Map(snapshot.entities.map((item) => [item.id, item]))
   const portfolioIds = new Set<string>()
   for (const candidate of candidates) {

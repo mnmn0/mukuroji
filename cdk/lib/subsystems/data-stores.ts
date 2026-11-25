@@ -207,6 +207,14 @@ export function buildDataStores(
     sortKey: { name: 'nextNotificationAtRecordKey', type: dynamodb.AttributeType.STRING },
     projectionType: dynamodb.ProjectionType.KEYS_ONLY,
   });
+  // Sparse: only members who opted into Inbox digests carry these attributes. The worker
+  // rereads each row strongly, so the index projects keys only (ADR 0066).
+  planningTable.addGlobalSecondaryIndex({
+    indexName: 'InboxDigestDueIndex',
+    partitionKey: { name: 'inboxDigestShard', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'inboxDigestDueAt', type: dynamodb.AttributeType.NUMBER },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
 
   const capacityPlanningTable = new dynamodb.Table(stack, 'CapacityPlanningTable', {
     partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
@@ -607,6 +615,14 @@ export function buildDataStores(
     indexName: 'EmailDeliveryIndex',
     partitionKey: { name: 'emailQueueShard', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'emailNextAttemptAt', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
+
+  // Sparse: only notifications queued while a VAPID public key is configured carry these keys.
+  notificationsTable.addGlobalSecondaryIndex({
+    indexName: 'PushDeliveryIndex',
+    partitionKey: { name: 'pushQueueShard', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'pushNextAttemptAt', type: dynamodb.AttributeType.STRING },
     projectionType: dynamodb.ProjectionType.KEYS_ONLY,
   });
 

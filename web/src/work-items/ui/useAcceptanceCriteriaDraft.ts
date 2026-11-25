@@ -1,5 +1,9 @@
 import { useState, type Dispatch, type SetStateAction } from 'react'
-import type { AcceptanceCriteriaDraftError, AcceptanceCriterionDraftRow } from '../model/acceptanceCriteria'
+import {
+  createNewAcceptanceCriterionDraftRows,
+  type AcceptanceCriteriaDraftError,
+  type AcceptanceCriterionDraftRow,
+} from '../model/acceptanceCriteria'
 
 /**
  * Draft problem shown next to the acceptance criterion rows.
@@ -59,4 +63,37 @@ export function useAcceptanceCriteriaDraft(resetKey: string): AcceptanceCriteria
     }))
   }
   return { draft: state.resetKey === resetKey ? state.draft : emptyAcceptanceCriteriaDraft, setDraft }
+}
+
+/**
+ * Builds the draft a create form starts with: the inherited criteria as open rows, or no rows.
+ *
+ * @param texts - Criterion texts inherited from a duplicated Work Item or a template.
+ * @returns A draft whose rows hold the inherited texts, or an empty draft.
+ */
+export function createNewWorkItemAcceptanceCriteriaDraft(texts: readonly string[]): AcceptanceCriteriaDraft {
+  return texts.length > 0
+    ? { rows: createNewAcceptanceCriterionDraftRows(texts), nextRowNumber: texts.length + 1 }
+    : { nextRowNumber: 1 }
+}
+
+/**
+ * Keeps the inherited criteria of a create form when its edit is canceled.
+ *
+ * A new Work Item has no stored criteria to fall back on, so canceling restores the inherited
+ * rows instead of dropping them.
+ *
+ * @param next - Draft the editor asked for.
+ * @param texts - Criterion texts inherited from a duplicated Work Item or a template.
+ * @returns The requested draft, or the inherited rows when the edit was closed.
+ */
+export function keepInheritedAcceptanceCriteria(
+  next: AcceptanceCriteriaDraft,
+  texts: readonly string[],
+): AcceptanceCriteriaDraft {
+  if (next.rows !== undefined || texts.length === 0) return next
+  return {
+    rows: createNewAcceptanceCriterionDraftRows(texts),
+    nextRowNumber: Math.max(next.nextRowNumber, texts.length + 1),
+  }
 }

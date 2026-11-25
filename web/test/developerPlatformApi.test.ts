@@ -18,6 +18,7 @@ import {
   disconnectDeveloperConnector,
   deleteDeveloperExternalLink,
   dryRunDeveloperImport,
+  getDeveloperImportProgress,
   getDeveloperPlatformResources,
   getPersonalCredentialAdministration,
   listAvailableDeveloperConnectorProviders,
@@ -908,6 +909,33 @@ describe('Developer Platform API', () => {
         'idempotency-unreadable-1',
       ])
     }
+  })
+
+  test('reads import progress and rejects a response that is not one', async () => {
+    let body: unknown = { jobId: 'job-1', status: 'running', totalRows: 10, processedRows: 4, processedLinks: 0 }
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(body), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })) as typeof fetch
+
+    await expect(getDeveloperImportProgress('access-token', 'job-1')).resolves.toEqual({
+      jobId: 'job-1',
+      status: 'running',
+      totalRows: 10,
+      processedRows: 4,
+      processedLinks: 0,
+    })
+
+    body = { jobId: 'job-1', status: 'paused', processedRows: 4, processedLinks: 0 }
+    await expect(getDeveloperImportProgress('access-token', 'job-1')).rejects.toMatchObject({
+      code: 'InvalidDeveloperPlatformResponse',
+      retryable: false,
+    } satisfies Partial<DeveloperPlatformApiError>)
+    body = { jobId: 'job-1', status: 'running', processedRows: -1, processedLinks: 0 }
+    await expect(getDeveloperImportProgress('access-token', 'job-1')).rejects.toMatchObject({
+      code: 'InvalidDeveloperPlatformResponse',
+    })
   })
 
   test('rejects malformed non-empty success JSON and explicitly accepts empty delete responses', async () => {

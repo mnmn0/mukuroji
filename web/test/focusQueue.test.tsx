@@ -372,6 +372,42 @@ describe('Focus queue', () => {
     expect(render({ ...focusQueueResponseFixture, projectLogEntries: [] })).not.toContain('focus-project-log')
   })
 
+  test('lists Team updates that wait for the viewer acknowledgement', () => {
+    const response: FocusQueueResponse = {
+      ...focusQueueResponseFixture,
+      updateReviews: [
+        {
+          id: 'update-review:team:core-team:3',
+          target: { type: 'team', teamId: 'core-team' },
+          title: 'Core team',
+          version: 3,
+          health: 'at-risk',
+          summary: 'Hiring is behind plan.',
+          authorMemberKey: 'lead@example.com',
+          publishedAt: '2026-08-09T09:00:00.000Z',
+          deepLink: '/planning/portfolio?targetType=team&teamId=core-team',
+        },
+      ],
+    }
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <FocusQueue
+          locale="en"
+          onOpenItem={() => undefined}
+          onSectionChange={() => undefined}
+          response={response}
+          section="now"
+          t={createTranslator('en')}
+        />
+      </MemoryRouter>,
+    )
+
+    expect(html).toContain('data-testid="focus-update-reviews"')
+    expect(html).toContain('Core team')
+    expect(html).toContain('Hiring is behind plan.')
+    expect(html).toContain('href="/planning/portfolio?targetType=team&amp;teamId=core-team"')
+  })
+
   test('falls back from an inaccessible requested signal to another authorized source', () => {
     const item = getFocusQueueItems(focusQueueResponseFixture, 'now')[0]
     const firstSignal = item?.signals[0]
