@@ -127,7 +127,11 @@ export function removeStoredAuthSession(refreshToken: string) {
   let removed = false
   try {
     for (const storage of [window.localStorage, window.sessionStorage]) {
-      if (readSession(storage)?.refreshToken === refreshToken) {
+      const session = readSession(storage)
+      if (session?.refreshToken === refreshToken) {
+        // A rejected refresh ends the session here, before any page reacts to it, so the input on
+        // screen is kept now even when the member reloads instead of signing in from the page.
+        if (!removed) preserveSessionDrafts(readAccessTokenSubject(session.accessToken))
         storage.removeItem(storageKey)
         removed = true
       }

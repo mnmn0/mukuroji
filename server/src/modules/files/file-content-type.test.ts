@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
-  isAllowedFileContentType,
+  isCatalogFileContentType,
   isInlineImageFileContentType,
   isInlineSafeFileContentType,
   normalizeFileContentType,
@@ -18,12 +18,28 @@ describe('file content type policy', () => {
     }
   })
 
-  test('accepts only allow-listed media types and never SVG', () => {
-    expect(isAllowedFileContentType('image/png')).toBeTrue()
-    expect(isAllowedFileContentType('application/pdf')).toBeTrue()
-    expect(isAllowedFileContentType('text/csv')).toBeTrue()
-    for (const contentType of ['image/svg+xml', 'image/x-icon', 'image/tiff', 'text/html', 'text/xml', '']) {
-      expect(isAllowedFileContentType(contentType)).toBeFalse()
+  test('stores only canonical catalog media types and never SVG or HTML', () => {
+    for (const contentType of [
+      'image/png',
+      'application/pdf',
+      'text/csv',
+      'text/markdown',
+      'application/vnd.ms-excel',
+      'application/vnd.ms-excel.sheet.macroenabled.12',
+      'application/vnd.jgraph.mxfile',
+    ]) {
+      expect(isCatalogFileContentType(contentType)).toBeTrue()
+    }
+    for (const contentType of [
+      'image/svg+xml',
+      'image/x-icon',
+      'text/html',
+      'text/xml',
+      'application/x-msdownload',
+      'application/octet-stream',
+      '',
+    ]) {
+      expect(isCatalogFileContentType(contentType)).toBeFalse()
     }
   })
 
@@ -32,7 +48,7 @@ describe('file content type policy', () => {
     expect(isInlineSafeFileContentType('application/pdf')).toBeTrue()
     expect(isInlineSafeFileContentType('video/mp4')).toBeTrue()
     for (const contentType of ['text/plain', 'text/csv', 'application/json', 'application/zip']) {
-      expect(isAllowedFileContentType(contentType)).toBeTrue()
+      expect(isCatalogFileContentType(contentType)).toBeTrue()
       expect(isInlineSafeFileContentType(contentType)).toBeFalse()
     }
     expect(isInlineImageFileContentType('image/svg+xml')).toBeFalse()

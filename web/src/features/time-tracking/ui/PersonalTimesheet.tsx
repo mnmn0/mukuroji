@@ -1,5 +1,6 @@
 import type { TimeEntry } from '@mukuroji/contracts'
 import { useId, useState } from 'react'
+import { hasPendingSessionDraft } from '../../../auth/useSessionDraft'
 import type { IndirectTimeEntryInput, TimeEntryDraftInput, TimesheetTransitionResult } from '../api/timeEntries'
 import {
   buildTimeEntryWeekRows,
@@ -8,6 +9,7 @@ import {
   sumTimeEntryMinutesInDays,
 } from '../model/timeEntryLifecycle'
 import { formatMinutes, type TimeWeekPeriod } from '../model/timePeriod'
+import { createTimeEntryFormSessionDraftKey } from '../model/timeEntryFormSessionDraft'
 import { IndirectTimeEntryForm, type IndirectTimeEntryTargets } from './IndirectTimeEntryForm'
 import { TimeEntryForm, type TimeEntryWorkItemOption } from './TimeEntryForm'
 import { TimeEntryList } from './TimeEntryList'
@@ -27,6 +29,8 @@ import { useTimeEntryCategories } from './timeEntryCategoryContext'
 export type PersonalTimesheetProps = {
   /** Translator. */
   t: TimeTrackingTranslator
+  /** Team the timesheet records into; new entry input is kept apart per Team. */
+  teamId: string
   /** Date and time formatters. */
   formatters: TimeTrackingFormatters
   /** Week shown. */
@@ -95,6 +99,7 @@ export function PersonalTimesheet({
   onUpdateIndirectEntry,
   rejectionReasons,
   t,
+  teamId,
   today,
   week,
   workItemOptions,
@@ -103,7 +108,15 @@ export function PersonalTimesheet({
 }: PersonalTimesheetProps) {
   const id = useId()
   const categories = useTimeEntryCategories()
-  const [creating, setCreating] = useState<'work-item' | 'indirect'>()
+  // Work Items and indirect work targets belong to one Team, so input kept in one Team never
+  // comes back in another.
+  const workItemEntrySessionDraftKey = createTimeEntryFormSessionDraftKey('work-item', ['timesheet', teamId])
+  const indirectEntrySessionDraftKey = createTimeEntryFormSessionDraftKey('indirect', ['timesheet', teamId])
+  // A form whose input was kept when the session ended opens again so the input comes back.
+  const [creating, setCreating] = useState<'work-item' | 'indirect' | undefined>(() =>
+    hasPendingSessionDraft(workItemEntrySessionDraftKey)
+      ? 'work-item'
+      : hasPendingSessionDraft(indirectEntrySessionDraftKey) ? 'indirect' : undefined)
   const canRecordIndirect = indirectTargets !== undefined &&
     (indirectTargets.allowNoProject || indirectTargets.projects.length > 0)
   const [isSubmittingWeek, setIsSubmittingWeek] = useState(false)
@@ -206,6 +219,7 @@ export function PersonalTimesheet({
         <TimeEntryForm
           defaultDate={defaultDate}
           onCancel={() => setCreating(undefined)}
+          sessionDraftKey={workItemEntrySessionDraftKey}
           onSave={async (input) => {
             const saved = await onCreateEntry(input)
             setCreating(undefined)
@@ -219,6 +233,7 @@ export function PersonalTimesheet({
         <IndirectTimeEntryForm
           defaultDate={defaultDate}
           onCancel={() => setCreating(undefined)}
+          sessionDraftKey={indirectEntrySessionDraftKey}
           onSave={async (input) => {
             const saved = await onCreateIndirectEntry(input)
             setCreating(undefined)
@@ -227,6 +242,17 @@ export function PersonalTimesheet({
           t={t}
           targets={indirectTargets}
         />
+      ) : null}
+      {creating === 'indirect' && !indirectTargets ? (
+        // Input kept from an ended session waits for the targets, but the member can still leave.
+        <div className="flex flex-wrap items-center gap-2" data-testid="indirect-time-entry-pending">
+          <p className="text-sm font-medium text-[var(--workbench-muted)]" role="status">
+            {t('timeTracking.indirect.targetsPending')}
+          </p>
+          <button className="workbench-button-secondary min-h-9 px-4" onClick={() => setCreating(undefined)} type="button">
+            {t('timeTracking.form.cancel')}
+          </button>
+        </div>
       ) : null}
 
       {isPartial ? (

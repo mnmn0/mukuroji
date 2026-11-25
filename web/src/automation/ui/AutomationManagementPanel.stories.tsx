@@ -15,6 +15,7 @@ import {
   workflowAutomationTemplateFixture,
   workflowTemplateApplicationFixture,
   workItemAutomationTemplateFixture,
+  automationRuleEditorOptionsFixture,
 } from '../fixtures'
 
 /** AutomationManagementPanel の Storybook metadata です。 */
@@ -82,6 +83,12 @@ const meta = {
     onRotateWebhook: async () => inboundWebhookSecretResponseFixture,
     onToggleRecurringWork: async () => undefined,
     onToggleRule: async () => undefined,
+    onUpdateRule: async () => undefined,
+    onDeleteRule: async () => undefined,
+    onDryRunRule: async () => ({ matched: true, triggerType: 'status', conditions: [], actions: [] }),
+    onDeleteTemplate: async () => undefined,
+    onDeleteRecurringWork: async () => undefined,
+    ruleEditorOptions: automationRuleEditorOptionsFixture,
     onToggleTemplate: async () => undefined,
     onUpdateTemplate: async () => undefined,
     onRefreshTemplateApplication: async (applicationId) =>

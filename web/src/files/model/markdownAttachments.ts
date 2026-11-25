@@ -1,4 +1,4 @@
-import type { FileAttachment, FileVersion } from '@mukuroji/contracts'
+import type { FileAttachment, FileTypeRejection, FileVersion } from '@mukuroji/contracts'
 
 /**
  * URL scheme that Markdown bodies use to point at a file attached to the same Work Item.
@@ -26,32 +26,14 @@ const inlineImageContentTypes: ReadonlySet<string> = new Set([
   'image/avif',
 ])
 
-/**
- * Types the File API accepts, mirrored so the editor can refuse a file before uploading it.
- * The server checks the same list again when the upload session is created.
- */
-const attachableContentTypes: ReadonlySet<string> = new Set([
-  ...inlineImageContentTypes,
-  'video/mp4',
-  'video/webm',
-  'video/quicktime',
-  'application/pdf',
-  'text/plain',
-  'text/csv',
-  'application/json',
-  'application/zip',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-])
-
 /** File ids are server-generated hex or UUID-like tokens; anything else is not a reference. */
 const fileIdPattern = /^[A-Za-z0-9_-]{1,128}$/
 
 /**
- * Why a selected file cannot be attached to a Markdown body.
+ * Why a selected file cannot be attached to a Markdown body before asking the server. The type
+ * is checked by the server, which knows the Workspace settings and says which types it accepts.
  */
-export type MarkdownAttachmentRejection = 'unsupportedType' | 'tooLarge'
+export type MarkdownAttachmentRejection = 'tooLarge'
 
 /**
  * Checks a pasted or dropped file before an upload session is created.
@@ -60,11 +42,63 @@ export type MarkdownAttachmentRejection = 'unsupportedType' | 'tooLarge'
  * @returns Why the file is refused, or `undefined` when it may be uploaded.
  */
 export function findMarkdownAttachmentRejection(
-  file: Pick<File, 'size' | 'type'>,
+  file: Pick<File, 'size'>,
 ): MarkdownAttachmentRejection | undefined {
-  if (!attachableContentTypes.has(normalizeContentType(file.type))) return 'unsupportedType'
   if (file.size <= 0 || file.size > markdownAttachmentMaxSizeBytes) return 'tooLarge'
   return undefined
+}
+
+/**
+ * Messages a Markdown editor shows after uploading a batch of files.
+ */
+export type MarkdownAttachmentBatchMessages = {
+  /** Why the server refused a file of the batch because of its type, if it did. */
+  fileTypeRejection?: FileTypeRejection
+  /** Message for a file that failed for another reason, which stops the rest of the batch. */
+  errorKey?: 'files.error.upload'
+}
+
+/**
+ * Decides what to report after a batch upload. A type rejection skips only that file, so a later
+ * file can still fail; both are reported so the failure is not hidden behind the rejection.
+ *
+ * @param succeeded - Whether the batch finished without a failure other than a type rejection.
+ * @param fileTypeRejection - Last type rejection reported during the batch, if any.
+ * @returns The messages to show; empty when every file was uploaded.
+ */
+export function readMarkdownAttachmentBatchMessages(
+  succeeded: boolean,
+  fileTypeRejection?: FileTypeRejection,
+): MarkdownAttachmentBatchMessages {
+  return {
+    ...(fileTypeRejection ? { fileTypeRejection } : {}),
+    ...(succeeded ? {} : { errorKey: 'files.error.upload' }),
+  }
+}
+
+/**
+ * Editor messages together with the file scope, such as the Work Item, whose upload produced them.
+ */
+export type ScopedMarkdownAttachmentMessages<Messages> = {
+  /** Key of the file scope the upload started in. */
+  scopeKey: string
+  /** Messages produced by that upload. */
+  messages: Messages
+}
+
+/**
+ * Returns stored editor messages only while the editor still shows the scope they belong to,
+ * so another Work Item's rejection or failure is never shown, not even for one render.
+ *
+ * @param stored - Messages with the scope of the upload that produced them.
+ * @param scopeKey - Key of the file scope the editor shows now.
+ * @returns The messages when the scopes match, otherwise `undefined`.
+ */
+export function readScopedMarkdownAttachmentMessages<Messages>(
+  stored: ScopedMarkdownAttachmentMessages<Messages>,
+  scopeKey: string,
+): Messages | undefined {
+  return stored.scopeKey === scopeKey ? stored.messages : undefined
 }
 
 /**

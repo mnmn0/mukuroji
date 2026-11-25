@@ -8,13 +8,17 @@ import { createHash } from 'node:crypto'
 import type {
   TenantOperation,
 } from '@mukuroji/contracts'
-import { DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS } from '@mukuroji/contracts'
+import {
+  DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  type WorkspaceFileTypeSettings,
+} from '@mukuroji/contracts'
 import {
   createDefaultTenantAdministrationSnapshot,
 } from '../../domain/tenant-administration'
 import type {
   TenantAdministrationAuditWriter,
 } from '../../application/ports/tenant-administration-port'
+import { createDynamoDbTenantAdministrationAuditWriter } from '../audit/tenant-administration-audit-writer'
 import { DynamoDbTenantAdministrationClient } from './tenant-administration-client'
 
 type CapturedCommand = {
@@ -448,6 +452,53 @@ describe('DynamoDbTenantAdministrationClient', () => {
       code: 'TenantAdministrationUnavailable',
       status: 503,
     })
+  })
+
+  test('stores File type settings and records the change in the same audit transaction', async () => {
+    const items = createAggregateItems()
+    const transactions: unknown[][] = []
+    const client = new DynamoDbTenantAdministrationClient(
+      'TenantAdministrationTable',
+      createDocumentClient((command) => {
+        if (command.constructor.name === 'TransactWriteCommand') {
+          const transactItems = command.input.TransactItems
+          transactions.push(Array.isArray(transactItems) ? transactItems : [])
+          return {}
+        }
+        const recordKey = readRecordKey(command)
+        if (!recordKey) return {}
+        const value = items.get(recordKey)
+        return value ? { Item: createStateItem(recordKey, value) } : {}
+      }),
+      () => '2026-08-02T00:00:00.000Z',
+      createDynamoDbTenantAdministrationAuditWriter('AuditEventsTable', 'ab'.repeat(32)),
+    )
+    const fileTypes: WorkspaceFileTypeSettings = { allowed: ['rar'], blocked: ['xlsm'] }
+    const saved = await client.updateProfile('workspace-1', 'admin-1', {
+      region: 'ap-northeast-1',
+      locale: 'ja',
+      defaultPolicy: { defaultMemberRole: 'member' },
+      fileTypes,
+      expectedRevision: 0,
+    })
+    expect(saved.fileTypes).toEqual(fileTypes)
+
+    expect(transactions).toHaveLength(1)
+    const auditItem = (transactions[0] ?? [])
+      .map((item) => isRecord(item) && isRecord(item.Put) ? item.Put : undefined)
+      .find((put) => put?.TableName === 'AuditEventsTable')?.Item
+    if (!isRecord(auditItem)) throw new Error('Tenant profile audit Put was not created.')
+    expect(auditItem.eventType).toBe('tenant.profile.updated')
+    expect(auditItem.changes).toEqual(expect.arrayContaining([
+      { field: 'fileTypes.allowed', after: ['rar'] },
+      { field: 'fileTypes.blocked', after: ['xlsm'] },
+    ]))
+
+    items.set('PROFILE', { ...items.get('PROFILE'), fileTypes })
+    expect((await client.getProfile('workspace-1'))?.fileTypes).toEqual(fileTypes)
+    // A stored row that would enable a type outside the catalog fails the read instead of applying it.
+    items.set('PROFILE', { ...items.get('PROFILE'), fileTypes: { allowed: ['exe'], blocked: [] } })
+    await expect(client.getProfile('workspace-1')).rejects.toThrow()
   })
 
   test('retires work categories but refuses to drop one already offered', async () => {

@@ -1,3 +1,5 @@
+import { findFileTypeByContentType } from '@mukuroji/contracts'
+
 /**
  * RFC 9110 `type/subtype` token pattern without parameters, applied after lowercasing.
  */
@@ -34,21 +36,6 @@ const INLINE_SAFE_CONTENT_TYPES: ReadonlySet<string> = new Set([
 ])
 
 /**
- * Every media type the File writer accepts. Types outside {@link INLINE_SAFE_CONTENT_TYPES}
- * are always served as attachments.
- */
-const ALLOWED_CONTENT_TYPES: ReadonlySet<string> = new Set([
-  ...INLINE_SAFE_CONTENT_TYPES,
-  'text/plain',
-  'text/csv',
-  'application/json',
-  'application/zip',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-])
-
-/**
  * Normalizes a caller-supplied File media type to the canonical stored representation.
  *
  * @param value - Non-empty media type text validated by the caller's input boundary.
@@ -61,13 +48,15 @@ export function normalizeFileContentType(value: string): string {
 }
 
 /**
- * Determines whether a canonical media type is accepted by File upload and integrity checks.
+ * Determines whether a canonical media type may be stored on a File version: the canonical media
+ * type of a catalog File type. A Workspace can stop accepting a type later, so stored versions are
+ * checked against the whole catalog rather than the Workspace settings.
  *
  * @param contentType - Canonical media type without parameters.
- * @returns Whether the File writer permits the media type.
+ * @returns Whether a File version may carry the media type.
  */
-export function isAllowedFileContentType(contentType: string): boolean {
-  return ALLOWED_CONTENT_TYPES.has(contentType)
+export function isCatalogFileContentType(contentType: string): boolean {
+  return findFileTypeByContentType(contentType) !== undefined
 }
 
 /**

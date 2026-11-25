@@ -10,6 +10,7 @@ import {
   createAuditFieldChanges,
   createMutationAuditEventPut,
   ensureLocalAuditEventsTable,
+  getConfiguredAuditRetentionDays,
   getConfiguredAuditTableName,
 } from '../../../audit'
 import type {
@@ -32,7 +33,9 @@ import {
   ProjectDataError,
 } from '../../../directory'
 import {
+  createRequestRequesterNotificationTransactItems,
   createRequestSubmissionEventProjection,
+  type RequestRequesterNotificationKind,
 } from '../../../request-intake'
 import {
   isCanonicalWorkItemArchiveWindow,
@@ -692,6 +695,8 @@ type TeamIssueItem = {
   creatorMemberKey: string
   /** Request intake から作成された場合の source submission ID です。 */
   sourceRequestId?: string
+  /** Member who sent the source request, kept to tell them when the Work Item is completed. */
+  sourceRequester?: WorkItemSourceRequester
   /** Team Triage から作成された場合の source Entry ID です。 */
   sourceTriageEntryId?: string
   /** Relation Graph から同期する search/backfill 用の派生 relation ID 一覧です。 */
@@ -1195,6 +1200,16 @@ export type RequestConversionTransactionInput = {
   submissionId: string
   /** Mutation 前に読み込んだ append-only event 履歴です。 */
   events: readonly RequestSubmissionEvent[]
+  /** Member who sent the request through an authenticated link; absent for anonymous requests. */
+  requester?: WorkItemSourceRequester
+}
+
+/** The member who sent the request a Work Item was made from. Never returned by the API. */
+export type WorkItemSourceRequester = {
+  /** Member key of the requester. */
+  memberKey: string
+  /** Form title used as the requester's notification title. */
+  formTitle: string
 }
 
 /** Triage compositionが Work Item 作成 transaction へ追加する受入更新です。 */
@@ -1421,6 +1436,24 @@ export type NamedWorkItemDeletionFence = {
 /**
  * API handler から利用する team issue client の最小 interface です。
  */
+/** Input for the source requester's completion notification written by another module. */
+export type CreateSourceRequesterCompletionTransactionItemsInput = {
+  /** Workspace that owns the Work Item. */
+  directoryId: string
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Work Item being completed. */
+  issueId: string
+  /** Work Item revision the completion writes. */
+  nextRevision: number
+  /** Member who completed the Work Item. */
+  actorUserId: string
+  /** When the completion happens. */
+  occurredAt: string
+  /** Correlation ID of the mutation that completes the Work Item, when known. */
+  correlationId?: string
+}
+
 export type TeamIssuesClient = {
   /** Prepares de-identified duplicate-source context for an atomic Triage merge.
    *
@@ -1430,6 +1463,16 @@ export type TeamIssuesClient = {
   createTriageDuplicateContextTransactionItems?(
     input: CreateTriageDuplicateContextTransactionItemsInput,
   ): TriageDuplicateContextTransactionContribution
+  /**
+   * Builds the source requester's completion notification for a completion that another module
+   * writes in its own transaction, such as an approval decision.
+   *
+   * @param input - Work Item, actor, and the revision the completion writes.
+   * @returns Audit outbox items, or none when the Work Item has no signed-in requester.
+   */
+  createSourceRequesterCompletionTransactionItems?(
+    input: CreateSourceRequesterCompletionTransactionItemsInput,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>>
   /**
    * DynamoDB から指定 team ID の Issue 一覧を取得します。
    */
@@ -1626,6 +1669,23 @@ export type TeamIssueDetailReadOptions = {
   includeEvents?: boolean
 }
 
+/**
+ * Validates the requester passed with a request conversion.
+ *
+ * @param value - Requester from the conversion input.
+ * @returns The normalized requester, or undefined when the request was anonymous.
+ */
+function readWorkItemSourceRequester(
+  value: WorkItemSourceRequester | undefined,
+): WorkItemSourceRequester | undefined {
+  if (value === undefined) return undefined
+  const memberKey = value.memberKey.trim().toLowerCase()
+  if (!memberKey || memberKey.length > 320 || typeof value.formTitle !== 'string') {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Request conversion requester is invalid.')
+  }
+  return { memberKey, formTitle: value.formTitle.slice(0, 500) }
+}
+
 function createRequestConversionTransactionItems(
   input: RequestConversionTransactionInput,
   teamId: string,
@@ -1796,6 +1856,68 @@ export class DynamoDbTeamIssuesClient {
     this.bootstrapLocalTables = bootstrapLocalTables
     this.auditTableName = auditTableName
     this.planningTableName = planningTableName?.trim() || undefined
+  }
+
+  /**
+   * Builds the source requester's completion notification for a completion that another module
+   * writes, reading the stored requester copy that the API never returns.
+   *
+   * @param input - Work Item, actor, and the revision the completion writes.
+   * @returns Audit outbox items, or none when the Work Item has no signed-in requester.
+   */
+  async createSourceRequesterCompletionTransactionItems(
+    input: CreateSourceRequesterCompletionTransactionItemsInput,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+    if (!this.auditTableName) return []
+    await this.ensureLocalTables()
+    const item = await this.getRequiredTeamIssueItem(input.directoryId, input.teamId, input.issueId, true)
+    return this.createSourceRequesterNotificationItems(
+      input.directoryId,
+      item,
+      'completed',
+      input.actorUserId,
+      input.occurredAt,
+      `${input.teamId}:${input.issueId}:${input.nextRevision}`,
+      input.correlationId,
+    )
+  }
+
+  /**
+   * Builds the Inbox notification for the member who sent the request a Work Item was made
+   * from. The notification names only the form, never the Work Item.
+   *
+   * @param directoryId - Workspace that owns the Work Item.
+   * @param item - Work Item after the change.
+   * @param kind - Whether the request was accepted or its Work Item completed.
+   * @param actorUserId - Member who made the change.
+   * @param occurredAt - When the change happened.
+   * @param occurrenceId - ID that makes this notification unique.
+   * @param correlationId - Correlation ID of the mutation that made the change, when known.
+   * @returns Audit outbox items, or none when the Work Item has no signed-in requester.
+   */
+  private createSourceRequesterNotificationItems(
+    directoryId: string,
+    item: TeamIssueItem,
+    kind: Extract<RequestRequesterNotificationKind, 'accepted' | 'completed'>,
+    actorUserId: string,
+    occurredAt: string,
+    occurrenceId: string,
+    correlationId?: string,
+  ): NonNullable<TransactWriteCommandInput['TransactItems']> {
+    if (!this.auditTableName || !item.sourceRequestId || !item.sourceRequester) return []
+    return createRequestRequesterNotificationTransactItems({
+      auditTableName: this.auditTableName,
+      auditRetentionDays: getConfiguredAuditRetentionDays(),
+      workspaceId: directoryId,
+      submissionId: item.sourceRequestId,
+      requesterUserId: item.sourceRequester.memberKey,
+      formTitle: item.sourceRequester.formTitle,
+      kind,
+      actorId: actorUserId,
+      occurredAt,
+      occurrenceId,
+      ...(correlationId ? { correlationId } : {}),
+    })
   }
 
   /**
@@ -2554,6 +2676,7 @@ export class DynamoDbTeamIssuesClient {
     const sourceRequestId = requestConversion
       ? readSourceRequestId(requestConversion.submissionId)
       : undefined
+    const sourceRequester = readWorkItemSourceRequester(requestConversion?.requester)
     const sourceTriageEntryId = triageAcceptance
       ? readSourceTriageEntryId(triageAcceptance.entryId)
       : undefined
@@ -2640,6 +2763,7 @@ export class DynamoDbTeamIssuesClient {
         assigneeUserId,
         creatorMemberKey: actorUserId,
         ...(sourceRequestId ? { sourceRequestId } : {}),
+        ...(sourceRequestId && sourceRequester ? { sourceRequester } : {}),
         ...(sourceTriageEntryId ? { sourceTriageEntryId } : {}),
         workflowSchemaVersion,
         workflowStatusId,
@@ -2807,6 +2931,16 @@ export class DynamoDbTeamIssuesClient {
               issueId,
               undefined,
               item,
+            ),
+            // Last, so the requester notification never shifts the cancellation indexes above.
+            ...this.createSourceRequesterNotificationItems(
+              directoryId,
+              item,
+              'accepted',
+              actorUserId,
+              now,
+              `${teamId}:${issueId}:created`,
+              auditContext?.correlationId,
             ),
           ],
         }),
@@ -3769,6 +3903,18 @@ export class DynamoDbTeamIssuesClient {
               beforeIssue,
               afterIssue,
             ),
+            // Last, so the requester notification never shifts the cancellation indexes above.
+            ...(completionTransition
+              ? this.createSourceRequesterNotificationItems(
+                  directoryId,
+                  afterIssue,
+                  'completed',
+                  actorUserId,
+                  afterIssue.updatedAt,
+                  `${teamId}:${issueId}:${nextRevision}`,
+                  auditContext?.correlationId,
+                )
+              : []),
           ],
         }),
       )

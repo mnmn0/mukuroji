@@ -1,6 +1,7 @@
 import {
   AUTOMATION_SCHEMA_VERSION,
   type CreateRecurringWorkInput,
+  type DeleteAutomationDefinitionInput,
   type RecurringWork,
   type UpdateRecurringWorkInput,
 } from '@mukuroji/contracts'
@@ -73,6 +74,30 @@ export function updateRecurringWork(
     `${automationApiBaseUrl}/recurring-work/${encodeURIComponent(recurringWorkId)}`,
     accessToken,
     'PATCH',
+    input,
+    mutationContext,
+  )
+}
+
+/**
+ * Deletes a recurring Work definition; Work Items it already created stay.
+ *
+ * @param accessToken - Access token used for the Authorization header.
+ * @param recurringWorkId - Definition to delete.
+ * @param input - Revision the client read.
+ * @param mutationContext - Mutation request context shared between retries.
+ * @returns A promise that resolves after the delete.
+ */
+export async function deleteRecurringWork(
+  accessToken: string,
+  recurringWorkId: string,
+  input: DeleteAutomationDefinitionInput,
+  mutationContext: MutationRequestContext,
+) {
+  await requestMutation<unknown>(
+    `${automationApiBaseUrl}/recurring-work/${encodeURIComponent(recurringWorkId)}`,
+    accessToken,
+    'DELETE',
     input,
     mutationContext,
   )

@@ -13,6 +13,7 @@ import { registerTimeTrackingRoutes } from './routes/time-tracking-routes'
 import { registerAgentRunRoutes } from './routes/agent-run-routes'
 import { registerCapacityPlanningRoutes } from './routes/capacity-planning-routes'
 import { registerNotificationsRoutes } from './routes/notifications-routes'
+import { registerNotificationDestinationRoutes } from './routes/notification-destination-routes'
 import { registerAutomationRoutes } from './routes/automation-routes'
 import { registerWorkItemKeyPrefixRoutes } from './routes/work-item-key-prefix-routes'
 import { registerWorkItemsRoutes } from './routes/work-items-routes'
@@ -89,6 +90,8 @@ export type {
 
 export {
   createAutomationActionExecutor,
+  createAutomationExecutionFailureNotifier,
+  createAutomationWorkCalendarSource,
   createBulkItemMutationIdempotencyKey,
   requireBulkOperationOwner,
   toBulkOperationResponse,
@@ -178,6 +181,7 @@ registerTimeTrackingRoutes(routeApp)
 registerAgentRunRoutes(routeApp)
 registerCapacityPlanningRoutes(routeApp)
 registerNotificationsRoutes(routeApp)
+registerNotificationDestinationRoutes(routeApp)
 registerAutomationRoutes(routeApp)
 registerWorkItemsRoutes(routeApp)
 registerWorkItemKeyPrefixRoutes(routeApp)

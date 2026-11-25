@@ -17,6 +17,7 @@ import {
 import { type FileProofingActor, type FileProofingScope } from '../../modules/files/file-proofing'
 import {
   WorkItemCompletionGateError,
+  WorkflowRuleError,
   WorkItemConfigurationError,
 } from '../../modules/work-items/work-item-configuration'
 import { ambientAutomationActionExecutorDependencies, workspaceDependencies } from './app-dependencies'
@@ -73,6 +74,9 @@ export function toWorkItemConfigurationErrorResponse(c: Context, error: unknown)
   }
   if (error instanceof WorkItemCompletionGateError) {
     return c.json(error.toResponseBody(), 409)
+  }
+  if (error instanceof WorkflowRuleError) {
+    return c.json(error.toResponseBody(), error.status === 403 ? 403 : 409)
   }
   if (error.status >= 500) {
     console.error(error)

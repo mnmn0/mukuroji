@@ -329,6 +329,22 @@ function createIdempotencyDocumentClient() {
           }
           return false
         })
+        const templateChecks = (command.input.TransactItems as Array<{
+          ConditionCheck?: {
+            Key: Record<string, unknown>
+            ConditionExpression: string
+            ExpressionAttributeValues: Record<string, unknown>
+          }
+        }>).flatMap((item) =>
+          item.ConditionCheck?.ConditionExpression === '#revision = :revision AND #enabled = :enabled'
+            ? [item.ConditionCheck]
+            : [])
+        for (const check of templateChecks) {
+          const existing = items.get(itemKey(check.Key))
+          conflicts.push(
+            existing?.revision !== check.ExpressionAttributeValues[':revision'] || existing?.enabled !== true,
+          )
+        }
         if (conflicts.some(Boolean)) {
           throw Object.assign(new Error('ConditionalCheckFailed'), {
             name: 'TransactionCanceledException',
@@ -461,6 +477,48 @@ describe('automation management create idempotency', () => {
     }, 'shared-key')).rejects.toMatchObject({ code: 'IdempotencyConflict' })
   })
 
+  test('rejects a rule or recurring work whose template is deleted between its read and its write', async () => {
+    const { documentClient, items } = createIdempotencyDocumentClient()
+    let deleteTemplateBeforeWrite = false
+    const racingClient = {
+      async send(command: { input: Record<string, unknown> }) {
+        if (deleteTemplateBeforeWrite && Array.isArray(command.input.TransactItems)) {
+          for (const key of items.keys()) {
+            if (key.endsWith('\0TEMPLATE#template-race')) items.delete(key)
+          }
+        }
+        return await documentClient.send(command as never)
+      },
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', racingClient)
+    const template = await client.createTemplate('workspace-1', {
+      kind: 'work-item',
+      name: 'Racing template',
+      enabled: true,
+      payload: { schedule: createDefaultUnscheduledWorkItemSchedule(), title: 'Race' },
+    }, 'template-race-key')
+    for (const key of items.keys()) {
+      const item = items.get(key)
+      if (item?.recordKey === `TEMPLATE#${template.id}`) {
+        items.delete(key)
+        items.set(key.replace(`TEMPLATE#${template.id}`, 'TEMPLATE#template-race'), {
+          ...item,
+          recordKey: 'TEMPLATE#template-race',
+          id: 'template-race',
+        })
+      }
+    }
+    deleteTemplateBeforeWrite = true
+
+    await expect(client.createRule('workspace-1', {
+      name: 'Racing rule',
+      enabled: true,
+      trigger: { type: 'status', toStatusId: 'done' },
+      actions: [{ type: 'create', templateId: 'template-race' }],
+    })).rejects.toMatchObject({ code: 'AutomationTemplateNotFound' })
+    expect([...items.values()].some((item) => item.entryType === 'rule')).toBe(false)
+  })
+
   test('pins server-resolved immutable template versions for rules and recurring work', async () => {
     const { documentClient } = createIdempotencyDocumentClient()
     const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
@@ -560,6 +618,7 @@ describe('automation management create idempotency', () => {
       schedule: { ...recurringV1.schedule, localTime: '10:00' },
     })
     expect(scheduleEdited.nextRunAt).toBe(recurringV1.nextRunAt)
+    expect(scheduleEdited.scheduleChangedAt).toBeUndefined()
     const templateV3 = await client.updateTemplate('workspace-1', templateV1.id, {
       expectedRevision: templateV2.revision,
       payload: {
@@ -1899,7 +1958,12 @@ describe('automation execution safety', () => {
         } },
         { Put: {
           ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
-          Item: { entryType: 'execution', ruleId: rule.id },
+          Item: {
+            entryType: 'execution',
+            ruleId: rule.id,
+            // An unclaimed reservation is recovered by the schedule worker five minutes later.
+            nextRunAtRecordKey: expect.stringMatching(/^2026-07-16T00:05:30\.000Z#execution#/),
+          },
         } },
         { Update: {
           ConditionExpression: 'attribute_not_exists(#executionCount) OR #executionCount < :maximumExecutions',
@@ -1978,6 +2042,38 @@ describe('automation execution safety', () => {
         } },
       ],
     })
+  })
+
+  test('fences a template delete with the definition revision read during its usage check', async () => {
+    const transactions: Array<Record<string, unknown>> = []
+    const documentClient = {
+      async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+        if (command.constructor.name !== 'TransactWriteCommand') {
+          throw new Error(`Unexpected command: ${command.constructor.name}`)
+        }
+        transactions.push(command.input)
+        return {}
+      },
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
+
+    await client.deleteTemplate('workspace-1', 'template-1', 4, 7)
+    await client.deleteTemplate('workspace-1', 'template-1', 4, 0)
+    await client.deleteRule('workspace-1', 'rule-1', 2)
+
+    const sentinelConditions = transactions.map((input) => {
+      const items = input.TransactItems as Array<{ Update?: { ConditionExpression: string; ExpressionAttributeValues: Record<string, unknown> } }>
+      const update = items[1]?.Update
+      return [update?.ConditionExpression, update?.ExpressionAttributeValues[':expected']]
+    })
+    expect(sentinelConditions).toEqual([
+      ['#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision = :expected', 7],
+      ['attribute_not_exists(scopeKey)', undefined],
+      [
+        'attribute_not_exists(scopeKey) OR (#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision >= :one)',
+        undefined,
+      ],
+    ])
   })
 
   test('skips a stale rule snapshot when the current definition changes before reservation', async () => {
@@ -2326,6 +2422,47 @@ describe('automation execution safety', () => {
     )
     expect(retried).toMatchObject({ status: 'dead-letter', retryable: true, attempts: 2 })
     expect(calls).toBe(2)
+  })
+
+  test('reports dead letters and rate-limit skips without failing the saved execution', async () => {
+    const reports: string[] = []
+    const notifier = {
+      async notify(rule: AutomationRule, execution: AutomationExecution, kind: string) {
+        reports.push(`${kind}:${rule.id}:${execution.status}:${execution.attempts}`)
+        if (reports.length === 1) throw new Error('Audit outbox is down.')
+      },
+    }
+    const executor = {
+      async execute() {
+        throw new AutomationError('invalid-input', 'StillFailing', 'Still failing.')
+      },
+    }
+    const rule = createRule({ actions: [{ type: 'comment', body: 'Only action' }] })
+    const client = createMemoryClient()
+    client.rules.set(`${rule.id}\0${rule.version}`, rule)
+    const engine = new AutomationEngine(client, executor, notifier)
+    const event = createEvent()
+
+    expect(await engine.handleEvent(rule, event)).toMatchObject({ status: 'dead-letter' })
+    expect(await engine.retryExecution(rule.workspaceId, createAutomationExecutionId(rule, event.eventId), event))
+      .toMatchObject({ status: 'dead-letter', attempts: 2 })
+
+    const limited = await new AutomationEngine(createMemoryClient(true), executor, notifier).handleEvent(
+      createRule({ rateLimit: { maxExecutions: 1, windowSeconds: 60 } }),
+      createEvent(),
+    )
+    expect(limited).toMatchObject({ status: 'skipped', errorCode: 'AutomationRateLimitExceeded' })
+
+    const succeeded = await new AutomationEngine(createMemoryClient(), {
+      async execute() {},
+    }, notifier).handleEvent(createRule({ id: 'rule-ok' }), createEvent({ eventId: 'event-ok' }))
+    expect(succeeded).toMatchObject({ status: 'succeeded' })
+
+    expect(reports).toEqual([
+      `dead-letter:${rule.id}:dead-letter:1`,
+      `dead-letter:${rule.id}:dead-letter:2`,
+      `rate-limited:${rule.id}:skipped:0`,
+    ])
   })
 })
 

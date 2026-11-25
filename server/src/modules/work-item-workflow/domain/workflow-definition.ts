@@ -1,7 +1,14 @@
-import type {
-  WorkflowStatusCategory,
-  WorkflowStatusDefinition,
-  WorkItemConfiguration,
+import {
+  isWorkflowStatusRequiredField,
+  isWorkflowTransitionActorRole,
+  WORKFLOW_STATUS_REQUIRED_FIELDS,
+  WORKFLOW_TRANSITION_ACTOR_ROLES,
+  type WorkflowStatusCategory,
+  type WorkflowStatusDefinition,
+  type WorkflowStatusRequiredField,
+  type WorkflowTransition,
+  type WorkflowTransitionActorRole,
+  type WorkItemConfiguration,
 } from '@mukuroji/contracts'
 
 const CONFIGURATION_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/i
@@ -49,7 +56,9 @@ export function validateWorkflowDefinition(
     if (!statusIds.has(fromStatusId) || !statusIds.has(toStatusId) || fromStatusId === toStatusId) {
       throw invalidWorkflow('Workflow transition references an invalid status.')
     }
-    return { fromStatusId, toStatusId }
+    const allowedActorRoles = readTransitionActorRoles(transition.allowedActorRoles)
+    const normalized: WorkflowTransition = { fromStatusId, toStatusId }
+    return allowedActorRoles.length === 0 ? normalized : { ...normalized, allowedActorRoles }
   })
   assertUnique(
     transitions.map((transition) => `${transition.fromStatusId}\0${transition.toStatusId}`),
@@ -75,6 +84,57 @@ function readWorkflowStatus(value: unknown): WorkflowStatusDefinition {
     ...(value.color === undefined ? {} : {
       color: readDisplayName(value.color, 'Workflow status color'),
     }),
+    ...readStatusRequirements(value),
+  }
+}
+
+/**
+ * Reads the optional transition actor roles; an empty list is stored as absent.
+ *
+ * @param value - Untrusted `allowedActorRoles` value.
+ * @returns Unique roles in display order.
+ */
+function readTransitionActorRoles(value: unknown): WorkflowTransitionActorRole[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || !value.every(isWorkflowTransitionActorRole)) {
+    throw invalidWorkflow('Workflow transition actor roles must be project-manager or assignee.')
+  }
+  assertUnique(value, 'Workflow transition actor role')
+  return WORKFLOW_TRANSITION_ACTOR_ROLES.filter((role) => value.includes(role))
+}
+
+/**
+ * Reads the optional fields a status requires; empty lists are stored as absent.
+ *
+ * Custom field IDs are checked against the configuration's fields by the configuration validator.
+ *
+ * @param value - Untrusted status object.
+ * @returns The required field properties to spread into the status.
+ */
+function readStatusRequirements(
+  value: Record<string, unknown>,
+): Pick<WorkflowStatusDefinition, 'requiredFields' | 'requiredCustomFieldIds'> {
+  const requiredFields: WorkflowStatusRequiredField[] = []
+  if (value.requiredFields !== undefined) {
+    const candidate = value.requiredFields
+    if (!Array.isArray(candidate) || !candidate.every(isWorkflowStatusRequiredField)) {
+      throw invalidWorkflow('Workflow status required fields must be due-date or acceptance-criteria.')
+    }
+    assertUnique(candidate, 'Workflow status required field')
+    requiredFields.push(...WORKFLOW_STATUS_REQUIRED_FIELDS.filter((field) => candidate.includes(field)))
+  }
+  let requiredCustomFieldIds: string[] = []
+  if (value.requiredCustomFieldIds !== undefined) {
+    if (!Array.isArray(value.requiredCustomFieldIds) || value.requiredCustomFieldIds.length > 64) {
+      throw invalidWorkflow('Workflow status required custom fields must be an array with at most 64 entries.')
+    }
+    requiredCustomFieldIds = value.requiredCustomFieldIds.map((fieldId) =>
+      readConfigurationId(fieldId, 'Workflow status required custom field'))
+    assertUnique(requiredCustomFieldIds, 'Workflow status required custom field')
+  }
+  return {
+    ...(requiredFields.length === 0 ? {} : { requiredFields }),
+    ...(requiredCustomFieldIds.length === 0 ? {} : { requiredCustomFieldIds }),
   }
 }
 
