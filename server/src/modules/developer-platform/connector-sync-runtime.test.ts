@@ -542,6 +542,20 @@ describe('ConnectorSyncEngine', () => {
       resourceType: 'issue',
     })
     expect(result.results).toEqual([expect.objectContaining({ kind: 'synced', linkId: link.id })])
+    // The same issue named with other letter cases is already claimed by that link.
+    await expect(fixture.platform.createExternalWorkItemLink({
+      workspaceId: 'workspace-1',
+      input: {
+        teamId: 'team-1',
+        workItemId: 'work-item-1',
+        installationId: fixture.installation.id,
+        resourceType: 'issue',
+        externalId: 'Acme/App#12',
+        externalUrl: 'https://github.com/Acme/App/issues/12',
+        displayKey: 'Acme/App#12',
+        syncDirection: 'bidirectional',
+      },
+    })).rejects.toMatchObject({ code: 'ExternalWorkItemLinkConflict' })
   })
 
   test('does not acknowledge a pending generation from an older provider replica', async () => {

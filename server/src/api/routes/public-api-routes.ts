@@ -2679,14 +2679,25 @@ export function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGate
         )
         // A two-state resource (a GitHub issue) carries open / closed, which becomes a status of the
         // matching category in the Work Item's own workflow.
-        const stateStatusId = input.patch.state === undefined
+        const stateStatus = input.patch.state === undefined || input.patch.status !== undefined
           ? undefined
           : resolveConnectorStateStatus(
               resolveWorkItemTypeWorkflow(configuration.configuration, detail.issue.workItemTypeId, { allowArchived: true }),
               detail.issue.workflowStatusId,
               input.patch.state,
             )
-        const workflowStatusId = input.patch.status ?? stateStatusId
+        if (stateStatus?.kind === 'unavailable') {
+          // The workflow cannot follow the resource from here; the link records a conflict and the
+          // other linked resources keep synchronizing.
+          await developerPlatformDependencies.idempotency.releaseIdempotency(completionRequest)
+          return {
+            kind: 'rejected',
+            workItem: toConnectorWorkItemSnapshot(detail.issue),
+            reason: 'state-status-unavailable',
+          }
+        }
+        const workflowStatusId = input.patch.status ??
+          (stateStatus?.kind === 'status' ? stateStatus.statusId : undefined)
         const body = normalizeTeamIssueInput({
           expectedRevision: input.expectedRevision,
           ...(input.patch.title !== undefined ? { title: input.patch.title } : {}),

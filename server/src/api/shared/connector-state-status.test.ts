@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test'
 import type { WorkflowDefinition } from '@mukuroji/contracts'
-import { WorkItemConfigurationError } from '../../modules/work-items/work-item-configuration'
 import { resolveConnectorStateStatus } from './connector-state-status'
 
 const workflow: Pick<WorkflowDefinition, 'statuses' | 'transitions'> = {
@@ -22,28 +21,28 @@ const workflow: Pick<WorkflowDefinition, 'statuses' | 'transitions'> = {
 
 describe('connector state status', () => {
   test('keeps a status whose category already agrees with the resource', () => {
-    expect(resolveConnectorStateStatus(workflow, 'doing', 'open')).toBeUndefined()
-    expect(resolveConnectorStateStatus(workflow, 'done', 'closed')).toBeUndefined()
-    expect(resolveConnectorStateStatus(workflow, 'dropped', 'closed')).toBeUndefined()
+    expect(resolveConnectorStateStatus(workflow, 'doing', 'open')).toEqual({ kind: 'unchanged' })
+    expect(resolveConnectorStateStatus(workflow, 'done', 'closed')).toEqual({ kind: 'unchanged' })
+    expect(resolveConnectorStateStatus(workflow, 'dropped', 'closed')).toEqual({ kind: 'unchanged' })
   })
 
   test('closes into the completed status the workflow allows from the current status', () => {
-    expect(resolveConnectorStateStatus(workflow, 'doing', 'closed')).toBe('done')
+    expect(resolveConnectorStateStatus(workflow, 'doing', 'closed')).toEqual({ kind: 'status', statusId: 'done' })
   })
 
   test('reopens into the earliest reachable open category', () => {
-    expect(resolveConnectorStateStatus(workflow, 'done', 'open')).toBe('doing')
-    expect(resolveConnectorStateStatus(workflow, 'dropped', 'open')).toBe('backlog')
+    expect(resolveConnectorStateStatus(workflow, 'done', 'open')).toEqual({ kind: 'status', statusId: 'doing' })
+    expect(resolveConnectorStateStatus(workflow, 'dropped', 'open')).toEqual({ kind: 'status', statusId: 'backlog' })
   })
 
-  test('falls back to the first status of the category and leaves the rejection to the workflow rules', () => {
-    expect(resolveConnectorStateStatus(workflow, 'todo', 'closed')).toBe('shipped')
+  test('reports a state the workflow cannot reach from the current status as unavailable', () => {
+    expect(resolveConnectorStateStatus(workflow, 'todo', 'closed')).toEqual({ kind: 'unavailable' })
   })
 
-  test('fails instead of acknowledging a state the workflow has no status for', () => {
+  test('reports a state the workflow has no status for as unavailable', () => {
     const openOnly = { statuses: workflow.statuses.filter((status) => status.category !== 'completed'), transitions: [] }
-    expect(() => resolveConnectorStateStatus(openOnly, 'doing', 'closed')).toThrow(WorkItemConfigurationError)
+    expect(resolveConnectorStateStatus(openOnly, 'doing', 'closed')).toEqual({ kind: 'unavailable' })
     const closedOnly = { statuses: workflow.statuses.filter((status) => status.category === 'completed'), transitions: [] }
-    expect(() => resolveConnectorStateStatus(closedOnly, 'done', 'open')).toThrow(WorkItemConfigurationError)
+    expect(resolveConnectorStateStatus(closedOnly, 'done', 'open')).toEqual({ kind: 'unavailable' })
   })
 })

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { externalIdMatchKey } from './domain/external-id-match-key'
 import type {
   CanonicalWorkItem,
   ConnectorInstallation,
@@ -112,13 +113,14 @@ export type ConnectorWorkItemApplyResult =
     workItem: ConnectorWorkItemSnapshot
     /**
      * Why the patch was refused: the event dates hold no working day of the Work Item calendar,
-     * or the Work Item has schedule dependencies that a direct date move would break.
+     * the Work Item has schedule dependencies that a direct date move would break, or its workflow
+     * has no status it allows for the open or closed state of the linked resource.
      */
     reason: ConnectorWorkItemRejection
   }
 
 /** Reasons the Work Item gateway refuses an external patch without writing it. */
-export type ConnectorWorkItemRejection = 'calendar-dates-invalid' | 'schedule-dependency'
+export type ConnectorWorkItemRejection = 'calendar-dates-invalid' | 'schedule-dependency' | 'state-status-unavailable'
 
 /** Connector worker と canonical Work Item service の境界です。 */
 export interface ConnectorWorkItemGateway {
@@ -736,8 +738,8 @@ export class ConnectorSyncEngine {
       operationId,
     })
     if (applied.kind === 'conflict' || applied.kind === 'rejected') {
-      // Dates the Work Item cannot take become a conflict too: the link stops retrying the same
-      // event, other events keep synchronizing, and someone chooses which dates to keep.
+      // Dates or a state the Work Item cannot take become a conflict too: the link stops retrying
+      // the same event, other events keep synchronizing, and someone chooses which side to keep.
       return this.persistConflict(
         input.workspaceId,
         link,
@@ -1245,12 +1247,17 @@ export class ConnectorSyncEngine {
       }
       if (applied.kind === 'rejected') {
         await release()
-        throw new ConnectorRuntimeError(
-          'ConnectorSyncConflictDatesRejected',
-          applied.reason === 'schedule-dependency'
-            ? 'The Work Item has schedule dependencies, so its dates cannot be moved from the calendar.'
-            : 'The chosen dates hold no working day of the Work Item calendar.',
-        )
+        throw applied.reason === 'state-status-unavailable'
+          ? new ConnectorRuntimeError(
+            'ConnectorSyncConflictStateRejected',
+            'The Work Item workflow has no status it allows for the open or closed state of the linked resource.',
+          )
+          : new ConnectorRuntimeError(
+            'ConnectorSyncConflictDatesRejected',
+            applied.reason === 'schedule-dependency'
+              ? 'The Work Item has schedule dependencies, so its dates cannot be moved from the calendar.'
+              : 'The chosen dates hold no working day of the Work Item calendar.',
+          )
       }
       synchronizedWorkItem = applied.workItem
     }
@@ -2447,20 +2454,6 @@ function requireStableValue(value: string, label: string) {
     )
   }
   return value
-}
-
-/**
- * Returns the key that matches a provider record to its link. GitHub treats owner and repository
- * names case-insensitively, so `Acme/App#12` from GitHub matches a link entered as `acme/app#12`.
- *
- * @param provider - Connector provider.
- * @param externalId - Provider resource ID.
- * @returns Matching key.
- */
-function externalIdMatchKey(provider: string, externalId: string) {
-  if (provider !== 'github') return externalId
-  const separator = externalId.lastIndexOf('#')
-  return separator < 0 ? externalId : `${externalId.slice(0, separator).toLowerCase()}${externalId.slice(separator)}`
 }
 
 function syncStateKey(workspaceId: string, linkId: string) {
