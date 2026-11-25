@@ -815,17 +815,23 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       operationId: string
       /** Claim timestamp です。 */
       startedAt: string
+      /** この試行だけを表す claim ID です。 */
+      claimId?: string
     },
   ): Promise<'claimed' | 'same-operation' | 'busy' | undefined> {
     const workspaceId = requireWorkspaceId(workspaceIdValue)
     const conflictId = requireIdentifier(conflictIdValue, 'Conflict ID')
     const operationId = requireIdentifier(input.operationId, 'Resolution operation ID')
     const startedAt = requireTimestamp(input.startedAt, 'Resolution claim timestamp')
+    const claimId = input.claimId === undefined
+      ? undefined
+      : requireIdentifier(input.claimId, 'Resolution claim ID')
     return this.claimConflictResolutionWithRetry(
       workspaceId,
       conflictId,
       operationId,
       startedAt,
+      claimId,
       0,
     )
   }
@@ -836,6 +842,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
     conflictId: string,
     operationId: string,
     startedAt: string,
+    claimId: string | undefined,
     retryCount: number,
   ): Promise<'claimed' | 'same-operation' | 'busy' | undefined> {
     const value = await this.getRow(workspaceId, conflictRecordKey(conflictId))
@@ -863,6 +870,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
         ...row.value,
         resolutionOperationId: operationId,
         resolutionStartedAt: startedAt,
+        ...(claimId === undefined ? {} : { resolutionClaimId: claimId }),
       },
       version: row.version + 1,
     }
@@ -885,6 +893,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
           conflictId,
           operationId,
           startedAt,
+          claimId,
           retryCount + 1,
         )
       }
@@ -898,7 +907,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
     conflictIdValue: string,
     operationIdValue: string,
     refresh?: ConnectorConflictSnapshotRefresh,
-    claimStartedAt?: string,
+    claimId?: string,
   ) {
     const workspaceId = requireWorkspaceId(workspaceIdValue)
     const conflictId = requireIdentifier(conflictIdValue, 'Conflict ID')
@@ -913,13 +922,14 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       row.value.conflict.status !== 'open' ||
       row.value.resolutionOperationId !== operationId ||
       // A claim the same operation took again after this attempt's lease expired is not this one.
-      (claimStartedAt !== undefined && row.value.resolutionStartedAt !== claimStartedAt)
+      (claimId !== undefined && row.value.resolutionClaimId !== claimId)
     ) return false
     const nextValue = refresh
       ? applyConflictSnapshotRefresh(row.value, refresh)
       : { ...row.value }
     delete nextValue.resolutionOperationId
     delete nextValue.resolutionStartedAt
+    delete nextValue.resolutionClaimId
     try {
       await this.documentClient.send(new PutCommand({
         TableName: this.tableName,

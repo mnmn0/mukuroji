@@ -79,9 +79,9 @@ Developer Platform には GitHub / GitLab 向けの connector の仕組み（OAu
     先の操作の別の要求として拒否されない。inbound の同期も、読んだ Work Item の revision を条件にする場合は
     その revision を操作 ID に含め、再送で同期済みの revision を条件にしたときと別の操作にする。
   - 解決の claim を取った後で競合を読み直し、読んだ時点から競合が新しくなっていれば何もせずに失敗させる。
-    同じ解決の再送は先の試行の claim を解放しない。claim の解放は取得した時刻も条件にし、lease が切れた後に
-    同じ解決の別の試行が取り直した claim を、先の試行が解放しないようにする。切れた claim を取り直す試行は、
-    前の claim より後の時刻でなければならない（同じ時刻なら取り直さず、やり直してもらう）。
+    同じ解決の再送は先の試行の claim を解放しない。claim には試行ごとに一意な ID を記録し、解放はその ID も
+    条件にする。lease が切れた後に同じ解決の別の試行が取り直した claim を、先の試行が解放しない。
+    切れた claim を取り直す試行は、前の claim より後の時刻でなければならない（lease を古い時刻から数えないため）。
 - 日付の競合は「マージ」で開始日と終了日を選び直せる。カレンダーの競合のマージは `schedule` だけ、他の
   connector の競合のマージは title・description・status だけを受け付ける。
 - Google の PATCH は `start`・`end` を項目ごとにマージするので、`dateTime` と `timeZone` を `null` で消してから

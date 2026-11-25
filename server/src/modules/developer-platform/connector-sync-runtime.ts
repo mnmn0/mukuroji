@@ -198,6 +198,8 @@ export type StoredConnectorSyncConflict = {
   resolutionOperationId?: string
   /** Resolution claim を取得した日時です。 */
   resolutionStartedAt?: string
+  /** Resolution claim を取得した試行ごとに一意な ID です。 */
+  resolutionClaimId?: string
 }
 
 /** Newer snapshots an open conflict takes when its resolution found the resource changed. */
@@ -273,12 +275,14 @@ export interface ConnectorSyncPersistence {
       operationId: string
       /** Claim timestamp です。 */
       startedAt: string
+      /** この試行だけを表す claim ID です。解放時に照合します。 */
+      claimId?: string
     },
   ): Promise<'claimed' | 'same-operation' | 'busy' | undefined>
   /**
    * Side effect 前に失敗した current resolution claim を解放します。`refresh` を渡すと、
    * conflict の snapshot と revision も同じ書き込みで新しい値に置き換えます。
-   * `claimStartedAt` を渡すと、その時刻に取得した claim だけを解放します。lease が切れた後に
+   * `claimId` を渡すと、その ID で取得した claim だけを解放します。lease が切れた後に
    * 同じ operation の別の試行が取り直した claim は解放しません。
    */
   releaseConflictResolution(
@@ -286,7 +290,7 @@ export interface ConnectorSyncPersistence {
     conflictId: string,
     operationId: string,
     refresh?: ConnectorConflictSnapshotRefresh,
-    claimStartedAt?: string,
+    claimId?: string,
   ): Promise<boolean>
   /** Open conflict を一度だけ resolved/ignored へ遷移させます。 */
   completeConflict(
@@ -1085,10 +1089,12 @@ export class ConnectorSyncEngine {
       true,
     )
     const resolvedAt = this.clock().toISOString()
+    // Retries of one resolution share the operation ID, so each attempt names its own claim.
+    const claimId = randomUUID()
     const claim = await this.persistence.claimConflictResolution(
       actor.workspaceId,
       conflictId,
-      { operationId, startedAt: resolvedAt },
+      { operationId, startedAt: resolvedAt, claimId },
     )
     if (claim === 'busy') {
       throw new ConnectorRuntimeError(
@@ -1116,7 +1122,7 @@ export class ConnectorSyncEngine {
           conflictId,
           operationId,
           refresh,
-          resolvedAt,
+          claimId,
         )
       }
     }
@@ -1770,6 +1776,8 @@ export class InMemoryConnectorSyncPersistence implements ConnectorSyncPersistenc
       operationId: string
       /** Claim timestamp です。 */
       startedAt: string
+      /** この試行だけを表す claim ID です。 */
+      claimId?: string
     },
   ) {
     const key = conflictKey(workspaceId, conflictId)
@@ -1784,6 +1792,7 @@ export class InMemoryConnectorSyncPersistence implements ConnectorSyncPersistenc
       ...current,
       resolutionOperationId: input.operationId,
       resolutionStartedAt: input.startedAt,
+      ...(input.claimId === undefined ? {} : { resolutionClaimId: input.claimId }),
     })
     return 'claimed' as const
   }
@@ -1794,7 +1803,7 @@ export class InMemoryConnectorSyncPersistence implements ConnectorSyncPersistenc
     conflictId: string,
     operationId: string,
     refresh?: ConnectorConflictSnapshotRefresh,
-    claimStartedAt?: string,
+    claimId?: string,
   ) {
     const key = conflictKey(workspaceId, conflictId)
     const current = this.conflicts.get(key)
@@ -1802,11 +1811,12 @@ export class InMemoryConnectorSyncPersistence implements ConnectorSyncPersistenc
       !current ||
       current.conflict.status !== 'open' ||
       current.resolutionOperationId !== operationId ||
-      (claimStartedAt !== undefined && current.resolutionStartedAt !== claimStartedAt)
+      (claimId !== undefined && current.resolutionClaimId !== claimId)
     ) return false
     const next = refresh ? applyConflictSnapshotRefresh(current, refresh) : { ...current }
     delete next.resolutionOperationId
     delete next.resolutionStartedAt
+    delete next.resolutionClaimId
     this.conflicts.set(key, next)
     return true
   }
@@ -2024,6 +2034,7 @@ export function applyConflictSnapshotRefresh(
   }
   delete next.resolutionOperationId
   delete next.resolutionStartedAt
+  delete next.resolutionClaimId
   return next
 }
 

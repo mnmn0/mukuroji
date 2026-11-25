@@ -1113,6 +1113,7 @@ describe('DynamoDbConnectorSyncPersistence', () => {
     await expect(persistence.claimConflictResolution('workspace-1', 'conflict-1', {
       operationId: 'resolution-operation-1',
       startedAt: firstStartedAt,
+      claimId: 'claim-first',
     })).resolves.toBe('claimed')
     // The first attempt stalls past its lease, and a retry of the same operation claims again.
     now = new Date('2026-07-18T00:01:31.000Z')
@@ -1121,11 +1122,13 @@ describe('DynamoDbConnectorSyncPersistence', () => {
     await expect(persistence.claimConflictResolution('workspace-1', 'conflict-1', {
       operationId: 'resolution-operation-1',
       startedAt: firstStartedAt,
+      claimId: 'claim-stalled',
     })).resolves.toBe('busy')
     const retryStartedAt = now.toISOString()
     await expect(persistence.claimConflictResolution('workspace-1', 'conflict-1', {
       operationId: 'resolution-operation-1',
       startedAt: retryStartedAt,
+      claimId: 'claim-retry',
     })).resolves.toBe('claimed')
 
     // The stalled attempt fails and must not release the retry's claim.
@@ -1134,7 +1137,7 @@ describe('DynamoDbConnectorSyncPersistence', () => {
       'conflict-1',
       'resolution-operation-1',
       undefined,
-      firstStartedAt,
+      'claim-first',
     )).resolves.toBe(false)
     await expect(persistence.claimConflictResolution('workspace-1', 'conflict-1', {
       operationId: 'resolution-operation-2',
@@ -1145,7 +1148,21 @@ describe('DynamoDbConnectorSyncPersistence', () => {
       'conflict-1',
       'resolution-operation-1',
       undefined,
-      retryStartedAt,
+      'claim-retry',
     )).resolves.toBe(true)
+    // After that release, an attempt that read the first claim's time takes a claim again. The
+    // first attempt still cannot release it, because the claim names the attempt that took it.
+    await expect(persistence.claimConflictResolution('workspace-1', 'conflict-1', {
+      operationId: 'resolution-operation-1',
+      startedAt: firstStartedAt,
+      claimId: 'claim-stalled',
+    })).resolves.toBe('claimed')
+    await expect(persistence.releaseConflictResolution(
+      'workspace-1',
+      'conflict-1',
+      'resolution-operation-1',
+      undefined,
+      'claim-first',
+    )).resolves.toBe(false)
   })
 })
