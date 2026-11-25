@@ -852,6 +852,10 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
           ? 'same-operation' as const
           : 'busy' as const
       }
+      // Release matches a claim by its start time, so a claim taken over from an expired one must
+      // start later. An attempt that read the clock no later than the expired claim, and then
+      // stalled past its lease, retries with a new time instead.
+      if (!(Date.parse(startedAt) > claimedAt)) return 'busy' as const
     }
     const next: ConnectorSyncConflictRow = {
       ...row,

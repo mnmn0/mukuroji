@@ -692,7 +692,7 @@ export class ConnectorSyncEngine {
     }
     // A Work Item whose dates are still the dates last synchronized only changed elsewhere, such
     // as its title; the event's dates apply on the condition that it has not changed since read.
-    const expectedRevision = lastSyncedDates && hasSameDates(workItem.schedule, lastSyncedDates)
+    const expectedRevision = lastSyncedDates && keepsSyncedDates(workItem.schedule, lastSyncedDates)
       ? workItem.revision
       : state.workItemRevision
     // The gateway keys its receipt on the expected revision too. A write conditional on the Work
@@ -1505,7 +1505,9 @@ export class ConnectorSyncEngine {
     if (
       link.syncDirection !== 'bidirectional' ||
       !workItem.schedule ||
-      hasSameDates(record.schedule, workItem.schedule)
+      !record.schedule ||
+      // A deadline or milestone synchronized from a multi-day event holds one of its days.
+      keepsSyncedDates(workItem.schedule, record.schedule)
     ) {
       return { kind: 'skipped', linkId: link.id, reason: 'stale' }
     }
@@ -2239,6 +2241,25 @@ function hasSameDates(
     right !== undefined &&
     left.startDate === right.startDate &&
     left.endDate === right.endDate
+}
+
+/**
+ * Tells whether Work Item dates are still the dates an inbound sync of the event dates produced.
+ * A date range takes the event dates as they are, a deadline takes the last day, and a milestone
+ * takes the first day, so a single day at either end of the synchronized dates also counts.
+ *
+ * @param schedule - Work Item dates as read.
+ * @param synced - Event dates last synchronized.
+ * @returns Whether the Work Item dates have not changed since that sync.
+ */
+function keepsSyncedDates(
+  schedule: { startDate: string; endDate: string } | undefined,
+  synced: { startDate: string; endDate: string },
+) {
+  if (!schedule) return false
+  if (hasSameDates(schedule, synced)) return true
+  return schedule.startDate === schedule.endDate &&
+    (schedule.endDate === synced.endDate || schedule.startDate === synced.startDate)
 }
 
 /**

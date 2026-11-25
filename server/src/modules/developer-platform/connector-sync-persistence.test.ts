@@ -1116,6 +1116,12 @@ describe('DynamoDbConnectorSyncPersistence', () => {
     })).resolves.toBe('claimed')
     // The first attempt stalls past its lease, and a retry of the same operation claims again.
     now = new Date('2026-07-18T00:01:31.000Z')
+    // A retry that read the clock together with the first attempt cannot take over the claim
+    // under the same start time, which would let the first attempt release it.
+    await expect(persistence.claimConflictResolution('workspace-1', 'conflict-1', {
+      operationId: 'resolution-operation-1',
+      startedAt: firstStartedAt,
+    })).resolves.toBe('busy')
     const retryStartedAt = now.toISOString()
     await expect(persistence.claimConflictResolution('workspace-1', 'conflict-1', {
       operationId: 'resolution-operation-1',

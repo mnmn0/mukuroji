@@ -216,6 +216,8 @@ async function createCalendarFixture() {
   // replays the same request and refuses a different one.
   const receipts = new Map<string, { request: string, workItem: ConnectorWorkItemSnapshot }>()
   let rejection: ConnectorWorkItemRejection | undefined
+  // Like a deadline Work Item, keep only the last day of the dates written to it.
+  let deadlineOnly = false
   const workItems: ConnectorWorkItemGateway = {
     async authorize() {},
     async get() {
@@ -234,7 +236,15 @@ async function createCalendarFixture() {
       workItem = {
         ...workItem,
         revision: workItem.revision + 1,
-        ...(input.patch.schedule ? { schedule: { ...input.patch.schedule, timeZone: calendarPolicy.timeZone } } : {}),
+        ...(input.patch.schedule
+          ? {
+              schedule: {
+                startDate: deadlineOnly ? input.patch.schedule.endDate : input.patch.schedule.startDate,
+                endDate: input.patch.schedule.endDate,
+                timeZone: calendarPolicy.timeZone,
+              },
+            }
+          : {}),
       }
       receipts.set(input.operationId, { request, workItem: structuredClone(workItem) })
       return { kind: 'applied', workItem: structuredClone(workItem) }
@@ -263,6 +273,9 @@ async function createCalendarFixture() {
     },
     rejectSchedules: (reason: ConnectorWorkItemRejection | undefined) => {
       rejection = reason
+    },
+    useDeadlines: () => {
+      deadlineOnly = true
     },
     advance: (milliseconds: number) => {
       currentTime = new Date(currentTime.getTime() + milliseconds)
@@ -965,6 +978,31 @@ describe('calendar connectors (ADR 0089)', () => {
     })
     expect(polled.results).toMatchObject([{ kind: 'synced', workItemRevision: 5 }])
     expect(fixture.getWorkItem()).toMatchObject({ title: 'Renamed in Mukuroji', schedule: { startDate: '2026-12-03' } })
+  })
+
+  test('moves a deadline synchronized from a multi-day event after a title-only Work Item change', async () => {
+    const fixture = await createCalendarFixture()
+    fixture.useDeadlines()
+    const link = await linkNewEvent(fixture, 'inbound')
+    const poll = () => fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    await poll()
+    const move = (start: string, end: string, etag: string) => {
+      const event = fixture.google.events.get(link.externalId)
+      if (!event) throw new Error('Expected the event.')
+      fixture.google.events.set(link.externalId, { ...event, start: { date: start }, end: { date: end }, etag })
+    }
+    move('2026-12-03', '2026-12-06', '"range-1"')
+    expect((await poll()).results).toMatchObject([{ kind: 'synced' }])
+    expect(fixture.getWorkItem().schedule).toMatchObject({ startDate: '2026-12-05', endDate: '2026-12-05' })
+    // The deadline is the last day of the synchronized range, so a rename leaves its dates as synced.
+    fixture.setWorkItem({ ...fixture.getWorkItem(), revision: fixture.getWorkItem().revision + 1, title: 'Renamed' })
+    move('2026-12-08', '2026-12-11', '"range-2"')
+    expect((await poll()).results).toMatchObject([{ kind: 'synced' }])
+    expect(fixture.getWorkItem()).toMatchObject({ title: 'Renamed', schedule: { endDate: '2026-12-10' } })
   })
 
   test('retries an event change applied to the Work Item as read after the state commit failed', async () => {
