@@ -128,6 +128,7 @@ import {
   RequestIntakeError,
   createRequestWorkItemInput,
 } from '../../modules/request-intake/request-intake'
+import { resolveRequestFormTitle } from '../../modules/request-intake/my-requests'
 import { CustomerError, projectCustomerImpactSignal } from '../../modules/customers'
 import {
   createTriageAcceptanceTransactionItems,
@@ -1267,6 +1268,45 @@ async function requirePlanningProjectScopeIsUnused(
     expectedPlanningRevision: authorizationState.revision,
     workItemRevisionGuards,
   }
+}
+
+/**
+ * Adds the source requester's completion notification to an approval that completes a Work Item
+ * made from a request, so the notice does not depend on how the Work Item was completed.
+ *
+ * @param principal - Member deciding the approval.
+ * @param teamId - Team that owns the Work Item.
+ * @param workItem - Work Item before the decision.
+ * @param transition - Resolved completion transition.
+ * @param correlationId - Correlation ID of the approval decision, so the notice can be traced.
+ * @returns The transition, with the notification items when the Work Item becomes completed.
+ */
+async function addSourceRequesterCompletionNotice(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
+  transition: FileApprovalCompletionTransition,
+  correlationId: string | undefined,
+): Promise<FileApprovalCompletionTransition> {
+  const createItems = workItemDependencies.teamIssues.createSourceRequesterCompletionTransactionItems
+  if (
+    !createItems ||
+    !workItem.sourceRequestId ||
+    workItem.statusCategory === 'completed' ||
+    transition.statusCategory !== 'completed'
+  ) {
+    return transition
+  }
+  const items = await createItems.call(workItemDependencies.teamIssues, {
+    directoryId: principal.directoryId,
+    teamId,
+    issueId: workItem.id,
+    nextRevision: transition.expectedRevision + 1,
+    actorUserId: principal.userKey,
+    occurredAt: new Date().toISOString(),
+    ...(correlationId ? { correlationId } : {}),
+  })
+  return items.length > 0 ? { ...transition, completionSideEffectItems: items } : transition
 }
 
 /** Approval 作成後に削除・無効化された遷移先を decision conflict として扱います。 */
@@ -4000,6 +4040,14 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           actorId: principal.userKey,
           submissionId,
           events: submission.events,
+          ...(submission.requesterUserId
+            ? {
+                requester: {
+                  memberKey: submission.requesterUserId,
+                  formTitle: resolveRequestFormTitle(submission),
+                },
+              }
+            : {}),
         },
         {
           entryId: triageAcceptance.entry.id,
@@ -6029,6 +6077,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const canonicalWorkItem = requireCanonicalFileProofingWorkItem(workItem)
       const body = await readFileProofingJson<CreateFileApprovalDecisionInput>(c.req)
       const input = { ...body } satisfies CreateFileApprovalDecisionInput
+      const decisionAuditContext = createApiMutationContext(c, principal, input)
       let resolvedCompletionTransition: FileApprovalCompletionTransition | undefined
       const resolveCompletionTransition: FileApprovalCompletionTransitionResolver = async (
         completionTransition,
@@ -6063,15 +6112,24 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             ),
           ],
         }
-        resolvedCompletionTransition = resolved
-        return resolved
+        const withRequesterNotice = resolved
+          ? await addSourceRequesterCompletionNotice(
+              principal,
+              scope.teamId,
+              canonicalWorkItem,
+              resolved,
+              decisionAuditContext.correlationId,
+            )
+          : undefined
+        resolvedCompletionTransition = withRequesterNotice
+        return withRequesterNotice
       }
       const approval = await workItemDependencies.fileProofing.decideApproval(
         scope,
         actor,
         readRequiredRouteId(c.req.param('approvalId'), 'Approval ID'),
         input,
-        createApiMutationContext(c, principal, input),
+        decisionAuditContext,
         resolveCompletionTransition,
       )
       if (approval.status === 'approved' && resolvedCompletionTransition) {

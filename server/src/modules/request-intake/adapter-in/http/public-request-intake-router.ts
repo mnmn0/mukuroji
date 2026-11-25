@@ -9,6 +9,7 @@ import type {
 import {
   RequestIntakeError,
   type RequestExternalContext,
+  type RequestIntakeActor,
   type RequestIntakeClient,
   type RequestLinkResolution,
 } from '../../request-intake'
@@ -17,8 +18,15 @@ import {
 export type PublicRequestIntakeRouterDependencies = {
   /** Returns the Request Intake application client bound to the current request. */
   getRequestIntake(): RequestIntakeClient
-  /** Validates the link access mode and current Workspace. */
-  authorizeRequestLink(context: Context, resolution: RequestLinkResolution): Promise<void>
+  /**
+   * Validates the link access mode and current Workspace.
+   *
+   * @returns The signed-in member for an authenticated link, or undefined for a public link.
+   */
+  authorizeRequestLink(
+    context: Context,
+    resolution: RequestLinkResolution,
+  ): Promise<RequestIntakeActor | undefined>
   /** Creates trusted request context for rate limiting and idempotency. */
   createExternalContext(context: Context): RequestExternalContext
   /** Maps public-boundary errors to the existing HTTP response contract. */
@@ -66,12 +74,13 @@ export function createPublicRequestIntakeRouter(
 
   router.post('/api/request-intake/:token/submissions', async (context) => {
     try {
-      const resolution = await resolveAuthorizedLink(context, dependencies)
+      const { resolution, requester } = await resolveAuthorizedLinkWithRequester(context, dependencies)
       const body = parseSubmitRequestInput(await dependencies.readJson(context.req))
       return context.json(await dependencies.getRequestIntake().submit(
         resolution,
         body,
         dependencies.createExternalContext(context),
+        ...(requester ? [requester] : []),
       ), 201)
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -235,9 +244,23 @@ async function resolveAuthorizedLink(
   context: Context,
   dependencies: PublicRequestIntakeRouterDependencies,
 ) {
+  return (await resolveAuthorizedLinkWithRequester(context, dependencies)).resolution
+}
+
+/**
+ * Resolves and authorizes the capability link and returns the signed-in requester, if any.
+ *
+ * @param context - Hono request context.
+ * @param dependencies - Request Intake transport dependencies.
+ * @returns The link resolution and the member who is sending through an authenticated link.
+ */
+async function resolveAuthorizedLinkWithRequester(
+  context: Context,
+  dependencies: PublicRequestIntakeRouterDependencies,
+) {
   const resolution = await dependencies.getRequestIntake().resolveLink(
     context.req.param('token') ?? '',
   )
-  await dependencies.authorizeRequestLink(context, resolution)
-  return resolution
+  const requester = await dependencies.authorizeRequestLink(context, resolution)
+  return { resolution, requester: resolution.accessMode === 'public' ? undefined : requester }
 }

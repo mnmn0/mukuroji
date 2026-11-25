@@ -754,6 +754,49 @@ describe('collaboration projection pure helpers', () => {
       keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
     }
   })
+  test('delivers a scope-less requester notification only to its requester', async () => {
+    const keys = ['WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const memberKey = 'member@example.com'
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async () => ({
+      Item: { entryType: 'workspace-member', memberKey, role: 'guest', status: 'active' }, $metadata: {},
+    }))
+    const event = createProjectionEvent({ eventType: 'request.requester.rejected',
+      notificationCandidates: [{ memberKey, reason: 'requester' }] })
+    const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+    try {
+      expect(await authorizeNotificationDelivery(event, memberKey, identity)).toBe(true)
+      expect(await authorizeNotificationDelivery(event, 'other@example.com', identity)).toBe(false)
+      expect(await authorizeNotificationDelivery({ ...event,
+        notificationCandidates: [{ memberKey, reason: 'automation' }] }, memberKey, identity)).toBe(false)
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+  test('keeps requester notifications in the Inbox even for a member opted in to every channel', () => {
+    const previous = process.env.NOTIFICATION_EMAIL_SENDER
+    process.env.NOTIFICATION_EMAIL_SENDER = 'notify@example.com'
+    const preferences = { ...DEFAULT_NOTIFICATION_PREFERENCES,
+      channels: { inApp: true, email: true, push: true, slack: true },
+      emailEnabledAt: '2026-07-12T12:00:00.000Z', slackEnabledAt: '2026-07-12T12:00:00.000Z' }
+    try {
+      const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', '2026-07-12T12:00:00.000Z',
+        preferences, { eventType: 'request.requester.completed', reasons: ['requester'] })
+      expect(state.inboxState).toBe('unread')
+      expect(state.deliveryChannels).toEqual(['inApp'])
+      expect(state.emailQueued).toBeUndefined()
+      const other = createNotificationProjectionDeliveryState('workspace-1#member@example.com', '2026-07-12T12:00:00.000Z',
+        preferences, { eventType: 'comment.created', reasons: ['mention'] })
+      expect(other.emailQueued).toBe(true)
+    } finally {
+      if (previous === undefined) delete process.env.NOTIFICATION_EMAIL_SENDER
+      else process.env.NOTIFICATION_EMAIL_SENDER = previous
+    }
+  })
   test('never queues delayed events from before the current Slack activation boundary', () => {
     const candidate = { memberKey: 'member@example.com', reasons: ['mention'] }
     const preferences = { ...DEFAULT_NOTIFICATION_PREFERENCES,

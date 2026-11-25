@@ -5189,3 +5189,133 @@ test('DynamoDB Work Item delete cleans deferred member index rows through the Pl
   expect(deletedPartitions).toHaveLength(21)
   expect(deletedPartitions).toContain('workspace-1#member-work-items#sato@example.com')
 })
+
+test('DynamoDB Work Item completion notifies the member who sent its source request', async () => {
+  const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  const currentIssue: Record<string, unknown> = {
+    ...createScheduleCascadeIssue('core-team', 'request-wi'),
+    revision: 2,
+    workflowStatusId: 'todo',
+    statusCategory: 'started',
+    sourceRequestId: 'req_1',
+    sourceRequester: { memberKey: 'member@example.com', formTitle: 'IT request' },
+  }
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'demo@example.com', kind: 'user' },
+    idempotencyKey: 'complete-request-work-item',
+    occurredAt: '2026-07-20T00:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/teams/core-team/issues/request-wi' },
+    source: { kind: 'api', requestId: 'complete-request-work-item' },
+  })
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentCommands.push({ input: command.input, name: command.constructor.name })
+      if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'AuditTable',
+  )
+  const requesterEvents = () => {
+    const transaction = sentCommands.filter((command) => command.name === 'TransactWriteCommand').at(-1)
+    const rawItems = transaction?.input.TransactItems
+    const items: unknown[] = Array.isArray(rawItems) ? rawItems : []
+    return items.flatMap((item) =>
+      isUnknownRecord(item) && isUnknownRecord(item.Put) && isUnknownRecord(item.Put.Item) &&
+        String(item.Put.Item.eventType).startsWith('request.requester.')
+        ? [{ item: item.Put.Item, last: item === items.at(-1) }]
+        : []
+    )
+  }
+
+  const updated = await client.updateTeamIssue('workspace-1', 'core-team', 'request-wi', {
+    expectedRevision: 2,
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'done',
+    statusCategory: 'completed',
+  }, 'demo@example.com', auditContext)
+
+  expect(updated.issue).not.toHaveProperty('sourceRequester')
+  const events = requesterEvents()
+  expect(events).toHaveLength(1)
+  expect(events[0]?.last).toBe(true)
+  expect(events[0]?.item).toMatchObject({
+    eventType: 'request.requester.completed',
+    entity: { type: 'request-submission', id: 'req_1' },
+    metadata: {
+      notificationTitle: 'IT request',
+      notificationCandidates: [{ memberKey: 'member@example.com', reason: 'requester' }],
+    },
+  })
+  expect(JSON.stringify(events[0]?.item)).not.toContain(String(currentIssue.title))
+  // The notice keeps the Work Item update's correlation ID, so both can be traced together.
+  expect(events[0]?.item.correlationId).toBe(auditContext.correlationId)
+
+  await client.updateTeamIssue('workspace-1', 'core-team', 'request-wi', {
+    expectedRevision: 2,
+    title: 'Renamed',
+  }, 'demo@example.com', auditContext)
+  expect(requesterEvents()).toHaveLength(0)
+})
+
+test('DynamoDB Work Item builds the requester completion notice for an approval completion', async () => {
+  const reads: Array<Record<string, unknown>> = []
+  const storedIssue: Record<string, unknown> = {
+    ...createScheduleCascadeIssue('core-team', 'request-wi'),
+    revision: 4,
+    sourceRequestId: 'req_1',
+    sourceRequester: { memberKey: 'member@example.com', formTitle: 'IT request' },
+  }
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        reads.push(command.input)
+        return { Item: storedIssue }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'AuditTable',
+  )
+
+  const items = await client.createSourceRequesterCompletionTransactionItems({
+    directoryId: 'workspace-1',
+    teamId: 'core-team',
+    issueId: 'request-wi',
+    nextRevision: 5,
+    actorUserId: 'reviewer@example.com',
+    occurredAt: '2026-07-20T00:00:00.000Z',
+  })
+
+  expect(reads[0]).toMatchObject({ ConsistentRead: true })
+  expect(items).toHaveLength(1)
+  expect(items[0]?.Put?.Item).toMatchObject({
+    eventType: 'request.requester.completed',
+    entity: { type: 'request-submission', id: 'req_1' },
+    metadata: { notificationCandidates: [{ memberKey: 'member@example.com', reason: 'requester' }] },
+  })
+  expect(JSON.stringify(items)).not.toContain(String(storedIssue.title))
+
+  delete storedIssue.sourceRequester
+  expect(await client.createSourceRequesterCompletionTransactionItems({
+    directoryId: 'workspace-1',
+    teamId: 'core-team',
+    issueId: 'request-wi',
+    nextRevision: 5,
+    actorUserId: 'reviewer@example.com',
+    occurredAt: '2026-07-20T00:00:00.000Z',
+  })).toEqual([])
+})
