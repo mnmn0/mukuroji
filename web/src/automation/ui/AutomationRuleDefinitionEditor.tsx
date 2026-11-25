@@ -144,8 +144,11 @@ export function AutomationRuleDefinitionEditor({
   onDryRun,
   onSave,
   options,
-  rule,
+  rule: currentRule,
 }: AutomationRuleDefinitionEditorProps) {
+  // The editor keeps the rule it opened with, so a reload that brings a newer revision makes the
+  // save fail with a revision conflict instead of writing this draft over the newer rule.
+  const [rule] = useState(currentRule)
   const t = useMemo(() => createTranslator(locale), [locale])
   const formId = useId()
   const [draft, setDraft] = useState<AutomationRuleDraft>(() => createAutomationRuleDraft(rule))
@@ -386,7 +389,12 @@ export function AutomationRuleDefinitionEditor({
       ) : null}
 
       <div className="flex flex-wrap justify-end gap-2">
-        <button className="workbench-button-secondary min-h-10 px-4" type="button" onClick={onCancel}>
+        <button
+          className="workbench-button-secondary min-h-10 px-4 disabled:cursor-not-allowed disabled:opacity-55"
+          disabled={isSaving}
+          type="button"
+          onClick={onCancel}
+        >
           {t('automation.ruleEdit.cancel')}
         </button>
         <button
@@ -434,7 +442,10 @@ function ConditionRow({ condition, index, onChange, onRemove, options, presets, 
   const [customField, setCustomField] = useState(!preset)
   const needsValue = condition.operator !== 'exists' && condition.operator !== 'not-exists'
   const invalid = !isAutomationRuleConditionDraftValid(condition)
-  const kind = customField ? 'text' : preset?.kind ?? 'text'
+  // A typed path that names a known number or boolean field gets that field's input.
+  const typed = customField ? presets.find((candidate) => candidate.field === condition.field.trim()) : undefined
+  const typedKind = typed?.kind === 'number' || typed?.kind === 'boolean' ? typed.kind : 'text'
+  const kind = customField ? typedKind : preset?.kind ?? 'text'
   return (
     <div
       className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto] items-end gap-3 max-[860px]:grid-cols-1"
@@ -474,7 +485,7 @@ function ConditionRow({ condition, index, onChange, onRemove, options, presets, 
             value={condition.field}
             onChange={(event) => {
               const field = event.target.value
-              const known = presets.find((candidate) => candidate.field === field)
+              const known = presets.find((candidate) => candidate.field === field.trim())
               const valueType = known?.kind === 'number' || known?.kind === 'boolean' ? known.kind : undefined
               onChange({ field, operator: condition.operator, value: condition.value, ...(valueType ? { valueType } : {}) })
             }}

@@ -517,8 +517,9 @@ function RulesTab({
             >
               {!readOnly && onUpdate ? (
                 <button
-                  className="workbench-button-secondary min-h-9 px-3"
+                  className="workbench-button-secondary min-h-9 px-3 disabled:cursor-not-allowed disabled:opacity-55"
                   data-testid={`automation-rule-edit-${id}`}
+                  disabled={busyOperation === `rule:update:${id}`}
                   type="button"
                   onClick={() => setEditingRuleId(isEditing ? undefined : id)}
                 >
