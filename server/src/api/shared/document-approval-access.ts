@@ -1,4 +1,5 @@
 import { APPROVAL_MAX_REVIEWERS, type ApprovalRequest } from '@mukuroji/contracts'
+import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import type { Context } from 'hono'
 import { ProjectDataError } from '../../modules/directory'
 import type { DocumentVersionApprovalRequest } from '../../modules/documents/adapter-in/http/document-api'
@@ -25,6 +26,8 @@ const REVIEWER_MEMBER_KEY_MAX_LENGTH = 320
  * @param c - Hono request context used for the mutation audit and idempotency key.
  * @param principal - Authenticated Workspace principal.
  * @param request - Document version subject, Work Item, reviewers, and due date.
+ * @param subjectConditionChecks - Document owner's checks that keep the requester's Document edit
+ *   permission and the pinned version unchanged until the approval is saved.
  * @returns The created approval request.
  * @throws FileProofingError when the principal cannot write the Work Item or the reviewers are invalid.
  */
@@ -32,6 +35,7 @@ export async function createAuthorizedDocumentVersionApproval(
   c: Context,
   principal: WorkspacePrincipal,
   request: DocumentVersionApprovalRequest,
+  subjectConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>,
 ): Promise<ApprovalRequest> {
   const { scope, actor } = await loadWorkItemFileProofingContext(
     principal,
@@ -80,6 +84,7 @@ export async function createAuthorizedDocumentVersionApproval(
     actor,
     input,
     createApiMutationContext(c, principal, { ...input, teamId: request.teamId, issueId: request.issueId }),
+    subjectConditionChecks,
   )
 }
 

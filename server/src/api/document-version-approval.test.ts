@@ -93,7 +93,19 @@ function createDocumentApproval(issueId: string, teamId = 'core-team'): Approval
 
 test('requests approval of a pinned Document version on the deliverable Work Item', async () => {
   configureFakeProjectClients(true, { role: 'member', guestWorkspaceMemberKeys: ['guest@example.com'] })
-  const created: Array<{ scope: FileProofingScope; input: CreateDocumentVersionApprovalInput }> = []
+  const created: Array<{
+    scope: FileProofingScope
+    input: CreateDocumentVersionApprovalInput
+    subjectConditionChecks: unknown
+  }> = []
+  const preparedFor: Array<{ documentId: string; versionId: string; memberKey: string }> = []
+  const documentCondition = {
+    ConditionCheck: {
+      TableName: 'documents',
+      Key: { workspaceId: 'demo-workspace', recordKey: 'DOCUMENT#document-1' },
+      ConditionExpression: 'attribute_exists(workspaceId)',
+    },
+  }
   setTestAppDependencies({
     documents: createDocumentFake({
       async get() {
@@ -102,10 +114,18 @@ test('requests approval of a pinned Document version on the deliverable Work Ite
       async getVersion() {
         return { version: pinnedVersion, document }
       },
+      async prepareVersionApprovalTransactWrite(request) {
+        preparedFor.push({
+          documentId: request.documentId,
+          versionId: request.versionId,
+          memberKey: request.access.memberKey,
+        })
+        return { conditionChecks: [documentCondition] }
+      },
     }),
     fileProofing: createFileProofingStub({
-      async createDocumentVersionApproval(scope, _actor, input) {
-        created.push({ scope, input })
+      async createDocumentVersionApproval(scope, _actor, input, _auditContext, subjectConditionChecks) {
+        created.push({ scope, input, subjectConditionChecks })
         return createDocumentApproval(scope.issueId ?? '')
       },
     }),
@@ -139,7 +159,14 @@ test('requests approval of a pinned Document version on the deliverable Work Ite
       reviewerMemberKeys: ['sato@example.com'],
       dueAt: '2099-07-20T00:00:00.000Z',
     },
+    // The Document edit permission and pin are re-checked in the approval transaction.
+    subjectConditionChecks: [documentCondition],
   }])
+  expect(preparedFor.at(-1)).toEqual({
+    documentId: 'document-1',
+    versionId: 'document-1:2',
+    memberKey: 'demo@example.com',
+  })
 })
 
 test('rejects a Document version approval without Work Item write access', async () => {

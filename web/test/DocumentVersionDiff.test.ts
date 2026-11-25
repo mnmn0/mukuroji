@@ -109,7 +109,7 @@ describe('diffDocumentVersions', () => {
     expect(diffDocumentVersions(before, before)).toMatchObject({ hasChanges: false })
     expect(diffDocumentVersions(before, page('Spec v2', [paragraph('a', 'body')]))).toMatchObject({
       hasChanges: true,
-      previousTitle: 'Spec v1',
+      titleChange: { before: 'Spec v1', after: 'Spec v2' },
     })
   })
 

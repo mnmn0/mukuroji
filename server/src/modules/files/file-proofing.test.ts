@@ -653,6 +653,99 @@ describe('file proofing domain', () => {
     expect(await client.getApprovalSummary(scope)).toMatchObject({ pendingCount: 0, approvedCount: 1 })
   })
 
+  test('rejects a Document version approval when the Work Item moves or Document access changes', async () => {
+    const { client, documentClient } = createClient('work-items')
+    const projectScope: FileProofingScope = { ...scope, projectId: 'project-1' }
+    const documentCheck = {
+      ConditionCheck: {
+        TableName: 'documents',
+        Key: { workspaceId: 'workspace-1', recordKey: 'DOCUMENT#doc-1' },
+        ConditionExpression: 'attribute_exists(workspaceId)',
+      },
+    }
+    const input = {
+      documentId: 'doc-1',
+      versionId: 'doc-1:3',
+      reviewerMemberKeys: ['reviewer@example.com'],
+      dueAt: '2099-07-20T00:00:00.000Z',
+    }
+    // Main approval, Document index, one reviewer projection, and the summary come first.
+    const guardIndex = 4
+    documentClient.nextTransactionError = createTransactionCancelledError(
+      Array.from({ length: 8 }, (_value, index) => ({
+        Code: index === guardIndex ? 'ConditionalCheckFailed' : 'None',
+      })),
+    )
+
+    await expect(client.createDocumentVersionApproval(
+      projectScope,
+      manager,
+      input,
+      createAuditContext('document-version-approval-moved'),
+      [documentCheck],
+    )).rejects.toMatchObject({ status: 409, code: 'ApprovalAuthorizationChanged' })
+    const items = documentClient.transactionInputs.at(-1)?.TransactItems ?? []
+    expect(items[guardIndex]?.ConditionCheck).toMatchObject({
+      TableName: 'work-items',
+      Key: { directoryTeamId: 'workspace-1#team#core', issueId: 'work-item-1' },
+      ConditionExpression: 'attribute_exists(issueId) AND #assignedProjectId = :projectId',
+      ExpressionAttributeValues: { ':projectId': 'project-1' },
+    })
+    expect(items[guardIndex + 1]).toEqual(documentCheck)
+
+    // Without a Project, the Work Item must still have no Project when the approval is saved.
+    const approval = await client.createDocumentVersionApproval(
+      scope,
+      manager,
+      input,
+      createAuditContext('document-version-approval-unassigned'),
+      [documentCheck],
+    )
+    expect(approval).toMatchObject({ status: 'pending', subjectType: 'document-version' })
+    expect(documentClient.transactionInputs.at(-1)?.TransactItems?.[guardIndex]?.ConditionCheck)
+      .toMatchObject({
+        TableName: 'work-items',
+        ConditionExpression: 'attribute_exists(issueId) AND attribute_not_exists(#assignedProjectId)',
+      })
+  })
+
+  test('replays a saved Document version approval after its due date has passed', async () => {
+    const { client, documentClient } = createClient()
+    const input = {
+      documentId: 'doc-1',
+      versionId: 'doc-1:3',
+      reviewerMemberKeys: ['reviewer@example.com'],
+      dueAt: '2099-07-20T00:00:00.000Z',
+    }
+    const approval = await client.createDocumentVersionApproval(
+      scope,
+      manager,
+      input,
+      createAuditContext('document-version-approval-replay', input),
+    )
+    // The saved due date has passed by the time the lost response is retried.
+    for (const [key, item] of documentClient.items) {
+      if (item.entryType === 'approval' && item.id === approval.id) {
+        documentClient.items.set(key, { ...item, dueAt: '2020-01-01T00:00:00.000Z' })
+      }
+    }
+    const transactions = documentClient.transactionInputs.length
+
+    await expect(client.createDocumentVersionApproval(
+      scope,
+      manager,
+      { ...input, dueAt: '2020-01-01T00:00:00.000Z' },
+      createAuditContext('document-version-approval-replay', input),
+    )).resolves.toMatchObject({ id: approval.id })
+    expect(documentClient.transactionInputs).toHaveLength(transactions)
+    await expect(client.createDocumentVersionApproval(
+      scope,
+      manager,
+      { ...input, dueAt: '2020-01-01T00:00:00.000Z' },
+      createAuditContext('document-version-approval-past-due', input),
+    )).rejects.toMatchObject({ status: 400 })
+  })
+
   test('lists more Document version approvals than one BatchGetItem request can read', async () => {
     const { client, documentClient } = createClient()
     const approval = await client.createDocumentVersionApproval(

@@ -58,7 +58,10 @@ Operation receipt は 30 日です。保持期間は現在 Workspace ごとに�
 metadata row の `expiresAtEpoch` を外し、その revision の full snapshot を TTL なしで書きます。
 後続の delta が期限切れで消えても、固定した version は単独の snapshot から preview・比較・復元
 できます。固定には Document の編集権限が要り、名前は 1〜120 文字です。同じ version を再度固定
-すると名前を付け替えます。
+すると名前を付け替えます。`Idempotency-Key` 付きの固定は actor・version・名前に束縛した receipt
+（`VERSION_PIN_RECEIPT#<documentId>#<digest>`、30 日）を残し、同じ key の再送には書き直さずに
+確定済みの結果を返します。後から別の key で付け替えた名前を、遅れて届いた再送が上書きすることは
+ありません。同じ key で別の version や名前を送ると `409 IdempotencyKeyReused` です。
 
 ### Version の承認
 
@@ -72,6 +75,12 @@ reviewer は Work Item を閲覧できる active member に限ります（guest 
 要り、依頼の権限には含まれません。そのため member key（メール）を直接入力して reviewer に足せ、
 その member が active で Work Item を閲覧できるかは依頼時に server が確かめます。reviewer 候補を
 返す API は足さず、`members.read` のない依頼者に member の一覧を見せることはしません。
+Reviewer が Document を閲覧できるかは確かめません（ADR 0091）。Document を読めない reviewer は
+承認カードから版を開けませんが、判断はできます。
+承認の保存 transaction は、依頼者の Document 編集権限の判定に使った認可 row、version が固定済み
+であること、Work Item が認可時と同じ Project に属することを condition check で再確認します。
+検証後にこれらが変わった場合は `409 ApprovalAuthorizationChanged` で、承認も通知も作りません。
+同じ `Idempotency-Key` の再送は、期限が過ぎていても保存済みの承認を返します。
 承認の状態は Work Item 側で変わるため、承認一覧は window が focus を戻したときと版の確認画面を
 開いたときに読み直します（版の snapshot は変わらないので読み直しません）。
 Document 側の表示用に、file proofing table の `WORKSPACE#<workspaceId>#DOCUMENT#<documentId>`

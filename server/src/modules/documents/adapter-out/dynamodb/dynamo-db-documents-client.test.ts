@@ -23,6 +23,7 @@ import {
   renderDocumentExport,
   renderPublicDocumentExport,
   validateDocumentPayload,
+  type DocumentAccessContext,
 } from '../../documents'
 
 const ownerAccess = {
@@ -1536,6 +1537,98 @@ test('pins a named version beyond retention and returns its read-only snapshot',
     name: 'too late',
     access: ownerAccess,
   })).rejects.toMatchObject({ status: 404, code: 'DocumentVersionNotFound' })
+})
+
+test('replays a retried version pin without overwriting a later rename', async () => {
+  const memory = createMemoryDocumentClient()
+  let currentTime = new Date('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => currentTime)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Design spec',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'v1 body' }],
+  })
+  const versionId = `${created.id}:1`
+  const pin = (name: string, idempotencyKey: string) => client.pinVersion({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    versionId,
+    name,
+    idempotencyKey,
+    access: ownerAccess,
+  })
+
+  const first = await pin('Draft A', 'pin-a')
+  currentTime = new Date('2026-07-18T00:05:00.000Z')
+  await pin('Renamed B', 'pin-b')
+  currentTime = new Date('2026-07-18T00:10:00.000Z')
+  // The response of A was lost and the client retries it after B.
+  await expect(pin('Draft A', 'pin-a')).resolves.toMatchObject({
+    name: 'Draft A',
+    pinnedAt: first.pinnedAt,
+  })
+  await expect(pin('Another name', 'pin-a')).rejects.toMatchObject({
+    status: 409,
+    code: 'IdempotencyKeyReused',
+  })
+  const versions = await client.listVersions({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+  })
+  expect(versions.versions.find(({ id }) => id === versionId)).toMatchObject({
+    name: 'Renamed B',
+    pinnedAt: '2026-07-18T00:05:00.000Z',
+  })
+})
+
+test('binds a version approval request to the edit permission and the pinned version', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory, () => new Date('2026-07-18T00:00:00.000Z'))
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Design spec',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'v1 body' }],
+  })
+  const versionId = `${created.id}:1`
+  const prepare = (access: DocumentAccessContext) =>
+    client.prepareVersionApprovalTransactWrite({
+      workspaceId: 'workspace-1',
+      documentId: created.id,
+      versionId,
+      access,
+    })
+
+  await expect(prepare(ownerAccess)).rejects.toMatchObject({
+    status: 409,
+    code: 'DocumentVersionNotPinned',
+  })
+  await client.pinVersion({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    versionId,
+    name: 'v1.0',
+    access: ownerAccess,
+  })
+  await expect(prepare({ memberKey: 'viewer@example.com', workspaceRole: 'guest' }))
+    .rejects.toMatchObject({ status: 403 })
+
+  const { conditionChecks } = await prepare(ownerAccess)
+  expect(conditionChecks[0]?.ConditionCheck).toMatchObject({
+    TableName: 'documents-table',
+    Key: { workspaceId: 'workspace-1', recordKey: expect.stringContaining('VERSION#') },
+    ConditionExpression: 'attribute_exists(#version.#name)',
+  })
+  // The Document row read for the edit permission is fenced as well.
+  expect(conditionChecks.slice(1).map((check) => check.ConditionCheck?.Key)).toContainEqual(
+    expect.objectContaining({ workspaceId: 'workspace-1', recordKey: expect.stringContaining(created.id) }),
+  )
 })
 
 test('reconstructs retained version deltas across paginated Query results', async () => {

@@ -2,9 +2,11 @@ import type {
   DocumentApplicationClient,
 } from './application/ports/document-ports'
 import type {
+  DocumentVersionApprovalTransactWrite,
   DocumentWorkItemDeletionFenceTransactWrite,
 } from './adapter-out/dynamodb/dynamo-db-documents-client'
 import type {
+  PrepareDocumentVersionApprovalRequest,
   PrepareDocumentWorkItemDeletionFenceRequest,
 } from './document-types'
 
@@ -23,6 +25,16 @@ export interface DocumentClient extends DocumentApplicationClient {
   prepareWorkItemDeletionFenceTransactWrite(
     request: PrepareDocumentWorkItemDeletionFenceRequest,
   ): Promise<DocumentWorkItemDeletionFenceTransactWrite>
+  /**
+   * Builds the DynamoDB condition checks that bind a version approval request to the requester's
+   * Document edit permission and to the version staying pinned.
+   *
+   * @param request - Version and the requester's authorization snapshot.
+   * @returns Adapter-specific transaction contribution.
+   */
+  prepareVersionApprovalTransactWrite(
+    request: PrepareDocumentVersionApprovalRequest,
+  ): Promise<DocumentVersionApprovalTransactWrite>
 }
 
 export * from './application/ports/document-ports'

@@ -214,12 +214,14 @@ export type DocumentApiDependencies = {
   /**
    * 閲覧を確認済みの固定 version について、成果物の Work Item に承認依頼を作成します。
    * Work Item の認可、reviewer の検証、承認の保存は Work Item 側の source of truth が行います。
+   * 依頼者の Document 編集権限は `access` で再確認し、保存 transaction の条件に含めます。
    * 未設定の runtime では承認依頼 route が 503 を返します。
    */
   requestVersionApproval?: (
     principal: DocumentApiPrincipal,
     request: DocumentVersionApprovalRequest,
     context: Context,
+    access: DocumentAccessContext,
   ) => Promise<ApprovalRequest>
   /**
    * 閲覧を確認済みの Document の version に出された承認依頼のうち、
@@ -745,11 +747,13 @@ export function registerDocumentApiRoutes(
   app.post('/api/documents/:documentId/versions/:versionId/pin', async (c) => {
     return withDocumentPrincipal(c, dependencies, async (principal, access) => {
       const body = await readJson<unknown>(c)
+      const idempotencyKey = c.req.header('Idempotency-Key')?.trim()
       const version = await dependencies.getClient().pinVersion({
         workspaceId: principal.workspaceId,
         documentId: readRequiredDocumentId(c),
         versionId: readRequiredVersionId(c),
         name: readDocumentVersionName(isRecord(body) ? body.name : undefined),
+        ...(idempotencyKey ? { idempotencyKey } : {}),
         access,
       })
       return c.json({ version })
@@ -790,7 +794,7 @@ export function registerDocumentApiRoutes(
         ...input,
         documentId,
         versionId: detail.version.id,
-      }, c)
+      }, c, access)
       return c.json({ approval }, 201)
     })
   })

@@ -1192,13 +1192,14 @@ function VersionsPanel({
           {restoreErrorMessage}
         </p>
       ) : null}
-      {reviewAccessToken && approvalsQuery.error && !approvalsQuery.data ? (
+      {reviewAccessToken && approvalsQuery.error ? (
         <div
           className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2"
           role="alert"
         >
           <p className="m-0 text-xs font-semibold leading-5 text-fg-red-800">
-            {t('documents.versions.approvalsError')}
+            {/* A failed refresh keeps the last approvals, which may no longer be current. */}
+            {t(approvalsQuery.data ? 'documents.versions.approvalsStale' : 'documents.versions.approvalsError')}
           </p>
           <button
             className="workbench-button-secondary min-h-8 px-2.5 text-xs"
@@ -1382,13 +1383,17 @@ function VersionsPanel({
         <DocumentVersionReviewDialog
           accessToken={reviewAccessToken}
           approvals={approvals.filter((approval) => approval.versionId === reviewingVersion.id)}
-          approvalsStatus={approvalsQuery.error && !approvalsQuery.data
-            ? { kind: 'error', onRetry: () => void approvalsQuery.mutate() }
+          approvalsStatus={approvalsQuery.error
+            ? {
+                kind: approvalsQuery.data ? 'stale' : 'error',
+                onRetry: () => void approvalsQuery.mutate(),
+              }
             : approvalsQuery.isLoading
               ? { kind: 'loading' }
               : undefined}
           document={document}
           initialTab={reviewingVersion.id === focusedVersionId ? 'approval' : 'preview'}
+          isRequestingApproval={reviewMutations.isRequestingApproval(reviewingVersion.id)}
           locale={locale}
           members={members}
           onClose={() => setReviewingVersionId(undefined)}

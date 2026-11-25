@@ -898,6 +898,8 @@ export interface FileProofingClient {
    * @param actor - Requesting actor; Document read access is verified by the caller.
    * @param input - Document version subject, reviewers, and due date.
    * @param auditContext - Mutation audit and idempotency context.
+   * @param subjectConditionChecks - Condition checks from the Document owner that keep the
+   *   requester's Document edit permission and the pinned version unchanged until the save.
    * @returns The created approval request.
    */
   createDocumentVersionApproval(
@@ -905,6 +907,7 @@ export interface FileProofingClient {
     actor: FileProofingActor,
     input: CreateDocumentVersionApprovalInput,
     auditContext?: MutationAuditContext,
+    subjectConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ): Promise<ApprovalRequest>
   /**
    * Lists approval requests created for versions of one Document, newest first.
@@ -2284,8 +2287,14 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
    *
    * @param scope - Work Item scope that owns the approval.
    * @param actor - Requesting actor; Document read access is verified by the caller.
+   * The transaction also checks that the Work Item still belongs to the Project the request was
+   * authorized for, and carries the Document owner's checks for the requester's edit permission,
+   * so a concurrent Work Item move or permission change rejects the whole request.
+   *
    * @param input - Document version subject, reviewers, and due date.
    * @param auditContext - Mutation audit and idempotency context.
+   * @param subjectConditionChecks - Condition checks from the Document owner that keep the
+   *   requester's Document edit permission and the pinned version unchanged until the save.
    * @returns The created approval request.
    */
   async createDocumentVersionApproval(
@@ -2293,6 +2302,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     actor: FileProofingActor,
     input: CreateDocumentVersionApprovalInput,
     auditContext?: MutationAuditContext,
+    subjectConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ): Promise<ApprovalRequest> {
     requireApprovalWrite(actor)
     requireWorkItemScope(scope)
@@ -2304,9 +2314,18 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       throw new FileProofingError(400, 'InvalidApprovalSubject', 'Document version does not belong to the Document.')
     }
     const reviewers = normalizeApprovalReviewers(input.reviewerMemberKeys)
+    const approvalId = createMutationResourceId('approval', auditContext, scopeKey)
+    if (auditContext) {
+      // A retry after a lost response returns the saved approval even when its due date has
+      // passed since, so the future-date rule only applies to a new request.
+      const existing = await this.getApproval(scopeKey, approvalId, false)
+      if (existing) {
+        requireMatchingIdempotencyFingerprint(existing.requestFingerprint, auditContext)
+        return toApprovalRequest(existing, actor)
+      }
+    }
     const dueAt = normalizeFutureTimestamp(input.dueAt, 'Approval due date')
     const now = auditContext?.occurredAt ?? new Date().toISOString()
-    const approvalId = createMutationResourceId('approval', auditContext, scopeKey)
     const item: StoredApprovalItem = {
       scopeKey,
       recordKey: createApprovalRecordKey(approvalId),
@@ -2337,6 +2356,12 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       now,
       { approvalId, dueAt, pending: 1 },
     ))
+    const guardStart = transactionItems.length
+    if (this.workItemsTableName) {
+      transactionItems.push(createWorkItemProjectConditionCheck(this.workItemsTableName, scope))
+    }
+    transactionItems.push(...subjectConditionChecks)
+    const guardEnd = transactionItems.length
     addAuditItem(transactionItems, this.auditTableName, auditContext, {
       directoryId: scope.workspaceId,
       eventType: 'approval.requested',
@@ -2365,6 +2390,14 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       if (existing) {
         requireMatchingIdempotencyFingerprint(existing.requestFingerprint, auditContext)
         return toApprovalRequest(existing, actor)
+      }
+      if (readConditionalFailureIndexes(error).some((index) => index >= guardStart && index < guardEnd)) {
+        throw new FileProofingError(
+          409,
+          'ApprovalAuthorizationChanged',
+          'The Work Item or Document access changed. Reload and try again.',
+          { cause: error },
+        )
       }
       throw new FileProofingError(
         409,
@@ -4828,6 +4861,60 @@ function isConditionalTransactionError(error: unknown) {
     failureCodes.every((code) => code === 'ConditionalCheckFailed')
 }
 
+/**
+ * Lists the transaction items whose condition failed in a cancelled transaction.
+ *
+ * @param error - Error thrown by TransactWriteItems.
+ * @returns Indexes of the items whose cancellation reason is ConditionalCheckFailed.
+ */
+function readConditionalFailureIndexes(error: unknown): number[] {
+  if (
+    typeof error !== 'object' || error === null ||
+    !('CancellationReasons' in error) || !Array.isArray(error.CancellationReasons)
+  ) {
+    return []
+  }
+  return error.CancellationReasons.flatMap((reason: unknown, index) =>
+    typeof reason === 'object' && reason !== null &&
+      'Code' in reason && reason.Code === 'ConditionalCheckFailed'
+      ? [index]
+      : []
+  )
+}
+
+/**
+ * Builds the check that the Work Item still exists and belongs to the Project, or to no Project,
+ * that the approval request was authorized for.
+ *
+ * @param workItemsTableName - Work Item table name.
+ * @param scope - Work Item scope read when the request was authorized.
+ * @returns The transaction condition check.
+ */
+function createWorkItemProjectConditionCheck(
+  workItemsTableName: string,
+  scope: FileProofingScope,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  return {
+    ConditionCheck: {
+      TableName: workItemsTableName,
+      Key: {
+        directoryTeamId: `${scope.workspaceId}#team#${scope.teamId}`,
+        issueId: requireText(scope.issueId ?? '', 'Work Item ID'),
+      },
+      ...(scope.projectId
+        ? {
+            ConditionExpression: 'attribute_exists(issueId) AND #assignedProjectId = :projectId',
+            ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId' },
+            ExpressionAttributeValues: { ':projectId': scope.projectId },
+          }
+        : {
+            ConditionExpression: 'attribute_exists(issueId) AND attribute_not_exists(#assignedProjectId)',
+            ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId' },
+          }),
+    },
+  }
+}
+
 /** DynamoDB single-item conditional write error かどうかを判定します。 */
 function isConditionalWriteError(error: unknown) {
   return typeof error === 'object' && error !== null &&
@@ -4920,7 +5007,6 @@ function isValidApprovalDueAtKey(value: unknown): value is string {
     isCanonicalTimestamp(value.slice(0, separatorIndex))
 }
 
-/** Reviewer projection row を判定します。 */
 /**
  * Checks whether a row is a Document approval index pointer.
  *
@@ -4935,6 +5021,7 @@ function isStoredDocumentApprovalIndexItem(value: unknown): value is StoredDocum
     'sourceScopeKey' in value && typeof value.sourceScopeKey === 'string' && value.sourceScopeKey.length > 0
 }
 
+/** Reviewer projection row を判定します。 */
 function isStoredReviewerApprovalItem(value: unknown): value is StoredReviewerApprovalItem {
   return typeof value === 'object' && value !== null &&
     'entryType' in value && value.entryType === 'reviewer-approval'

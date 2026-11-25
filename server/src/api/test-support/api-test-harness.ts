@@ -771,6 +771,9 @@ function createDocumentFake(
     restoreVersion: unsupported,
     getVersion: unsupported,
     pinVersion: unsupported,
+    async prepareVersionApprovalTransactWrite() {
+      return { conditionChecks: [] }
+    },
     updatePreference: unsupported,
     listRecent: unsupported,
     getCommentCreateReplay: unsupported,
