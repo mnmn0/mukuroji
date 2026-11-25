@@ -4,6 +4,8 @@ import { MemoryRouter } from 'react-router'
 import { SWRConfig, unstable_serialize } from 'swr'
 import type { ApprovalRequest, DocumentBlock, DocumentDetail, DocumentVersion } from '@mukuroji/contracts'
 import { documentRecordFixture } from '../src/documents/fixtures'
+import { listEnteredReviewerKeys, readEnteredReviewerKey } from '../src/documents/model/versionApprovals'
+import { documentApprovalsQueryConfig } from '../src/documents/queries/useDocumentVersionReview'
 import { DocumentVersionReviewDialog, type ApprovalsReadStatus } from '../src/documents/ui/DocumentVersionReview'
 import { DocumentContextPanel } from '../src/documents/ui/DocumentContextPanel'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -190,6 +192,28 @@ describe('DocumentVersionReviewDialog', () => {
     expect(html).toContain('data-testid="document-approval-approval-1"')
     expect(html).toContain('Rina Reviewer')
     expect(html).toContain('Request approval')
+  })
+
+  test('lets a requester without the member list add a reviewer by member key', () => {
+    // Without members.read the Workspace member list is empty, yet the server still accepts any
+    // active member who can view the Work Item as a reviewer.
+    const html = renderDialog({ initialTab: 'approval', members: [] })
+    expect(html).toContain('enter a reviewer&#x27;s member email and add it')
+    expect(html).toContain('>Add reviewer<')
+
+    expect(readEnteredReviewerKey('  Ann@Example.com ', [])).toBe('ann@example.com')
+    expect(readEnteredReviewerKey('ann@example.com', ['ann@example.com'])).toBeUndefined()
+    expect(readEnteredReviewerKey('   ', [])).toBeUndefined()
+    expect(readEnteredReviewerKey(`${'a'.repeat(310)}@example.com`, [])).toBeUndefined()
+    expect(listEnteredReviewerKeys(
+      ['ann@example.com', 'reviewer@example.com', 'bob@example.com'],
+      ['reviewer@example.com'],
+    )).toEqual(['ann@example.com', 'bob@example.com'])
+  })
+
+  test('reads the approval list again on focus while version snapshots stay cached', () => {
+    // Approvals are decided on the Work Item, often in another tab, so their status can change.
+    expect(documentApprovalsQueryConfig.revalidateOnFocus).toBe(true)
   })
 
   test('offers a retry when the version detail of the preview or comparison fails to load', () => {

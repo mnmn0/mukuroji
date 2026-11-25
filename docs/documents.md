@@ -68,6 +68,12 @@ reviewer の Inbox、判断と取消、Work Item の承認集計（完了 Gate �
 依頼には Document の編集権限（固定と同じ。Enterprise role では `documents.write` 以上）、その
 version が固定済みであること、Work Item の編集権限と Enterprise role の `files.approve` が要り、
 reviewer は Work Item を閲覧できる active member に限ります（guest は reviewer にできません）。
+依頼画面は Workspace のメンバー一覧から reviewer を選ばせますが、一覧の取得には `members.read` が
+要り、依頼の権限には含まれません。そのため member key（メール）を直接入力して reviewer に足せ、
+その member が active で Work Item を閲覧できるかは依頼時に server が確かめます。reviewer 候補を
+返す API は足さず、`members.read` のない依頼者に member の一覧を見せることはしません。
+承認の状態は Work Item 側で変わるため、承認一覧は window が focus を戻したときと版の確認画面を
+開いたときに読み直します（版の snapshot は変わらないので読み直しません）。
 Document 側の表示用に、file proofing table の `WORKSPACE#<workspaceId>#DOCUMENT#<documentId>`
 partition へ `APPROVAL#<createdAt>#<approvalId>` の pointer row を書き、承認一覧はそこから main
 approval row を読み、閲覧者が Work Item を見られる承認だけを返します。
