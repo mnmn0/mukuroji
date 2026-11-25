@@ -140,6 +140,7 @@ function parseMarkdown(text: string): unknown {
   const cached = recentMarkdownTrees.get(text)
   if (cached !== undefined) return cached
   const tree: unknown = fromMarkdown(text, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
+  if (text.length > RECENT_MARKDOWN_TREE_MAX_LENGTH) return tree
   recentMarkdownTrees.set(text, tree)
   if (recentMarkdownTrees.size > RECENT_MARKDOWN_TREE_COUNT) {
     const oldest = recentMarkdownTrees.keys().next()
@@ -154,6 +155,13 @@ function parseMarkdown(text: string): unknown {
  * read, never changed.
  */
 const RECENT_MARKDOWN_TREE_COUNT = 8
+
+/**
+ * Longest text whose tree {@link parseMarkdown} keeps: one paragraph block, with room for the
+ * probe and fence it is checked with. A whole run of blocks is read once and not kept, so the
+ * kept trees stay small.
+ */
+const RECENT_MARKDOWN_TREE_MAX_LENGTH = 60_000
 
 /** The last parsed trees, by source text, oldest first. */
 const recentMarkdownTrees = new Map<string, unknown>()
