@@ -97,7 +97,7 @@ function teamApi(teamId: string, tasks: AgentTask[], runs: AgentRunRecord[] = []
       const projectBriefs: Record<string, string> = teamId === 'team-b' ? { project: 'Project brief' } : {}
       return {
         schemaVersion: 1, teamId, revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
-        readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false,
+        readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false, acceptNewRuns: true,
         brief: `${teamId} brief`, projectBriefs,
       }
     },
@@ -167,6 +167,27 @@ describe('multi-Team agent tasks', () => {
     expect(next.action).toBe('start')
     expect(next.task?.id).toBe('b1')
     expect(next.teamId).toBe('team-b')
+  })
+
+  test('reports intake stopped only when every Team has stopped new runs', async () => {
+    /**
+     * Builds a Team with no ready work whose intake switch is set.
+     *
+     * @param teamId - Team ID.
+     * @param acceptNewRuns - Whether the Team accepts new runs.
+     * @returns The Team port.
+     */
+    const idleTeam = (teamId: string, acceptNewRuns: boolean) => {
+      const team = teamApi(teamId, [task(teamId, `${teamId}-done`, { statusCategory: 'completed', workflowStatusId: 'done' })])
+      const settings = team.api.agentSettings
+      team.api.agentSettings = async () => ({ ...(await settings()), acceptNewRuns })
+      return team
+    }
+    const mixed = await createMultiTeamAgentTasks([idleTeam('team-a', false), idleTeam('team-b', true)], scope).next({})
+    expect(mixed).toMatchObject({ action: 'none', teamId: 'team-b' })
+    expect(mixed).not.toHaveProperty('acceptingNewRuns')
+    const stopped = await createMultiTeamAgentTasks([idleTeam('team-a', false), idleTeam('team-b', false)], scope).next({})
+    expect(stopped).toMatchObject({ action: 'none', acceptingNewRuns: false })
   })
 
   test('prefers an active run in a later Team over new work in an earlier Team', async () => {

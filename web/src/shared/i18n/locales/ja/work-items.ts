@@ -828,6 +828,8 @@ export const workItemsMessages = {
   'workItems.agentRuns.stalledHint': '期限内に操作がありません。エージェントの状況を確認し、必要なら解放してください。',
   'workItems.agentRuns.resumed': '再開',
   'workItems.agentRuns.resumedHint': '前の Run の後に、同じ担当者のエージェントが再開した Run です。',
+  'workItems.agentRuns.startedByCredential': '開始した credential',
+  'workItems.agentRuns.startedByInstance': 'エージェントのインスタンス',
   'workItems.agentRuns.usageTotal': 'このタスクのトークン',
   'workItems.agentRuns.usageTokens': '入力 {input} ・出力 {output} ・キャッシュ読み取り {cacheRead} ・キャッシュ書き込み {cacheCreation}',
   'workItems.agentRuns.usageCompact': '{tokens} トークン',

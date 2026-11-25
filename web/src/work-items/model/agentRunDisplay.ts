@@ -1,4 +1,4 @@
-import type { AgentRun } from '@mukuroji/contracts'
+import type { AgentRun, AgentRunStartedBy } from '@mukuroji/contracts'
 
 /** Display state of an Agent Run, with stalled runs separated from running ones. */
 export type AgentRunDisplayState =
@@ -38,4 +38,26 @@ export function splitAgentRuns<Run extends Pick<AgentRun, 'state'>>(runs: readon
     ...(active ? { active } : {}),
     history: runs.filter((run) => run !== active),
   }
+}
+
+/**
+ * Describes the credential that started a run: its API key name with the ID, or the ID alone.
+ *
+ * @param startedBy - Credential and instance that started the run.
+ * @returns Display text.
+ */
+export function formatAgentRunCredential(startedBy: AgentRunStartedBy): string {
+  return startedBy.credentialName === undefined
+    ? startedBy.credentialId
+    : `${startedBy.credentialName} (${startedBy.credentialId})`
+}
+
+/**
+ * Shortens an instance hash for display; the full hash stays available as a tooltip.
+ *
+ * @param instanceIdHash - SHA-256 hash of the agent instance ID.
+ * @returns The first 12 characters.
+ */
+export function shortenAgentInstanceHash(instanceIdHash: string): string {
+  return instanceIdHash.slice(0, 12)
 }

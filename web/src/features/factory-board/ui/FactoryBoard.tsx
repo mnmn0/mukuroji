@@ -1,7 +1,12 @@
 import type { AgentRunReport, AgentRunView, FactoryBoardItem, FactoryBoardLane, TeamAgentRunBoardResponse } from '@mukuroji/contracts'
 import { useCallback, useId, useRef, useState, type MouseEvent } from 'react'
 import { ChevronIcon, ClockIcon, ExternalLinkIcon } from '../../../shared/ui/icons'
-import { readAgentRunDisplayState, type AgentRunDisplayState } from '../../../work-items/model/agentRunDisplay'
+import {
+  formatAgentRunCredential,
+  readAgentRunDisplayState,
+  shortenAgentInstanceHash,
+  type AgentRunDisplayState,
+} from '../../../work-items/model/agentRunDisplay'
 import { AgentRunReportChips } from '../../../work-items/ui/AgentRunReportChips'
 import {
   FACTORY_BOARD_FILTER_ALL,
@@ -845,6 +850,12 @@ function FactoryBoardDetail({ formatDateTime, item, labels, lane, now, onNavigat
             {run.state === 'active'
               ? <DetailField label={labels.runs.leaseExpiresAt} value={formatDateTime(run.leaseExpiresAt)} />
               : run.finishedAt ? <DetailField label={labels.runs.finishedAt} value={formatDateTime(run.finishedAt)} /> : null}
+            {run.startedBy ? (
+              <>
+                <DetailField label={labels.runs.startedByCredential} value={formatAgentRunCredential(run.startedBy)} wrap />
+                <DetailField label={labels.runs.startedByInstance} value={shortenAgentInstanceHash(run.startedBy.instanceIdHash)} />
+              </>
+            ) : null}
           </dl>
           {run.state === 'active' && readLeaseMinutesRemaining(run.leaseExpiresAt, now) <= 0 ? (
             <p className="text-xs font-semibold text-[var(--workbench-muted)]">{labels.runs.stalledHint}</p>
@@ -898,16 +909,18 @@ function FactoryBoardDetail({ formatDateTime, item, labels, lane, now, onNavigat
  * @param props - Label and value.
  * @returns Definition list entry.
  */
-function DetailField({ label, value }: {
+function DetailField({ label, value, wrap = false }: {
   /** Field label. */
   label: string
   /** Display value. */
   value: string
+  /** Wraps a long value instead of cutting it off, so its end stays readable. */
+  wrap?: boolean
 }) {
   return (
     <div className="grid min-w-0 gap-0.5">
       <dt className="font-semibold text-[var(--workbench-muted)]">{label}</dt>
-      <dd className="truncate font-medium text-[var(--workbench-text)]">{value}</dd>
+      <dd className={`${wrap ? '[overflow-wrap:anywhere]' : 'truncate'} font-medium text-[var(--workbench-text)]`}>{value}</dd>
     </div>
   )
 }
