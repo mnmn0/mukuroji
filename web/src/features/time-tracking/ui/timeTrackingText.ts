@@ -139,6 +139,10 @@ export function describeTimeTrackingFailure(t: TimeTrackingTranslator, error: un
       return t('timeTracking.error.overlap')
     case 'dailyLimit':
       return t('timeTracking.error.dailyLimit')
+    case 'budgetPeriodOverlap':
+      return t('timeTracking.error.budgetPeriodOverlap')
+    case 'budgetPeriodLimit':
+      return t('timeTracking.error.budgetPeriodLimit')
     case 'forbidden':
       return t('timeTracking.error.forbidden')
     case 'invalid':

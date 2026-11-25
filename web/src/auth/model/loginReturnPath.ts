@@ -53,6 +53,7 @@ export function resolveSafeLoginReturnPath(value: string | null | undefined) {
         '/workload',
         '/inbox',
         '/requests',
+        '/my-requests',
         '/search',
         '/planning',
         '/reports',

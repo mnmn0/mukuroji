@@ -3238,3 +3238,22 @@ test('requires the audit input of a deleted Work Item relation clean-up when aud
   await expect(client.prepareWorkItemDeletionRelationCleanup('workspace-1', 'core-team', 'design'))
     .rejects.toMatchObject({ code: 'WorkItemRelationAuditContextMissing' })
 })
+
+test('rejects a workflow status that requires an unknown or formula custom field', () => {
+  const requiring = (customFields: typeof DEFAULT_WORK_ITEM_CONFIGURATION.customFields) => ({
+    ...DEFAULT_WORK_ITEM_CONFIGURATION,
+    customFields,
+    workflow: {
+      ...DEFAULT_WORK_ITEM_CONFIGURATION.workflow,
+      statuses: DEFAULT_WORK_ITEM_CONFIGURATION.workflow.statuses.map((status) =>
+        status.id === 'review' ? { ...status, requiredCustomFieldIds: ['review-note'] } : status),
+    },
+  })
+  expect(() => validateWorkItemConfiguration(requiring([]))).toThrow('requires unknown custom field "review-note"')
+  expect(() => validateWorkItemConfiguration(requiring([{
+    id: 'review-note', name: 'Score', type: 'formula', sortOrder: 0, required: false, formulaExpression: '1',
+  }]))).toThrow('cannot require formula field "review-note"')
+  expect(validateWorkItemConfiguration(requiring([{
+    id: 'review-note', name: 'Review note', type: 'text', sortOrder: 0, required: false,
+  }])).workflow.statuses.find((status) => status.id === 'review')?.requiredCustomFieldIds).toEqual(['review-note'])
+})

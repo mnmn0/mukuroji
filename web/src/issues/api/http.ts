@@ -1,3 +1,8 @@
+import {
+  isWorkflowStatusRequiredField,
+  isWorkflowTransitionActorRole,
+  type WorkflowRuleUnmetCondition,
+} from '@mukuroji/contracts'
 import { isRecord } from '../../shared/api/jsonValidation'
 
 /** Default message used when an Issues API error does not include one. */
@@ -41,6 +46,36 @@ export function readApiError(data: unknown): { code?: string; message: string } 
         ? record.message
         : defaultIssuesApiErrorMessage,
   }
+}
+
+/**
+ * Reads the workflow rules a rejected status change did not meet, dropping malformed entries.
+ *
+ * @param data - Untrusted error response body.
+ * @returns Unmet rules of a workflow rule error, or an empty list for any other body.
+ */
+export function readWorkflowRuleConditions(data: unknown): WorkflowRuleUnmetCondition[] {
+  if (
+    !isRecord(data) ||
+    (data.code !== 'WorkflowTransitionActorDenied' && data.code !== 'WorkflowStatusRequirementsNotMet') ||
+    !Array.isArray(data.unmetConditions)
+  ) {
+    return []
+  }
+  return data.unmetConditions.slice(0, 100).flatMap((candidate): WorkflowRuleUnmetCondition[] => {
+    if (!isRecord(candidate) || typeof candidate.message !== 'string') return []
+    if (candidate.rule === 'transition-actor' && Array.isArray(candidate.allowedActorRoles)) {
+      const allowedActorRoles = candidate.allowedActorRoles.filter(isWorkflowTransitionActorRole)
+      return [{ rule: 'transition-actor', allowedActorRoles, message: candidate.message }]
+    }
+    if (candidate.rule === 'required-field' && isWorkflowStatusRequiredField(candidate.field)) {
+      return [{ rule: 'required-field', field: candidate.field, message: candidate.message }]
+    }
+    if (candidate.rule === 'required-custom-field' && typeof candidate.customFieldId === 'string') {
+      return [{ rule: 'required-custom-field', customFieldId: candidate.customFieldId, message: candidate.message }]
+    }
+    return []
+  })
 }
 
 /**

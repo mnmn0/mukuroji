@@ -128,6 +128,7 @@ import {
   RequestIntakeError,
   createRequestWorkItemInput,
 } from '../../modules/request-intake/request-intake'
+import { resolveRequestFormTitle } from '../../modules/request-intake/my-requests'
 import { CustomerError, projectCustomerImpactSignal } from '../../modules/customers'
 import {
   createTriageAcceptanceTransactionItems,
@@ -213,6 +214,7 @@ import {
 } from '../shared/http'
 import { readAuditEventQuery, readLocale, readRequiredRouteId } from '../shared/input-parsing'
 import {
+  createPlanningCallerAuthorizationConditionChecks,
   createPlanningFencedWorkItemAuthorizationSnapshot,
   filterPlanningSnapshotForPrincipal,
   withPlanningLegacyReadScope,
@@ -283,9 +285,11 @@ import {
   summarizeAccessibleWorkItems,
 } from '../shared/work-item-aggregate-read'
 import {
+  createPersonWorkflowRulePrincipal,
   filterRequestConversionCustomFieldValues,
   getWorkItemConfigurationTableName,
   prepareConfiguredCreateWorkItem,
+  type WorkflowRulePrincipal,
 } from '../shared/work-item-configuration'
 import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
@@ -1266,12 +1270,52 @@ async function requirePlanningProjectScopeIsUnused(
   }
 }
 
+/**
+ * Adds the source requester's completion notification to an approval that completes a Work Item
+ * made from a request, so the notice does not depend on how the Work Item was completed.
+ *
+ * @param principal - Member deciding the approval.
+ * @param teamId - Team that owns the Work Item.
+ * @param workItem - Work Item before the decision.
+ * @param transition - Resolved completion transition.
+ * @param correlationId - Correlation ID of the approval decision, so the notice can be traced.
+ * @returns The transition, with the notification items when the Work Item becomes completed.
+ */
+async function addSourceRequesterCompletionNotice(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
+  transition: FileApprovalCompletionTransition,
+  correlationId: string | undefined,
+): Promise<FileApprovalCompletionTransition> {
+  const createItems = workItemDependencies.teamIssues.createSourceRequesterCompletionTransactionItems
+  if (
+    !createItems ||
+    !workItem.sourceRequestId ||
+    workItem.statusCategory === 'completed' ||
+    transition.statusCategory !== 'completed'
+  ) {
+    return transition
+  }
+  const items = await createItems.call(workItemDependencies.teamIssues, {
+    directoryId: principal.directoryId,
+    teamId,
+    issueId: workItem.id,
+    nextRevision: transition.expectedRevision + 1,
+    actorUserId: principal.userKey,
+    occurredAt: new Date().toISOString(),
+    ...(correlationId ? { correlationId } : {}),
+  })
+  return items.length > 0 ? { ...transition, completionSideEffectItems: items } : transition
+}
+
 /** Approval 作成後に削除・無効化された遷移先を decision conflict として扱います。 */
 async function resolveFileApprovalCompletionTransitionForDecision(
   directoryId: string,
   teamId: string,
   workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
   completionTransition: string,
+  decider: WorkflowRulePrincipal,
 ): Promise<FileApprovalCompletionTransition | undefined> {
   try {
     return await resolveFileApprovalCompletionTransition(
@@ -1279,6 +1323,7 @@ async function resolveFileApprovalCompletionTransitionForDecision(
       teamId,
       workItem,
       completionTransition,
+      decider,
     )
   } catch (error) {
     if (
@@ -3932,6 +3977,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         conversion.target.teamId,
         conversionInput,
         resolvedConfiguration,
+        createPersonWorkflowRulePrincipal(principal, teamContext),
         { fallbackToTypeInitialStatus: body.target?.workflowStatusId === undefined },
       )
       const authorizationConditionChecks = await createTriageProjectAuthorizationConditionChecks(
@@ -3994,6 +4040,14 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           actorId: principal.userKey,
           submissionId,
           events: submission.events,
+          ...(submission.requesterUserId
+            ? {
+                requester: {
+                  memberKey: submission.requesterUserId,
+                  formTitle: resolveRequestFormTitle(submission),
+                },
+              }
+            : {}),
         },
         {
           entryId: triageAcceptance.entry.id,
@@ -4823,6 +4877,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         teamId,
         body,
         resolvedConfiguration,
+        createPersonWorkflowRulePrincipal(principal, context),
       )
       const assigneeUserId = readTeamIssueAssigneeUserId(configuredBody)
       await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
@@ -5280,6 +5335,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         detail.issue,
         body,
         resolvedConfiguration,
+        createPersonWorkflowRulePrincipal(principal, context),
       )
 
       let authorizationSnapshot: WorkItemAuthorizationSnapshot | undefined
@@ -6021,25 +6077,59 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const canonicalWorkItem = requireCanonicalFileProofingWorkItem(workItem)
       const body = await readFileProofingJson<CreateFileApprovalDecisionInput>(c.req)
       const input = { ...body } satisfies CreateFileApprovalDecisionInput
+      const decisionAuditContext = createApiMutationContext(c, principal, input)
       let resolvedCompletionTransition: FileApprovalCompletionTransition | undefined
       const resolveCompletionTransition: FileApprovalCompletionTransitionResolver = async (
         completionTransition,
       ) => {
-        const resolved = await resolveFileApprovalCompletionTransitionForDecision(
+        // The decider changes the status, so the workflow's transition actor roles apply to them.
+        // A reviewer may hold no Team role; then only the assignee role can hold, so that denial
+        // leaves the manager role unmet instead of blocking a decision no rule restricts. Any other
+        // failure surfaces.
+        const deciderContext = await requireTeamPermission(principal, scope.teamId, 'viewer')
+          .catch((error: unknown) => {
+            if (error instanceof ProjectDataError && error.status === 403) return undefined
+            throw error
+          })
+        const transition = await resolveFileApprovalCompletionTransitionForDecision(
           principal.directoryId,
           scope.teamId,
           canonicalWorkItem,
           completionTransition,
+          createPersonWorkflowRulePrincipal(principal, deciderContext),
         )
-        resolvedCompletionTransition = resolved
-        return resolved
+        // The transition was judged against the decider's roles, so a role change before the
+        // decision commits fails it. The decision already writes Planning META, so only the caller's
+        // member row and enterprise CONTROL revision are checked here.
+        const resolved = transition && {
+          ...transition,
+          configurationConditionChecks: [
+            ...transition.configurationConditionChecks,
+            ...createPlanningCallerAuthorizationConditionChecks(
+              principal,
+              [],
+              principal.principalKind !== 'service-account',
+            ),
+          ],
+        }
+        const withRequesterNotice = resolved
+          ? await addSourceRequesterCompletionNotice(
+              principal,
+              scope.teamId,
+              canonicalWorkItem,
+              resolved,
+              decisionAuditContext.correlationId,
+            )
+          : undefined
+        resolvedCompletionTransition = withRequesterNotice
+        return withRequesterNotice
       }
       const approval = await workItemDependencies.fileProofing.decideApproval(
         scope,
         actor,
         readRequiredRouteId(c.req.param('approvalId'), 'Approval ID'),
         input,
-        createApiMutationContext(c, principal, input),
+        decisionAuditContext,
         resolveCompletionTransition,
       )
       if (approval.status === 'approved' && resolvedCompletionTransition) {

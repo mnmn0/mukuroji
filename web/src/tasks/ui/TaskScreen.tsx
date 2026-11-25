@@ -56,6 +56,7 @@ import {
   createWorkItemTemplateDraft,
   listWorkItemTemplatesForTeam,
 } from '../../issues/model/workItemDuplicate'
+import { describeWorkflowRuleRejection } from '../../issues/model/workflowRuleErrors'
 import { useWorkItemCreateTemplates } from '../../automation/queries/useWorkItemCreateTemplates'
 import { TeamIssuesApiError, type TeamIssue, type TeamIssueDetail, type UpdateTeamIssueInput } from '../../issues/api'
 import type {
@@ -4313,6 +4314,8 @@ function resolveTaskMutationErrorMessage(
   error: unknown,
   t: (key: MessageKey) => string,
 ): string {
+  const workflowRule = describeWorkflowRuleRejection(error, t)
+  if (workflowRule) return workflowRule
   if (error instanceof TeamIssuesApiError) {
     if (isTaskSchedulePreviewStaleCode(error.code)) {
       return t('tasks.schedule.previewStale')

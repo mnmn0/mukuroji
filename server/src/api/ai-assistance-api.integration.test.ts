@@ -227,6 +227,9 @@ function createUnreachableRequestIntakeClient(
     completeConversion: createUnexpectedAiRequestIntakeCall('completeConversion'),
     getRequesterThread: createUnexpectedAiRequestIntakeCall('getRequesterThread'),
     replyToThread: createUnexpectedAiRequestIntakeCall('replyToThread'),
+    listRequesterSubmissions: createUnexpectedAiRequestIntakeCall('listRequesterSubmissions'),
+    getRequesterSubmission: createUnexpectedAiRequestIntakeCall('getRequesterSubmission'),
+    replyAsRequester: createUnexpectedAiRequestIntakeCall('replyAsRequester'),
     ingestEmail: createUnexpectedAiRequestIntakeCall('ingestEmail'),
     createAttachmentAccess: createUnexpectedAiRequestIntakeCall('createAttachmentAccess'),
   }

@@ -525,6 +525,14 @@ export function PublicRequestFormScreen({
         <p className="mt-4 text-sm font-semibold text-[var(--workbench-muted)]">
           {t('requests.public.receipt').replace('{id}', receipt.receiptId)}
         </p>
+        {form.accessMode !== 'public' ? (
+          <p className="mt-3 text-sm text-[var(--workbench-muted)]">
+            {t('requests.public.myRequestsHint')}{' '}
+            <Link className="font-semibold text-[var(--workbench-primary-text)]" to="/my-requests">
+              {t('requests.public.myRequestsLink')}
+            </Link>
+          </p>
+        ) : null}
         {thread?.messages.length ? (
           <div className="mx-auto mt-7 grid max-w-[620px] gap-3 border-t border-[var(--workbench-border)] pt-6 text-left">
             <h2 className="text-lg font-semibold text-[var(--workbench-text)]">{t('requests.public.threadTitle')}</h2>
