@@ -15,9 +15,11 @@ import {
   type TeamAgentRunBoardResponse,
   type WorkItemAgentRunReportsResponse,
   type WorkItemAgentRunsResponse,
+  type WorkspaceAgentDefaults,
 } from '@mukuroji/contracts'
 import {
   AgentRunError,
+  applyWorkspaceAgentDefaults,
   combineAgentRunUsage,
   createAgentRunIntegrityError,
   createAgentRunNotActiveError,
@@ -25,6 +27,7 @@ import {
   finishAgentRun,
   assertAgentSettingsBriefLimits,
   readUpdateAgentSettingsRequest,
+  readUpdateWorkspaceAgentDefaultsRequest,
   toAgentRun,
   toAgentRunReport,
   type AgentRunFinishedGroup,
@@ -54,6 +57,7 @@ import {
   canWorkspaceBusinessWrite,
   requireAssignedProjectPermission,
   requireTeamPermission,
+  requireWorkspaceAdministration,
   requireWorkspaceBusinessWrite,
   type WorkspacePrincipal,
 } from '../shared/project-access'
@@ -940,5 +944,66 @@ export async function updateWebAgentSettings(
     .update(`agent-settings\0${principal.userKey}\0${auditContext.idempotencyKeyHash}`)
     .digest('hex')
   const saved = await store.saveSettings(principal.directoryId, teamId, update, principal.userKey, now, mutationKey, auditPut ? [auditPut] : [])
-  return withVisibleProjectBriefs(principal, permission, saved)
+  // The response shows the Workspace brief as the editor saw it, for a Team without a brief of its own.
+  const defaults = await store.getWorkspaceAgentDefaults(principal.directoryId)
+  return withVisibleProjectBriefs(principal, permission, applyWorkspaceAgentDefaults(saved, defaults))
+}
+
+/**
+ * Reads the Workspace agent defaults for a Workspace administrator.
+ *
+ * @param principal - Workspace administrator.
+ * @returns Saved defaults, or the built-in ones at revision 0.
+ */
+export async function getWebWorkspaceAgentDefaults(principal: WorkspacePrincipal): Promise<WorkspaceAgentDefaults> {
+  requireWorkspaceAdministration(principal)
+  return workItemDependencies.agentRuns.getWorkspaceAgentDefaults(principal.directoryId)
+}
+
+/**
+ * Saves the Workspace agent defaults for a Workspace administrator with revision CAS and an audit
+ * event. The body is validated only after the caller is authorized.
+ *
+ * @param principal - Workspace administrator.
+ * @param body - Untrusted request body.
+ * @param auditContext - Audit context of the request.
+ * @returns Saved defaults.
+ */
+export async function updateWebWorkspaceAgentDefaults(
+  principal: WorkspacePrincipal,
+  body: unknown,
+  auditContext: MutationAuditContext,
+): Promise<WorkspaceAgentDefaults> {
+  requireWorkspaceBusinessWrite(principal)
+  requireWorkspaceAdministration(principal)
+  const update = readUpdateWorkspaceAgentDefaultsRequest(body)
+  const store = workItemDependencies.agentRuns
+  const before = await store.getWorkspaceAgentDefaults(principal.directoryId)
+  const now = new Date()
+  const auditPut = createMutationAuditEventPut(getConfiguredAuditTableName(), auditContext, {
+    directoryId: principal.directoryId,
+    eventType: 'agent-defaults.updated',
+    entityType: 'agent-defaults',
+    entityId: 'workspace/agent-defaults',
+    action: 'updated',
+    occurredAt: now.toISOString(),
+    summary: 'Workspace agent defaults were updated.',
+    changes: [
+      { field: 'leaseMinutes', before: before.leaseMinutes, after: update.leaseMinutes },
+      {
+        field: 'allowTakeoverAfterLeaseExpiry',
+        before: before.allowTakeoverAfterLeaseExpiry,
+        after: update.allowTakeoverAfterLeaseExpiry,
+      },
+      { field: 'requireAcceptanceCriteria', before: before.requireAcceptanceCriteria, after: update.requireAcceptanceCriteria },
+      // The brief is user text; the audit trail records only its size.
+      { field: 'brief.bytes', before: briefBytes(before.brief), after: briefBytes(update.brief) },
+    ].filter((change) => change.before !== change.after),
+    metadata: { adapter: 'agent-defaults', beforeRevision: update.expectedRevision },
+  })
+  // A retry with the same Idempotency-Key replays the committed save instead of failing its revision check.
+  const mutationKey = createHash('sha256')
+    .update(`agent-defaults\0${principal.userKey}\0${auditContext.idempotencyKeyHash}`)
+    .digest('hex')
+  return store.saveWorkspaceAgentDefaults(principal.directoryId, update, principal.userKey, now, mutationKey, auditPut ? [auditPut] : [])
 }

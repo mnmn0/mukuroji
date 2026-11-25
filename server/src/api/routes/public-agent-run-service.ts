@@ -21,6 +21,7 @@ import {
   finishAgentRun,
   isAgentRunStalled,
   isClaimHeldBy,
+  resolveTeamAgentBrief,
   toAgentRun,
   toAgentRunReport,
   type StoredAgentRun,
@@ -1063,6 +1064,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       const settings = withVisibleProjectBriefs(
         principal, permission, await workItemDependencies.agentRuns.getSettings(principal.directoryId, teamId),
       )
+      const brief = resolveTeamAgentBrief(settings)
       return {
         schemaVersion: settings.schemaVersion,
         teamId: settings.teamId,
@@ -1072,7 +1074,8 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         resumableStatusIds: settings.resumableStatusIds,
         requireAcceptanceCriteria: settings.requireAcceptanceCriteria,
         ...(settings.acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId: settings.acceptanceCriteriaFieldId }),
-        ...(settings.brief === undefined ? {} : { brief: settings.brief }),
+        // A Team without a brief of its own passes the Workspace default brief to its agents.
+        ...(brief === undefined ? {} : { brief }),
         projectBriefs: settings.projectBriefs,
       }
     },

@@ -198,7 +198,7 @@ describe('Agent Run domain', () => {
       [{ brief: 'é'.repeat(8193) }, '/brief'],
       [{ brief: 7 }, '/brief'],
       [{ projectBriefs: { 'a/b': 'x', '..': 'y' } }, '/projectBriefs/..'],
-      [{ projectBriefs: Object.fromEntries(Array.from({ length: 21 }, (_, index) => [`p${index}`, 'x'])) }, '/projectBriefs'],
+      [{ projectBriefs: Object.fromEntries(Array.from({ length: 101 }, (_, index) => [`p${index}`, 'x'])) }, '/projectBriefs'],
       [{ brief: 'a'.repeat(16384), projectBriefs: Object.fromEntries(Array.from({ length: 8 }, (_, index) => [`p${index}`, 'a'.repeat(16384)])) }, '/projectBriefs'],
     ] as const) {
       expect(() => readUpdateAgentSettingsRequest({ ...base, ...invalid })).toThrow(expect.objectContaining({ pointer }))
@@ -732,6 +732,42 @@ describe('DynamoDB Agent Run store', () => {
       ConditionExpression: '#revision = :expectedRevision',
       ExpressionAttributeValues: { ':expectedRevision': 1 },
     } }, { Put: { Item: { recordKey: 'agent-settings-mutation#key-2' } } }] })
+  })
+})
+
+describe('Workspace agent defaults', () => {
+  test('saves the defaults with revision CAS and applies them to a Team without settings', async () => {
+    const first = createClient([{}])
+    const update = { expectedRevision: 0, leaseMinutes: 60, allowTakeoverAfterLeaseExpiry: true, requireAcceptanceCriteria: true, brief: 'Workspace brief' }
+    const saved = await new DynamoDbAgentRunStore(first.client, 'AgentRuns').saveWorkspaceAgentDefaults('workspace-1', update, 'admin-1', now, 'key-1', [])
+    expect(saved).toEqual({ schemaVersion: 1, revision: 1, leaseMinutes: 60, allowTakeoverAfterLeaseExpiry: true, requireAcceptanceCriteria: true, brief: 'Workspace brief', updatedAt: now.toISOString(), updatedBy: 'admin-1' })
+    const command = first.commands[0]
+    if (!(command instanceof TransactWriteCommand)) throw new Error('The save must be a transaction.')
+    // The Workspace row lives outside every Team partition.
+    expect(command.input).toMatchObject({ TransactItems: [
+      { Put: { Item: { directoryTeamId: 'workspace-1#workspace', recordKey: 'agent-defaults', entityType: 'agent-defaults' }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
+      { Put: { Item: { recordKey: 'agent-defaults-mutation#key-1', entityType: 'agent-defaults-mutation' }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
+    ] })
+    const row = command.input.TransactItems?.[0]?.Put?.Item
+
+    // A Team without settings reads the Workspace values at revision 0; a saved Team keeps its own.
+    const unsaved = createClient([{}, { Item: row }])
+    expect(await new DynamoDbAgentRunStore(unsaved.client, 'AgentRuns').getSettings('workspace-1', 'core')).toMatchObject({
+      revision: 0, leaseMinutes: 60, allowTakeoverAfterLeaseExpiry: true, requireAcceptanceCriteria: true, workspaceBrief: 'Workspace brief',
+    })
+    const teamRow = {
+      directoryTeamId: 'workspace-1#team#core', recordKey: 'agent-settings', entityType: 'agent-settings', workspaceId: 'workspace-1',
+      schemaVersion: 1, teamId: 'core', revision: 2, leaseMinutes: 15, allowTakeoverAfterLeaseExpiry: false,
+      updatedAt: now.toISOString(), updatedBy: 'member-1',
+    }
+    const savedTeam = createClient([{ Item: teamRow }, { Item: row }])
+    expect(await new DynamoDbAgentRunStore(savedTeam.client, 'AgentRuns').getSettings('workspace-1', 'core')).toMatchObject({
+      revision: 2, leaseMinutes: 15, allowTakeoverAfterLeaseExpiry: false, requireAcceptanceCriteria: false, workspaceBrief: 'Workspace brief',
+    })
+    // A corrupt Workspace row is not read as defaults.
+    const corrupt = createClient([{ Item: { ...row, leaseMinutes: 'long' } }])
+    await expect(new DynamoDbAgentRunStore(corrupt.client, 'AgentRuns').getWorkspaceAgentDefaults('workspace-1'))
+      .rejects.toMatchObject({ category: 'temporarily_unavailable' })
   })
 })
 

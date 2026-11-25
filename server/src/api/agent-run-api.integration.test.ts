@@ -12,6 +12,7 @@ import {
   createAgentRunIntegrityError,
   createAgentRunNotActiveError,
   createDefaultAgentSettings,
+  createDefaultWorkspaceAgentDefaults,
   finishAgentRun,
   formatUsageBucketStart,
   hashAgentInstanceId,
@@ -112,6 +113,8 @@ function configureUnstartedAssignedWorkItem(overrides: {
   statusCategory?: 'unstarted' | 'started'
   /** Team role of the caller. */
   role?: 'member' | 'manager' | 'viewer'
+  /** Workspace role of the caller. */
+  workspaceRole?: 'member' | 'admin'
   /** Runs just before the fenced update applies its Agent Run items, to simulate a concurrent write. */
   beforeCommit?: () => void
 } = {}) {
@@ -121,7 +124,7 @@ function configureUnstartedAssignedWorkItem(overrides: {
   const projectOptions: NonNullable<Parameters<typeof configureFakeProjectClients>[1]> = {
     directoryId: workspaceId,
     role: overrides.role ?? 'member',
-    workspaceRole: 'member',
+    workspaceRole: overrides.workspaceRole ?? 'member',
     detailAssigneeUserId: overrides.assigneeUserId ?? 'demo@example.com',
     detailWorkflowStatusId: overrides.statusCategory === 'started' ? 'in-progress' : 'todo',
     detailStatusCategory: overrides.statusCategory ?? 'unstarted',
@@ -2398,6 +2401,64 @@ describe('Web Agent Run routes', () => {
       method: 'PUT', headers, body: JSON.stringify({ ...body, expectedRevision: 2, readyStatusIds: ['ready', 'ready'] }),
     })
     expect(invalid.status).toBe(400)
+  })
+
+  test('lets only a Workspace administrator read and save the Workspace agent defaults', async () => {
+    const defaultsUrl = 'http://localhost/api/workspace/agent-defaults'
+    const defaults = { expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, brief: 'Follow the Workspace rules.' }
+    configureUnstartedAssignedWorkItem({ role: 'manager' })
+    expect((await app.request(defaultsUrl, { headers })).status).toBe(403)
+    expect((await app.request(defaultsUrl, { method: 'PUT', headers, body: JSON.stringify(defaults) })).status).toBe(403)
+
+    configureUnstartedAssignedWorkItem({ role: 'manager', workspaceRole: 'admin' })
+    expect(await (await app.request(defaultsUrl, { headers })).json()).toMatchObject({ revision: 0, leaseMinutes: 30 })
+    const saved = await app.request(defaultsUrl, {
+      method: 'PUT', headers: { ...headers, 'Idempotency-Key': 'defaults-1' }, body: JSON.stringify(defaults),
+    })
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toMatchObject({ revision: 1, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, brief: defaults.brief })
+    // A retry with the same key replays the save; a stale revision is a conflict; unknown fields are refused.
+    expect((await app.request(defaultsUrl, {
+      method: 'PUT', headers: { ...headers, 'Idempotency-Key': 'defaults-1' }, body: JSON.stringify(defaults),
+    })).status).toBe(200)
+    expect((await app.request(defaultsUrl, {
+      method: 'PUT', headers: { ...headers, 'Idempotency-Key': 'defaults-2' }, body: JSON.stringify(defaults),
+    })).status).toBe(409)
+    expect((await app.request(defaultsUrl, {
+      method: 'PUT', headers, body: JSON.stringify({ ...defaults, expectedRevision: 1, projectBriefs: {} }),
+    })).status).toBe(400)
+  })
+
+  test('applies the Workspace defaults to a Team without settings and its brief to a Team without one', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ role: 'manager' })
+    const brief = 'Follow the Workspace rules.'
+    store.state.workspaceDefaults.set(workspaceId, {
+      ...createDefaultWorkspaceAgentDefaults(), revision: 1, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, brief,
+      updatedAt: new Date().toISOString(), updatedBy: 'admin@example.com',
+    })
+
+    // A Team that never saved settings uses the Workspace values and passes its brief to agents.
+    const team = await app.request('http://localhost/api/teams/core-team/agent-settings', { headers })
+    expect(await team.json()).toMatchObject({ revision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, workspaceBrief: brief })
+    const service = createCanonicalPublicAgentRunService()
+    expect(await runWithTestAppDependencies(() => service.getContext(credential, 'core-team'))).toMatchObject({ brief })
+
+    // A Team's own settings and brief take precedence; without a brief it still inherits the Workspace one.
+    const own = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT',
+      headers: { ...headers, 'Idempotency-Key': 'team-own' },
+      body: JSON.stringify({ expectedRevision: 0, leaseMinutes: 20, allowTakeoverAfterLeaseExpiry: false, brief: 'Team rules.' }),
+    })
+    expect(await own.json()).toMatchObject({ revision: 1, leaseMinutes: 20, brief: 'Team rules.', workspaceBrief: brief })
+    expect(await runWithTestAppDependencies(() => service.getContext(credential, 'core-team')))
+      .toMatchObject({ brief: 'Team rules.' })
+    await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT',
+      headers: { ...headers, 'Idempotency-Key': 'team-no-brief' },
+      body: JSON.stringify({ expectedRevision: 1, leaseMinutes: 20, allowTakeoverAfterLeaseExpiry: false }),
+    })
+    expect(await runWithTestAppDependencies(() => service.getContext(credential, 'core-team')))
+      .toMatchObject({ brief, revision: 2 })
   })
 
   test('shows and edits only the briefs of Projects the caller can view', async () => {

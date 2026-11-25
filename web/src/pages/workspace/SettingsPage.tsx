@@ -293,6 +293,7 @@ export function SettingsPage() {
               <SettingsPanelAnchor panel="agent-settings">
                 <AgentSettingsPanelContainer
                   accessToken={workspace.accessToken}
+                  canManageWorkspaceConfiguration={workspace.canManageWorkspaceConfiguration}
                   canMutateTeamConfiguration={workspace.canMutateTeamConfiguration}
                   locale={workspace.locale}
                   teams={workspace.teams}

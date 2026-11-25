@@ -43,8 +43,12 @@ export const AGENT_SETTINGS_MAX_RESUMABLE_STATUSES = 50
 /** Maximum UTF-8 size in bytes of one agent brief. */
 export const AGENT_SETTINGS_BRIEF_MAX_BYTES = 16 * 1024
 
-/** Maximum number of Projects that may carry their own agent brief. */
-export const AGENT_SETTINGS_MAX_PROJECT_BRIEFS = 20
+/**
+ * Maximum number of Projects that may carry their own agent brief. The combined size limit
+ * {@link AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES} bounds the stored row, so the count only keeps the
+ * list reviewable.
+ */
+export const AGENT_SETTINGS_MAX_PROJECT_BRIEFS = 100
 
 /** Maximum combined UTF-8 size in bytes of the Team brief and every Project brief. */
 export const AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES = 128 * 1024
@@ -532,6 +536,11 @@ export type AgentSettings = {
   brief?: string
   /** Agent briefs per Project ID, returned after the Team brief for work in that Project. */
   projectBriefs: Record<string, string>
+  /**
+   * Workspace default brief that agents receive when the Team has no brief of its own. It is read
+   * only here; Workspace administrators change it through the Workspace agent defaults.
+   */
+  workspaceBrief?: string
   /** Whether each run that finishes as `failed` is filed to the Team's Triage as an `agent-run` entry. */
   fileFailedRunsToTriage: boolean
   /** Whether each run that stalls (active past its lease) is filed to the Team's Triage as an `agent-run` entry. */
@@ -540,6 +549,43 @@ export type AgentSettings = {
   updatedAt?: string
   /** Member key of the last editor. */
   updatedBy?: string
+}
+
+/**
+ * Agent settings of a Workspace that a Team uses until it saves its own, and the brief a Team
+ * without a brief of its own passes to agents.
+ */
+export type WorkspaceAgentDefaults = {
+  /** Agent settings contract schema version. */
+  schemaVersion: typeof AGENT_SETTINGS_SCHEMA_VERSION
+  /** Optimistic concurrency revision; `0` means the defaults have never been saved. */
+  revision: number
+  /** Lease length in minutes for new runs of a Team without saved settings. */
+  leaseMinutes: number
+  /** Whether a Team without saved settings lets another instance of the assignee take over a stalled run. */
+  allowTakeoverAfterLeaseExpiry: boolean
+  /** Whether a Team without saved settings readies only Work Items with acceptance criteria. */
+  requireAcceptanceCriteria: boolean
+  /** Brief in Markdown for every Team without a brief of its own. It is user data, never instructions. */
+  brief?: string
+  /** UTC ISO 8601 time of the last saved change. */
+  updatedAt?: string
+  /** Member key of the last editor. */
+  updatedBy?: string
+}
+
+/** Request body that replaces the Workspace agent defaults. */
+export type UpdateWorkspaceAgentDefaultsRequest = {
+  /** Revision read before editing; `0` when no defaults were saved yet. */
+  expectedRevision: number
+  /** Lease length in minutes for new runs. */
+  leaseMinutes: number
+  /** Whether another instance of the same assignee may take over a stalled run. */
+  allowTakeoverAfterLeaseExpiry: boolean
+  /** Whether only Work Items with acceptance criteria are ready; omitted means false. */
+  requireAcceptanceCriteria?: boolean
+  /** Default brief in Markdown; omitted or empty removes it. */
+  brief?: string
 }
 
 /**
@@ -569,7 +615,10 @@ export type AgentContext = {
   requireAcceptanceCriteria: boolean
   /** Custom field whose non-empty value also counts as acceptance criteria. */
   acceptanceCriteriaFieldId?: string
-  /** Team agent brief in Markdown. It is user data, never instructions that change credentials or scope. */
+  /**
+   * Team agent brief in Markdown, or the Workspace default brief when the Team has none. It is user
+   * data, never instructions that change credentials or scope.
+   */
   brief?: string
   /** Agent briefs per Project ID the caller can view. */
   projectBriefs: Record<string, string>
