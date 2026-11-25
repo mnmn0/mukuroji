@@ -673,8 +673,14 @@ export type TeamAgentRunBoardResponse = {
   activeRunsHasMore: boolean
   /** Whether finished runs beyond {@link FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS} were left unread. */
   finishedRunsHasMore: boolean
-  /** Whether Work Items beyond {@link FACTORY_BOARD_MAX_EVALUATED_WORK_ITEMS} were left unread. */
+  /** Whether started Work Items beyond {@link FACTORY_BOARD_MAX_EVALUATED_WORK_ITEMS} were left unread. */
   startedWorkItemsHasMore: boolean
+  /**
+   * Opaque token that reads the next page of the sources left unread, passed back as the
+   * `continuation` query parameter; absent when every source was read to its end. A later page holds
+   * only the items of those sources, and a Work Item can appear on more than one page.
+   */
+  continuation?: string
 }
 
 /** Milliseconds in one hour. */
@@ -864,4 +870,53 @@ export type TeamFactoryAnalyticsResponse = FactoryAnalyticsRunSummary & {
   historyHasMore: boolean
   /** Telemetry usage of the period's runs; absent when none of them has usage. */
   usage?: FactoryAnalyticsUsage
+}
+
+/** Outcomes a finished Agent Run can have, for filtering the Run history. */
+export const AGENT_RUN_OUTCOMES = ['completed', 'paused', 'failed', 'released', 'superseded'] as const satisfies readonly AgentRunOutcome[]
+
+/** Longest period one Run history request covers, in days. */
+export const AGENT_RUN_HISTORY_MAX_PERIOD_DAYS = 92
+
+/** Most runs one Run history response returns for a Team. */
+export const AGENT_RUN_HISTORY_MAX_RUNS = 200
+
+/** Most finished-run index entries one Run history request evaluates in each outcome group. */
+export const AGENT_RUN_HISTORY_MAX_EVALUATED_RUNS = 1000
+
+/** One finished run in the Run history, with the Work Item it worked on. */
+export type AgentRunHistoryEntry = AgentRun & {
+  /** Title of the run's Work Item. */
+  workItemTitle: string
+  /** Project of the run's Work Item, when it has one. */
+  projectId?: string
+}
+
+/** Filters of a Run history request; every filter is optional. */
+export type AgentRunHistoryFilters = {
+  /** Only runs that finished this way. */
+  outcome?: AgentRunOutcome
+  /** Only runs of Work Items this member was responsible for when the run started. */
+  assigneeUserId?: string
+  /** Only runs driven by this client runtime. */
+  runtime?: AgentRunRuntime
+  /** Only runs of Work Items in this Project. */
+  projectId?: string
+}
+
+/** Finished runs of one Team in a period, newest finish first. */
+export type TeamAgentRunHistoryResponse = {
+  /** Team the runs belong to. */
+  teamId: string
+  /** UTC ISO 8601 start of the period, inclusive. */
+  from: string
+  /** UTC ISO 8601 end of the period, inclusive. */
+  to: string
+  /** Runs on Work Items the viewer can see, newest finish first. */
+  runs: AgentRunHistoryEntry[]
+  /**
+   * True when runs of the period were left out because a read bound was reached; a shorter period
+   * or a narrower filter returns the rest.
+   */
+  hasMore: boolean
 }

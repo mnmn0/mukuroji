@@ -400,5 +400,13 @@ export function createMultiTeamAgentTasks(teams: readonly TeamWorkItemApi[], sco
     async document(id: string, documentId: string) {
       return (await teamForTask(id)).tasks.document(id, documentId)
     },
+    /** Lists a task's downloadable attachments in the Team that holds it. */
+    async attachments(id: string) {
+      return (await teamForTask(id)).tasks.attachments(id)
+    },
+    /** Issues a download URL for a task's attachment in the Team that holds it. */
+    async attachmentDownload(id: string, fileId: string) {
+      return (await teamForTask(id)).tasks.attachmentDownload(id, fileId)
+    },
   }
 }

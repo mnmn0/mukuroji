@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { classifyFactoryBoardItem, type AgentRunReportKind, type TeamAgentRunBoardResponse, type TeamFactoryAnalyticsResponse } from '@mukuroji/contracts'
+import { classifyFactoryBoardItem, type AgentRunReportKind, type TeamAgentRunBoardResponse, type TeamAgentRunHistoryResponse, type TeamFactoryAnalyticsResponse } from '@mukuroji/contracts'
 import { createApiTestHarness } from './test-support/api-test-harness'
 import { createCanonicalPublicAgentTelemetryService } from './routes/public-agent-telemetry-service'
 import { createCanonicalPublicAgentRunService, createCanonicalPublicWorkItemService } from './api-router'
@@ -2276,9 +2276,20 @@ describe('Factory board route', () => {
     setTestAppDependencies({
       teamIssues: createTeamIssuesFake({
         ...base,
-        async getPublicWorkItemPage(_directoryId, _teamId, options) {
+        async getPublicWorkItemPage() {
+          throw new Error('The board must read started Work Items from the started index.')
+        },
+        async listStartedWorkItemIds(_directoryId, _teamId, options) {
           pageReads.push(options.limit)
-          return { issues: await Promise.all(workItems.slice(0, options.limit).map(toIssue)) }
+          // The fake cursor is the offset into the Team's started Work Items.
+          const offset = options.cursor === undefined ? 0 : Number(options.cursor)
+          const started = workItems.filter((workItem) => workItem.statusCategory === 'started')
+          const page = started.slice(offset, offset + options.limit)
+          const next = offset + page.length
+          return {
+            workItemIds: page.map((workItem) => workItem.id),
+            ...(next < started.length ? { nextCursor: String(next) } : {}),
+          }
         },
         async getTeamIssueDetail(directoryId, teamId, issueId, options) {
           const workItem = workItems.find((candidate) => candidate.id === issueId)
@@ -2518,9 +2529,9 @@ describe('Factory board route', () => {
     setTestAppDependencies({
       teamIssues: createTeamIssuesFake({
         ...base,
-        async getPublicWorkItemPage(directoryId, teamId, options) {
+        async listStartedWorkItemIds(directoryId, teamId, options) {
           pageLimits.push(options.limit)
-          const page = await base.getPublicWorkItemPage(directoryId, teamId, options)
+          const page = await base.listStartedWorkItemIds(directoryId, teamId, options)
           return { ...page, nextCursor: 'next' }
         },
       }),
@@ -2528,6 +2539,63 @@ describe('Factory board route', () => {
     const { body } = await readBoard()
     expect(body.startedWorkItemsHasMore).toBe(true)
     expect(pageLimits).toEqual([100, 100, 100])
+  })
+
+  test('continues every lane that reached its bound until all failures and started Work Items are shown', async () => {
+    const now = Date.now()
+    const failedItems: BoardWorkItem[] = Array.from({ length: 600 }, (_, index) => ({ id: `failed-${index}`, statusCategory: 'unstarted' }))
+    const startedItems: BoardWorkItem[] = Array.from({ length: 350 }, (_, index) => ({ id: `started-${index}`, statusCategory: 'started' }))
+    const { store } = configureBoard([...failedItems, ...startedItems])
+    for (let index = 0; index < 600; index += 1) {
+      store.seed(finishAgentRun(createRunAt(`failed-${index}`, new Date(now - 50 * hourMs)), 'failed', 'agent', new Date(now - 49 * hourMs)))
+    }
+    for (let index = 0; index < 350; index += 1) {
+      store.seed(finishAgentRun(createRunAt(`started-${index}`, new Date(now - 3 * hourMs)), 'paused', 'agent', new Date(now - 2 * hourMs)))
+    }
+    const first = await readBoard()
+    expect(first.body).toMatchObject({ finishedRunsHasMore: true, startedWorkItemsHasMore: true, activeRunsHasMore: false })
+    expect(first.body.continuation).toBeString()
+    // The token is sealed: none of its parts reveals a DynamoDB key, and a changed token is refused.
+    const token = first.body.continuation ?? ''
+    for (const part of token.split('.')) expect(Buffer.from(part, 'base64url').toString('utf8')).not.toContain('Partition')
+    const tampered = `${token.slice(0, -2)}${token.endsWith('AA') ? 'BB' : 'AA'}`
+    expect((await app.request(
+      `http://localhost/api/teams/core-team/agent-runs?continuation=${encodeURIComponent(tampered)}`,
+      { headers },
+    )).status).toBe(400)
+    const seen = new Set(first.body.items.map((item) => item.workItem.id))
+    let continuation = first.body.continuation
+    let pages = 1
+    while (continuation !== undefined) {
+      const response = await app.request(
+        `http://localhost/api/teams/core-team/agent-runs?continuation=${encodeURIComponent(continuation)}`,
+        { headers },
+      )
+      expect(response.status).toBe(200)
+      const body: TeamAgentRunBoardResponse = await response.json()
+      // A later page is evaluated at the first page's read time, so lanes and windows agree.
+      expect(body.generatedAt).toBe(first.body.generatedAt)
+      for (const item of body.items) seen.add(item.workItem.id)
+      continuation = body.continuation
+      pages += 1
+      expect(pages).toBeLessThan(5)
+    }
+    // 600 failed runs need a second page of the failed lane; 350 started Work Items a second page of their source.
+    expect(pages).toBe(2)
+    for (const item of [...failedItems, ...startedItems]) expect(seen.has(item.id)).toBe(true)
+  })
+
+  test('rejects a malformed, forged, or foreign board continuation', async () => {
+    configureBoard([])
+    const read = async (continuation: string) => (await app.request(
+      `http://localhost/api/teams/core-team/agent-runs?continuation=${encodeURIComponent(continuation)}`,
+      { headers },
+    )).status
+    expect(await read('not-a-token')).toBe(400)
+    // A readable token, as an earlier version issued, is refused: tokens are sealed by the server.
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
+    expect(await read(encode({ version: 1, since: new Date().toISOString(), failed: 'x' }))).toBe(400)
+    expect(await read(`b1.${'A'.repeat(16)}.${'A'.repeat(20)}.${'A'.repeat(22)}`)).toBe(400)
   })
 
   test('requires a session and a Team the caller can view', async () => {
@@ -2801,6 +2869,99 @@ describe('Factory board route', () => {
     expect(tooLong.status).toBe(400)
     expect(await tooLong.json()).toMatchObject({ code: 'validation_failed' })
     expect((await app.request(`http://localhost/api/teams/unknown-team/agent-runs/analytics${period}`, { headers })).status).toBe(404)
+  })
+
+  /**
+   * Reads the Run history of the last two days.
+   *
+   * @param now - End of the period in epoch milliseconds.
+   * @param filters - Extra query parameters.
+   * @returns Parsed response.
+   */
+  async function readHistory(now: number, filters: Record<string, string> = {}): Promise<TeamAgentRunHistoryResponse> {
+    const query = new URLSearchParams({ from: new Date(now - 48 * hourMs).toISOString(), to: new Date(now).toISOString(), ...filters })
+    const response = await app.request(`http://localhost/api/teams/core-team/agent-runs/history?${query}`, { headers })
+    expect(response.status).toBe(200)
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store')
+    return await response.json()
+  }
+
+  test('lists the runs that finished in the period on visible Work Items, newest first, with filters', async () => {
+    const now = Date.now()
+    const { store } = configureBoard([
+      { id: 'task-failed', statusCategory: 'started', assignedProjectId: 'refero' },
+      { id: 'task-done', statusCategory: 'completed' },
+      { id: 'task-hidden', statusCategory: 'completed', assignedProjectId: 'secret' },
+      { id: 'task-old', statusCategory: 'completed' },
+      { id: 'task-active', statusCategory: 'started' },
+    ])
+    const failed = finishAgentRun(createRunAt('task-failed', new Date(now - 10 * hourMs)), 'failed', 'agent', new Date(now - 9 * hourMs))
+    const done = { ...finishAgentRun(createRunAt('task-done', new Date(now - 4 * hourMs)), 'completed', 'agent', new Date(now - 3 * hourMs)), runtime: 'codex' as const }
+    store.seed(failed)
+    store.seed(done)
+    store.seed(finishAgentRun(createRunAt('task-hidden', new Date(now - 4 * hourMs)), 'completed', 'agent', new Date(now - 2 * hourMs)))
+    store.seed(finishAgentRun(createRunAt('task-old', new Date(now - 80 * hourMs)), 'failed', 'agent', new Date(now - 70 * hourMs)))
+    store.seed(createRunAt('task-active', new Date(now - hourMs)))
+
+    const all = await readHistory(now)
+    expect(all.runs.map((run) => [run.workItemId, run.outcome])).toEqual([['task-done', 'completed'], ['task-failed', 'failed']])
+    expect(all.runs[1]).toMatchObject({ runId: failed.runId, workItemTitle: 'Title of task-failed', projectId: 'refero', state: 'finished' })
+    expect(all.hasMore).toBe(false)
+    expect(JSON.stringify(all)).not.toContain('task-hidden')
+    expect(JSON.stringify(all)).not.toContain('cursor')
+
+    expect((await readHistory(now, { outcome: 'failed' })).runs.map((run) => run.runId)).toEqual([failed.runId])
+    expect((await readHistory(now, { runtime: 'codex' })).runs.map((run) => run.runId)).toEqual([done.runId])
+    expect((await readHistory(now, { projectId: 'refero' })).runs.map((run) => run.runId)).toEqual([failed.runId])
+    expect((await readHistory(now, { assigneeUserId: 'someone-else' })).runs).toEqual([])
+  })
+
+  test('bounds the runs it returns and says so', async () => {
+    const now = Date.now()
+    const workItems: BoardWorkItem[] = Array.from({ length: 201 }, (_, index) => ({ id: `task-${String(index).padStart(3, '0')}`, statusCategory: 'completed' }))
+    const { store } = configureBoard(workItems)
+    for (const workItem of workItems) {
+      store.seed(finishAgentRun(createRunAt(workItem.id, new Date(now - 2 * hourMs)), 'completed', 'agent', new Date(now - hourMs)))
+    }
+    const body = await readHistory(now)
+    expect(body.runs).toHaveLength(200)
+    expect(body.hasMore).toBe(true)
+  })
+
+  test('stops reading runs of a narrow filter at its read bound and says so', async () => {
+    const now = Date.now()
+    const { store } = configureBoard([{ id: 'task-match', statusCategory: 'completed' }, { id: 'task-other', statusCategory: 'completed' }])
+    store.seed(finishAgentRun(createRunAt('task-match', new Date(now - 47 * hourMs)), 'completed', 'agent', new Date(now - 46 * hourMs)))
+    for (let index = 0; index < 650; index += 1) {
+      store.seed(finishAgentRun(createRunAt('task-other', new Date(now - 2 * hourMs)), 'completed', 'agent', new Date(now - hourMs - index * 1_000)))
+    }
+    let reads = 0
+    const getRun = store.getRun.bind(store)
+    store.getRun = async (...args) => {
+      reads += 1
+      return getRun(...args)
+    }
+    const body = await readHistory(now, { runtime: 'codex' })
+    expect(body.runs).toEqual([])
+    expect(body.hasMore).toBe(true)
+    expect(reads).toBe(600)
+  })
+
+  test('validates the Run history request and requires a session and a Team the caller can view', async () => {
+    configureBoard([])
+    const path = 'http://localhost/api/teams/core-team/agent-runs/history'
+    const period = 'from=2026-10-01T00:00:00Z&to=2026-10-31T00:00:00Z'
+    expect((await app.request(`${path}?${period}`)).status).toBe(401)
+    expect((await app.request(`${path}?${period}`, { headers })).status).toBe(200)
+    expect((await app.request(`${path}?to=2026-10-31T00:00:00Z`, { headers })).status).toBe(400)
+    expect((await app.request(`${path}?from=2026-01-01T00:00:00Z&to=2026-10-31T00:00:00Z`, { headers })).status).toBe(400)
+    // A day that does not exist is refused instead of rolling into the next month; a leap day is accepted.
+    expect((await app.request(`${path}?from=2026-02-30T00:00:00Z&to=2026-03-10T00:00:00Z`, { headers })).status).toBe(400)
+    expect((await app.request(`${path}?from=2028-02-29T00:00:00Z&to=2028-03-10T00:00:00Z`, { headers })).status).toBe(200)
+    expect((await app.request(`${path}?${period}&outcome=exploded`, { headers })).status).toBe(400)
+    expect((await app.request(`${path}?${period}&runtime=cursor`, { headers })).status).toBe(400)
+    expect((await app.request(`${path}?${period}&assigneeUserId=${'x'.repeat(300)}`, { headers })).status).toBe(400)
+    expect((await app.request(`http://localhost/api/teams/unknown-team/agent-runs/history?${period}`, { headers })).status).toBe(404)
   })
 })
 

@@ -140,6 +140,12 @@ function createPlanningRevisionIncrementTransactionItem(
 }
 
 /** File proofing API が扱う安定 error です。 */
+/** Options of a file access request. */
+export type FileAccessOptions = {
+  /** Refuses the access with `409 FileVersionConflict` unless the version is the file's current version. */
+  requireCurrentVersion?: boolean
+}
+
 export class FileProofingError extends Error {
   /** HTTP response に対応する status code です。 */
   readonly status: number
@@ -804,6 +810,7 @@ export interface FileProofingClient {
     versionId: string,
     disposition: 'inline' | 'attachment',
     auditContext?: MutationAuditContext,
+    options?: FileAccessOptions,
   ): Promise<FileVersionAccess>
   /** Version の annotation 一覧を取得します。 */
   listAnnotations(
@@ -1598,6 +1605,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     versionId: string,
     requestedDisposition: 'inline' | 'attachment',
     auditContext?: MutationAuditContext,
+    options?: FileAccessOptions,
   ): Promise<FileVersionAccess> {
     await this.ensureReady()
     const scopeKey = createFileProofingScopeKey(scope)
@@ -1605,6 +1613,10 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     requireFileNotDeleted(file)
     requireFileRead(file, actor)
     const version = requireStoredVersion(file, versionId)
+    // The revision condition below keeps the current version unchanged until the access is recorded.
+    if (options?.requireCurrentVersion && file.currentVersionId !== versionId) {
+      throw new FileProofingError(409, 'FileVersionConflict', 'File access state changed. Reload and try again.')
+    }
     const objectVersionId = requireStoredObjectVersionId(version)
     requireAvailableScanStatus(version.scanStatus)
     const scanStatus = await this.objectClient.getScanStatus(
@@ -1662,6 +1674,13 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       const existing = await this.getItem<StoredDownloadItem>(scopeKey, history.recordKey)
       if (existing) {
         requireMatchingIdempotencyFingerprint(existing.requestFingerprint, auditContext)
+        // A replay must not hand out an older version once a caller asked for the current one only.
+        if (options?.requireCurrentVersion) {
+          const latest = await this.getFile(scopeKey, fileId)
+          if (latest.currentVersionId !== versionId) {
+            throw new FileProofingError(409, 'FileVersionConflict', 'File access state changed. Reload and try again.', { cause: error })
+          }
+        }
       } else {
         throw new FileProofingError(
           409,

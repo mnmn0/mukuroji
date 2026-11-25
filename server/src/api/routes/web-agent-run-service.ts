@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from 'node:crypto'
 import {
   FACTORY_BOARD_COMPLETED_WINDOW_HOURS,
   FACTORY_BOARD_MAX_ACTIVE_RUNS,
@@ -30,6 +30,7 @@ import {
   type AgentRunFinishedGroup,
   type StoredAgentRun,
 } from '../../modules/agent-runs'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { CognitoServiceError, isCognitoUserNotFoundError, type CognitoUserProfile } from '../../modules/authentication'
 import {
   createMutationAuditEventPut,
@@ -58,6 +59,7 @@ import {
 } from '../shared/project-access'
 import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from '../shared/work-item-access'
 import { readAgentRunUsage } from '../shared/agent-run-usage-access'
+import { isRecord } from '../shared/value-guards'
 import { readWorkspaceMemberNamesForDisplay, type TeamPermissionContext } from '../shared/workspace-access'
 
 /**
@@ -301,20 +303,164 @@ async function readBoardWorkItem(
   }
 }
 
+/** Where each board source continues on the next board page; absent sources are finished. */
+type FactoryBoardContinuation = {
+  /** Cursor of the active-run lease index. */
+  active?: string
+  /** Cursor of the finished-run index group of runs that did not fail. */
+  recent?: string
+  /** Cursor of the finished-run index group of failed runs. */
+  failed?: string
+  /** Cursor of the Team's started Work Item index. */
+  started?: string
+  /** Start of the completed-lane window the first page used, as an ISO time. */
+  since: string
+}
+
+/** Longest store cursor a board continuation may carry; store cursors are far shorter. */
+const boardContinuationCursorMaxLength = 2_048
+
+/** Source fields of {@link FactoryBoardContinuation}. */
+const boardContinuationSources = ['active', 'recent', 'failed', 'started'] as const
+
+/** Envelope version of a sealed board continuation; also bound into its authentication. */
+const boardContinuationEnvelope = 'b1'
+
+/** Label that derives the board continuation key from the server cursor secret. */
+const boardContinuationKeyLabel = 'mukuroji:factory-board-continuation:v1'
+
+/** Byte lengths of the AES-GCM nonce and tag of a sealed continuation. */
+const boardContinuationIvBytes = 12
+const boardContinuationTagBytes = 16
+
+/** Base64url text, the only alphabet of a sealed continuation part. */
+const base64UrlPattern = /^[A-Za-z0-9_-]+$/u
+
+/** Viewer and Team a board continuation is bound to. */
+type FactoryBoardContinuationScope = {
+  /** Workspace ID. */
+  directoryId: string
+  /** Team ID. */
+  teamId: string
+  /** Viewer the continuation was issued to. */
+  userKey: string
+}
+
+/** Key derived from the server cursor secret, resolved on first use. */
+let boardContinuationKey: Buffer | undefined
+
+/**
+ * Returns the AES-256-GCM key of board continuations.
+ *
+ * @returns 32-byte key used only for board continuations.
+ */
+function getBoardContinuationKey(): Buffer {
+  boardContinuationKey ??= createHmac('sha256', loadServerConfig().publicApiCursorSecret)
+    .update(boardContinuationKeyLabel)
+    .digest()
+  return boardContinuationKey
+}
+
+/**
+ * Builds the additional authenticated data that binds a continuation to its viewer and Team.
+ *
+ * @param scope - Viewer and Team.
+ * @returns Authenticated data.
+ */
+function boardContinuationAad(scope: FactoryBoardContinuationScope): Buffer {
+  return Buffer.from(JSON.stringify([boardContinuationEnvelope, scope.directoryId, scope.teamId, scope.userKey]), 'utf8')
+}
+
+/**
+ * Seals the sources left unread so the board can load the rest on request. The store cursors carry
+ * DynamoDB keys, and a page can stop on a Work Item the viewer cannot see, so the token is encrypted
+ * and authenticated for the viewer and Team: the client can neither read nor forge it.
+ *
+ * @param continuation - Sources to continue and the completed-lane window.
+ * @param scope - Viewer and Team the token is issued to.
+ * @returns Opaque token, or undefined when every source was read to its end.
+ */
+function encodeBoardContinuation(continuation: FactoryBoardContinuation, scope: FactoryBoardContinuationScope): string | undefined {
+  if (boardContinuationSources.every((source) => continuation[source] === undefined)) return undefined
+  const iv = randomBytes(boardContinuationIvBytes)
+  const cipher = createCipheriv('aes-256-gcm', getBoardContinuationKey(), iv, { authTagLength: boardContinuationTagBytes })
+  cipher.setAAD(boardContinuationAad(scope))
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify({ version: 1, ...continuation }), 'utf8'), cipher.final()])
+  return [boardContinuationEnvelope, iv.toString('base64url'), ciphertext.toString('base64url'), cipher.getAuthTag().toString('base64url')].join('.')
+}
+
+/**
+ * Opens a sealed board continuation token.
+ *
+ * @param value - Token from the query string.
+ * @param scope - Viewer and Team of the request.
+ * @returns The token's plaintext.
+ * @throws Error when the token is malformed, tampered with, or issued to another viewer or Team.
+ */
+function openBoardContinuation(value: string, scope: FactoryBoardContinuationScope): unknown {
+  const parts = value.split('.')
+  if (parts.length !== 4 || parts[0] !== boardContinuationEnvelope || !parts.slice(1).every((part) => base64UrlPattern.test(part))) {
+    throw new TypeError('Unsupported continuation envelope.')
+  }
+  const [, ivText = '', ciphertextText = '', tagText = ''] = parts
+  const iv = Buffer.from(ivText, 'base64url')
+  const tag = Buffer.from(tagText, 'base64url')
+  if (iv.length !== boardContinuationIvBytes || tag.length !== boardContinuationTagBytes) throw new TypeError('Malformed continuation.')
+  const decipher = createDecipheriv('aes-256-gcm', getBoardContinuationKey(), iv, { authTagLength: boardContinuationTagBytes })
+  decipher.setAAD(boardContinuationAad(scope))
+  decipher.setAuthTag(tag)
+  const plaintext = Buffer.concat([decipher.update(Buffer.from(ciphertextText, 'base64url')), decipher.final()])
+  return JSON.parse(plaintext.toString('utf8'))
+}
+
+/**
+ * Validates a client-supplied board continuation token for the requesting viewer and Team.
+ *
+ * @param value - Token from the query string.
+ * @param principal - Viewer.
+ * @param teamId - Team of the request.
+ * @returns Decoded continuation.
+ * @throws AgentRunError when the token is malformed, tampered with, or issued for another viewer or Team.
+ */
+export function readFactoryBoardContinuation(value: string, principal: WorkspacePrincipal, teamId: string): FactoryBoardContinuation {
+  const invalid = () => new AgentRunError('validation_failed', 'The board continuation is invalid.', { pointer: '/continuation' })
+  if (value.length > boardContinuationCursorMaxLength * boardContinuationSources.length * 2) throw invalid()
+  let parsed: unknown
+  try {
+    parsed = openBoardContinuation(value, { directoryId: principal.directoryId, teamId, userKey: principal.userKey })
+  } catch {
+    throw invalid()
+  }
+  if (!isRecord(parsed) || parsed.version !== 1 || typeof parsed.since !== 'string' || !Number.isFinite(Date.parse(parsed.since))) {
+    throw invalid()
+  }
+  const continuation: FactoryBoardContinuation = { since: new Date(parsed.since).toISOString() }
+  for (const source of boardContinuationSources) {
+    const cursor = parsed[source]
+    if (cursor === undefined) continue
+    if (typeof cursor !== 'string' || cursor === '' || cursor.length > boardContinuationCursorMaxLength) throw invalid()
+    continuation[source] = cursor
+  }
+  if (boardContinuationSources.every((source) => continuation[source] === undefined)) throw invalid()
+  return continuation
+}
+
 /**
  * Reads a Team's active runs again from the run rows, because the lease index can still show a run
  * that just finished. Two active runs on one Work Item break the claim invariant and fail closed.
  *
  * @param principal - Viewer.
  * @param teamId - Team ID.
- * @returns Active runs by Work Item ID, in lease order, and whether more active runs exist.
+ * @param cursor - Where the previous board page stopped, or undefined for the first page.
+ * @returns Active runs by Work Item ID, in lease order, and the cursor of the runs left unread.
  */
 async function readBoardActiveRuns(
   principal: WorkspacePrincipal,
   teamId: string,
-): Promise<{ runs: Map<string, StoredAgentRun>; hasMore: boolean }> {
+  cursor: string | undefined,
+): Promise<{ runs: Map<string, StoredAgentRun>; nextCursor?: string }> {
   const store = workItemDependencies.agentRuns
-  const page = await store.listActiveRuns(principal.directoryId, teamId, undefined, FACTORY_BOARD_MAX_ACTIVE_RUNS)
+  const page = await store.listActiveRuns(principal.directoryId, teamId, cursor, FACTORY_BOARD_MAX_ACTIVE_RUNS)
   const current = await mapInOrderWithConcurrency(page.runs, boardReadConcurrency, async (indexed) => {
     const run = await store.getRun(principal.directoryId, teamId, indexed.runId)
     if (run && run.workItemId !== indexed.workItemId) throw createAgentRunIntegrityError()
@@ -326,52 +472,33 @@ async function readBoardActiveRuns(
     if (runs.has(run.workItemId)) throw createAgentRunIntegrityError()
     runs.set(run.workItemId, run)
   }
-  return { runs, hasMore: page.nextCursor !== undefined }
+  return { runs, ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) }
 }
 
 /**
- * Collects the Work Items of runs that finished within the completed-lane window, and of every failed
- * run, which stays on the board without a time limit. The board then shows each Work Item by its
- * newest run. Both come from the finished-run index, newest finish first, so the Team's older
- * finished runs are never read; each group stops after
- * {@link FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS} runs.
- *
- * @param principal - Viewer.
- * @param teamId - Team ID.
- * @param now - Board read time.
- * @returns Work Item IDs and whether either group was left partly unread.
- */
-async function readRecentlyFinishedWorkItemIds(
-  principal: WorkspacePrincipal,
-  teamId: string,
-  now: Date,
-): Promise<{ workItemIds: string[]; hasMore: boolean }> {
-  const since = new Date(now.getTime() - FACTORY_BOARD_COMPLETED_WINDOW_HOURS * millisecondsPerHour).toISOString()
-  const [recent, failed] = await Promise.all([
-    readFinishedRunWorkItemIds(principal, teamId, 'other', since),
-    readFinishedRunWorkItemIds(principal, teamId, 'failed', undefined),
-  ])
-  return { workItemIds: [...new Set([...recent.workItemIds, ...failed.workItemIds])], hasMore: recent.hasMore || failed.hasMore }
-}
-
-/**
- * Reads one group of the finished-run index up to the board bound.
+ * Reads one group of the finished-run index up to the board bound. The completed lane reads the
+ * runs that finished within its window, and the failed lane reads every failed run, which stays on
+ * the board without a time limit; the board then shows each Work Item by its newest run. Both come
+ * from the finished-run index, newest finish first, so the Team's older finished runs are never
+ * read.
  *
  * @param principal - Viewer.
  * @param teamId - Team ID.
  * @param group - Failed runs or the other finished runs.
  * @param since - When given, only runs that finished at or after this ISO time.
- * @returns Work Item IDs and whether the group was left partly unread.
+ * @param startCursor - Where the previous board page stopped, or undefined for the first page.
+ * @returns Work Item IDs and the cursor of the runs left unread.
  */
 async function readFinishedRunWorkItemIds(
   principal: WorkspacePrincipal,
   teamId: string,
   group: AgentRunFinishedGroup,
   since: string | undefined,
-): Promise<{ workItemIds: string[]; hasMore: boolean }> {
+  startCursor: string | undefined,
+): Promise<{ workItemIds: string[]; nextCursor?: string }> {
   const workItemIds = new Set<string>()
   let evaluated = 0
-  let cursor: string | undefined
+  let cursor = startCursor
   do {
     const limit = Math.min(boardPageSize, FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS - evaluated)
     const page = await workItemDependencies.agentRuns.listFinishedRunsByTime(principal.directoryId, teamId, group, since, cursor, limit)
@@ -379,41 +506,38 @@ async function readFinishedRunWorkItemIds(
     for (const run of page.runs) workItemIds.add(run.workItemId)
     cursor = page.nextCursor
   } while (cursor !== undefined && evaluated < FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS)
-  return { workItemIds: [...workItemIds], hasMore: cursor !== undefined }
+  return { workItemIds: [...workItemIds], ...(cursor === undefined ? {} : { nextCursor: cursor }) }
 }
 
 /**
- * Collects the `started` Work Items the viewer can see among the most recently updated ones. The
- * board reads each of them again strongly before it shows them.
+ * Collects the Team's `started` Work Items from the sparse started index, most recently updated
+ * first, so Work Items in other status categories never use up the bound (ADR 0098). The board
+ * reads each of them again strongly and checks the viewer's Project access before it shows them.
  *
  * @param principal - Viewer.
- * @param permission - Viewer's Team permission context.
  * @param teamId - Team ID.
- * @returns Work Item IDs and whether Work Items were left unread.
+ * @param startCursor - Where the previous board page stopped, or undefined for the first page.
+ * @returns Work Item IDs and the cursor of the Work Items left unread.
  */
 async function readStartedWorkItemIds(
   principal: WorkspacePrincipal,
-  permission: TeamPermissionContext,
   teamId: string,
-): Promise<{ workItemIds: string[]; hasMore: boolean }> {
+  startCursor: string | undefined,
+): Promise<{ workItemIds: string[]; nextCursor?: string }> {
   const workItemIds: string[] = []
   let evaluated = 0
-  let cursor: string | undefined
+  let cursor = startCursor
   do {
     const limit = Math.min(boardPageSize, FACTORY_BOARD_MAX_EVALUATED_WORK_ITEMS - evaluated)
-    const page = await workItemDependencies.teamIssues.getPublicWorkItemPage(principal.directoryId, teamId, {
+    const page = await workItemDependencies.teamIssues.listStartedWorkItemIds(principal.directoryId, teamId, {
       limit,
       ...(cursor === undefined ? {} : { cursor }),
     })
     evaluated += limit
-    for (const issue of page.issues) {
-      if (issue.statusCategory === 'started' && canAccessAssignedProject(principal, permission, issue.assignedProjectId, 'viewer')) {
-        workItemIds.push(issue.id)
-      }
-    }
+    workItemIds.push(...page.workItemIds)
     cursor = page.nextCursor
   } while (cursor !== undefined && evaluated < FACTORY_BOARD_MAX_EVALUATED_WORK_ITEMS)
-  return { workItemIds, hasMore: cursor !== undefined }
+  return { workItemIds, ...(cursor === undefined ? {} : { nextCursor: cursor }) }
 }
 
 /**
@@ -544,31 +668,58 @@ async function readBoardWorkspaceNames(
 
 /**
  * Lists the Factory board of a Team for anyone who can view the Team: the Work Items of active runs,
- * of runs that finished within the completed-lane window, and the `started` Work Items among the most
- * recently updated ones, each with its active or newest run and that run's latest report. Only Work
- * Items the viewer can see and that belong to a lane are returned. Every source is read up to a fixed
- * bound and reports whether it stopped early; store cursors never leave the server.
+ * of runs that finished within the completed-lane window, of failed runs, and the `started` Work
+ * Items, each with its active or newest run and that run's latest report. Only Work Items the
+ * viewer can see and that belong to a lane are returned. Every source is read up to a fixed bound;
+ * a source that stopped early sets its `...HasMore` flag and continues from the returned
+ * `continuation` token on the next request, which reads only the sources left unread.
  *
  * @param principal - Viewer.
  * @param teamId - Team ID.
  * @param correlationId - Correlation ID of the request, logged with a failed profile lookup.
- * @returns Board items and the bounds that were reached.
+ * @param continuation - Sources to continue from a previous page, or undefined for the first page.
+ * @returns Board items, the bounds that were reached, and the token of the next page.
  */
 export async function listWebTeamAgentRunBoard(
   principal: WorkspacePrincipal,
   teamId: string,
   correlationId?: string,
+  continuation?: FactoryBoardContinuation,
 ): Promise<TeamAgentRunBoardResponse> {
   const permission = await requireTeamPermission(principal, teamId, 'viewer')
-  const now = new Date()
-  const [active, finished, started, manager, writable] = await Promise.all([
-    readBoardActiveRuns(principal, teamId),
-    readRecentlyFinishedWorkItemIds(principal, teamId, now),
-    readStartedWorkItemIds(principal, permission, teamId),
+  const completedWindow = FACTORY_BOARD_COMPLETED_WINDOW_HOURS * millisecondsPerHour
+  // Every page of one board is evaluated at the first page's read time: the completed-lane window
+  // starts where the first page started it, and lanes and stalled leases use the same time, so a
+  // later page neither drops a run the first page's window holds nor classifies it differently.
+  const now = continuation === undefined ? new Date() : new Date(Date.parse(continuation.since) + completedWindow)
+  const since = continuation?.since ?? new Date(now.getTime() - completedWindow).toISOString()
+  const empty: { workItemIds: string[]; nextCursor?: string } = { workItemIds: [] }
+  const noActiveRuns: { runs: Map<string, StoredAgentRun>; nextCursor?: string } = { runs: new Map() }
+  const [active, recent, failed, started, manager, writable] = await Promise.all([
+    continuation === undefined || continuation.active !== undefined
+      ? readBoardActiveRuns(principal, teamId, continuation?.active)
+      : noActiveRuns,
+    continuation === undefined || continuation.recent !== undefined
+      ? readFinishedRunWorkItemIds(principal, teamId, 'other', since, continuation?.recent)
+      : empty,
+    continuation === undefined || continuation.failed !== undefined
+      ? readFinishedRunWorkItemIds(principal, teamId, 'failed', undefined, continuation?.failed)
+      : empty,
+    continuation === undefined || continuation.started !== undefined
+      ? readStartedWorkItemIds(principal, teamId, continuation?.started)
+      : empty,
     isTeamManager(principal, teamId),
     canWriteTeamForRelease(principal, teamId),
   ])
   const credentialNames = await readCredentialNamesForManager(manager, principal.directoryId)
+  const finished = { workItemIds: [...new Set([...recent.workItemIds, ...failed.workItemIds])] }
+  const nextContinuation = encodeBoardContinuation({
+    since,
+    ...(active.nextCursor !== undefined ? { active: active.nextCursor } : {}),
+    ...(recent.nextCursor !== undefined ? { recent: recent.nextCursor } : {}),
+    ...(failed.nextCursor !== undefined ? { failed: failed.nextCursor } : {}),
+    ...(started.nextCursor !== undefined ? { started: started.nextCursor } : {}),
+  }, { directoryId: principal.directoryId, teamId, userKey: principal.userKey })
   const workItemIds = [...new Set([...active.runs.keys(), ...finished.workItemIds, ...started.workItemIds])]
   const store = workItemDependencies.agentRuns
   const items = await mapInOrderWithConcurrency(workItemIds, boardReadConcurrency, async (workItemId) => {
@@ -624,9 +775,11 @@ export async function listWebTeamAgentRunBoard(
         },
       }
     }),
-    activeRunsHasMore: active.hasMore,
-    finishedRunsHasMore: finished.hasMore,
-    startedWorkItemsHasMore: started.hasMore,
+    activeRunsHasMore: active.nextCursor !== undefined,
+    finishedRunsHasMore: (recent.nextCursor !== undefined) ||
+      (failed.nextCursor !== undefined),
+    startedWorkItemsHasMore: started.nextCursor !== undefined,
+    ...(nextContinuation === undefined ? {} : { continuation: nextContinuation }),
   }
 }
 
