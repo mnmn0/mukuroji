@@ -138,7 +138,9 @@ transaction で参加者 row と marker を書き足します。どちらも pag
 同じ Document の別の comment が先に保存されて comment window の条件に負けた返信は、参加者を読み直して
 参加者 row と通知先を作り直してから再試行するので、同時に初めて返信した member にも通知が届きます。
 既存の thread は data migration `0002-document-comment-participant-index` で参加者 row と marker を
-一括で作れます。migration の間は comment の作成を止めます（[data-migration.md](data-migration.md)）。Comment の作成者は自分の
+一括で作れます。migration の間は comment の作成を止めます（[data-migration.md](data-migration.md)）。comment row の編集・削除・resolve は、row の単調増加の `revision` を 1 つ上げ、読んだ `revision` と
+`updatedAt` を条件に書くので、同じミリ秒に commit された別の書き込みも上書きせず 409 で断ります
+（`revision` のない古い row は revision 0 として扱います。ADR 0092）。Comment の作成者は自分の
 comment の本文と mention を編集（`editedAt` を記録し、新しく mention された member にだけ通知）
 し、削除できます。編集の画面は保存済みの mention を候補から選んだ扱いにせず、編集で変わらなかった
 部分にある mention はその位置の member のまま保ちます。そのため保存後に member の名前が入れ替わっても、

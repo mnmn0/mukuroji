@@ -1734,26 +1734,26 @@ function safeSvgColor(value: string | undefined, fallback: string): string {
 }
 
 /**
- * Escapes Markdown punctuation in plain text.
- *
- * @param value - Plain text to escape.
- * @returns Escaped Markdown text.
- */
-function escapeMarkdownText(value: string): string {
-  return value.replace(/([\\`*_[\]<>])/gu, '\\$1')
-}
-
-/**
  * Escapes the text of a block the page shows as written, such as a checklist item or an embed
  * title, so the Markdown renders those same characters: a character reference or a strikethrough
  * would otherwise render differently, and the import would keep the block as a paragraph.
  *
  * @param value - Text the page shows.
+ * @param special - Characters to escape.
  * @returns Escaped Markdown text.
  */
-function escapeMarkdownNativeText(value: string): string {
-  return escapeMarkdownText(value).replace(/[&~]/gu, '\\$&')
+function escapeMarkdownNativeText(value: string, special: RegExp = MARKDOWN_NATIVE_TEXT_SPECIAL): string {
+  return value.replace(special, '\\$&')
 }
+
+/**
+ * Characters escaped in text a block shows as written. The backslash is among them, so one pass
+ * escapes it together with the rest and an escape the text holds is written as text.
+ */
+const MARKDOWN_NATIVE_TEXT_SPECIAL = /[\\`*_[\]<>&~]/gu
+
+/** Characters escaped in a table cell: those of {@link MARKDOWN_NATIVE_TEXT_SPECIAL} and the cell separator. */
+const MARKDOWN_TABLE_CELL_SPECIAL = /[\\`*_[\]<>&~|]/gu
 
 /**
  * Escapes the text of a heading, which the page shows as written. A closing run of `#` would
@@ -1763,7 +1763,11 @@ function escapeMarkdownNativeText(value: string): string {
  * @returns Escaped Markdown text for after the heading's `#` marker.
  */
 function escapeMarkdownHeadingText(value: string): string {
-  return escapeMarkdownNativeText(value).replace(/(^|[ \t])#(?=#*[ \t]*$)/u, '$1\\#')
+  // The first `#` of a closing run is written escaped; the text on both sides is escaped apart.
+  const closing = /(?:^|[ \t])(#+)[ \t]*$/u.exec(value)
+  if (closing?.[1] === undefined) return escapeMarkdownNativeText(value)
+  const hash = closing.index + closing[0].length - closing[0].trimStart().length
+  return `${escapeMarkdownNativeText(value.slice(0, hash))}\\#${escapeMarkdownNativeText(value.slice(hash + 1))}`
 }
 
 /**
@@ -1772,13 +1776,14 @@ function escapeMarkdownHeadingText(value: string): string {
  * links too, and the rest is escaped.
  *
  * @param value - Stored text.
+ * @param special - Characters to escape in the text and the link labels.
  * @returns Markdown text.
  */
-function renderMarkdownLinkedText(value: string): string {
+function renderMarkdownLinkedText(value: string, special: RegExp = MARKDOWN_NATIVE_TEXT_SPECIAL): string {
   return splitDocumentPageLinks(value)
     .map((segment) => segment.type === 'text'
-      ? escapeMarkdownNativeText(segment.text)
-      : `[${escapeMarkdownNativeText(segment.label)}](${segment.href})`)
+      ? escapeMarkdownNativeText(segment.text, special)
+      : `[${escapeMarkdownNativeText(segment.label, special)}](${segment.href})`)
     .join('')
 }
 
@@ -1964,8 +1969,9 @@ function joinMarkdownBlocks(
  * @returns Escaped plain text.
  */
 function renderPlainMarkdownParagraph(text: string): string {
-  return escapeMarkdownText(text)
-    .replaceAll('~', '\\~')
+  // Backslashes are escaped in the same pass as the other characters.
+  return text
+    .replace(/[\\`*_[\]<>~]/gu, '\\$&')
     .replace(/^[ \t]+/u, (indent) => indent.replaceAll(' ', '&#32;').replaceAll('\t', '&#9;'))
 }
 
@@ -2040,7 +2046,7 @@ function escapeRawHtmlStarts(text: string): string {
  * @returns Escaped table-cell text.
  */
 function escapeMarkdownTableCell(value: string): string {
-  return renderMarkdownLinkedText(value).replaceAll('|', '\\|').replace(/\r?\n/gu, '<br>')
+  return renderMarkdownLinkedText(value, MARKDOWN_TABLE_CELL_SPECIAL).replace(/\r?\n/gu, '<br>')
 }
 
 /**

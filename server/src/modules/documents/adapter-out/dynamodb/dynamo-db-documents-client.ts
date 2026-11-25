@@ -624,6 +624,12 @@ type StoredDocumentCommentItem = StoredDocumentComment & {
   recordKey: string
   /** Row discriminator です。 */
   entryType: 'document-comment'
+  /**
+   * Monotonic revision of the row, raised by every edit, delete, and resolve and checked by
+   * each of them, so two writes in the same millisecond still conflict. Rows written before it
+   * existed have none and count as revision 0 until their next write.
+   */
+  revision?: number
 }
 
 /**
@@ -3325,6 +3331,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       workspaceId: input.workspaceId,
       recordKey: commentKey(input.documentId, now, id),
       entryType: 'document-comment',
+      revision: 1,
     }
     const receipt: StoredDocumentCommentReceiptItem = {
       workspaceId: input.workspaceId,
@@ -3769,6 +3776,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     const now = this.now().toISOString()
     const next: StoredDocumentCommentItem = {
       ...stored,
+      revision: nextCommentRevision(stored),
       resolved: input.resolved,
       updatedAt: now,
       ...(input.resolved
@@ -3792,22 +3800,10 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         Put: {
           TableName: this.tableName,
           Item: next,
-          // The row is written whole, so an edit or delete that committed with the same
-          // timestamp must also fail the condition instead of being undone.
-          ...(stored.deletedAt === undefined
-            ? {
-                ConditionExpression: 'updatedAt = :updatedAt AND body = :body AND attribute_not_exists(deletedAt)',
-                ExpressionAttributeValues: {
-                  ':updatedAt': stored.updatedAt,
-                  ':body': stored.body,
-                },
-              }
-            : {
-                ConditionExpression: 'updatedAt = :updatedAt',
-                ExpressionAttributeValues: {
-                  ':updatedAt': stored.updatedAt,
-                },
-              }),
+          // The row is written whole, so any write that committed since it was read, even in
+          // the same millisecond, must fail the condition instead of being undone. A deleted
+          // root can still be resolved.
+          ...commentRevisionCondition(stored, true),
         },
       },
       ...authorizationGuardConditionChecks(
@@ -3983,7 +3979,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       throw new DocumentError(409, 'DocumentCommentDeleted', 'The comment was deleted.')
     }
     const now = this.now().toISOString()
-    const next = change(stored, now)
+    const next: StoredDocumentCommentItem = { ...change(stored, now), revision: nextCommentRevision(stored) }
     const notificationCandidates = notify(stored)
     const deepLink =
       `/documents/${encodeURIComponent(input.documentId)}` +
@@ -3999,7 +3995,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       ? undefined
       : deriveMutationAuditPartContext(
           input.auditContext,
-          `document-comment-${action}:${input.documentId}:${stored.id}:${stored.updatedAt}`,
+          `document-comment-${action}:${input.documentId}:${stored.id}:${stored.updatedAt}:${stored.revision ?? 0}`,
         )
     const auditPut = createMutationAuditEventPut(
       this.auditTableName,
@@ -4053,12 +4049,8 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         Put: {
           TableName: this.tableName,
           Item: next,
-          // A resolve that committed with the same timestamp must also fail the condition.
-          ConditionExpression: 'updatedAt = :updatedAt AND resolved = :resolved AND attribute_not_exists(deletedAt)',
-          ExpressionAttributeValues: {
-            ':updatedAt': stored.updatedAt,
-            ':resolved': stored.resolved,
-          },
+          // Any write that committed since the read, even in the same millisecond, fails it.
+          ...commentRevisionCondition(stored, false),
         },
       },
       ...(idempotency === undefined
@@ -6479,6 +6471,10 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         'DocumentCommentNotFound',
         'Document comment was not found.',
       )
+    }
+    const revision: unknown = result.Item.revision
+    if (revision !== undefined && (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1)) {
+      throw invalidStoredDocumentData()
     }
     return result.Item as StoredDocumentCommentItem
   }
@@ -9446,11 +9442,47 @@ function isObjectLike(value: unknown): boolean {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * Gives the revision a comment row gets on its next write.
+ *
+ * @param stored - Comment row as read.
+ * @returns One more than its revision; a row without one counts as revision 0.
+ */
+function nextCommentRevision(stored: StoredDocumentCommentItem): number {
+  return (stored.revision ?? 0) + 1
+}
+
+/**
+ * Builds the condition that a comment row is still the one read, checked by every write of it.
+ *
+ * The revision tells writes apart even within one millisecond; a row without one must still have
+ * none. The update time is checked as well, for a write by a server version that does not raise
+ * the revision yet.
+ *
+ * @param stored - Comment row as read.
+ * @param allowDeleted - Whether the row may already be deleted, as when a deleted root is resolved.
+ * @returns The condition expression and its values.
+ */
+function commentRevisionCondition(
+  stored: StoredDocumentCommentItem,
+  allowDeleted: boolean,
+): { ConditionExpression: string; ExpressionAttributeValues: Record<string, unknown> } {
+  const revision = stored.revision === undefined ? 'attribute_not_exists(revision)' : 'revision = :expectedRevision'
+  return {
+    ConditionExpression: `${revision} AND updatedAt = :updatedAt${allowDeleted ? '' : ' AND attribute_not_exists(deletedAt)'}`,
+    ExpressionAttributeValues: {
+      ':updatedAt': stored.updatedAt,
+      ...(stored.revision === undefined ? {} : { ':expectedRevision': stored.revision }),
+    },
+  }
+}
+
 function stripCommentStorageFields(item: Record<string, unknown>): StoredDocumentComment {
   const {
     workspaceId: _workspaceId,
     recordKey: _recordKey,
     entryType: _entryType,
+    revision: _revision,
     ...comment
   } = item
   return comment as StoredDocumentComment

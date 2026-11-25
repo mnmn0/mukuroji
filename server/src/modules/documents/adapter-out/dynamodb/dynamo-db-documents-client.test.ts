@@ -5195,12 +5195,16 @@ test('does not let a resolve and an edit or delete with the same timestamp undo 
   }
   /**
    * Commits a change to the comment row with the timestamp it already has, as a concurrent
-   * writer whose clock reads the same millisecond does, right before the next transaction.
+   * writer whose clock reads the same millisecond does, right before the next transaction. Like
+   * every comment write, it raises the revision.
    *
    * @param change - Fields the concurrent writer sets.
    */
   const concurrently = (change: Record<string, unknown>) => {
-    memory.beforeTransaction(() => memory.put({ ...commentRow(), ...change }))
+    memory.beforeTransaction(() => {
+      const row = commentRow()
+      memory.put({ ...row, ...change, revision: Number(row.revision ?? 0) + 1 })
+    })
   }
   const resolve = () => client.resolveComment({
     workspaceId: 'workspace-1',
@@ -5229,6 +5233,82 @@ test('does not let a resolve and an edit or delete with the same timestamp undo 
     mentions: [],
   })).rejects.toMatchObject({ status: 409, code: 'DocumentCommentConflict' })
   expect(commentRow()).toMatchObject({ body: 'Edited', resolved: true })
+})
+
+test('does not let two edits of a comment in the same millisecond overwrite each other', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory, () => new Date('2026-07-18T00:00:00.000Z'))
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Same millisecond edits',
+    blocks: [],
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Original',
+    mentions: [],
+    commentId: 'root',
+  })
+  /**
+   * Reads the stored row of the root comment.
+   *
+   * @returns The row.
+   */
+  const commentRow = () => {
+    const row = memory.items().find((item) => item.entryType === 'document-comment' && item.id === 'root')
+    if (row === undefined) throw new Error('The comment row should exist.')
+    return row
+  }
+  /**
+   * Edits the root comment.
+   *
+   * @param body - New body.
+   * @returns The edited comment.
+   */
+  const edit = (body: string) => client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'root',
+    access: ownerAccess,
+    body,
+    mentions: [],
+  })
+  expect(commentRow()).toMatchObject({ revision: 1 })
+
+  // Edits one after another in the same millisecond each raise the revision, and the response
+  // keeps the revision to the server.
+  const first = await edit('First')
+  expect(first).not.toHaveProperty('revision')
+  await edit('Second')
+  expect(commentRow()).toMatchObject({ body: 'Second', revision: 3 })
+
+  // Another edit commits between this edit's read and write, with the same timestamp.
+  memory.beforeTransaction(() => {
+    memory.put({ ...commentRow(), body: 'Concurrent', revision: Number(commentRow().revision) + 1 })
+  })
+  await expect(edit('Late')).rejects.toMatchObject({ status: 409, code: 'DocumentCommentConflict' })
+  expect(commentRow()).toMatchObject({ body: 'Concurrent', revision: 4 })
+
+  // A row stored before revisions existed is edited as revision 0, and an edit that gave it a
+  // revision in the meantime is a conflict.
+  const { revision: _revision, ...legacy } = commentRow()
+  memory.put(legacy)
+  memory.beforeTransaction(() => {
+    memory.put({ ...commentRow(), body: 'Concurrent on legacy', revision: 1 })
+  })
+  await expect(edit('Late on legacy')).rejects.toMatchObject({ status: 409, code: 'DocumentCommentConflict' })
+  memory.put(legacy)
+  await edit('Legacy edited')
+  expect(commentRow()).toMatchObject({ body: 'Legacy edited', revision: 1 })
+
+  // A malformed revision is refused instead of being written over.
+  memory.put({ ...commentRow(), revision: 'x' })
+  await expect(edit('Broken')).rejects.toMatchObject({ code: 'InvalidStoredDocumentData' })
 })
 
 test('names a keyed comment edit audit event by the change, so the key can change another Document or a later version', async () => {
@@ -6460,14 +6540,14 @@ test('writes native blocks so that their Markdown renders the text the page show
   const page = createPage({
     title: 'Plan #',
     blocks: [
-      { id: 'block-1', type: 'heading', level: 1, text: 'Price &amp; ~~sale~~ for C# a #' },
+      { id: 'block-1', type: 'heading', level: 1, text: 'Price &amp; ~~sale~~ for C# a\\b #' },
       {
         id: 'block-2',
         type: 'checklist',
         items: [
           { id: 'item-1', text: 'Read [Setup](/documents/doc-1) first', checked: false },
           { id: 'item-2', text: 'See https://example.com/x', checked: true },
-          { id: 'item-3', text: '**not bold** & `not code` <b>', checked: false },
+          { id: 'item-3', text: '**not bold** & `not code` <b> C:\\dir\\', checked: false },
         ],
       },
       {
@@ -6482,7 +6562,7 @@ test('writes native blocks so that their Markdown renders the text the page show
               { id: 'cell-2', text: 'line\nbreak' },
             ],
           },
-          { id: 'row-2', cells: [{ id: 'cell-3', text: '~x~' }, { id: 'cell-4', text: '' }] },
+          { id: 'row-2', cells: [{ id: 'cell-3', text: '~x~' }, { id: 'cell-4', text: 'a\\b|c' }] },
         ],
       },
       { id: 'block-4', type: 'embed', url: 'https://example.com/g', title: 'Guide &amp; ~more~' },
@@ -6495,17 +6575,17 @@ test('writes native blocks so that their Markdown renders the text the page show
 /** Markdown export of the native blocks above; the web import test reads it too. */
 const NATIVE_BLOCK_EXPORT = [
   '# Plan \\#',
-  '## Price \\&amp; \\~\\~sale\\~\\~ for C# a \\#',
+  '## Price \\&amp; \\~\\~sale\\~\\~ for C# a\\\\b \\#',
   [
     '- [ ] Read [Setup](/documents/doc-1) first',
     '- [x] See https://example.com/x',
-    '- [ ] \\*\\*not bold\\*\\* \\& \\`not code\\` \\<b\\>',
+    '- [ ] \\*\\*not bold\\*\\* \\& \\`not code\\` \\<b\\> C:\\\\dir\\\\',
   ].join('\n'),
   [
     '| A | B \\| C |',
     '| --- | --- |',
     '| [Setup](/documents/doc-1) | line<br>break |',
-    '| \\~x\\~ |  |',
+    '| \\~x\\~ | a\\\\b\\|c |',
   ].join('\n'),
   '[Guide \\&amp; \\~more\\~](https://example.com/g)',
 ].join('\n\n') + '\n'
@@ -8840,18 +8920,14 @@ function matchesCondition(
     return current?.revision ===
       values[':expectedDocumentAuthorizationRevision']
   }
-  if (condition === 'updatedAt = :updatedAt') {
-    return current?.updatedAt === values[':updatedAt']
-  }
-  if (condition === 'updatedAt = :updatedAt AND resolved = :resolved AND attribute_not_exists(deletedAt)') {
-    return current?.updatedAt === values[':updatedAt'] &&
-      current?.resolved === values[':resolved'] &&
-      current?.deletedAt === undefined
-  }
-  if (condition === 'updatedAt = :updatedAt AND body = :body AND attribute_not_exists(deletedAt)') {
-    return current?.updatedAt === values[':updatedAt'] &&
-      current?.body === values[':body'] &&
-      current?.deletedAt === undefined
+  const commentRevision = /^(attribute_not_exists\(revision\)|revision = :expectedRevision) AND updatedAt = :updatedAt( AND attribute_not_exists\(deletedAt\))?$/u.exec(condition)
+  if (commentRevision) {
+    const revisionMatches = commentRevision[1] === 'attribute_not_exists(revision)'
+      ? current?.revision === undefined
+      : current?.revision === values[':expectedRevision']
+    return revisionMatches &&
+      current?.updatedAt === values[':updatedAt'] &&
+      (commentRevision[2] === undefined || current?.deletedAt === undefined)
   }
   if (condition === 'preferenceRevision = :expectedPreferenceRevision') {
     return (

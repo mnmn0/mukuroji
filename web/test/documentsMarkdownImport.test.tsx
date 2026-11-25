@@ -564,17 +564,17 @@ describe('Markdown import of a file whose blocks reference each other', () => {
     // server/src/modules/documents/adapter-out/dynamodb/dynamo-db-documents-client.test.ts).
     const exported = [
       '# Plan \\#',
-      '## Price \\&amp; \\~\\~sale\\~\\~ for C# a \\#',
+      '## Price \\&amp; \\~\\~sale\\~\\~ for C# a\\\\b \\#',
       [
         '- [ ] Read [Setup](/documents/doc-1) first',
         '- [x] See https://example.com/x',
-        '- [ ] \\*\\*not bold\\*\\* \\& \\`not code\\` \\<b\\>',
+        '- [ ] \\*\\*not bold\\*\\* \\& \\`not code\\` \\<b\\> C:\\\\dir\\\\',
       ].join('\n'),
       [
         '| A | B \\| C |',
         '| --- | --- |',
         '| [Setup](/documents/doc-1) | line<br>break |',
-        '| \\~x\\~ |  |',
+        '| \\~x\\~ | a\\\\b\\|c |',
       ].join('\n'),
       '[Guide \\&amp; \\~more\\~](https://example.com/g)',
     ].join('\n\n') + '\n'
@@ -582,13 +582,13 @@ describe('Markdown import of a file whose blocks reference each other', () => {
     if (!result.ok) throw new Error(`conversion failed: ${result.code}`)
     expect(result.title).toBe('Plan #')
     expect(result.blocks).toMatchObject([
-      { type: 'heading', level: 1, text: 'Price &amp; ~~sale~~ for C# a #' },
+      { type: 'heading', level: 1, text: 'Price &amp; ~~sale~~ for C# a\\b #' },
       {
         type: 'checklist',
         items: [
           { text: 'Read [Setup](/documents/doc-1) first', checked: false },
           { text: 'See https://example.com/x', checked: true },
-          { text: '**not bold** & `not code` <b>', checked: false },
+          { text: '**not bold** & `not code` <b> C:\\dir\\', checked: false },
         ],
       },
       {
@@ -596,7 +596,7 @@ describe('Markdown import of a file whose blocks reference each other', () => {
         columns: ['A', 'B | C'],
         rows: [
           { cells: [{ text: '[Setup](/documents/doc-1)' }, { text: 'line\nbreak' }] },
-          { cells: [{ text: '~x~' }, { text: '' }] },
+          { cells: [{ text: '~x~' }, { text: 'a\\b|c' }] },
         ],
       },
       { type: 'embed', url: 'https://example.com/g', title: 'Guide &amp; ~more~' },

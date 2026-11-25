@@ -56,11 +56,26 @@ Issue #422 で、Document comment の返信を thread の作成者とそれま�
   - 削除済みの comment をまだ記録のない key で削除したときも、comment と audit event は書かずに
     receipt だけを書く。その key で別の comment を削除すると fingerprint の違いで 409 になる。
   - 再送かどうかは receipt で決めるので、audit event ID は request の key に Document・comment・
-    置き換える版（読んだ `updatedAt`）を加えて作る。同じ key で別の Document の comment を変えるときや、
+    置き換える版（読んだ `updatedAt` と `revision`）を加えて作る。同じ key で別の Document の comment を変えるときや、
     receipt の期限が切れた後に同じ comment を変えるときに、残っている前の audit event と衝突しない。
   - 編集の API は、Document に comment できることを確かめてから receipt を読み、記録済みなら
     mention の member 検証より前にその結果を返す。最初の試行の後で mention した member が
     Workspace を離れても、再送は 400 にならない。新しい編集は従来どおり member を検証する。
+
+comment row 自体の書き込みは、row に持たせる単調増加の `revision` で直列化する。
+
+- 作成は `revision: 1` で書き、編集・削除・resolve はどれも読んだ row の `revision` に 1 を足して
+  row 全体を Put する。条件は読んだ `revision`（`revision = :expectedRevision`）と `updatedAt` が
+  一致すること。`updatedAt` はミリ秒単位なので、同じミリ秒に commit された 2 つの書き込みは
+  `updatedAt` だけでは区別できず、後の Put が先の変更を黙って戻してしまう。`revision` はそれを
+  `409 DocumentCommentConflict` にする。`updatedAt` も条件に残すのは、deploy の途中でまだ
+  `revision` を上げない古い server が書いた変更を検出するため。
+- この変更より前に作った row は `revision` を持たず、revision 0 として扱う。その row への書き込みの
+  条件は `attribute_not_exists(revision)` で、最初の書き込みが `revision: 1` を付ける。row を
+  書き換える migration は要らず、schema version も上げない。参加者 index の migration は comment row の
+  ID・作成者・時刻だけを読むので、`revision` の有無に影響されない。
+- 整数 1 以上でない `revision` を持つ row は壊れた row として 503 `InvalidStoredDocumentData` で
+  止め、上書きしない。API の応答と receipt に残す comment には `revision` を含めない。
 
 既存の comment には data migration `0002-document-comment-participant-index`（`kind: 'derive'`、
 table `documents`、ADR 0013 の runner）で参加者 row と marker を作る。
