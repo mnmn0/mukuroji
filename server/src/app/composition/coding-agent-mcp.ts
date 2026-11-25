@@ -157,9 +157,10 @@ export function composeCodingAgentHeartbeat(
   // Hooks fire on every tool call, so one machine-local stamp per instance keeps the API calls
   // to one heartbeat a minute; leases are several minutes long. The stamp lives in the account's
   // own cache directory, not a shared temporary directory another account could plant files in.
+  // The key includes the Teams and Project, so a hook renewing one scope never suppresses another.
   const stampDirectory = join(environment.XDG_CACHE_HOME?.trim() || join(homedir(), '.cache'), 'mukuroji-mcp')
   const stampPath = join(stampDirectory, `heartbeat-${createHash('sha256')
-    .update([config.MUKUROJI_MCP_URL, owner.assigneeUserId, owner.instanceId].join('\u0000')).digest('hex').slice(0, 32)}`)
+    .update([config.MUKUROJI_MCP_URL, owner.assigneeUserId, owner.instanceId, teamIds.join(','), config.MUKUROJI_MCP_PROJECT_ID ?? ''].join('\u0000')).digest('hex').slice(0, 32)}`)
   return async () => {
     if (await readStampAgeMs(stampPath) < HOOK_HEARTBEAT_INTERVAL_MS) return { renewed: 0, recent: 0, failed: 0, throttled: true }
     const result = await heartbeatOwnRuns(teams, owner, runInScope ? { runInScope } : {})
