@@ -873,9 +873,17 @@ export function TaskPage() {
   const refreshProjectDeliverables = () => {
     void projectDeliverables.refresh().catch(() => undefined)
   }
+  const refreshProjectDeliverablesList = projectDeliverables.refresh
+  /**
+   * Re-reads the deliverables list and the selected Work Item after a file or approval change,
+   * so the completion Gate sees the new approval counts.
+   */
+  const refreshAfterIssueArtifactChange = useCallback(async () => {
+    await Promise.all([refreshProjectDeliverablesList(), mutateSelectedIssueDetail()])
+  }, [mutateSelectedIssueDetail, refreshProjectDeliverablesList])
   const issueArtifacts = useFileArtifacts({
     accessToken,
-    onRefreshed: projectDeliverables.refresh,
+    onRefreshed: refreshAfterIssueArtifactChange,
     scope: hasUnavailableCommentOwner ? undefined : issueFileScope,
   })
   const projectFiles = useFileArtifacts({

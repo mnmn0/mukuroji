@@ -29,6 +29,10 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   `WorkItemCompletionGateStatus` で返します。scope は既存の `work-items:read` です（#354）。
 - MCP: `get_task` が `completionGate` で Team の完了 Gate の達成状況を返します。server が古いときは `null` です。
   この client が知らない条件は `conditions` から省き、`blocksCompletion` はそれも含めて判定した値のままです（#354）。
+- server API: `GET /api/v1/agent-context` が `acceptNewRuns` を返します。Team の管理者が新しい Agent Run の受付を
+  止めている間は `false` で、start・resume・take over は `409 not_ready`（pointer `/acceptNewRuns`）になります（#412）。
+- MCP: `get_configuration` の `agentSettings.acceptNewRuns` で受付停止を示し、`get_next_task` は受付停止中に
+  新しいタスクや再開を提示せず `action: none` と `acceptingNewRuns: false` を返します。古い server では常に `true` です（#412）。
 - server API: `GET /api/v1/work-items/{workItemId}/agent-run-questions?teamId=` を追加しました。Work Item の
   `blocker`・`handoff` report を新しい順に最大 20 件、人の回答（`answer`）付きで返します。scope は既存の
   `work-items:read` です。質問は新しい `AgentRunQuestion` で返し、既存の `AgentRunReport` は変えていません（#411）。

@@ -1143,7 +1143,7 @@ export function TaskDetailPane({
           // The Team manager who may correct actual dates is the one who may override the Gate.
           ? { overrideFormId: editorFormId }
           : {})}
-        policy={configuration?.completionGate}
+        policy={resolvedConfiguration?.completionGate}
       />
     </>
   )

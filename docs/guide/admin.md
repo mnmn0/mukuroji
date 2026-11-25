@@ -476,6 +476,9 @@ coding agent に任せる作業の範囲を Team ごとに決めます。**設�
 （[`cdk/README.md`](../../cdk/README.md#optional-modules)）。**agent を接続** と自分用 token の発行は off でも使え、
 設定例は Team を固定しない Workspace profile になります。
 
+- 「新しい Agent Run を受け付ける」: 障害対応中やリリース前に off にすると、agent はタスクの着手・再開・引き継ぎが
+  できなくなり、理由（`not_ready`）が agent に返ります。実行中の Run は止まらないので、必要なら Factory board か
+  タスクの Run 欄から1件ずつ解放してください。既定は on です。
 - 「リース時間（分）」: agent が作業を確保しておける時間（5〜240分、既定30分）。
   期限切れ後に同じ担当者の別インスタンスが引き継ぐことを許可するかも選べます。
 - 「着手可能なステータス」: agent に提示してよい状態（バックログ / 未着手の区分から選ぶ）。
@@ -489,7 +492,8 @@ coding agent に任せる作業の範囲を Team ごとに決めます。**設�
 - 「エージェント向けブリーフ」: Team と Project ごとに agent へ渡す前提知識（各 16 KiB まで）。
 
 保存は **エージェント設定を保存**。agent の稼働状況は Team の **Factory board** で確認します
-（[coding agent 利用者ガイド](coding-agent.md#factory-board)）。
+（[coding agent 利用者ガイド](coding-agent.md#factory-board)）。Team の管理者には、Factory board とタスクの Run 欄に、
+Run を開始した credential（API key の名前と ID）と agent のインスタンス（ID の hash の先頭 12 文字）も表示されます。
 
 ## ID・セキュリティ
 
