@@ -343,7 +343,10 @@ describe('agent task lifecycle', () => {
       async agentSettings() { return { ...(await settings()), acceptNewRuns } },
     })
     expect(await service.next({})).toMatchObject({ action: 'none', task: null, acceptingNewRuns: false })
+    // get_configuration shows the switch, so an agent can see why no task is offered.
+    expect((await service.configuration()).agentSettings.acceptNewRuns).toBe(false)
     acceptNewRuns = true
+    expect((await service.configuration()).agentSettings.acceptNewRuns).toBe(true)
     await service.transition('held', 1, 'review', 'start', '00000000-0000-4000-8000-000000000411')
     acceptNewRuns = false
     expect(await service.next({})).toMatchObject({ action: 'in_progress', task: { id: 'held' } })

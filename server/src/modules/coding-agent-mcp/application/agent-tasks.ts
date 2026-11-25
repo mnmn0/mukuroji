@@ -439,6 +439,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
           readyStatusIds: agentSettings.readyStatusIds,
           resumableStatusIds: agentSettings.resumableStatusIds,
           requireAcceptanceCriteria: agentSettings.requireAcceptanceCriteria,
+          acceptNewRuns: agentSettings.acceptNewRuns,
           ...(agentSettings.acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId: agentSettings.acceptanceCriteriaFieldId }),
         },
         brief: composeBrief(agentSettings, scope.assignedProjectId),
