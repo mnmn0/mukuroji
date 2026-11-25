@@ -5,7 +5,7 @@ import type {
   DocumentTableRow,
 } from '@mukuroji/contracts'
 import {
-  isMarkdownWithinParseLimits,
+  isMarkdownImportWithinParseLimits,
   readMarkdownImportStructure,
   type MarkdownImportStructure,
   type MarkdownLineRange,
@@ -183,7 +183,7 @@ export function convertMarkdownToDocument(
   // parse limits, and a line scan with throwaway IDs has not rejected an oversized table.
   // A file the parser could take too long on is split by lines only, as before references were
   // made inline.
-  const spans = MAY_SPAN_BLOCKS.test(text) && isMarkdownWithinParseLimits(text)
+  const spans = MAY_SPAN_BLOCKS.test(text) && isMarkdownImportWithinParseLimits(text)
   if (spans) {
     const checked = scanBlocks(sourceLines, () => 'unused', options.resolveLink)
     if (!checked.ok) return checked

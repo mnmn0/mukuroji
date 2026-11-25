@@ -1363,6 +1363,7 @@ function ReadOnlyBlock({
     <SafeMarkdown
       bodyMarkdown={block.text}
       className="text-[1rem] leading-8 [&_p]:m-0 [&_p]:whitespace-pre-wrap"
+      complexityNotice={t('documents.editor.markdownTooComplex')}
       rawHtml="escape"
     />
   )

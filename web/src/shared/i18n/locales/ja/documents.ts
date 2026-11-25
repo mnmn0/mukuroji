@@ -222,6 +222,7 @@ export const documentsMessages = {
   'documents.editor.deleteRow': '行を削除',
   'documents.editor.deleteColumn': '列を削除',
   'documents.editor.mermaidSource': 'Mermaid のソース（図には描画しません）',
+  'documents.editor.markdownTooComplex': 'この段落は Markdown として表示するには複雑すぎるため、書式を付けずに表示しています。',
   'documents.editor.untitledBlock': '無題',
   'documents.editor.overwriteRetry': '最新リビジョンへ上書き保存',
   'documents.editor.retrySave': '保存を再試行',

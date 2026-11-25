@@ -1,6 +1,7 @@
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
+import { isMarkdownWithinParseLimits, MARKDOWN_IMPORT_PARSE_LIMITS } from '../../shared/lib/markdownParseLimits'
 
 /** Lines of the source a Markdown node covers, counted from 0. */
 export type MarkdownLineRange = {
@@ -128,79 +129,14 @@ export function readMarkdownImportStructure(
 }
 
 /**
- * Limits of the Markdown file an import parses as a whole, per blank-line separated part and for
- * the file. The parse time of a part grows with the square of its delimiters and punctuation,
- * and with its lines and list or quote markers; the import parses the file once, so the limits
- * keep that parse to about a second.
- */
-const MARKDOWN_IMPORT_PARSE_LIMITS = {
-  /** Most emphasis, strikethrough, closing bracket, and table delimiters of one part. */
-  partDelimiters: 3_000,
-  /** Most of the squares of those counts of all the parts. */
-  documentDelimiterSquares: 25_000_000,
-  /** Most ASCII punctuation characters of one part. */
-  partPunctuation: 10_000,
-  /** Most of the squares of those counts of all the parts. */
-  documentPunctuationSquares: 300_000_000,
-  /** Most lines of the file. */
-  documentLines: 20_000,
-  /** Most list and quote markers at line starts of the file. */
-  documentContainers: 20_000,
-  /** Most list and quote markers at the start of one line. */
-  nesting: 8,
-} as const
-
-/** One list or quote marker at the start of a line, with the spaces before and after it. */
-const MARKDOWN_CONTAINER_MARKER = /^[ \t]*(?:>|[-+*](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))[ \t]?/u
-
-/** One ASCII punctuation character. */
-const ASCII_PUNCTUATION_CHARACTER = /^[!-/:-@[-`{-~]$/u
-
-/**
- * Tells, in one linear scan, whether the Markdown parser reads a file in bounded time. It takes
- * far longer than the file's length on some input, such as dense emphasis or brackets, deep
- * nesting, or many list lines; such a file is imported without being parsed as a whole.
+ * Tells whether the Markdown parser reads an import file in bounded time; a file past the limits
+ * is imported without being parsed as a whole.
  *
  * @param source - Markdown file with `\n` line endings.
- * @returns Whether the file is within the parse limits.
+ * @returns Whether the file is within the import's parse limits.
  */
-export function isMarkdownWithinParseLimits(source: string): boolean {
-  const limits = MARKDOWN_IMPORT_PARSE_LIMITS
-  const lines = source.split('\n')
-  if (lines.length > limits.documentLines) return false
-  let containers = 0
-  for (const line of lines) {
-    let rest = line
-    let depth = 0
-    for (
-      let marker = MARKDOWN_CONTAINER_MARKER.exec(rest);
-      marker && marker[0] !== '';
-      marker = MARKDOWN_CONTAINER_MARKER.exec(rest)
-    ) {
-      depth += 1
-      rest = rest.slice(marker[0].length)
-    }
-    if (depth > limits.nesting) return false
-    containers += depth
-  }
-  if (containers > limits.documentContainers) return false
-  let delimiterSquares = 0
-  let punctuationSquares = 0
-  for (const part of source.split(/\n[ \t]*\n/u)) {
-    let delimiters = 0
-    let punctuation = 0
-    for (const character of part) {
-      if (character === '*' || character === '_' || character === '~' || character === ']' || character === '|') {
-        delimiters += 1
-      }
-      if (ASCII_PUNCTUATION_CHARACTER.test(character)) punctuation += 1
-    }
-    if (delimiters > limits.partDelimiters || punctuation > limits.partPunctuation) return false
-    delimiterSquares += delimiters ** 2
-    punctuationSquares += punctuation ** 2
-  }
-  return delimiterSquares <= limits.documentDelimiterSquares &&
-    punctuationSquares <= limits.documentPunctuationSquares
+export function isMarkdownImportWithinParseLimits(source: string): boolean {
+  return isMarkdownWithinParseLimits(source, MARKDOWN_IMPORT_PARSE_LIMITS)
 }
 
 /**

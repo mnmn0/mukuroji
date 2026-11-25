@@ -3,6 +3,7 @@ import Markdown, { type Components, type Options } from 'react-markdown'
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import remarkGfm from 'remark-gfm'
 import { rehypePrefixFragmentLinks } from '../lib/markdownFragmentLinks'
+import { isMarkdownWithinParseLimits, MARKDOWN_RENDER_PARSE_LIMITS } from '../lib/markdownParseLimits'
 import { remarkHtmlAsText } from '../lib/markdownHtmlAsText'
 
 /**
@@ -40,6 +41,13 @@ export type SafeMarkdownProps = {
    * default rules.
    */
   acceptExtraUrl?: (value: string) => boolean
+  /**
+   * Turns on the parse limits: a body the Markdown parser could take too long on, such as one
+   * dense with emphasis or brackets or deeply nested, is shown as plain text with its line breaks
+   * and spaces, followed by this note, so it cannot freeze the page. Without it, every body is
+   * parsed.
+   */
+  complexityNotice?: string
 }
 
 /**
@@ -99,6 +107,7 @@ export function SafeMarkdown({
   acceptExtraUrl,
   bodyMarkdown,
   className = '',
+  complexityNotice,
   components,
   extraUrlSchemes,
   rawHtml = 'skip',
@@ -120,6 +129,19 @@ export function SafeMarkdown({
       },
     }
   }, [schemeKey])
+  const tooComplex = useMemo(
+    () => complexityNotice !== undefined && !isMarkdownWithinParseLimits(bodyMarkdown, MARKDOWN_RENDER_PARSE_LIMITS),
+    [bodyMarkdown, complexityNotice],
+  )
+
+  if (tooComplex) {
+    return (
+      <div className={`min-w-0 break-words text-sm font-medium leading-6 text-[var(--workbench-text)] ${className}`}>
+        <p className="whitespace-pre-wrap">{bodyMarkdown}</p>
+        <p className="mt-1 text-xs text-[var(--workbench-muted)]" role="note">{complexityNotice}</p>
+      </div>
+    )
+  }
 
   return (
     <div

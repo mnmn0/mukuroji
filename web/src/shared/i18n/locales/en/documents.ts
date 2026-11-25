@@ -222,6 +222,7 @@ export const documentsMessages = {
   'documents.editor.deleteRow': 'Delete row',
   'documents.editor.deleteColumn': 'Delete column',
   'documents.editor.mermaidSource': 'Mermaid source (not drawn as a diagram)',
+  'documents.editor.markdownTooComplex': 'Formatting was skipped because this paragraph is too complex to display as Markdown.',
   'documents.editor.untitledBlock': 'Untitled',
   'documents.editor.overwriteRetry': 'Overwrite latest revision',
   'documents.editor.retrySave': 'Retry save',
