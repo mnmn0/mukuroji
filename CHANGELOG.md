@@ -32,6 +32,10 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   `DELETE /api/v1/work-items/{workItemId}/relations/{targetWorkItemId}/{relationType}`（scope `work-items:write`、
   `Idempotency-Key` 必須）を追加しました。権限は Web の relation 操作と同じで、親の Work Item Type が子の Type を
   許さない link、2 つ目の親、循環する link は `409` です（#360）。
+- server API: `GET /api/v1/work-item-types` の各 Type に、直下の子に使える Type の ID `allowedChildTypeIds` を加えました。
+  `create_subtasks` はこれを見て、親の Type が許さない子 Type を含むときは 1 件も作らずに断ります（#360）。
+- server API: relation の作成・削除は `Idempotency-Key` の receipt を relation と同じ transaction に残すので、
+  応答が失われた後に同じ key で再試行すると結果を replay します（#360）。
 - server API: `GET /api/v1/work-items/{workItemId}/agent-run-questions?teamId=` を追加しました。Work Item の
   `blocker`・`handoff` report を新しい順に最大 20 件、人の回答（`answer`）付きで返します。scope は既存の
   `work-items:read` です。質問は新しい `AgentRunQuestion` で返し、既存の `AgentRunReport` は変えていません（#411）。
