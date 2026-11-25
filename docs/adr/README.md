@@ -118,3 +118,4 @@
 | [0096](0096-member-last-sign-in-on-member-row.md) | メンバーの最終ログインを member row に version を変えずに記録し、owner と admin にだけ返す | 提案 |
 | [0097](0097-org-units.md) | OrgUnit（部門）で Team を束ね、部門のロールは配下の Team scope に展開して評価する | 提案 |
 | [0098](0098-team-started-work-item-index-and-board-continuation.md) | Team の started な Work Item を sparse index で引き、Factory board の上限で止まった lane を続きから読む | 提案 |
+| [0102](0102-retire-mail-and-storage-connector-providers.md) | Gmail・Outlook・Google Drive・OneDrive・Dropbox を connector の選択肢から外す | 提案 |

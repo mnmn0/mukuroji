@@ -114,13 +114,18 @@ export type ConnectorWorkItemApplyResult =
     /**
      * Why the patch was refused: the event dates hold no working day of the Work Item calendar,
      * the Work Item has schedule dependencies that a direct date move would break, or its workflow
-     * has no status it allows for the open or closed state of the linked resource.
+     * has no status it allows for the open or closed state of the linked resource, or a workflow
+     * rule or completion gate refuses the change.
      */
     reason: ConnectorWorkItemRejection
   }
 
 /** Reasons the Work Item gateway refuses an external patch without writing it. */
-export type ConnectorWorkItemRejection = 'calendar-dates-invalid' | 'schedule-dependency' | 'state-status-unavailable'
+export type ConnectorWorkItemRejection =
+  | 'calendar-dates-invalid'
+  | 'schedule-dependency'
+  | 'state-status-unavailable'
+  | 'workflow-rule-rejected'
 
 /** Connector worker と canonical Work Item service の境界です。 */
 export interface ConnectorWorkItemGateway {
@@ -1247,6 +1252,12 @@ export class ConnectorSyncEngine {
       }
       if (applied.kind === 'rejected') {
         await release()
+        if (applied.reason === 'workflow-rule-rejected') {
+          throw new ConnectorRuntimeError(
+            'ConnectorSyncConflictWorkflowRejected',
+            'A workflow rule or completion gate of the Work Item refuses this change.',
+          )
+        }
         throw applied.reason === 'state-status-unavailable'
           ? new ConnectorRuntimeError(
             'ConnectorSyncConflictStateRejected',

@@ -2707,14 +2707,27 @@ export function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGate
           ...(workflowStatusId !== undefined ? { workflowStatusId } : {}),
           ...(schedule ? { schedule: schedule.schedule } : {}),
         }, permission.team)
-        const configuredBody = await prepareConfiguredUpdateWorkItem(
-          input.workspaceId,
-          input.teamId,
-          detail.issue,
-          body,
-          configuration,
-          CREDENTIAL_WORKFLOW_RULE_PRINCIPAL,
-        )
+        let configuredBody: Awaited<ReturnType<typeof prepareConfiguredUpdateWorkItem>>
+        try {
+          configuredBody = await prepareConfiguredUpdateWorkItem(
+            input.workspaceId,
+            input.teamId,
+            detail.issue,
+            body,
+            configuration,
+            CREDENTIAL_WORKFLOW_RULE_PRINCIPAL,
+          )
+        } catch (error) {
+          // A transition rule or completion gate refuses the change for good; retrying the poll
+          // cannot succeed, so the link records a conflict and polling moves on.
+          if (!(error instanceof WorkflowRuleError) && !(error instanceof WorkItemCompletionGateError)) throw error
+          await developerPlatformDependencies.idempotency.releaseIdempotency(completionRequest)
+          return {
+            kind: 'rejected',
+            workItem: toConnectorWorkItemSnapshot(detail.issue),
+            reason: 'workflow-rule-rejected',
+          }
+        }
         const idempotencyTransaction: WorkItemIdempotencyTransaction | undefined =
           developerPlatformDependencies.transactions.prepareIdempotencyCompletionTransactWrite
             ? {
