@@ -315,8 +315,11 @@ const AI_ASSISTANCE_WORK_ITEM_CANDIDATE_LIMIT = 20
 /** Maximum number of AI prompt sources resolved concurrently in one request. */
 const AI_ASSISTANCE_SOURCE_RESOLUTION_CONCURRENCY = 4
 
-/** Conservative non-source condition reserve for Workspace, Planning, Document, and Enterprise rows. */
-const AI_ASSISTANCE_NON_SOURCE_AUTHORIZATION_CONDITION_RESERVE = 4
+/**
+ * Conservative non-source condition reserve for the Workspace member, Planning, Document,
+ * Enterprise control, and OrgUnit structure rows.
+ */
+const AI_ASSISTANCE_NON_SOURCE_AUTHORIZATION_CONDITION_RESERVE = 5
 
 /** One permission-safe source fragment and the non-content fences that authorize it. */
 type ResolvedAiPromptSource = {

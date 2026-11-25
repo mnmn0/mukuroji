@@ -578,10 +578,11 @@ export type CreateTeamResponse = {
 }
 
 /**
- * Most authorization condition checks a directory change carries: the caller's membership and the
- * Enterprise control row.
+ * Most authorization condition checks a directory change carries: the caller's membership, the
+ * Enterprise control row, and the OrgUnit structure revision that expanded OrgUnit scopes
+ * (ADR 0097). Archiving a Team keeps this room free so its restore still fits one transaction.
  */
-const DIRECTORY_RESTORE_AUTHORIZATION_RESERVE = 2
+const DIRECTORY_RESTORE_AUTHORIZATION_RESERVE = 3
 
 /** Condition checks proving the caller is still authorized when a directory change commits. */
 export type DirectoryAuthorizationConditionChecks = NonNullable<
