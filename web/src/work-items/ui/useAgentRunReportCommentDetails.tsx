@@ -1,12 +1,8 @@
-import type { AgentRunReport } from '@mukuroji/contracts'
 import { useCallback, useMemo, type ReactNode } from 'react'
-import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { Locale } from '../../shared/i18n/i18n'
-import { answerAgentRunReport } from '../api/agentRuns'
-import { WorkItemConfigurationApiError } from '../api/errors'
 import { indexAgentRunReportsByComment, selectAgentRunReportsForWorkItem } from '../model/agentRunReportDisplay'
+import { useAnswerAgentRunReport } from '../mutations/useAnswerAgentRunReport'
 import { useWorkItemAgentRunReports } from '../queries/useWorkItemAgentRunReports'
-import type { AgentRunReportAnswerResult } from './AgentRunReportAnswerForm'
 import { AgentRunReportChips, AgentRunReportsLoadNotice } from './AgentRunReportChips'
 import { createAgentRunReportChipsLabels, createAgentRunReportsNoticeLabels } from './agentRunReportLabels'
 
@@ -63,27 +59,7 @@ export function useAgentRunReportCommentDetails({
     () => indexAgentRunReportsByComment(selectAgentRunReportsForWorkItem(reports, { accessToken, teamId, workItemId })),
     [accessToken, reports, teamId, workItemId],
   )
-  const mutationRunner = useMemo(() => createMutationRequestRunner(), [])
-  const answer = useCallback(async (report: AgentRunReport, body: string): Promise<AgentRunReportAnswerResult> => {
-    if (!accessToken || !teamId) return 'failed'
-    try {
-      await mutationRunner.run(
-        `agent-run:answer:${teamId}:${report.runId}:${report.sequence}`,
-        body,
-        (context) => answerAgentRunReport(accessToken, teamId, report, body, context),
-      )
-    } catch (answerError) {
-      if (answerError instanceof WorkItemConfigurationApiError && answerError.status === 409) {
-        void mutate().catch(() => undefined)
-        return 'conflict'
-      }
-      return 'failed'
-    }
-    // The answer is committed: a failed refresh must not report it as failed.
-    void mutate().catch(() => undefined)
-    void onAnswered?.().catch(() => undefined)
-    return 'saved'
-  }, [accessToken, mutate, mutationRunner, onAnswered, teamId])
+  const answer = useAnswerAgentRunReport({ accessToken, teamId, refreshReports: mutate, onAnswered })
   const renderCommentDetails = useCallback((comment: { id: string }) => {
     const report = byComment.get(comment.id)
     if (!report) return null

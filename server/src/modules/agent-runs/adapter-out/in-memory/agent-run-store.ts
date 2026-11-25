@@ -420,6 +420,12 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
+  async getRunReport(run: StoredAgentRun, sequence: number): Promise<StoredAgentRunReport | undefined> {
+    const report = this.state.reports.get(`${key(run.directoryId, run.teamId, run.runId)}|${sequence}`)
+    return report === undefined ? undefined : structuredClone(report)
+  }
+
+  /** @inheritdoc */
   createReportAnswerItems(report: StoredAgentRunReport, answer: AgentRunReportAnswer): AgentRunTransactItem[] {
     const [reportUpdate] = this.#builder.createReportAnswerItems(report, answer)
     if (!reportUpdate) throw new Error('The answer builder returned an unexpected item count.')

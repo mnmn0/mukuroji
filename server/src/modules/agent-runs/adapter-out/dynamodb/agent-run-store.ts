@@ -424,6 +424,14 @@ export interface AgentRunStore {
    */
   listWorkItemReports(directoryId: string, teamId: string, workItemId: string, cursor: string | undefined, limit: number): Promise<AgentRunReportPage>
   /**
+   * Reads one report of a run with a strongly consistent read. Only the reports written while the run
+   * held its Work Item are searched, so the read does not depend on how many reports the Work Item has.
+   * @param run - Run the report belongs to.
+   * @param sequence - Position of the report within the run.
+   * @returns The report, or undefined when the run has no such report.
+   */
+  getRunReport(run: StoredAgentRun, sequence: number): Promise<StoredAgentRunReport | undefined>
+  /**
    * Commits a standalone transaction of Agent Run writes and caller items.
    * @param items - Agent Run writes first, then audit or receipt writes.
    * @param fenceItemCount - Number of leading Agent Run writes whose failure means the run changed.
@@ -1664,6 +1672,45 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
       ? encodeCursor({ directoryTeamId: last.directoryTeamId, recordKey: last.recordKey })
       : undefined
     return { reports, ...(nextCursor === undefined ? {} : { nextCursor }) }
+  }
+
+  /** @inheritdoc */
+  async getRunReport(run: StoredAgentRun, sequence: number): Promise<StoredAgentRunReport | undefined> {
+    if (!Number.isSafeInteger(sequence) || sequence < 1 || sequence > run.reportCount) return undefined
+    const partition = createAgentRunPartition(run.directoryId, run.teamId)
+    const prefix = reportRecordKeyPrefix(run.workItemId)
+    // Report keys sort by creation time, and every report of the run was written between its start and
+    // its last report, so only that range is read. '~' sorts after every run ID character.
+    const lastReportAt = run.lastReportAt ?? run.startedAt
+    let next: Record<string, unknown> | undefined
+    do {
+      const response = await this.#client.send(new QueryCommand({
+        TableName: this.#tableName,
+        KeyConditionExpression: '#directoryTeamId = :partition AND #recordKey BETWEEN :from AND :to',
+        FilterExpression: '#runId = :runId AND #sequence = :sequence',
+        ExpressionAttributeNames: {
+          '#directoryTeamId': 'directoryTeamId',
+          '#recordKey': 'recordKey',
+          '#runId': 'runId',
+          '#sequence': 'sequence',
+        },
+        ExpressionAttributeValues: {
+          ':partition': partition,
+          ':from': `${prefix}${run.startedAt}`,
+          ':to': `${prefix}${lastReportAt}#~`,
+          ':runId': run.runId,
+          ':sequence': sequence,
+        },
+        ConsistentRead: true,
+        ExclusiveStartKey: next,
+      }))
+      const item = response.Items?.[0]
+      if (item !== undefined) {
+        return parseReport(item, { directoryId: run.directoryId, teamId: run.teamId, workItemId: run.workItemId })
+      }
+      next = response.LastEvaluatedKey
+    } while (next !== undefined)
+    return undefined
   }
 
   /** @inheritdoc */

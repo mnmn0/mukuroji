@@ -347,6 +347,45 @@ describe('DynamoDB Agent Run reports', () => {
   })
 })
 
+describe('DynamoDB Agent Run report lookup', () => {
+  test('reads one report of a run within the run\'s time range, paging past filtered pages', async () => {
+    const run = createRun()
+    const builder = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
+    const item = builder.createReportItems(run, createReport(run), now)[2]?.Put?.Item
+    if (!item) throw new Error('The report put must carry an item.')
+    const reported = { ...run, reportCount: 1, lastReportAt: now.toISOString() }
+    // The first page holds only other reports, so the lookup continues after it.
+    const { client, commands } = createClient([{ Items: [], LastEvaluatedKey: { recordKey: 'k' } }, { Items: [item] }])
+    const report = await new DynamoDbAgentRunStore(client, 'AgentRuns').getRunReport(reported, 1)
+    expect(report).toMatchObject({ runId: run.runId, sequence: 1, workItemId: 'task-1' })
+    expect(commands).toHaveLength(2)
+    const query = commands[0]
+    if (!(query instanceof QueryCommand)) throw new Error('The report must be queried.')
+    expect(query.input).toMatchObject({
+      KeyConditionExpression: '#directoryTeamId = :partition AND #recordKey BETWEEN :from AND :to',
+      FilterExpression: '#runId = :runId AND #sequence = :sequence',
+      ExpressionAttributeValues: {
+        ':partition': 'workspace-1#team#core',
+        ':from': `${reportPrefix('task-1')}${run.startedAt}`,
+        ':to': `${reportPrefix('task-1')}${now.toISOString()}#~`,
+        ':runId': run.runId,
+        ':sequence': 1,
+      },
+      ConsistentRead: true,
+    })
+    expect(commands[1]?.input).toMatchObject({ ExclusiveStartKey: { recordKey: 'k' } })
+  })
+
+  test('reads nothing for a sequence the run never reported', async () => {
+    const { client, commands } = createClient()
+    const store = new DynamoDbAgentRunStore(client, 'AgentRuns')
+    const run = { ...createRun(), reportCount: 2 }
+    expect(await store.getRunReport(run, 3)).toBeUndefined()
+    expect(await store.getRunReport(run, 0)).toBeUndefined()
+    expect(commands).toHaveLength(0)
+  })
+})
+
 describe('in-memory Agent Run reports', () => {
   test('saves reports in order and rejects a stale report count or another instance', () => {
     const store = new InMemoryAgentRunStore()

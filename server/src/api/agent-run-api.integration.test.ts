@@ -2006,6 +2006,65 @@ describe('Web Agent Run routes', () => {
     expect(store.state.reports.get(`${workspaceId}|core-team|${held.runId}|1`)?.answer).toBeUndefined()
   })
 
+  test('refuses an answer to a run of another Work Item and keeps a refused comment\'s status', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = { ...createHeldRun('task-1'), reportCount: 1 }
+    store.seed(held)
+    store.state.reports.set(`${workspaceId}|core-team|${held.runId}|1`, {
+      schemaVersion: 1, runId: held.runId, directoryId: workspaceId, teamId: 'core-team', workItemId: 'task-1', sequence: 1,
+      kind: 'blocker', commentId: 'cmt_1', verifications: [], artifacts: [], createdAt: '2026-10-22T00:00:00.000Z', createdBy: 'demo@example.com',
+    })
+    setTestAppDependencies({
+      collaboration: createCollaborationStub({
+        /**
+         * Refuses the comment as the real writer does when the caller's access changed.
+         *
+         * @returns Never.
+         */
+        async createComment() {
+          throw new CollaborationError(403, 'CollaborationAuthorizationChanged', 'Access changed.')
+        },
+      }),
+    })
+    /**
+     * Answers report 1 of the held run through a Work Item.
+     *
+     * @param workItemId - Work Item in the path.
+     * @returns The response.
+     */
+    const answer = (workItemId: string) => app.request(
+      `http://localhost/api/teams/core-team/work-items/${workItemId}/agent-runs/${held.runId}/reports/1/answer`,
+      { method: 'POST', headers, body: JSON.stringify({ body: 'Go ahead.' }) },
+    )
+    const refused = await answer('task-1')
+    expect(refused.status).toBe(403)
+    expect(await refused.json()).toMatchObject({ code: 'CollaborationAuthorizationChanged' })
+    expect(store.state.reports.get(`${workspaceId}|core-team|${held.runId}|1`)?.answer).toBeUndefined()
+  })
+
+  test('stops the question list at its byte budget so the MCP client can read it', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'viewer' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    const artifacts = Array.from({ length: 20 }, (_, index) => ({
+      type: 'url' as const, url: `https://example.test/${index}/${'あ'.repeat(1_990)}`, label: 'l'.repeat(128),
+    }))
+    for (let sequence = 1; sequence <= 20; sequence += 1) {
+      store.state.reports.set(`${workspaceId}|core-team|${held.runId}|${sequence}`, {
+        schemaVersion: 1, runId: held.runId, directoryId: workspaceId, teamId: 'core-team', workItemId: 'task-1', sequence,
+        kind: 'blocker', commentId: `cmt_${sequence}`, verifications: [], artifacts,
+        createdAt: new Date(Date.UTC(2026, 9, 22, 0, sequence)).toISOString(), createdBy: 'demo@example.com',
+      })
+    }
+    const { listWorkItemQuestions } = createCanonicalPublicAgentRunService()
+    if (!listWorkItemQuestions) throw new Error('The Public API service must list questions.')
+    const questions = await runWithTestAppDependencies(() => listWorkItemQuestions(credential, 'core-team', 'task-1'))
+    expect(questions.hasMore).toBe(true)
+    expect(questions.items[0]?.sequence).toBe(20)
+    expect(questions.items.length).toBeLessThan(20)
+    expect(Buffer.byteLength(JSON.stringify(questions))).toBeLessThanOrEqual(1_000_100)
+  })
+
   test('stops a report page at its byte budget so the response stays within the Lambda limit', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'viewer' })
     const held = createHeldRun('task-1')

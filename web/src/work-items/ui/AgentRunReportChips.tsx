@@ -1,6 +1,7 @@
 import type { AgentRunReport, AgentRunVerificationStatus } from '@mukuroji/contracts'
 import { isAgentRunReportAwaitingDecision, readAgentRunArtifactText } from '../model/agentRunReportDisplay'
-import { AgentRunReportAnswerForm, type AgentRunReportAnswerResult } from './AgentRunReportAnswerForm'
+import type { AgentRunReportAnswerResult } from '../mutations/useAnswerAgentRunReport'
+import { AgentRunReportAnswerForm } from './AgentRunReportAnswerForm'
 import type { AgentRunReportChipsLabels, AgentRunReportsNoticeLabels } from './agentRunReportLabels'
 
 /** Props of the report chips shown under one comment. */

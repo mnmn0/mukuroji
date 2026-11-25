@@ -200,7 +200,8 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   Work Item がその Project にない場合は保存せず `403` を返し、receipt の再送時にも再検証します。
 - `GET /api/v1/work-items/{workItemId}/agent-run-questions?teamId=` は、Work Item の `blocker` と `handoff`
   の report を新しい順に最大 20 件、人の回答（`answer`: `body`、`answeredBy`、`answeredAt`、回答 comment の
-  `commentId`）と一緒に返します。古いものが残るときは `hasMore` が `true` です。scope は `work-items:read` で、
+  `commentId`）と一緒に返します。応答は約 1 MB までで、最新の 1 件は必ず含みます。件数か大きさで古いものが
+  残るときは `hasMore` が `true` です。scope は `work-items:read` で、
   Work Item を閲覧できる credential が読めます。応答は `Cache-Control: private, no-store` です。回答は Web の
   会話から member が 1 つの report に 1 つだけ保存し、同じ transaction で回答者の comment と監査 event を保存します。
 - `POST /api/v1/work-items/{workItemId}/agent-runs/{runId}/take-over` は `Idempotency-Key` を

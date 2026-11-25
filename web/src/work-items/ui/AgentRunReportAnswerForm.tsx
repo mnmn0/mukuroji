@@ -1,9 +1,7 @@
 import { AGENT_RUN_REPORT_ANSWER_MAX_LENGTH } from '@mukuroji/contracts'
 import { useId, useState, type FormEvent } from 'react'
+import type { AgentRunReportAnswerResult } from '../mutations/useAnswerAgentRunReport'
 import type { AgentRunReportAnswerLabels } from './agentRunReportLabels'
-
-/** Outcome of sending an answer. */
-export type AgentRunReportAnswerResult = 'saved' | 'conflict' | 'failed'
 
 /** Props of the answer form under a blocker or hand-off. */
 export type AgentRunReportAnswerFormProps = {

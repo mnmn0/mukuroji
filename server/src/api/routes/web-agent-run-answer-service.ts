@@ -11,6 +11,7 @@ import {
   createAgentRunIntegrityError,
   isAgentRunQuestionReport,
   toAgentRunReport,
+  type StoredAgentRun,
   type StoredAgentRunReport,
 } from '../../modules/agent-runs'
 import {
@@ -33,8 +34,14 @@ import { loadAuthorizedTeamIssue } from '../shared/work-item-access'
 /** Reports one store page returns. */
 const reportPageSize = 100
 
-/** Most report pages a lookup or a question list reads for one Work Item. */
+/** Most report pages a question list reads for one Work Item. */
 const maximumReportPages = 20
+
+/**
+ * Most bytes of serialized questions one list returns. It stays well under the 2 MiB response limit of
+ * the MCP client, which reads the list on every `get_task`, whatever the reports' artifact lists hold.
+ */
+const questionsResponseByteBudget = 1_000_000
 
 /** Identity of one report within a Work Item. */
 export type AgentRunReportReference = {
@@ -45,39 +52,14 @@ export type AgentRunReportReference = {
 }
 
 /**
- * Reads a Work Item's reports newest first until a report matches, up to a fixed bound.
- *
- * @param principal - Caller.
- * @param teamId - Team ID.
- * @param workItemId - Work Item ID.
- * @param match - Returns true for the wanted report.
- * @returns The first matching report, or undefined.
- */
-async function findWorkItemReport(
-  principal: WorkspacePrincipal,
-  teamId: string,
-  workItemId: string,
-  match: (report: StoredAgentRunReport) => boolean,
-): Promise<StoredAgentRunReport | undefined> {
-  let cursor: string | undefined
-  for (let page = 0; page < maximumReportPages; page += 1) {
-    const result = await workItemDependencies.agentRuns.listWorkItemReports(principal.directoryId, teamId, workItemId, cursor, reportPageSize)
-    const found = result.reports.find(match)
-    if (found) return found
-    cursor = result.nextCursor
-    if (cursor === undefined) return undefined
-  }
-  return undefined
-}
-
-/**
- * Reads one report of a Work Item.
+ * Reads one report of a Work Item and the run it belongs to. The report is read by its run, so it is
+ * found however many reports the Work Item has.
  *
  * @param principal - Caller.
  * @param teamId - Team ID.
  * @param workItemId - Work Item ID.
  * @param reference - Run and sequence of the report.
- * @returns The report.
+ * @returns The report and its run.
  * @throws AgentRunError not_found when the Work Item has no such report.
  */
 async function requireWorkItemReport(
@@ -85,12 +67,16 @@ async function requireWorkItemReport(
   teamId: string,
   workItemId: string,
   reference: AgentRunReportReference,
-): Promise<StoredAgentRunReport> {
-  const report = await findWorkItemReport(principal, teamId, workItemId,
-    (candidate) => candidate.runId === reference.runId && candidate.sequence === reference.sequence)
+): Promise<{ report: StoredAgentRunReport, run: StoredAgentRun }> {
+  const store = workItemDependencies.agentRuns
+  const run = await store.getRun(principal.directoryId, teamId, reference.runId)
+  if (!run || run.workItemId !== workItemId) throw new AgentRunError('not_found', 'The report was not found.')
+  const report = await store.getRunReport(run, reference.sequence)
   if (!report) throw new AgentRunError('not_found', 'The report was not found.')
-  if (report.workItemId !== workItemId) throw createAgentRunIntegrityError()
-  return report
+  if (report.workItemId !== workItemId || report.runId !== run.runId || report.sequence !== reference.sequence) {
+    throw createAgentRunIntegrityError()
+  }
+  return { report, run }
 }
 
 /**
@@ -136,12 +122,10 @@ export async function answerWebAgentRunReport(
 ): Promise<AnswerAgentRunReportResponse> {
   requireWorkspaceBusinessWrite(principal)
   const { context: permissionContext, detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
-  const report = await requireWorkItemReport(principal, teamId, workItemId, reference)
+  const { report, run } = await requireWorkItemReport(principal, teamId, workItemId, reference)
   const replay = recordedAnswer(report, principal, body)
   if (replay) return { report: toAgentRunReport(report) }
   const store = workItemDependencies.agentRuns
-  const run = await store.getRun(principal.directoryId, teamId, report.runId)
-  if (!run || run.workItemId !== workItemId) throw createAgentRunIntegrityError()
   const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, workItemId)
   const commentId = deriveAuditedCommentId(entityKey, auditContext)
   const answer: AgentRunReportAnswer = {
@@ -186,8 +170,7 @@ export async function answerWebAgentRunReport(
   } catch (error) {
     // A concurrent answer fails the report condition; it is reported as a conflict, or replayed when it
     // is this member's same answer.
-    const latest = await findWorkItemReport(principal, teamId, workItemId,
-      (candidate) => candidate.runId === report.runId && candidate.sequence === report.sequence).catch(() => undefined)
+    const latest = await store.getRunReport(run, report.sequence).catch(() => undefined)
     if (latest?.answer !== undefined && recordedAnswer(latest, principal, body)) return { report: toAgentRunReport(latest) }
     throw error
   }
@@ -201,7 +184,8 @@ export async function answerWebAgentRunReport(
  * @param principal - Viewer.
  * @param teamId - Team ID.
  * @param workItemId - Work Item ID.
- * @returns Up to {@link AGENT_RUN_QUESTIONS_MAX_ITEMS} questions, newest first.
+ * @returns Up to {@link AGENT_RUN_QUESTIONS_MAX_ITEMS} questions, newest first, within a byte budget;
+ * `hasMore` is true when older questions were left out.
  */
 export async function listWorkItemAgentRunQuestions(
   principal: WorkspacePrincipal,
@@ -210,6 +194,7 @@ export async function listWorkItemAgentRunQuestions(
 ): Promise<WorkItemAgentRunQuestionsResponse> {
   await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
   const items: AgentRunReport[] = []
+  let bytes = 0
   let cursor: string | undefined
   for (let page = 0; page < maximumReportPages; page += 1) {
     const result = await workItemDependencies.agentRuns.listWorkItemReports(principal.directoryId, teamId, workItemId, cursor, reportPageSize)
@@ -217,7 +202,12 @@ export async function listWorkItemAgentRunQuestions(
       if (report.workItemId !== workItemId) throw createAgentRunIntegrityError()
       if (!isAgentRunQuestionReport(report)) continue
       if (items.length === AGENT_RUN_QUESTIONS_MAX_ITEMS) return { items, hasMore: true }
-      items.push(toAgentRunReport(report))
+      const item = toAgentRunReport(report)
+      const itemBytes = Buffer.byteLength(JSON.stringify(item))
+      // The newest question is always returned; later ones stop at the byte budget.
+      if (items.length > 0 && bytes + itemBytes > questionsResponseByteBudget) return { items, hasMore: true }
+      bytes += itemBytes
+      items.push(item)
     }
     cursor = result.nextCursor
     if (cursor === undefined) return { items, hasMore: false }

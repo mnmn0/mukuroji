@@ -1,9 +1,11 @@
 import type { Context, Hono } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
 import { AgentRunError, readAgentRunId, readAnswerAgentRunReportRequest } from '../../modules/agent-runs'
+import { CollaborationError } from '../../modules/collaboration'
 import { ProjectDataError } from '../../modules/directory'
 import { isTeamIssueNotFoundError } from '../../modules/work-items'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
+import { toCollaborationErrorResponse } from '../shared/collaboration-access'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { createRequestMutationContext, readBearerAccessToken, readJson } from '../shared/http'
 import { toProjectDataErrorResponse } from '../shared/project-access'
@@ -37,6 +39,8 @@ function toAgentRunErrorResponse(c: Context, error: unknown): Response {
   if (error instanceof CognitoServiceError) return toCognitoDirectoryErrorResponse(c, error)
   if (error instanceof WorkspaceAccessError) return toWorkspaceAccessErrorResponse(c, error)
   if (error instanceof ProjectDataError || isTeamIssueNotFoundError(error)) return toProjectDataErrorResponse(c, error)
+  // An answer saves a comment, whose authorization and condition failures keep their 403 or 409.
+  if (error instanceof CollaborationError) return toCollaborationErrorResponse(c, error)
   if (!(error instanceof AgentRunError)) {
     console.error(error)
     return c.json({ code: 'AgentRunsUnavailable', message: 'Agent Runs are unavailable.' }, 502)
