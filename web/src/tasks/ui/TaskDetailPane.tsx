@@ -81,6 +81,7 @@ import {
 import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
 import { readAcceptanceCriteriaDraftSubmission } from '../../work-items/model/acceptanceCriteria'
 import { WorkItemAcceptanceCriteriaEditor } from '../../work-items/ui/WorkItemAcceptanceCriteriaEditor'
+import { WorkItemCompletionGateStatus } from '../../work-items/ui/WorkItemCompletionGateStatus'
 import { useAcceptanceCriteriaDraft } from '../../work-items/ui/useAcceptanceCriteriaDraft'
 import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
 import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
@@ -1125,6 +1126,12 @@ export function TaskDetailPane({
         key={`acceptance-criteria:${editorIdentity}`}
         locale={locale}
         readOnly={isReadOnly}
+      />
+      <WorkItemCompletionGateStatus
+        acceptanceCriteria={(issue ?? currentTask).acceptanceCriteria}
+        approvalSummary={(issue ?? currentTask).approvalSummary}
+        locale={locale}
+        policy={configuration?.completionGate}
       />
     </>
   )
