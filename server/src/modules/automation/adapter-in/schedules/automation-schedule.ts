@@ -908,14 +908,25 @@ async function selectScheduledRuleDueOccurrences(
 ) {
   const client = dependencies.client
   if (rule.trigger.type !== 'schedule') return []
+  const firstOccurrence = occurrences[0]
   if (rule.trigger.schedule.catchUpPolicy !== 'skip') {
-    return selectCatchUpOccurrences(
+    const selected = selectCatchUpOccurrences(
       occurrences,
       rule.trigger.schedule.catchUpPolicy,
       maximum,
     )
+    // A due-soon fan-out that already started keeps its remaining Work Items under every policy:
+    // they have no execution of their own to retry once the cursor moves past the occurrence.
+    if (
+      !rule.trigger.dueWorkItems ||
+      !firstOccurrence ||
+      selected.some((occurrence) => occurrence.getTime() === firstOccurrence.getTime()) ||
+      !await hasStartedDueWorkItemOccurrence(rule, firstOccurrence, dependencies)
+    ) {
+      return selected
+    }
+    return mergeOccurrences(firstOccurrence, selected)
   }
-  const firstOccurrence = occurrences[0]
   const onTimeOccurrences = selectOnTimeOccurrences(occurrences, now)
   if (
     !firstOccurrence ||

@@ -1787,6 +1787,132 @@ describe('due-soon schedule rules and business-day Recurring Work', () => {
     expect(resumed.nextRunAt).toBe('2026-07-17T00:00:00.000Z')
   })
 
+  test('finishes a started due-soon fan-out under the latest policy before the newest occurrence', async () => {
+    const rule: AutomationRule = {
+      ...createScheduledRule(),
+      trigger: {
+        type: 'schedule',
+        schedule: {
+          frequency: 'daily',
+          interval: 1,
+          timeZone: 'Asia/Tokyo',
+          localTime: '09:00',
+          startDate: '2026-07-16',
+          catchUpPolicy: 'latest',
+        },
+        dueWorkItems: { daysBefore: 3 },
+      },
+      actions: [{ type: 'notify', recipientMemberKeys: [], notifyAssignee: true, title: 'Due soon' }],
+    }
+    const executions = new Map<string, AutomationExecution>()
+    const receipts = new Set<string>()
+    let currentRule = rule
+    let crashOnSecondItem = true
+    const notified: string[] = []
+    const client = createAutomationSchedulePort({
+      async reserveExecution(execution) {
+        if (crashOnSecondItem && execution.triggerEventId.endsWith(':item-2')) {
+          crashOnSecondItem = false
+          throw new Error('worker stopped')
+        }
+        if (executions.has(execution.id)) return 'duplicate'
+        executions.set(execution.id, structuredClone(execution))
+        return 'created'
+      },
+      async getExecution(_workspaceId, executionId) {
+        return structuredClone(executions.get(executionId))
+      },
+      async listExecutions(query) {
+        return {
+          executions: [...executions.values()]
+            .filter((execution) => execution.ruleId === query.ruleId)
+            .sort((first, second) => second.startedAt.localeCompare(first.startedAt))
+            .slice(0, query.limit)
+            .map((execution) => structuredClone(execution)),
+        }
+      },
+      async claimExecution(candidate, _now, leaseExpiresAt) {
+        const current = executions.get(candidate.id)
+        if (!current || current.status !== candidate.status || current.attempts !== candidate.attempts) {
+          return false
+        }
+        current.status = 'running'
+        current.attempts += 1
+        current.nextRetryAt = leaseExpiresAt
+        executions.set(current.id, structuredClone(current))
+        return true
+      },
+      async saveExecution(execution) {
+        executions.set(execution.id, structuredClone(execution))
+        return true
+      },
+      async hasActionReceipt(_workspaceId, executionId, actionId) {
+        return receipts.has(`${executionId}:${actionId}`)
+      },
+      async putActionReceipt(_workspaceId, executionId, actionId) {
+        const receipt = `${executionId}:${actionId}`
+        if (receipts.has(receipt)) return false
+        receipts.add(receipt)
+        return true
+      },
+      async completeScheduledRule(_workspaceId, _ruleId, expectedRevision, lastRunAt, nextRunAt) {
+        if (currentRule.revision !== expectedRevision) throw new Error('revision conflict')
+        currentRule = { ...currentRule, revision: currentRule.revision + 1, lastRunAt, nextRunAt }
+        return structuredClone(currentRule)
+      },
+      async getRule() {
+        return structuredClone(currentRule)
+      },
+    })
+    const dependencies = {
+      client,
+      entitlement: enabledAutomationEntitlement,
+      actionExecutor: {
+        async execute(_action, context) {
+          notified.push(String(context.event.metadata?.issueId))
+        },
+      },
+      dueWorkItems: {
+        async listOpenWorkItemsDueOn(_workspaceId, dueDate) {
+          // item-1 is completed after the first run, so it leaves the due list.
+          return [
+            ...(crashOnSecondItem ? [{ teamId: 'core', workItemId: 'item-1', dueDate }] : []),
+            { teamId: 'core', workItemId: 'item-2', dueDate },
+          ]
+        },
+      },
+      workItems: {
+        async getTeamIssueDetail(_workspaceId, _teamId, workItemId) {
+          return {
+            issue: {
+              id: workItemId,
+              assigneeUserId: `member-${workItemId}`,
+              dueDate: '2026-07-19',
+              statusCategory: 'unstarted',
+            },
+          }
+        },
+      },
+    } satisfies AutomationScheduleDependencies
+
+    await expect(processScheduledAutomationRule(
+      rule,
+      new Date('2026-07-16T00:00:30.000Z'),
+      dependencies,
+    )).rejects.toThrow('worker stopped')
+    const resumed = await processScheduledAutomationRule(
+      currentRule,
+      new Date('2026-07-17T00:10:00.000Z'),
+      dependencies,
+    )
+
+    // The started July 16 fan-out finishes item-2; the July 17 occurrence finds no Work Item due
+    // on July 20, since every item is due on July 19.
+    expect(notified).toEqual(['item-1', 'item-2'])
+    expect(resumed.lastRunAt).toBe('2026-07-17T00:00:00.000Z')
+    expect(resumed.nextRunAt).toBe('2026-07-18T00:00:00.000Z')
+  })
+
   test('rejects a due-soon rule when the schedule has no due Work Item source', async () => {
     const rule: AutomationRule = {
       ...createScheduledRule(),
