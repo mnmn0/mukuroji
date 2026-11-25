@@ -31,7 +31,7 @@
 | `ApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
 | `ConnectorRuntimeConfiguration` | no（`mukuroji:connectors` 有効時だけ存在） | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
-| `NotificationEmailSender` | no | 通知を Email で送るときの SES 送信元アドレス。既定値は空で、空のあいだは Email 配信を行いません（通知設定の Email は保存だけされます）。設定前に SES でこのアドレスかドメインを検証し、sandbox を解除してください。送信元ドメインの SPF / DKIM / DMARC は運用者が DNS に設定します。詳しくは [`docs/notifications.md`](../docs/notifications.md#email-配信) を参照してください。 |
+| `NotificationEmailSender` | no | 通知を Email で送るときの SES 送信元アドレス。既定値は空で、空のあいだは Email 配信を行いません（通知設定の Email は保存だけされます）。設定前に SES でこのアドレスかドメインを検証し、sandbox を解除してください。送信元ドメインの SPF / DKIM / DMARC は運用者が DNS に設定します。stack は SES configuration set を作り、bounce と complaint を EventBridge と SQS で受けて宛先を止めます。詳しくは [`docs/notifications.md`](../docs/notifications.md#email-配信) を参照してください。 |
 | `WebPushVapidPublicKey` | no | 通知の Web Push に使う VAPID 公開鍵（padding なし base64url の非圧縮 P-256）。既定値は空で、空のあいだは push の購読登録も配信も行いません（通知設定のプッシュは保存だけされます）。`bun run web-push:vapid-keys` で鍵の組を作り、秘密鍵を Secrets Manager の secret `mukuroji/web-push/vapid-private-key` に保存してから設定してください。詳しくは [`docs/notifications.md`](../docs/notifications.md#web-push-配信) を参照してください。 |
 | `InboxDigestDeliveryEnabled` | no | `true`（既定）なら、メンバーが「受信トレイのダイジェスト設定」で同意した Update の日次・週次ダイジェストを scheduled-jobs Lambda が15分おきに受信トレイへ配ります。`false` にすると同意は保存されたまま何も配りません。[ADR 0066](../docs/adr/0066-inbox-digest-scheduled-job.md) を参照してください。 |
 | `CognitoEmailSender` | no | stack が作る user pool の招待・パスワード再設定メールを SES から送るときの送信元アドレス。既定値は空で、空のあいだは Cognito の既定の送信機能（1日 50 通まで）を使います。既存の user pool を使う場合は指定できません。[招待と再設定のメールを SES から送る](#招待と再設定のメールを-ses-から送る) を参照してください。 |
@@ -209,7 +209,7 @@ aws ce update-cost-allocation-tags-status \
 | X-Ray | $0 | 既定の `LambdaTracingMode=PassThrough` で記録しません。 |
 | GuardDuty Malware Protection for S3 | $0 | 料金は scan した容量と object 数だけです。無効にすると upload した file を scan できず、download を許す条件（scan 済みの tag）が成り立たないため、必須にしています。 |
 
-`ScheduledJobsFunction` は毎分 1 回起動し、その分に実行する job だけを動かします（毎分: Automation、Triage、Agent Run triage、Slack 通知、Email 通知、Web Push 通知。5 分: Analytics。60 分: 通知の予定、Cycle。6 時間: 祝日の取り込み）。毎分の job は、対象を期限の sparse index（Automation の `ScheduleDueIndex`、Triage の `triage-wake-index` の 8 partition、通知の配信待ち index）から query して読むため、対象がない分は空の query だけで終わります。Software factory を deploy しない環境では Agent Run triage を動かしません。月 43,200 回の起動は Lambda の無料枠に収まる見込みで、DynamoDB の読み取りは月数十セントです。間隔を延ばすと期限の通知や Automation の実行が最大でその分遅れるため、毎分のままにしています。
+`ScheduledJobsFunction` は毎分 1 回起動し、その分に実行する job だけを動かします（毎分: Automation、Triage、Agent Run triage、Slack 通知、Email 通知、Web Push 通知、Email の bounce / complaint 取り込み。5 分: Analytics。60 分: 通知の予定、Cycle。6 時間: 祝日の取り込み）。毎分の job は、対象を期限の sparse index（Automation の `ScheduleDueIndex`、Triage の `triage-wake-index` の 8 partition、通知の配信待ち index）から query して読むため、対象がない分は空の query だけで終わります。Software factory を deploy しない環境では Agent Run triage を動かしません。月 43,200 回の起動は Lambda の無料枠に収まる見込みで、DynamoDB の読み取りは月数十セントです。間隔を延ばすと期限の通知や Automation の実行が最大でその分遅れるため、毎分のままにしています。
 
 ### 利用規模ごとの試算
 
