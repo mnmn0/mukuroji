@@ -277,6 +277,11 @@ export function DocumentReadOnlyContent({
  * Props of {@link DocumentReadOnlyBlock}.
  */
 export type DocumentReadOnlyBlockProps = {
+  /**
+   * Members that name a checklist owner. A key without a matching member is shown as the key, so
+   * an owner or deadline change stays visible when the member list is missing.
+   */
+  assignees?: readonly ChecklistAssigneeOption[]
   /** Block to render. */
   block: DocumentBlock
   /** Translator. */
@@ -286,11 +291,14 @@ export type DocumentReadOnlyBlockProps = {
 /**
  * Renders one block with the safe read-only renderer, for version comparisons.
  *
- * @param props - Block and translator.
+ * A comparison always shows the saved checklist owner and deadline, because a change to either
+ * one counts as a change of the block.
+ *
+ * @param props - Block, owner names, and translator.
  * @returns The read-only block.
  */
-export function DocumentReadOnlyBlock({ block, t }: DocumentReadOnlyBlockProps) {
-  return <ReadOnlyBlock block={block} t={t} />
+export function DocumentReadOnlyBlock({ assignees, block, t }: DocumentReadOnlyBlockProps) {
+  return <ReadOnlyBlock block={block} checklistAssignees={assignees ?? []} t={t} />
 }
 
 function EditableBlock({
@@ -1111,10 +1119,16 @@ function DiagramBlockEditor({
 
 function ReadOnlyBlock({
   block,
+  checklistAssignees,
   checklistWorkItems,
   t,
 }: {
   block: DocumentBlock
+  /**
+   * Members that name a checklist owner when the checklist controls offer none. Passing it shows
+   * the saved owner and deadline even without the controls.
+   */
+  checklistAssignees?: readonly ChecklistAssigneeOption[]
   /** Open actions for checklist items with a Work Item; creation is never offered here. */
   checklistWorkItems?: ChecklistWorkItemControls
   t: (key: MessageKey) => string
@@ -1175,6 +1189,7 @@ function ReadOnlyBlock({
 
   if (block.type === 'checklist') {
     const today = formatLocalCalendarDate(new Date())
+    const ownershipAssignees = checklistWorkItems?.assignees ?? checklistAssignees
     return (
       <ul className="m-0 grid list-none gap-2 p-0">
         {block.items.map((item) => (
@@ -1184,9 +1199,9 @@ function ReadOnlyBlock({
               <span className={item.checked ? 'text-[var(--workbench-muted)] line-through' : ''}>
                 <DocumentLinkedText text={item.text} />
               </span>
-              {checklistWorkItems?.assignees ? (
+              {ownershipAssignees ? (
                 <ChecklistItemOwnershipSummary
-                  assignees={checklistWorkItems.assignees}
+                  assignees={ownershipAssignees}
                   item={item}
                   t={t}
                   today={today}
