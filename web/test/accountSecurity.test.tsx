@@ -216,14 +216,18 @@ describe('system administrators in the member list', () => {
         { id: 'a-project', memberKey: 'a@example.com', roleId: 'custom:editor', scopeType: 'project' },
         { id: 'a-workspace', memberKey: 'a@example.com', roleId: 'workspace:portfolio-viewer', scopeType: 'workspace' },
         { id: 'b-team', memberKey: 'b@example.com', roleId: 'custom:missing', scopeType: 'team' },
+        { id: 'a-org-unit', memberKey: 'a@example.com', roleId: 'org-unit:manager', scopeType: 'org-unit' },
       ],
       roles: [
         { id: 'workspace:portfolio-viewer', name: 'Portfolio viewer' },
         { id: 'custom:editor', name: 'Editor' },
+        { id: 'org-unit:manager', name: 'OrgUnit manager' },
       ],
     })
 
-    expect(grouped.get('a@example.com')?.map((label) => label.roleName)).toEqual(['Portfolio viewer', 'Editor'])
+    // An OrgUnit role sits between the Workspace and the narrower Team and Project scopes.
+    expect(grouped.get('a@example.com')?.map((label) => label.roleName))
+      .toEqual(['Portfolio viewer', 'OrgUnit manager', 'Editor'])
     expect(grouped.get('b@example.com')).toEqual([{ id: 'b-team', roleName: 'custom:missing', scopeType: 'team' }])
   })
 })

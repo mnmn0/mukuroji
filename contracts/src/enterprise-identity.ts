@@ -58,6 +58,8 @@ export const ENTERPRISE_BUILT_IN_ROLE_IDS = [
   'workspace:guest',
   'workspace:portfolio-viewer',
   'workspace:auditor',
+  'org-unit:manager',
+  'org-unit:viewer',
   'team:manager',
   'team:member',
   'project:manager',
@@ -80,6 +82,12 @@ export type EnterpriseCustomRoleId = `custom:${string}`
  */
 export type EnterpriseRoleId = EnterpriseBuiltInRoleId | EnterpriseCustomRoleId
 
+/** Scope kinds that a role assignment or directory group mapping can target. */
+export const ENTERPRISE_ROLE_SCOPE_KINDS = ['workspace', 'org-unit', 'team', 'project'] as const
+
+/** Scope kind that a role assignment or directory group mapping targets. */
+export type EnterpriseRoleScopeKind = (typeof ENTERPRISE_ROLE_SCOPE_KINDS)[number]
+
 /**
  * Role assignment と authorization request が参照する resource scope です。
  */
@@ -89,11 +97,12 @@ export type EnterpriseRoleScope = {
    */
   workspaceId: string
   /**
-   * Workspace、Team、Project のどこに権限を適用するかを示します。
+   * Workspace、OrgUnit、Team、Project のどこに権限を適用するかを示します。
+   * OrgUnit scope は、その OrgUnit と配下の OrgUnit に所属する Team とその Project に効きます。
    */
-  kind: 'workspace' | 'team' | 'project'
+  kind: EnterpriseRoleScopeKind
   /**
-   * Team または Project の ID です。Workspace scope では指定しません。
+   * OrgUnit、Team、Project の ID です。Workspace scope では指定しません。
    */
   targetId?: string
   /** Team that owns a Project scope; required whenever the scope kind is project. */

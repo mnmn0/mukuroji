@@ -512,6 +512,15 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         'entryKey',
         encodedWorkspaceSelector('directoryId', 'equals', 'TEAM_GRANT_REQUEST#'),
       ),
+      // The OrgUnit structure is one sidecar row per Workspace (ADR 0097). New targets go last
+      // so queued jobs keep their indexes.
+      exactSidecarTarget(
+        'org-structure',
+        this.config.projectDirectoryTableName,
+        'directoryId',
+        'entryKey',
+        encodedWorkspaceSelector('directoryId', 'equals', 'ORG_STRUCTURE#'),
+      ),
     ]
   }
 

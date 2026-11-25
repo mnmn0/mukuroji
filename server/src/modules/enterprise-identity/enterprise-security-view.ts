@@ -4,6 +4,7 @@ import {
   type EnterpriseIdentityProvider,
   type EnterpriseIdentitySnapshot,
   type EnterprisePermissionId,
+  type EnterpriseRoleScopeKind,
   type EnterpriseSecurityPolicy,
 } from '@mukuroji/contracts'
 import {
@@ -101,6 +102,18 @@ const builtInRoles = [
     name: 'Auditor',
     description: 'Read the audit log without export or administration access.',
     permissions: builtInPermissions['workspace:auditor'],
+  },
+  {
+    id: 'org-unit:manager',
+    name: 'OrgUnit manager',
+    description: 'Manage every Team of an OrgUnit and its sub-units, with their Projects and Work Items.',
+    permissions: builtInPermissions['org-unit:manager'],
+  },
+  {
+    id: 'org-unit:viewer',
+    name: 'OrgUnit viewer',
+    description: 'Read every Team of an OrgUnit and its sub-units, with their Projects and Work Items.',
+    permissions: builtInPermissions['org-unit:viewer'],
   },
   {
     id: 'team:manager',
@@ -303,7 +316,7 @@ export function toEnterpriseSecuritySnapshotView(
     ...snapshot.customRoles.map((role) => role.roleId),
   ]
   const assignableRoleIdsForScope = (
-    scopeKind: 'workspace' | 'team' | 'project',
+    scopeKind: EnterpriseRoleScopeKind,
   ) => roleIds.filter((roleId) =>
     canAssignEnterpriseRole(
       snapshot.customRoles,
@@ -337,12 +350,14 @@ export function toEnterpriseSecuritySnapshotView(
     assignableRoleIds: {
       groupMappings: {
         workspace: assignableRoleIdsForScope('workspace'),
+        'org-unit': assignableRoleIdsForScope('org-unit'),
         team: assignableRoleIdsForScope('team'),
         project: assignableRoleIdsForScope('project'),
       },
       serviceAccounts: assignableRoleIdsForScope('workspace'),
       members: {
         workspace: assignableRoleIdsForScope('workspace'),
+        'org-unit': assignableRoleIdsForScope('org-unit'),
         team: assignableRoleIdsForScope('team'),
         project: assignableRoleIdsForScope('project'),
       },

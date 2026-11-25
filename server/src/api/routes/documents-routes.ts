@@ -70,6 +70,9 @@ async function createDocumentApiPrincipal(
             enterpriseControlRevision:
               principal.enterpriseIdentityControlRevision,
           }),
+      ...(principal.enterpriseOrgStructureRevision === undefined
+        ? {}
+        : { orgStructureRevision: principal.enterpriseOrgStructureRevision }),
     } satisfies DocumentAuthorizationFenceSnapshot],
     projectRoles,
     ...createDocumentEnterpriseScopeBoundary(principal),

@@ -314,6 +314,28 @@ function projectIdRawItem(
 }
 
 /**
+ * Creates a valid low-level OrgUnit structure row.
+ *
+ * @param overrides - Exact attributes that should replace valid defaults.
+ * @returns One raw DynamoDB item suitable for the normalization boundary.
+ */
+function orgStructureRawItem(
+  overrides: Readonly<Record<string, AttributeValue>> = {},
+): Record<string, AttributeValue> {
+  return {
+    directoryId: { S: 'ORG_STRUCTURE#workspace%231' },
+    entryKey: { S: 'STRUCTURE' },
+    entryType: { S: 'org-structure' },
+    workspaceId: { S: 'workspace#1' },
+    orgUnits: { L: [{ M: { id: { S: 'sales' }, name: { S: 'Sales' } } }] },
+    teamAssignments: { L: [{ M: { teamId: { S: 'team-1' }, orgUnitId: { S: 'sales' } } }] },
+    revision: { N: '1' },
+    updatedAt: { S: CHECKED_AT },
+    ...overrides,
+  }
+}
+
+/**
  * Creates a valid low-level Team-wide grant receipt row.
  *
  * @param overrides - Exact attributes that should replace valid defaults.
@@ -671,6 +693,39 @@ describe('cross-domain normalized page reader boundary', () => {
       teamGrantRequestRawItem({ entryKey: { S: 'key-hash' } }),
       teamGrantRequestRawItem({ requestFingerprint: { S: '' } }),
       teamGrantRequestRawItem({ createdAt: { S: 'yesterday' } }),
+    ]
+    for (const row of malformedRows) {
+      const fixture = new FixtureRawReader({ pages: [rawItemPage(row)] })
+      const malformed = createCrossDomainIntegrityNormalizedPageReader(readerConfiguration())
+      installFixtureRawReader(malformed, fixture)
+      try {
+        await expect(malformed.readPage(pageRequest(undefined, 'project-directory')))
+          .rejects.toEqual(new CrossDomainIntegrityNormalizedPageReaderFailure('AWS_RESPONSE_INVALID'))
+      } finally {
+        malformed.close()
+      }
+    }
+  })
+
+  test('accepts a canonical OrgUnit structure row and fails closed on a malformed one', async () => {
+    const accepted = new FixtureRawReader({ pages: [rawItemPage(orgStructureRawItem())] })
+    const reader = createCrossDomainIntegrityNormalizedPageReader(readerConfiguration())
+    installFixtureRawReader(reader, accepted)
+    try {
+      await expect(reader.readPage(pageRequest(undefined, 'project-directory')))
+        .resolves.toMatchObject({ items: [], retainedUnitCount: 0 })
+    } finally {
+      reader.close()
+    }
+
+    const malformedRows = [
+      orgStructureRawItem({ directoryId: { S: 'ORG_STRUCTURE#workspace#1' } }),
+      orgStructureRawItem({ entryKey: { S: 'OTHER' } }),
+      orgStructureRawItem({ revision: { N: '0' } }),
+      orgStructureRawItem({ updatedAt: { S: 'yesterday' } }),
+      orgStructureRawItem({
+        orgUnits: { L: [{ M: { id: { S: 'sales' }, name: { S: 'Sales' }, parentId: { S: 'sales' } } }] },
+      }),
     ]
     for (const row of malformedRows) {
       const fixture = new FixtureRawReader({ pages: [rawItemPage(row)] })
