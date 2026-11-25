@@ -147,9 +147,11 @@ export async function deliverDueChannelPosts(dependencies: ChannelPostDeliveryDe
   let delivered = 0
   let invalidCount = 0
   let failedCount = 0
+  let truncatedCount = 0
   for (const shard of dependencies.shards) {
     const page = await dependencies.posts.listDue(shard, dependencies.now(), postsPerShard)
     invalidCount += page.invalidCount
+    if (page.truncated) truncatedCount += 1
     for (const post of page.posts) {
       const token = dependencies.createToken()
       const claimedAt = dependencies.now()
@@ -191,8 +193,11 @@ export async function deliverDueChannelPosts(dependencies: ChannelPostDeliveryDe
     }
   }
   // Failing the run raises the scheduled-jobs alarm; the rows stay in the failed partition.
-  if (invalidCount > 0 || failedCount > 0) {
-    throw new Error(`Channel posts: ${failedCount} failed, ${invalidCount} unreadable queue candidates.`)
+  if (invalidCount > 0 || failedCount > 0 || truncatedCount > 0) {
+    throw new Error(
+      `Channel posts: ${failedCount} failed, ${invalidCount} unreadable queue candidates, ` +
+      `${truncatedCount} partitions left unread at the page limit.`,
+    )
   }
   return delivered
 }

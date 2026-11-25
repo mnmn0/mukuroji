@@ -280,7 +280,9 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
       startKey = page.LastEvaluatedKey
       if (!startKey) break
     }
-    return { posts, invalidCount }
+    // Stale index candidates filled the budget; the run reports it instead of passing silently.
+    const truncated = startKey !== undefined && posts.length < limit
+    return { posts, invalidCount, ...(truncated ? { truncated } : {}) }
   }
 
   /** @inheritdoc */

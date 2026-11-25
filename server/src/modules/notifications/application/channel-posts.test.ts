@@ -187,6 +187,20 @@ describe('channel post delivery', () => {
     expect(failures.map((failure) => failure.code)).toEqual(['ChannelPostAttemptsExhausted'])
   })
 
+  test('fails the run when a partition was left unread at the page limit', async () => {
+    const state = queue(post)
+    await expect(deliverDueChannelPosts({
+      destinations: destinations({ scope: 'team', teamId: 'core' }),
+      posts: { ...state.posts, async listDue() { return { posts: [], invalidCount: 0, truncated: true } } },
+      isAuthorized: async () => true,
+      send: async () => { throw new Error('Must not send') },
+      shards: ['slack-channel#1'],
+      reportFailure: () => { throw new Error('Must not fail a post') },
+      createToken: () => 'token-1',
+      now: () => now,
+    })).rejects.toThrow('1 partitions left unread')
+  })
+
   test('drops a post whose source left its Team or Project, or whose Workspace closed', async () => {
     const state = queue(post)
     const delivered = await deliverDueChannelPosts({

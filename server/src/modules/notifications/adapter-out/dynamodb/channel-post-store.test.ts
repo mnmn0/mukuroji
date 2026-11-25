@@ -88,3 +88,21 @@ test('reads past unreadable candidates to the valid posts behind them, and refus
   const next = await store.listDue(String(target), now, 2)
   expect(next.invalidCount).toBe(0)
 })
+
+test('reports a partition whose read budget ran out on candidates that are no longer due', async () => {
+  const ids: string[] = []
+  const probe = await queuedStore(Array.from({ length: 80 }, (_, index) => post(`event-${index}`)))
+  const target = probe.shardOf('event-0')
+  for (let index = 0; index < 80 && ids.length < 6; index += 1) {
+    if (probe.shardOf(`event-${index}`) === target) ids.push(`event-${index}`)
+  }
+  expect(ids).toHaveLength(6)
+  const { store, rows } = await queuedStore(ids.map((id) => post(id)))
+  // The index still lists these rows, but the table already moved them to a later attempt.
+  for (const row of rows.values()) row.slackNextAttemptAt = '2026-11-25T01:00:00.000Z'
+
+  const page = await store.listDue(String(target), now, 2)
+  expect(page.posts).toEqual([])
+  expect(page.invalidCount).toBe(0)
+  expect(page.truncated).toBe(true)
+})

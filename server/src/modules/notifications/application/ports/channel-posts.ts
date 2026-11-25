@@ -175,6 +175,8 @@ export type ChannelPostStore = {
     posts: ChannelPost[]
     /** Candidates that could not be read. */
     invalidCount: number
+    /** True when the read budget ran out before `limit` posts were found and more candidates remain. */
+    truncated?: boolean
   }>
   /**
    * Claims a post for one attempt when its revision and due time are unchanged.
