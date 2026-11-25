@@ -1,11 +1,12 @@
-import { expect, test } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { Client } from '@modelcontextprotocol/client'
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio'
 import { CODING_AGENT_MCP_VERSION } from '../../modules/coding-agent-mcp/application/compatibility'
-import { composeCodingAgentMcp, deriveAgentInstanceId } from './coding-agent-mcp'
+import { AgentTaskError } from '../../modules/coding-agent-mcp/application/work-item-api'
+import { composeCodingAgentMcp, deriveAgentInstanceId, readTeamIds } from './coding-agent-mcp'
 
 /** Public run fields kept by the fake API, plus the raw instance ID only the fake sees. */
 type FakeRun = {
@@ -432,6 +433,25 @@ test('reuses a known server compatibility and retries an unknown one', async () 
   }
 })
 
+test('several configured Teams let create_task choose its Team, and one Team keeps the old schema', async () => {
+  const fake = startFakeApi()
+  const clients: Client[] = []
+  try {
+    const single = await connect(fake.api.port, 'auto', {})
+    clients.push(single)
+    const multi = await connect(fake.api.port, 'auto', { MUKUROJI_MCP_TEAM_IDS: 'team-b' })
+    clients.push(multi)
+    /** Reads the argument names of create_task. */
+    const createArguments = async (client: Client) =>
+      Object.keys((await client.listTools()).tools.find((tool) => tool.name === 'create_task')?.inputSchema.properties ?? {})
+    expect(await createArguments(single)).not.toContain('teamId')
+    expect(await createArguments(multi)).toContain('teamId')
+  } finally {
+    await Promise.all(clients.map((client) => client.close()))
+    await fake.api.stop(true)
+  }
+})
+
 test('derives a stable instance ID without exposing host or account names', () => {
   const derived = deriveAgentInstanceId('codex', 'agent')
   expect(derived).toMatch(/^[0-9a-f]{64}$/u)
@@ -636,4 +656,21 @@ test('the workspace profile needs only the origin and token, and rejects an unkn
   expect(() => composeCodingAgentMcp({
     MUKUROJI_MCP_PROFILE: 'workspace', MUKUROJI_MCP_URL: 'http://127.0.0.1:3000', MUKUROJI_MCP_TOKEN: 'token',
   })).not.toThrow()
+})
+
+describe('readTeamIds', () => {
+  test('keeps the single Team of an older configuration', () => {
+    expect(readTeamIds('team-a', undefined)).toEqual(['team-a'])
+  })
+
+  test('adds listed Teams in order without duplicates', () => {
+    expect(readTeamIds('team-a', 'team-b, team-a ,team-c')).toEqual(['team-a', 'team-b', 'team-c'])
+    expect(readTeamIds(undefined, 'team-b')).toEqual(['team-b'])
+  })
+
+  test('rejects no Team, an empty entry, and too many Teams', () => {
+    expect(() => readTeamIds(undefined, undefined)).toThrow(AgentTaskError)
+    expect(() => readTeamIds(undefined, 'team-a,,team-b')).toThrow(AgentTaskError)
+    expect(() => readTeamIds(undefined, Array.from({ length: 11 }, (_, index) => `team-${index}`).join(','))).toThrow(AgentTaskError)
+  })
 })

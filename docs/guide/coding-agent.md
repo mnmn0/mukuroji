@@ -51,11 +51,16 @@ token の期限が近づいたら「発行済みの token」から **期限を�
 | `MUKUROJI_MCP_URL` | ○ | 接続先の origin（HTTPS。`/api` は付けない） |
 | `MUKUROJI_MCP_TOKEN` | ○ | 発行した token |
 | `MUKUROJI_MCP_TEAM_ID` | ○ | 作業する Team |
+| `MUKUROJI_MCP_TEAM_IDS` | | 複数の Team で作業する場合に、Team ID をカンマ区切りで並べる（最大10件）。`TEAM_ID` は省略できる |
 | `MUKUROJI_MCP_ASSIGNEE_ID` | ○ | 自分の member ID。token の持ち主と一致させる |
 | `MUKUROJI_MCP_PROJECT_ID` | | 特定の Project に絞る |
 | `MUKUROJI_MCP_READ_ONLY` | | 読み取り用の6ツールだけを公開する |
 | `MUKUROJI_MCP_RUNTIME` | | `claude-code` / `codex` / `kiro` / `other` |
 | `MUKUROJI_MCP_PROFILE` | | `tasks`（既定）か `workspace`。`workspace` では URL と token だけを読む |
+
+複数の Team で担当している場合は、`MUKUROJI_MCP_TEAM_IDS` に Team ID を並べると、1つの設定で全 Team の担当タスクを扱えます。
+`get_next_task` は全 Team から次の作業を選び、同じ優先度なら先に書いた Team を選びます。
+タスクを作る Team は `create_task` の `teamId` で選べます。省略すると、最初に書いた Team に作ります。
 
 ### Workspace 全体を読む（Workspace profile）
 

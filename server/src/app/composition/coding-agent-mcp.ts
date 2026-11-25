@@ -9,6 +9,7 @@ import { createAgentWorkItemApi } from '../../modules/coding-agent-mcp/adapter-o
 import { createWorkspaceApi } from '../../modules/coding-agent-mcp/adapter-out/http/workspace-api'
 import { createWorkspaceMcpServer } from '../../modules/coding-agent-mcp/adapter-in/mcp/workspace-server'
 import { assessServerCompatibility, type ServerCompatibility } from '../../modules/coding-agent-mcp/application/compatibility'
+import { maximumAgentTeams } from '../../modules/coding-agent-mcp/application/multi-team-agent-tasks'
 import { AgentTaskError } from '../../modules/coding-agent-mcp/application/work-item-api'
 
 const profileSchema = z.enum(['tasks', 'workspace']).default('tasks')
@@ -22,7 +23,8 @@ const workspaceConfigSchema = z.object({
 const configSchema = z.object({
   MUKUROJI_MCP_URL: z.url(),
   MUKUROJI_MCP_TOKEN: z.string().min(1),
-  MUKUROJI_MCP_TEAM_ID: z.string().trim().min(1).max(256),
+  MUKUROJI_MCP_TEAM_ID: z.string().trim().min(1).max(256).optional(),
+  MUKUROJI_MCP_TEAM_IDS: z.string().trim().min(1).max(4096).optional(),
   MUKUROJI_MCP_ASSIGNEE_ID: z.string().trim().min(1).max(256),
   MUKUROJI_MCP_PROJECT_ID: z.string().trim().min(1).max(256).optional(),
   MUKUROJI_MCP_AGENT_NAME: z.string().trim().min(1).max(64).regex(/^[\p{L}\p{N} ._-]+$/u).default('coding-agent'),
@@ -91,10 +93,13 @@ export function composeCodingAgentMcp(environment: Record<string, string | undef
   if (profile.data === 'workspace') return composeWorkspaceMcp(environment)
   const parsed = configSchema.safeParse(environment)
   if (!parsed.success) {
-    throw new AgentTaskError('configuration', 'Set MUKUROJI_MCP_URL, MUKUROJI_MCP_TOKEN, MUKUROJI_MCP_TEAM_ID, and MUKUROJI_MCP_ASSIGNEE_ID. Check optional PROJECT_ID, AGENT_NAME, READ_ONLY, RUNTIME, and INSTANCE_ID values.')
+    throw new AgentTaskError('configuration', 'Set MUKUROJI_MCP_URL, MUKUROJI_MCP_TOKEN, MUKUROJI_MCP_TEAM_ID (or MUKUROJI_MCP_TEAM_IDS), and MUKUROJI_MCP_ASSIGNEE_ID. Check optional PROJECT_ID, AGENT_NAME, READ_ONLY, RUNTIME, and INSTANCE_ID values.')
   }
   const config = parsed.data
-  const api = createAgentWorkItemApi({ origin: config.MUKUROJI_MCP_URL, token: config.MUKUROJI_MCP_TOKEN, teamId: config.MUKUROJI_MCP_TEAM_ID })
+  const teamIds = readTeamIds(config.MUKUROJI_MCP_TEAM_ID, config.MUKUROJI_MCP_TEAM_IDS)
+  const apiFor = (teamId: string) => createAgentWorkItemApi({ origin: config.MUKUROJI_MCP_URL, token: config.MUKUROJI_MCP_TOKEN, teamId })
+  // One Team keeps the single-Team server unchanged; several Teams route each task to its Team.
+  const api = teamIds.length === 1 ? apiFor(teamIds[0]) : teamIds.map((teamId) => ({ teamId, api: apiFor(teamId) }))
   const serverCompatibility = createServerCompatibilityReader(config.MUKUROJI_MCP_URL)
   const createServer = () => createCodingAgentMcpServer(api, {
     assigneeUserId: config.MUKUROJI_MCP_ASSIGNEE_ID,
@@ -105,6 +110,30 @@ export function composeCodingAgentMcp(environment: Record<string, string | undef
       deriveAgentInstanceId(config.MUKUROJI_MCP_RUNTIME, config.MUKUROJI_MCP_ASSIGNEE_ID),
   }, config.MUKUROJI_MCP_READ_ONLY === 'true', serverCompatibility)
   return Object.assign(createServer, { serverCompatibility })
+}
+
+/**
+ * Reads the configured Teams: `MUKUROJI_MCP_TEAM_ID` first, then the comma-separated
+ * `MUKUROJI_MCP_TEAM_IDS` in order, without duplicates.
+ *
+ * @param teamId - Single Team ID, as older configurations set it.
+ * @param teamIds - Comma-separated Team IDs.
+ * @returns At least one and at most `maximumAgentTeams` Team IDs.
+ * @throws AgentTaskError configuration when no Team, an empty entry, or too many Teams are set.
+ */
+export function readTeamIds(teamId: string | undefined, teamIds: string | undefined): string[] {
+  const listed = teamIds === undefined ? [] : teamIds.split(',').map((entry) => entry.trim())
+  if (listed.some((entry) => entry.length === 0 || entry.length > 256)) {
+    throw new AgentTaskError('configuration', 'MUKUROJI_MCP_TEAM_IDS must be Team IDs separated by commas.')
+  }
+  const unique = [...new Set([...(teamId === undefined ? [] : [teamId]), ...listed])]
+  if (unique.length === 0) {
+    throw new AgentTaskError('configuration', 'Set MUKUROJI_MCP_TEAM_ID or MUKUROJI_MCP_TEAM_IDS.')
+  }
+  if (unique.length > maximumAgentTeams) {
+    throw new AgentTaskError('configuration', `MUKUROJI_MCP_TEAM_IDS may list at most ${maximumAgentTeams} Teams.`)
+  }
+  return unique
 }
 
 /**

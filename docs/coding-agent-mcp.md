@@ -59,7 +59,8 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 | --- | --- | --- |
 | `MUKUROJI_MCP_URL` | 必須 | Mukurojiのorigin。`/api` を含めず、HTTPSを使用。開発時はloopbackのみHTTP可 |
 | `MUKUROJI_MCP_TOKEN` | 必須 | APIキーまたは有効なOAuth access token |
-| `MUKUROJI_MCP_TEAM_ID` | 必須 | この接続で扱うTeam |
+| `MUKUROJI_MCP_TEAM_ID` | 必須（`TEAM_IDS` を使う場合は任意） | この接続で扱うTeam |
+| `MUKUROJI_MCP_TEAM_IDS` | 任意 | 複数のTeamを扱う場合に、Team IDをカンマ区切りで最大10件。`TEAM_ID` があればその後ろに足します |
 | `MUKUROJI_MCP_ASSIGNEE_ID` | 必須 | 作業選択・作成・更新の対象となる担当メンバー |
 | `MUKUROJI_MCP_PROJECT_ID` | 任意 | 全操作を一つのProjectに限定 |
 | `MUKUROJI_MCP_AGENT_NAME` | 任意 | コメントに付ける表示名。既定 `coding-agent`、最大64文字 |
@@ -67,6 +68,18 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 | `MUKUROJI_MCP_RUNTIME` | 任意 | Agent Runに記録するクライアント種別。`claude-code`、`codex`、`kiro`、`other`。既定 `other` |
 | `MUKUROJI_MCP_PROFILE` | 任意 | `tasks`（既定、この表の値を使う）か `workspace`（下の「Workspace profile」。URL と token だけを読む） |
 | `MUKUROJI_MCP_INSTANCE_ID` | 任意 | このエージェントインスタンスを区別する安定ID。最大256文字。未指定時はホスト名・OSユーザー名・runtime・担当者から導出したSHA-256だけを送ります。サーバーはさらにハッシュ化して保存し、元の値を返しません |
+
+### 複数のTeamを扱う
+
+`MUKUROJI_MCP_TEAM_IDS` で2つ以上のTeamを指定すると、1つのMCP設定で、すべてのTeamの担当タスクを扱います。
+Team が1つだけなら、ツールと結果は従来と同じです。
+
+- `get_configuration` は、各Teamの設定・brief・catalog を `teams` に並べて返します。
+- `get_next_task` は全Teamを調べ、自分の実行中Run、再開、新しい作業の順に選びます。同じ順位なら先に書いたTeamを優先し、選んだタスクのTeamを `teamId` で返します。
+- `list_tasks` は指定した順にTeamを続けて読みます。`nextCursor` には次に読むTeamが含まれます。
+- `get_work_status` は全Teamの件数を足し、進行中のタスクに `teamId` を付けます。
+- タスクIDやRun IDを受け取るツールは、そのタスクやRunを持つTeamを自分で探します。ステータスIDは、そのタスクのTeamのcatalogから選んでください。
+- `create_task` は `teamId` を受け取ります。省略すると、最初に書いたTeamに作ります。
 
 同じメンバーが複数のエージェントを同時に使う場合も、`INSTANCE_ID` が異なれば別のインスタンスとして扱います。
 同じマシン・同じOSユーザーで同じruntimeを複数起動する場合は、プロセスごとに異なる `INSTANCE_ID` を指定してください。
