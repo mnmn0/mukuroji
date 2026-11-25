@@ -70,6 +70,13 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   creatorMemberKey: string
   /** Request intake から作成された場合の source submission ID です。 */
   sourceRequestId?: string
+  /** Member who sent the source request and the form title, kept for the completion notice. */
+  sourceRequester?: {
+    /** Member key of the requester. */
+    memberKey: string
+    /** Form title used as the notification title. */
+    formTitle: string
+  }
   /** Team Triage から作成された場合の source Entry ID です。 */
   sourceTriageEntryId?: string
   /** Workflow 内の現在 status ID です。 */
@@ -168,6 +175,7 @@ function hasCanonicalWorkItemRecordBase(value: Record<string, unknown>): boolean
     (value.progressPercent === undefined || isWorkItemProgressPercent(value.progressPercent)) &&
     isNonEmptyString(value.creatorMemberKey) &&
     (value.sourceRequestId === undefined || isNonEmptyString(value.sourceRequestId)) &&
+    (value.sourceRequester === undefined || isSourceRequester(value.sourceRequester)) &&
     (value.sourceTriageEntryId === undefined ||
       isNonEmptyString(value.sourceTriageEntryId)) &&
     hasCanonicalProjectAssignment(value) &&
@@ -433,6 +441,16 @@ function isSha256Digest(value: unknown): value is string {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0 && value === value.trim()
+}
+
+/**
+ * Checks the stored requester of a Work Item made from a request.
+ *
+ * @param value - Stored `sourceRequester` value.
+ * @returns Whether it names a member key and a form title.
+ */
+function isSourceRequester(value: unknown): boolean {
+  return isRecord(value) && isNonEmptyString(value.memberKey) && typeof value.formTitle === 'string'
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
