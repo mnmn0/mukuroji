@@ -9,6 +9,7 @@ import {
   type WorkItemPriority,
   type WorkItemTypeDefinition,
 } from '@mukuroji/contracts'
+import { TeamIssuesApiError } from '../../../issues/api/errors'
 import { createTeamIssue, getTeamIssueDetail } from '../../../issues/api/workItems'
 import { isWorkspaceOrProjectWorkItemListKey } from '../../../issues/queries/useWorkItems'
 import { getPlanningSnapshot } from '../../../planning/api/snapshot'
@@ -247,21 +248,35 @@ export function useAiPlanningStructureAdoption({
     if (!accessToken) throw new AiPlanningStructureAdoptionError('missing-token')
     setIsPending(true)
     try {
-      const result = await adoptAiPlanningStructure(session, accessToken, parent, input)
+      return await adoptAiPlanningStructure(session, accessToken, parent, input)
+    } finally {
       // Lists, details, hierarchies, and the Planning graph of the Team read the new children and
-      // dependencies; a failed refresh leaves the created rows in place.
+      // dependencies. A failed adoption may already have created some of them, so they are
+      // refreshed on failure too; a failed refresh leaves the created rows in place.
       // The Project and Workspace lists hold the children too, without the Team ID in their keys.
       await mutate(
         (key) => (Array.isArray(key) && (key.includes(parent.teamId) || key[0] === 'planning-snapshot')) ||
           isWorkspaceOrProjectWorkItemListKey(key, parent.assignedProjectId),
       ).catch(() => undefined)
-      return result
-    } finally {
       setIsPending(false)
     }
   }
 
   return { adopt, isPending }
+}
+
+/**
+ * Tells whether the server refused a child create without making it, so the request may change
+ * before the next try. A lost response, a server error, a conflict on the idempotency key, and a
+ * rate limit may hide a create that did happen, so they keep the first request.
+ *
+ * @param error - Failure of the create request.
+ * @returns Whether the create certainly made nothing.
+ */
+function isDefinitiveCreateRejection(error: unknown): boolean {
+  return error instanceof TeamIssuesApiError &&
+    error.status >= 400 && error.status < 500 &&
+    error.status !== 408 && error.status !== 409 && error.status !== 429
 }
 
 /**
@@ -310,11 +325,19 @@ async function createChildren(
       ...(backlogStatus ? { quickCapture: true, workflowStatusId: backlogStatus.id } : {}),
     }
     attemptedChildren.set(createdKey, request)
-    const issue = await runner.run(
-      `ai-planning:${input.generationId}:child:${child.rowId}`,
-      JSON.stringify([parent.teamId, request]),
-      (context) => api.createTeamIssue(parent.teamId, token, request, context),
-    )
+    let issue: Awaited<ReturnType<AiPlanningStructureApi['createTeamIssue']>>
+    try {
+      issue = await runner.run(
+        `ai-planning:${input.generationId}:child:${child.rowId}`,
+        JSON.stringify([parent.teamId, request]),
+        (context) => api.createTeamIssue(parent.teamId, token, request, context),
+        (error) => !isDefinitiveCreateRejection(error),
+      )
+    } catch (error) {
+      // A refused create made nothing, so the edited row is sent on the next try instead.
+      if (isDefinitiveCreateRejection(error)) attemptedChildren.delete(createdKey)
+      throw error
+    }
     createdChildren.set(createdKey, issue.id)
     childWorkItemIds[child.rowId] = issue.id
   }

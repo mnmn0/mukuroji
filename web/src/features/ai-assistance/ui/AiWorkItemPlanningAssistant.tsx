@@ -19,6 +19,7 @@ import {
   AiPlanningStructureAdoptionContainer,
   type AiPlanningStructureAdoptionContext,
 } from './AiPlanningStructureAdoption'
+import { useAiGenerationExpiryRerender } from './useAiGenerationExpiryRerender'
 
 /** Props for explicit Work Item planning assistance. */
 export type AiWorkItemPlanningAssistantProps = {
@@ -200,6 +201,9 @@ export function AiWorkItemPlanningAssistantView({
 }: AiWorkItemPlanningAssistantViewProps) {
   const [confirmationGenerationId, setConfirmationGenerationId] = useState<string>()
   const confirmationRef = useRef<HTMLDivElement>(null)
+  // The structure adoption section shows the draft outside the review, so it must be withdrawn at
+  // the same expiry time as the review's own content.
+  useAiGenerationExpiryRerender(generation)
   const availableDraft = getAvailableWorkItemPlanningDraft(generation)
   const hasInvalidAvailableDraft = generation?.content.availability === 'available' &&
     !availableDraft

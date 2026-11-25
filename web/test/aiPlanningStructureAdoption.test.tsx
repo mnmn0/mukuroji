@@ -9,6 +9,7 @@ import {
   type WorkItemConfiguration,
   type WorkItemParentMutationInput,
 } from '@mukuroji/contracts'
+import { TeamIssuesApiError } from '../src/issues/api/errors'
 import { teamIssueFixtures } from '../src/issues/fixtures'
 import { aiPlanningGenerationFixture } from '../src/features/ai-assistance/fixtures'
 import {
@@ -58,7 +59,9 @@ const parent: AiPlanningStructureParent = {
 }
 
 /** Records the calls of a fake API backed by in-memory Work Items and dependencies. */
-function createFakeApi(options: { failParentOnce?: boolean; loseCreateResponseOnce?: boolean } = {}) {
+function createFakeApi(
+  options: { failParentOnce?: boolean; loseCreateResponseOnce?: boolean; rejectCreateOnce?: boolean } = {},
+) {
   const created: { idempotencyKey: string; input: CreateWorkItemInput }[] = []
   const parents = new Map<string, string>()
   const parentCalls: WorkItemParentMutationInput[] = []
@@ -68,6 +71,7 @@ function createFakeApi(options: { failParentOnce?: boolean; loseCreateResponseOn
   let planningRevision = 9
   let failParent = options.failParentOnce ?? false
   let loseCreateResponse = options.loseCreateResponseOnce ?? false
+  let rejectCreate = options.rejectCreateOnce ?? false
 
   const snapshot = (): PlanningSnapshot => ({
     ...planningSnapshotFixture,
@@ -87,6 +91,11 @@ function createFakeApi(options: { failParentOnce?: boolean; loseCreateResponseOn
 
   const api: AiPlanningStructureApi = {
     async createTeamIssue(_teamId, _token, input, context) {
+      if (rejectCreate) {
+        // The server refused the input and made nothing.
+        rejectCreate = false
+        throw new TeamIssuesApiError(400, 'invalid input')
+      }
       // The server returns the first result for a repeated idempotency key.
       const existing = issuesByKey.get(context.idempotencyKey)
       const id = existing ?? `child-${issuesByKey.size + 1}`
@@ -232,6 +241,18 @@ describe('AI planning structure adoption', () => {
     expect(fake.created.map((entry) => entry.input.title)).toEqual(['Write the plan', 'Review the plan'])
   })
 
+  test('a retry after a refused create sends the edited row', async () => {
+    const fake = createFakeApi({ rejectCreateOnce: true })
+    const session = createAiPlanningStructureAdoptionSession(fake.api)
+    await expect(adoptAiPlanningStructure(session, 'token', parent, input)).rejects.toThrow('invalid input')
+    expect(fake.created).toHaveLength(0)
+
+    const edited = { ...input, children: [{ ...input.children[0], title: 'Edited' }, input.children[1]] }
+    await adoptAiPlanningStructure(session, 'token', parent, edited)
+
+    expect(fake.created.map((entry) => entry.input.title)).toEqual(['Edited', 'Review the plan'])
+  })
+
   test('refreshes Workspace lists and the lists of the parent Project only', () => {
     expect(isWorkspaceOrProjectWorkItemListKey(['workspace-work-items', 'token', false, ''], 'project-1')).toBe(true)
     expect(isWorkspaceOrProjectWorkItemListKey(['project-issues', 'token', 'project-1', false, null, null], 'project-1'))
@@ -282,6 +303,23 @@ describe('AI planning structure adoption section', () => {
     expect(html).toContain('Verify keyboard navigation findings')
     expect(html).toContain('Planned effort (hours)')
     expect(html).toContain('value="2"')
+  })
+
+  test('withdraws the section with the draft once the generation expires', () => {
+    setSystemTime(new Date(Date.parse(aiPlanningGenerationFixture.expiresAt) + 1_000))
+    const html = renderToStaticMarkup(
+      <AiWorkItemPlanningAssistantView
+        generation={aiPlanningGenerationFixture}
+        locale="en"
+        onDecide={async () => undefined}
+        onGenerate={() => undefined}
+        structureAdoption={{ childTypes: [{ id: 'task', name: 'Task' }], parent }}
+        t={t}
+      />,
+    )
+
+    expect(html).not.toContain('ai-planning-structure-adoption')
+    expect(html).not.toContain('Verify keyboard navigation findings')
   })
 
   test('keeps the section away from read-only routes', () => {
