@@ -145,30 +145,7 @@ export async function loadFileProofingRequestContext(
 
   if (kind === 'work-item') {
     const issueId = readRequiredRouteId(c.req.param('issueId'), 'Work Item ID')
-    const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
-    return {
-      scope: {
-        workspaceId: principal.directoryId,
-        teamId,
-        kind,
-        issueId,
-        ...(detail.issue.assignedProjectId
-          ? { projectId: detail.issue.assignedProjectId }
-          : {}),
-      },
-      actor: {
-        memberKey: principal.userKey,
-        guest: principal.workspaceRole === 'guest',
-        canWrite: canWriteTeamIssue(principal, context, detail.issue.assignedProjectId),
-        canManage: principal.workspaceRole !== 'guest' &&
-          canManageTeamIssueCollaboration(
-            principal,
-            context,
-            detail.issue.assignedProjectId,
-          ),
-      },
-      workItem: detail.issue,
-    }
+    return loadWorkItemFileProofingContext(principal, teamId, issueId)
   }
 
   const projectId = readRequiredRouteId(c.req.param('projectId'), 'Project ID')
@@ -230,6 +207,49 @@ export async function loadProjectFileProofingContext(
       canManage,
     },
     context,
+  }
+}
+
+/**
+ * Loads the file proofing scope and actor of one Work Item the principal can view.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team that owns the Work Item.
+ * @param issueId - Work Item ID.
+ * @returns The Work Item scope, the actor's capabilities, and the Work Item.
+ */
+export async function loadWorkItemFileProofingContext(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  issueId: string,
+): Promise<{
+  scope: FileProofingScope
+  actor: FileProofingActor
+  workItem: TeamIssueResponseItem
+}> {
+  const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+  return {
+    scope: {
+      workspaceId: principal.directoryId,
+      teamId,
+      kind: 'work-item',
+      issueId,
+      ...(detail.issue.assignedProjectId
+        ? { projectId: detail.issue.assignedProjectId }
+        : {}),
+    },
+    actor: {
+      memberKey: principal.userKey,
+      guest: principal.workspaceRole === 'guest',
+      canWrite: canWriteTeamIssue(principal, context, detail.issue.assignedProjectId),
+      canManage: principal.workspaceRole !== 'guest' &&
+        canManageTeamIssueCollaboration(
+          principal,
+          context,
+          detail.issue.assignedProjectId,
+        ),
+    },
+    workItem: detail.issue,
   }
 }
 

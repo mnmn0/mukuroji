@@ -18,6 +18,7 @@ import {
 import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { resolveDeveloperCredentialPrincipal } from './developer-platform-access'
 import { requirePlanningUpdateProjectPermission } from './planning-access'
+import { isWorkspaceMemberRowActive } from '../../modules/workspace-access'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import {
   requireProjectPermission,
@@ -89,7 +90,8 @@ async function listCredentialTeams(
  * Lists the active members of a Project, for an owner who may assign work in it.
  *
  * The rule matches the Web assignee picker: the owner needs member access to the Project. A member
- * whose Workspace membership is not active is left out, because work cannot be assigned to them.
+ * whose Workspace membership is not active, or whose access expiry has passed, is left out, because
+ * work cannot be assigned to them.
  *
  * @param credential - Authenticated developer credential.
  * @param teamId - Team that owns the Project.
@@ -113,9 +115,11 @@ async function listCredentialProjectMembers(
     projectId,
     teamId,
   )
+  const now = new Date()
   const items = await Promise.all(members.map(async (member) => {
     const workspaceMember = await workspaceDependencies.workspaceAccess.getMember(principal.directoryId, member.id)
-    if (workspaceMember?.status !== 'active') return undefined
+    // A member whose access expired keeps an active row until handover, but cannot receive work.
+    if (!workspaceMember || !isWorkspaceMemberRowActive(workspaceMember, now)) return undefined
     return {
       id: member.id,
       ...(workspaceMember.name ? { name: workspaceMember.name } : {}),

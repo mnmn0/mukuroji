@@ -1,3 +1,5 @@
+import type { ApprovalRequest } from './files'
+
 /**
  * Document、Wiki、Whiteboard の canonical schema version です。
  */
@@ -7,6 +9,11 @@ export const DOCUMENT_SCHEMA_VERSION = 1 as const
  * DynamoDB transaction headroom を保証する Document operation batch 上限です。
  */
 export const DOCUMENT_OPERATION_BATCH_LIMIT = 4 as const
+
+/**
+ * 名前付き version（固定版）の名前に使える最大文字数です。
+ */
+export const DOCUMENT_VERSION_NAME_MAX_LENGTH = 120 as const
 
 /**
  * Document tree に保存できる node 種別です。
@@ -1420,6 +1427,19 @@ export type DocumentVersion = {
    * Version の作成日時です。
    */
   createdAt: string
+  /**
+   * 固定した version に付けた名前です（例: 「v1.0 承認版」）。
+   * 名前がある version は履歴の保持期間を過ぎても削除されません。
+   */
+  name?: string
+  /**
+   * Version を名前付きで固定した日時です。
+   */
+  pinnedAt?: string
+  /**
+   * Version を名前付きで固定した Workspace user ID です。
+   */
+  pinnedByUserId?: string
 }
 
 /**
@@ -2243,6 +2263,70 @@ export type RestoreDocumentVersionResponse = {
    * 復元元の immutable version ID です。
    */
   restoredFromVersionId: string
+}
+
+/**
+ * Version に名前を付けて固定する入力です。
+ */
+export type PinDocumentVersionInput = {
+  /**
+   * 固定する version の名前です。前後の空白を除いて 1 文字以上
+   * {@link DOCUMENT_VERSION_NAME_MAX_LENGTH} 文字以下です。
+   */
+  name: string
+}
+
+/**
+ * Version を固定した結果の response です。
+ */
+export type PinDocumentVersionResponse = {
+  /**
+   * 名前と固定情報を含む version metadata です。
+   */
+  version: DocumentVersion
+}
+
+/**
+ * 固定した Document version に承認依頼を出す入力です。
+ * 承認依頼は成果物として link する Work Item に作成されます。
+ */
+export type CreateDocumentVersionApprovalInput = {
+  /**
+   * 成果物として link する Work Item の Team ID です。
+   */
+  teamId: string
+  /**
+   * 成果物として link する Work Item ID です。
+   */
+  issueId: string
+  /**
+   * Reviewer の Workspace member key 一覧です。
+   */
+  reviewerMemberKeys: string[]
+  /**
+   * 判断期限の ISO 8601 timestamp です。
+   */
+  dueAt: string
+}
+
+/**
+ * Document version の承認依頼を作成した結果の response です。
+ */
+export type CreateDocumentVersionApprovalResponse = {
+  /**
+   * 作成した承認依頼です。
+   */
+  approval: ApprovalRequest
+}
+
+/**
+ * Document の version に出された承認依頼の一覧 response です。
+ */
+export type DocumentApprovalsResponse = {
+  /**
+   * 現在 user が閲覧できる Work Item に属する承認依頼です。新しい順に並びます。
+   */
+  approvals: ApprovalRequest[]
 }
 
 /**

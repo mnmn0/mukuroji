@@ -81,6 +81,10 @@ export type WorkspaceMember = {
    */
   deactivatedAt?: string
   /**
+   * When the member's access ends (ISO 8601); absent when it does not end.
+   */
+  accessExpiresAt?: string
+  /**
    * When the member last signed in (ISO 8601). Only owners and admins receive it, and it is absent
    * when no sign-in has been recorded since the time was first kept.
    */

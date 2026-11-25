@@ -2525,3 +2525,147 @@ test('answers a write without waiting for a stalled change notification', async 
   expect(response.status).toBe(200)
   expect(Date.now() - started).toBeLessThan(5_000)
 })
+
+test('requires Document edit permission to request approval of a version', async () => {
+  let requested = false
+  const app = createTestApp(createDocumentClient({
+    async get() {
+      return { ...pageDocument, capabilities: { ...pageDocument.capabilities, canEdit: false } }
+    },
+    async getVersion() {
+      throw new Error('The version must not be read without edit permission.')
+    },
+  }), {
+    async requestVersionApproval() {
+      requested = true
+      throw new Error('The approval must not be requested without edit permission.')
+    },
+  })
+
+  const response = await app.request('/api/documents/document-1/versions/2/approvals', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      teamId: 'core',
+      issueId: 'work-item-1',
+      reviewerMemberKeys: ['reviewer@example.com'],
+      dueAt: '2099-07-20T00:00:00.000Z',
+    }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'DocumentEditDenied' })
+  expect(requested).toBe(false)
+})
+
+test('pins a named version and requests approval only for a pinned version', async () => {
+  const pinnedNames: string[] = []
+  const unpinnedVersion = {
+    schemaVersion: 1,
+    id: 'document-1:2',
+    documentId: 'document-1',
+    revision: 2,
+    kind: 'page',
+    title: 'Roadmap',
+    reason: 'edit',
+    createdByUserId: 'owner@example.com',
+    createdAt: '2026-07-18T00:00:00.000Z',
+  } as const
+  let pinned = false
+  const approvalRequests: unknown[] = []
+  const app = createTestApp(createDocumentClient({
+    async getVersion(input) {
+      expect(input.versionId).toBe('2')
+      return {
+        version: pinned ? { ...unpinnedVersion, name: 'v1.0' } : unpinnedVersion,
+        document: pageDocument,
+      }
+    },
+    async pinVersion(input) {
+      pinnedNames.push(input.name)
+      pinned = true
+      return { ...unpinnedVersion, name: input.name }
+    },
+    async get() {
+      return pageDocument
+    },
+  }), {
+    async requestVersionApproval(_principal, request) {
+      approvalRequests.push(request)
+      return {
+        id: 'approval-1',
+        subjectType: 'document-version',
+        documentId: request.documentId,
+        versionId: request.versionId,
+        teamId: request.teamId,
+        issueId: request.issueId,
+        revision: 1,
+        status: 'pending',
+        reviewers: [{ memberKey: 'reviewer@example.com', status: 'pending' }],
+        dueAt: request.dueAt,
+        requestedByMemberKey: 'owner@example.com',
+        requestedByKind: 'member',
+        createdAt: '2026-07-18T00:00:00.000Z',
+        updatedAt: '2026-07-18T00:00:00.000Z',
+        capabilities: { canDecide: false, canCancel: true },
+      }
+    },
+    async listVersionApprovals(_principal, documentId) {
+      expect(documentId).toBe('document-1')
+      return []
+    },
+  })
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+  const approvalBody = JSON.stringify({
+    teamId: 'core',
+    issueId: 'work-item-1',
+    reviewerMemberKeys: ['reviewer@example.com'],
+    dueAt: '2099-07-20T00:00:00.000Z',
+  })
+
+  const preview = await app.request('/api/documents/document-1/versions/2', { headers })
+  expect(preview.status).toBe(200)
+  expect(await preview.json()).toMatchObject({
+    version: { version: { id: 'document-1:2' }, document: { id: 'document-1' } },
+  })
+
+  const notPinned = await app.request('/api/documents/document-1/versions/2/approvals', {
+    method: 'POST', headers, body: approvalBody,
+  })
+  expect(notPinned.status).toBe(409)
+  expect(await notPinned.json()).toMatchObject({ code: 'DocumentVersionNotPinned' })
+
+  for (const name of ['', '   ', 'x'.repeat(121), 3]) {
+    const invalid = await app.request('/api/documents/document-1/versions/2/pin', {
+      method: 'POST', headers, body: JSON.stringify({ name }),
+    })
+    expect(invalid.status).toBe(400)
+  }
+  const pin = await app.request('/api/documents/document-1/versions/2/pin', {
+    method: 'POST', headers, body: JSON.stringify({ name: '  v1.0 承認版  ' }),
+  })
+  expect(pin.status).toBe(200)
+  expect(pinnedNames).toEqual(['v1.0 承認版'])
+
+  const malformed = await app.request('/api/documents/document-1/versions/2/approvals', {
+    method: 'POST', headers, body: JSON.stringify({ teamId: 'core', reviewerMemberKeys: [1] }),
+  })
+  expect(malformed.status).toBe(400)
+
+  const requested = await app.request('/api/documents/document-1/versions/2/approvals', {
+    method: 'POST', headers, body: approvalBody,
+  })
+  expect(requested.status).toBe(201)
+  expect(approvalRequests).toEqual([{
+    teamId: 'core',
+    issueId: 'work-item-1',
+    reviewerMemberKeys: ['reviewer@example.com'],
+    dueAt: '2099-07-20T00:00:00.000Z',
+    documentId: 'document-1',
+    versionId: 'document-1:2',
+  }])
+
+  const approvals = await app.request('/api/documents/document-1/approvals', { headers })
+  expect(approvals.status).toBe(200)
+  expect(await approvals.json()).toEqual({ approvals: [] })
+})

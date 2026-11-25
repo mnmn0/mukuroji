@@ -2,6 +2,7 @@ import {
   createProductionNotificationScheduleHandler,
 } from '../app/composition/notification-schedule'
 import { createLazySingleton } from '../app/composition/lazy-singleton'
+import { hydrateWorkspaceAuditPseudonymSecret } from '../app/composition/workspace-audit-pseudonym-secret'
 import {
   createRuntimeControlGuardedHandler,
 } from '../app/composition/runtime-control'
@@ -22,6 +23,8 @@ const getProductionHandler = createLazySingleton(
 async function processNotificationSchedule(
   event: NotificationScheduleEvent = {},
 ) {
+  // An access expiry notice names the member by the Workspace audit pseudonym.
+  await hydrateWorkspaceAuditPseudonymSecret()
   return await getProductionHandler()(event)
 }
 

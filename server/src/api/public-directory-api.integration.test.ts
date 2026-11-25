@@ -5,8 +5,10 @@ import type { AuthenticatedDeveloperCredential } from '../modules/developer-plat
 
 const {
   configureFakeProjectClients,
+  getTestAppDependencies,
   resetTestApp,
   runWithTestAppDependencies,
+  setTestAppDependencies,
 } = createApiTestHarness()
 
 afterEach(() => {
@@ -115,6 +117,45 @@ describe('Public API directory', () => {
     })
     await expect(runWithTestAppDependencies(() => createCanonicalPublicDirectoryService()
       .listProjectMembers(credential, 'core-team', 'refero'))).rejects.toMatchObject({ status: 403 })
+  })
+
+  test('leaves out a Project member whose access expired while their row is still active (ADR 0095)', async () => {
+    configureFakeProjectClients(true, {
+      directoryId: workspaceId,
+      projectAccesses: [{ projectId: 'refero', role: 'member' }],
+      role: 'member',
+      workspaceRole: 'member',
+    })
+    const { workspaceAccess, projectDirectory } = getTestAppDependencies().workspace
+    setTestAppDependencies({
+      workspaceAccess: {
+        ...workspaceAccess,
+        async getMember(memberWorkspaceId, memberKey) {
+          const member = await workspaceAccess.getMember(memberWorkspaceId, memberKey)
+          return member && memberKey === 'sato@example.com'
+            ? { ...member, accessExpiresAt: '2020-01-01T00:00:00.000Z' }
+            : member
+        },
+      },
+      projectDirectory: {
+        ...projectDirectory,
+        async getProjectMembers(directoryId, projectId, teamId) {
+          const response = await projectDirectory.getProjectMembers(directoryId, projectId, teamId)
+          return {
+            ...response,
+            members: [
+              ...response.members,
+              { id: 'sato@example.com', email: 'sato@example.com', role: 'member', updatedAt: '2026-06-08T00:00:00.000Z' },
+            ],
+          }
+        },
+      },
+    })
+
+    const members = await runWithTestAppDependencies(() => createCanonicalPublicDirectoryService()
+      .listProjectMembers(credential, 'core-team', 'refero'))
+
+    expect(members.items.map((item) => item.id)).toEqual(['demo@example.com'])
   })
 
   test('reads the Project log for a viewer and hides a Project the owner cannot see', async () => {
