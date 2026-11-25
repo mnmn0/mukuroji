@@ -41,8 +41,15 @@ import {
   type FileAttachmentTargetType,
   type FilePreviewKind,
   type FileScanStatus,
+  type FileTypeRejection,
+  type FileTypeRejectionReason,
   type FileVersion,
   type WorkflowStatusCategory,
+  type WorkspaceFileTypeSettings,
+  DEFAULT_WORKSPACE_FILE_TYPE_SETTINGS,
+  isFileTypeAllowed,
+  listAllowedFileTypes,
+  resolveFileType,
 } from '@mukuroji/contracts'
 import {
   createMutationAuditEventPut,
@@ -58,7 +65,6 @@ import { FILE_UPLOAD_MAX_SIZE_BYTES } from '../file-upload-policy'
 import { PLANNING_STORAGE_SCHEMA_VERSION } from '../planning'
 import { isMissingFileObjectVersionError } from './file-object-errors'
 import {
-  isAllowedFileContentType,
   isInlineImageFileContentType,
   isInlineSafeFileContentType,
   isInlineVideoFileContentType,
@@ -138,13 +144,38 @@ export class FileProofingError extends Error {
   /** Client が分岐できる安定 error code です。 */
   readonly code: string
 
+  /** `415 FileTypeNotAllowed` で返す拒否理由と Workspace が受け付ける種別です。 */
+  readonly fileTypeRejection?: FileTypeRejection
+
   /** File proofing error を作成します。 */
-  constructor(status: number, code: string, message: string, options?: ErrorOptions) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    options?: ErrorOptions & {
+      /** `415 FileTypeNotAllowed` の拒否理由と受け付ける種別です。 */
+      fileTypeRejection?: FileTypeRejection
+    },
+  ) {
     super(message, options)
     this.name = 'FileProofingError'
     this.status = status
     this.code = code
+    if (options?.fileTypeRejection) {
+      this.fileTypeRejection = options.fileTypeRejection
+    }
   }
+}
+
+/** Workspace が受け付ける File 種別を読む port です。 */
+export type FileTypeSettingsSource = {
+  /**
+   * Workspace の File 種別設定を読みます。
+   *
+   * @param workspaceId - Canonical Workspace ID.
+   * @returns 設定。保存していない Workspace は既定値。
+   */
+  readFileTypeSettings(workspaceId: string): Promise<WorkspaceFileTypeSettings>
 }
 
 /** File attachment を保存する Team scoped resource です。 */
@@ -1007,6 +1038,9 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
   /** 同時 bootstrap を一つにまとめる promise です。 */
   private tableReady?: Promise<void>
 
+  /** Workspace が受け付ける File 種別の読み取り port です。未設定なら既定の種別です。 */
+  private readonly fileTypeSettings?: FileTypeSettingsSource
+
   /** DynamoDB file proofing client を作成します。 */
   constructor(
     documentClient: DynamoDBDocumentClient,
@@ -1025,6 +1059,8 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       dynamoDbClient?: DynamoDBClient
       /** Local table を自動作成するかどうかです。 */
       bootstrapLocalTable?: boolean
+      /** Workspace が受け付ける File 種別の読み取り port です。 */
+      fileTypeSettings?: FileTypeSettingsSource
     } = {},
   ) {
     this.documentClient = documentClient
@@ -1036,6 +1072,19 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     this.retentionDays = requirePositiveInteger(options.retentionDays ?? 30, 'File retention days')
     this.dynamoDbClient = options.dynamoDbClient
     this.bootstrapLocalTable = options.bootstrapLocalTable === true
+    this.fileTypeSettings = options.fileTypeSettings
+  }
+
+  /**
+   * Reads the File types the Workspace accepts for new uploads.
+   *
+   * @param workspaceId - Canonical Workspace ID.
+   * @returns The Workspace settings, or the defaults when no reader is configured.
+   */
+  private async readFileTypeSettings(workspaceId: string): Promise<WorkspaceFileTypeSettings> {
+    return this.fileTypeSettings
+      ? await this.fileTypeSettings.readFileTypeSettings(workspaceId)
+      : DEFAULT_WORKSPACE_FILE_TYPE_SETTINGS
   }
 
   /** Scope の file と approval を取得します。 */
@@ -1124,7 +1173,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
   ): Promise<FileUploadSession> {
     requireFileWrite(actor)
     await this.ensureReady()
-    const normalized = normalizeUploadInput(input)
+    const normalized = normalizeUploadInput(input, await this.readFileTypeSettings(scope.workspaceId))
     const now = auditContext?.occurredAt ?? new Date().toISOString()
     const scopeKey = createFileProofingScopeKey(scope)
     const fileId = createMutationResourceId('file', auditContext, scopeKey)
@@ -1201,7 +1250,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         'A new version cannot replace a file while approval is pending.',
       )
     }
-    const normalized = normalizeUploadInput(input)
+    const normalized = normalizeUploadInput(input, await this.readFileTypeSettings(scope.workspaceId))
     const now = auditContext?.occurredAt ?? new Date().toISOString()
     const versionId = createMutationResourceId(
       'version',
@@ -2697,8 +2746,15 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
   }
 }
 
-/** Production/local environment から標準 file proofing client を作成します。 */
-export function createDefaultFileProofingClient(): FileProofingClient {
+/**
+ * Production/local environment から標準 file proofing client を作成します。
+ *
+ * @param fileTypeSettings - Workspace が受け付ける File 種別の読み取り port。省略時は既定の種別です。
+ * @returns 設定済みの file proofing client。
+ */
+export function createDefaultFileProofingClient(
+  fileTypeSettings?: FileTypeSettingsSource,
+): FileProofingClient {
   const dynamoDbClient = createConfiguredDynamoDbClient()
   const documentClient =
     createPlanningRevisionFenceWriterDynamoDbDocumentClient(dynamoDbClient)
@@ -2726,6 +2782,7 @@ export function createDefaultFileProofingClient(): FileProofingClient {
       planningTableName: readEnvironment('PLANNING_TABLE_NAME'),
       dynamoDbClient,
       bootstrapLocalTable: shouldBootstrapLocalDynamoDb(),
+      ...(fileTypeSettings ? { fileTypeSettings } : {}),
     },
   )
 }
@@ -2933,13 +2990,29 @@ function resolveAttachmentTarget(scope: FileProofingScope): {
   return { type: 'project', id: requireText(scope.projectId, 'Project ID') }
 }
 
-/** Direct upload input を検証・正規化します。 */
-function normalizeUploadInput(input: CreateFileUploadInput) {
+/**
+ * Validates and normalizes a direct upload request.
+ *
+ * The File type is resolved from the file name and the reported media type, and the stored media
+ * type is the canonical one of that type, so a browser that reports no type still gets the right
+ * one. Executables and other dangerous types are refused whatever the Workspace settings say.
+ *
+ * @param input - Untrusted upload request.
+ * @param settings - File types the Workspace accepts.
+ * @returns The display name, canonical media type, and size to store.
+ * @throws FileProofingError `415 FileTypeNotAllowed` with the reason and accepted types when the
+ *   type is dangerous, unrecognized, or not accepted by the Workspace.
+ */
+function normalizeUploadInput(input: CreateFileUploadInput, settings: WorkspaceFileTypeSettings) {
   const fileName = normalizeFileName(input.fileName)
-  const contentType = normalizeContentType(input.contentType)
-  if (!isAllowedFileContentType(contentType)) {
-    throw new FileProofingError(415, 'FileTypeNotAllowed', `Media type "${contentType}" is not allowed.`)
+  const resolution = resolveFileType(fileName, normalizeContentType(input.contentType))
+  if (resolution.kind !== 'known') {
+    throw createFileTypeRejection(resolution.kind, settings)
   }
+  if (!isFileTypeAllowed(settings, resolution.type.id)) {
+    throw createFileTypeRejection('not-allowed', settings)
+  }
+  const contentType = resolution.type.contentType
   if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes <= 0) {
     throw new FileProofingError(400, 'InvalidFileSize', 'File size must be a positive integer.')
   }
@@ -2951,6 +3024,22 @@ function normalizeUploadInput(input: CreateFileUploadInput) {
     )
   }
   return { fileName, contentType, sizeBytes: input.sizeBytes }
+}
+
+/**
+ * Creates the `415 FileTypeNotAllowed` error, which tells the client why and what it may attach.
+ *
+ * @param reason - Why the type was refused.
+ * @param settings - File types the Workspace accepts.
+ * @returns The error to throw.
+ */
+function createFileTypeRejection(
+  reason: FileTypeRejectionReason,
+  settings: WorkspaceFileTypeSettings,
+): FileProofingError {
+  return new FileProofingError(415, 'FileTypeNotAllowed', 'This file type cannot be attached.', {
+    fileTypeRejection: { reason, allowedFileTypes: listAllowedFileTypes(settings) },
+  })
 }
 
 /** File 名を path/control character なしの表示名へ正規化します。 */
@@ -2966,9 +3055,20 @@ function normalizeFileName(value: unknown) {
   return fileName
 }
 
-/** MIME type parameter を除去して小文字化します。 */
+/**
+ * Removes MIME type parameters and lowercases the essence. Browsers report an empty media type for
+ * files they do not know (for example `.md`, `.xlsm`, or `.drawio`), so an empty string is kept and
+ * the File type is decided by the extension.
+ *
+ * @param value - Untrusted media type from the upload request.
+ * @returns Lowercase `type/subtype`, or an empty string when the browser reported none.
+ * @throws FileProofingError `400 InvalidFileProofingInput` when the value is not a string.
+ */
 function normalizeContentType(value: unknown) {
-  return normalizeFileContentType(requireText(value, 'File media type'))
+  if (typeof value !== 'string') {
+    throw new FileProofingError(400, 'InvalidFileProofingInput', 'File media type is required.')
+  }
+  return normalizeFileContentType(value)
 }
 
 /** MIME type を browser preview 種別へ変換します。 */

@@ -19,6 +19,7 @@ import {
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
   readWorkspaceNationalHolidayDates,
+  readWorkspaceFileTypeSettings,
   readWorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
@@ -361,6 +362,7 @@ function isTenantProfile(value: unknown): value is TenantProfile {
       readPlanningUpdateTemplateSettings(value.planningUpdateTemplate) !== undefined) &&
     (value.timeEntryCategories === undefined ||
       readWorkspaceTimeEntryCategorySettings(value.timeEntryCategories) !== undefined) &&
+    (value.fileTypes === undefined || readWorkspaceFileTypeSettings(value.fileTypes) !== undefined) &&
     (value.defaultCurrency === undefined || isCurrencyCode(value.defaultCurrency)) &&
     (value.status === 'active' || value.status === 'closing' || value.status === 'closed') &&
     (value.closedAt === undefined || typeof value.closedAt === 'string') &&
