@@ -74,9 +74,10 @@ export function createTimeReportQuery(input: TimeReportInput): string {
  */
 export function readTimeBudget(value: unknown): TimeBudget | undefined {
   if (!isRecord(value)) return undefined
-  const { schemaVersion, workspaceId, scopeType, scopeId, amountMinor, currency, periodFrom, periodTo, revision, updatedAt } = value
+  const { schemaVersion, workspaceId, teamId, scopeType, scopeId, amountMinor, currency, periodFrom, periodTo, revision, updatedAt } = value
   if (
-    schemaVersion !== 1 || typeof workspaceId !== 'string' || (scopeType !== 'team' && scopeType !== 'project') ||
+    schemaVersion !== 1 || typeof workspaceId !== 'string' || typeof teamId !== 'string' ||
+    (scopeType !== 'team' && scopeType !== 'project') ||
     typeof scopeId !== 'string' || !isNonnegativeSafeInteger(amountMinor) || typeof currency !== 'string' ||
     !isOptionalString(periodFrom) || !isOptionalString(periodTo) || !isNonnegativeSafeInteger(revision) ||
     typeof updatedAt !== 'string'
@@ -86,6 +87,7 @@ export function readTimeBudget(value: unknown): TimeBudget | undefined {
   return {
     schemaVersion,
     workspaceId,
+    teamId,
     scopeType,
     scopeId,
     amountMinor,

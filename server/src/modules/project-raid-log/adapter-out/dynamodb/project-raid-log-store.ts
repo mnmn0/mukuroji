@@ -48,6 +48,8 @@ const AUDIT_FIELDS = [
   'reviewDueDate',
   'ownerMemberId',
   'relatedWorkItemIds',
+  'scheduleChanges',
+  'decision',
   'status',
   'revision',
 ]
@@ -518,22 +520,41 @@ function rowIdentity(scope: ProjectRaidLogScope, entryId: string) {
  *
  * @param previous - Entry before the change.
  * @param next - Entry after the change.
- * @returns `raid_entry_closed`, `raid_entry_reopened`, or `raid_entry_updated`.
+ * @returns `raid_change_request_approved` or `raid_change_request_rejected` for a decision,
+ * `raid_change_request_approval_held` for a new or renewed approval hold, else
+ * `raid_entry_closed`, `raid_entry_reopened`, or `raid_entry_updated`.
  */
 function describeUpdateAction(previous: ProjectRaidEntry, next: ProjectRaidEntry) {
+  if (previous.decision === undefined && next.decision !== undefined) {
+    return next.decision.outcome === 'approved' ? 'raid_change_request_approved' : 'raid_change_request_rejected'
+  }
+  if (next.approvalHold !== undefined && next.approvalHold.heldAt !== previous.approvalHold?.heldAt) {
+    return 'raid_change_request_approval_held'
+  }
   if (previous.status === 'open' && next.status === 'closed') return 'raid_entry_closed'
   if (previous.status === 'closed' && next.status === 'open') return 'raid_entry_reopened'
   return 'raid_entry_updated'
 }
 
 /**
- * Converts an entry to the plain record compared for audit changes.
+ * Converts an entry to the plain record compared for audit changes. The deciding member is left
+ * out of the decision: the audit event's actor already records who decided, and a member key must
+ * not be kept in the changes.
  *
  * @param entry - Entry.
  * @returns The entry fields as a record.
  */
 function toAuditRecord(entry: ProjectRaidEntry): Record<string, unknown> {
-  return { ...entry }
+  const { decision } = entry
+  if (decision === undefined) return { ...entry }
+  return {
+    ...entry,
+    decision: {
+      outcome: decision.outcome,
+      decidedAt: decision.decidedAt,
+      ...(decision.baselineId === undefined ? {} : { baselineId: decision.baselineId }),
+    },
+  }
 }
 
 /**

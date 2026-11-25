@@ -1,11 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import {
   deriveProjectRaidSeverity,
+  isProjectRaidApprovalHoldActive,
   parseProjectRaidEntry,
   parseProjectRaidEntryInput,
   parseProjectRaidEntryResponse,
   parseProjectRaidLogResponse,
   summarizeProjectRaidLog,
+  toPublicProjectRaidEntry,
   type ProjectRaidEntry,
 } from '../src/project-raid-log'
 
@@ -89,6 +91,97 @@ describe('parseProjectRaidEntry', () => {
     expect(parseProjectRaidEntry({ ...entry(), updatedAt: '2026-02-30T00:00:00.000Z' })).toBeUndefined()
     expect(parseProjectRaidEntry({ ...entry(), updatedAt: '2026-11-19T24:00:00.000Z' })).toBeUndefined()
     expect(parseProjectRaidEntry({ ...entry(), status: 'closed', closedAt: '2026-11-19' })).toBeUndefined()
+  })
+})
+
+describe('change request schedule changes and decisions', () => {
+  const base = { kind: 'change-request', title: 'Move', impact: 3, relatedWorkItemIds: ['wi-1', 'wi-2'], status: 'open' }
+
+  test('accepts one move or resize per related Work Item of a change request', () => {
+    const parsed = parseProjectRaidEntryInput({
+      ...base,
+      scheduleChanges: [
+        { workItemId: ' wi-1 ', operation: { type: 'move', targetDate: '2026-12-10' } },
+        { workItemId: 'wi-2', operation: { type: 'resize', endDate: '2026-12-20' } },
+      ],
+    })
+    expect(parsed.ok && parsed.value.scheduleChanges).toEqual([
+      { workItemId: 'wi-1', operation: { type: 'move', targetDate: '2026-12-10' } },
+      { workItemId: 'wi-2', operation: { type: 'resize', endDate: '2026-12-20' } },
+    ])
+  })
+
+  test('rejects changes on other kinds, unrelated or repeated Work Items, and invalid dates', () => {
+    const move = { workItemId: 'wi-1', operation: { type: 'move', targetDate: '2026-12-10' } }
+    expect(parseProjectRaidEntryInput({ ...base, kind: 'issue', scheduleChanges: [move] }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, workItemId: 'wi-9' }] }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [move, move] }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, operation: { type: 'move', targetDate: '2026-02-30' } }] }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, operation: { type: 'replace' } }] }).ok).toBe(false)
+    // Dates must be ones a Work Item schedule accepts, so that approval can apply them.
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, operation: { type: 'move', targetDate: '0999-12-10' } }] }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, operation: { type: 'resize', endDate: '0999-12-31' } }] }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, operation: { type: 'move', targetDate: '1000-01-01' } }] }).ok).toBe(true)
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, operation: { type: 'resize', endDate: '9999-12-31' } }] }).ok).toBe(true)
+  })
+
+  test('reads stored schedule changes whatever order their keys are in', () => {
+    const request = entry({
+      kind: 'change-request',
+      probability: undefined,
+      relatedWorkItemIds: ['wi-1', 'wi-2'],
+      scheduleChanges: [
+        { workItemId: 'wi-1', operation: { type: 'move', targetDate: '2026-12-10' } },
+        { workItemId: 'wi-2', operation: { type: 'resize', endDate: '2026-12-20' } },
+      ],
+    })
+    const reordered = {
+      ...request,
+      scheduleChanges: [
+        { operation: { targetDate: '2026-12-10', type: 'move' }, workItemId: 'wi-1' },
+        { operation: { endDate: '2026-12-20', type: 'resize' }, workItemId: 'wi-2' },
+      ],
+    }
+    expect(parseProjectRaidEntry(reordered)?.scheduleChanges).toEqual(request.scheduleChanges)
+    expect(parseProjectRaidEntry({
+      ...request,
+      scheduleChanges: [{ workItemId: 'wi-1', operation: { type: 'move', targetDate: '2026-12-10', extra: true } }],
+    })).toBeUndefined()
+  })
+
+  test('keeps a decision only on a closed change request', () => {
+    const decision = { outcome: 'approved', decidedAt: '2026-11-20T00:00:00.000Z', decidedByMemberId: 'sato@example.com', baselineId: 'b-1' }
+    const closed = entry({ kind: 'change-request', probability: undefined, status: 'closed', closedAt: '2026-11-20T00:00:00.000Z' })
+    expect(parseProjectRaidEntry({ ...closed, decision })?.decision).toEqual(decision)
+    expect(parseProjectRaidEntry({ ...closed, status: 'open', closedAt: undefined, decision })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...entry({ status: 'closed', closedAt: '2026-11-20T00:00:00.000Z' }), decision })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...closed, decision: { ...decision, outcome: 'rejected' } })).toBeUndefined()
+  })
+})
+
+describe('approval holds', () => {
+  const approvalHold = { heldByMemberId: 'sato@example.com', heldAt: '2026-11-20T00:00:00.000Z', expiresAt: '2026-11-20T00:10:00.000Z' }
+  const open = entry({ kind: 'change-request', probability: undefined })
+
+  test('keeps a hold only on an open, undecided change request', () => {
+    expect(parseProjectRaidEntry({ ...open, approvalHold })?.approvalHold).toEqual(approvalHold)
+    expect(parseProjectRaidEntry({ ...entry(), approvalHold })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...open, status: 'closed', closedAt: '2026-11-20T00:00:00.000Z', approvalHold })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...open, approvalHold: { ...approvalHold, extra: true } })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...open, approvalHold: { ...approvalHold, expiresAt: 'later' } })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...open, approvalHold: { ...approvalHold, heldByMemberId: '' } })).toBeUndefined()
+  })
+
+  test('treats a hold as active until it expires', () => {
+    expect(isProjectRaidApprovalHoldActive(undefined, new Date('2026-11-20T00:05:00.000Z'))).toBe(false)
+    expect(isProjectRaidApprovalHoldActive(approvalHold, new Date('2026-11-20T00:09:59.999Z'))).toBe(true)
+    expect(isProjectRaidApprovalHoldActive(approvalHold, new Date('2026-11-20T00:10:00.000Z'))).toBe(false)
+  })
+
+  test('leaves the hold out of the Public API form', () => {
+    const visible = toPublicProjectRaidEntry({ ...open, approvalHold })
+    expect('approvalHold' in visible).toBe(false)
+    expect(visible.severity).toBe(deriveProjectRaidSeverity(open))
   })
 })
 

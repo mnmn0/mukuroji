@@ -1,7 +1,13 @@
 import { GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb'
-import type { ChannelDelivery, ChannelDeliveryBatch, ChannelDeliveryStore } from '../../application/channel-delivery'
+import type { ChannelDelivery, ChannelDeliveryBatch, ChannelDeliveryStore, ChannelDigestCompanions } from '../../application/channel-delivery'
 import { EXTERNAL_DELIVERY_CHANNELS, channelDeliveryShard, channelFailedDeliveryShard, type ExternalDeliveryChannel } from '../../domain/channel-delivery'
-import { NOTIFICATION_PREFERENCES_KEY, parseStoredNotificationPreferences, toNotificationItem } from '../../notifications'
+import { NOTIFICATION_PREFERENCES_KEY, parseStoredNotificationPreferences, toNotificationItem, type NotificationFrequency } from '../../notifications'
+
+/** Furthest ahead of now a digest companion may be scheduled: the longest digest frequency, a week, plus a day of quiet hours. */
+const DIGEST_COMPANION_HORIZON_MS = 8 * 24 * 60 * 60 * 1_000
+
+/** Frequencies a stored row may record. */
+const NOTIFICATION_FREQUENCIES: readonly NotificationFrequency[] = ['instant', 'hourly', 'daily', 'weekly']
 
 /** Minimal DynamoDB command boundary used by the delivery queue. */
 type ChannelDocumentClient = {
@@ -116,8 +122,63 @@ export class DynamoDbChannelDeliveryStore implements ChannelDeliveryStore {
     return { deliveries, invalidCount }
   }
 
+  /**
+   * Lists the recipient's other queued digest rows in the same shard, including ones not yet due,
+   * so the first due row of a digest window carries everything gathered since. A not-yet-due row
+   * is taken only while it is pending and was never attempted, so retry backoff and other
+   * workers' leases are kept. Corrupt rows are skipped here; the due scan reports them.
+   * @param delivery - Due row that opens the digest.
+   * @param now - Current time.
+   * @param limit - Most companions to return.
+   * @returns Companion deliveries, oldest scheduled first.
+   */
+  async listCompanions(delivery: ChannelDelivery, now: Date, limit: number): Promise<ChannelDigestCompanions> {
+    const names = this.#names
+    const shard = channelDeliveryShard(names.channel, delivery.recipientKey)
+    const horizon = new Date(now.getTime() + DIGEST_COMPANION_HORIZON_MS)
+    const companions: ChannelDelivery[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    const cursors = new Set<string>()
+    let corrupt = false
+    for (let pageNumber = 0; pageNumber < 10 && companions.length < limit; pageNumber += 1) {
+      const page = await this.#client.send(new QueryCommand({
+        TableName: this.#tableName, IndexName: names.index,
+        KeyConditionExpression: `${names.shard} = :shard AND ${names.next} <= :horizon`,
+        FilterExpression: 'recipientKey = :recipientKey',
+        ExpressionAttributeValues: { ':shard': shard, ':horizon': horizon.toISOString(), ':recipientKey': delivery.recipientKey },
+        // Without Limit each page reads up to 1 MB of the keys-only index.
+        ExclusiveStartKey: exclusiveStartKey,
+      }))
+      for (const candidate of page.Items ?? []) {
+        if (companions.length >= limit) break
+        if (candidate.recipientKey !== delivery.recipientKey || typeof candidate.notificationKey !== 'string' ||
+          candidate.notificationKey === delivery.notificationKey) continue
+        const result = await this.#client.send(new GetCommand({
+          TableName: this.#tableName, ConsistentRead: true,
+          Key: { recipientKey: delivery.recipientKey, notificationKey: candidate.notificationKey },
+        }))
+        try {
+          const companion = parseDelivery(names, result.Item, delivery.recipientKey, candidate.notificationKey, shard, now, horizon)
+          if (!companion || !companion.deliveryFrequency || companion.deliveryFrequency === 'instant') continue
+          if (companion.nextAttemptAt > now.toISOString() && (result.Item?.[names.status] !== 'pending' || companion.attempts !== 0)) continue
+          companions.push(companion)
+        } catch {
+          // A corrupt row may not come due for days; report it now instead of a healthy digest.
+          corrupt = true
+        }
+      }
+      exclusiveStartKey = page.LastEvaluatedKey
+      if (!exclusiveStartKey) return { deliveries: companions, complete: !corrupt }
+      const cursor = JSON.stringify(exclusiveStartKey)
+      if (cursors.has(cursor)) return { deliveries: companions, complete: false }
+      cursors.add(cursor)
+    }
+    // Reaching the limit is complete; running out of pages with more rows left is not.
+    return { deliveries: companions, complete: !corrupt && companions.length >= limit }
+  }
+
   /** Fences slow authorization reads before sending and renews the transport lease. */
-  async renew(delivery: ChannelDelivery, token: string, now: Date): Promise<boolean> {
+  async renew(delivery: ChannelDelivery, token: string, now: Date, leaseMs = 60_000): Promise<boolean> {
     const names = this.#names
     try {
       await this.#client.send(new UpdateCommand({
@@ -127,7 +188,7 @@ export class DynamoDbChannelDeliveryStore implements ChannelDeliveryStore {
         ExpressionAttributeNames: { '#version': 'version' },
         ExpressionAttributeValues: {
           ':token': token, ':now': now.toISOString(),
-          ':lease': new Date(now.getTime() + 60_000).toISOString(),
+          ':lease': new Date(now.getTime() + leaseMs).toISOString(),
           ':claimedVersion': delivery.version + 1, ':one': 1,
         },
       }))
@@ -149,13 +210,13 @@ export class DynamoDbChannelDeliveryStore implements ChannelDeliveryStore {
     try {
       await this.#client.send(new UpdateCommand({
         TableName: this.#tableName, Key: key(delivery),
-        ConditionExpression: `#version = :version AND ${names.next} = :due AND attribute_exists(${names.shard})${otherLeases}`,
+        // The own-lease guard keeps a digest from taking a not-yet-due row another worker leased.
+        ConditionExpression: `#version = :version AND ${names.next} = :due AND attribute_exists(${names.shard}) AND (attribute_not_exists(${names.lease}) OR ${names.next} <= :now)${otherLeases}`,
         UpdateExpression: `SET ${names.lease} = :token, ${names.next} = :lease, ${names.status} = :sending ADD #version :one, ${names.attempts} :one`,
         ExpressionAttributeNames: { '#version': 'version' },
         ExpressionAttributeValues: {
           ':version': delivery.version, ':due': delivery.nextAttemptAt, ':token': token,
-          ':lease': leaseUntil.toISOString(), ':sending': 'sending', ':one': 1,
-          ...(otherLeases ? { ':now': now.toISOString() } : {}),
+          ':lease': leaseUntil.toISOString(), ':sending': 'sending', ':one': 1, ':now': now.toISOString(),
         },
       }))
       return true
@@ -206,8 +267,18 @@ export class DynamoDbChannelDeliveryStore implements ChannelDeliveryStore {
   }
 }
 
-/** Validates one canonical delivery, allowing eventually consistent index removals and leases. */
-function parseDelivery(names: ChannelAttributes, row: Record<string, unknown> | undefined, recipientKey: string, notificationKey: string, shard: string, now: Date): ChannelDelivery | undefined {
+/**
+ * Validates one canonical delivery, allowing eventually consistent index removals and leases.
+ * @param names - Channel attribute names.
+ * @param row - Strongly read row.
+ * @param recipientKey - Expected recipient partition.
+ * @param notificationKey - Expected notification key.
+ * @param shard - Queue shard the row was found in.
+ * @param now - Current time, used for the Inbox state.
+ * @param dueBy - Latest due time accepted; later rows are skipped.
+ * @returns The delivery, or undefined when it is no longer queued or not yet due.
+ */
+function parseDelivery(names: ChannelAttributes, row: Record<string, unknown> | undefined, recipientKey: string, notificationKey: string, shard: string, now: Date, dueBy: Date = now): ChannelDelivery | undefined {
   if (!row || row[names.shard] === undefined) return undefined
   const invalidRow = () => invalidChannelRow(names)
   const rowShard = row[names.shard]
@@ -218,7 +289,8 @@ function parseDelivery(names: ChannelAttributes, row: Record<string, unknown> | 
   if (rowShard !== shard || typeof nextAttemptAt !== 'string') throw invalidRow()
   if (!Number.isFinite(Date.parse(nextAttemptAt))) throw invalidRow()
   if (row.deliveryAfter !== undefined && (typeof row.deliveryAfter !== 'string' || !Number.isFinite(Date.parse(row.deliveryAfter)))) throw invalidRow()
-  if (nextAttemptAt > now.toISOString()) return undefined
+  const deliveryFrequency = NOTIFICATION_FREQUENCIES.find((frequency) => frequency === row.deliveryFrequency)
+  if (nextAttemptAt > dueBy.toISOString()) return undefined
   if (typeof row.expiresAt !== 'number' || !Number.isSafeInteger(row.expiresAt)) throw invalidRow()
   if (
     typeof row.workspaceId !== 'string' || typeof row.recipientMemberKey !== 'string' ||
@@ -262,6 +334,7 @@ function parseDelivery(names: ChannelAttributes, row: Record<string, unknown> | 
     attempts, version: row.version, nextAttemptAt,
     scheduledAt: typeof row.deliveryAfter === 'string' ? row.deliveryAfter : nextAttemptAt,
     notification, expiresAt: row.expiresAt,
+    ...(deliveryFrequency ? { deliveryFrequency } : {}),
     ...(typeof row.dueDate === 'string' ? { dueDate: row.dueDate } : {}),
     ...(typeof row.workItemUpdatedAt === 'string'
       ? { workItemUpdatedAt: row.workItemUpdatedAt }

@@ -82,3 +82,185 @@ describe('Email opt-in boundary', () => {
     expect(isEmailNotificationEligible({ ...legacy, updatedAt: undefined }, '2026-09-26T12:00:00.000Z')).toBe(false)
   })
 })
+
+describe('Email digest delivery', () => {
+  /** Creates a queue whose first due row opens a digest with the given companions. */
+  function digestFixture(companionCount: number, options: { lostRenewal?: string, suppressedKey?: string, result?: ChannelSendResult, incomplete?: boolean } = {}) {
+    const f = fixture({ succeeded: true, retryable: false }, emailOn)
+    const base: ChannelDelivery = {
+      workspaceId: 'workspace-1', memberKey: 'member@example.test', recipientKey: 'workspace-1#member@example.test',
+      notificationKey: '2026-09-26T11:00:00.000Z#event-1', attempts: 0, version: 1, deliveryFrequency: 'daily',
+      nextAttemptAt: '2026-09-26T12:00:00.000Z', expiresAt: Date.parse('2026-09-26T12:00:00.000Z') / 1_000 + 3_600,
+      notification: { id: 'notification-1', eventId: 'event-1', eventType: 'comment.created',
+        reasons: ['mention'], title: 'Review', occurredAt: '2026-09-26T11:00:00.000Z', state: 'unread' },
+    }
+    const companions = Array.from({ length: companionCount }, (_, index): ChannelDelivery => {
+      const minute = String(index + 1).padStart(2, '0')
+      return {
+        ...base, notificationKey: `2026-09-26T11:${minute}:00.000Z#event-${index + 2}`,
+        nextAttemptAt: '2026-09-27T11:00:00.000Z',
+        notification: { ...base.notification, id: `notification-${index + 2}`, eventId: `event-${index + 2}`,
+          occurredAt: `2026-09-26T11:${minute}:00.000Z` },
+      }
+    })
+    const finishes: Array<{ key: string, status: string, code?: string }> = []
+    const digests: string[][] = []
+    let pending = true
+    const dependencies: ChannelDeliveryDependencies = {
+      ...f.dependencies,
+      send: async () => { throw new Error('A digest row must not be sent on its own.') },
+      store: {
+        ...f.dependencies.store,
+        listDue: async (shard) => ({ deliveries: shard === 'email#0' && pending ? [base] : [], invalidCount: 0 }),
+        renew: async (delivery) => delivery.notificationKey !== options.lostRenewal,
+        finish: async (delivery, _token, status, _next, code) => { finishes.push({ key: delivery.notificationKey, status, code }); pending = false },
+      },
+      isAuthorized: async (delivery) => delivery.notificationKey !== options.suppressedKey,
+      digest: {
+        listCompanions: async () => ({ deliveries: companions, complete: options.incomplete !== true }),
+        send: async (deliveries) => { digests.push(deliveries.map((delivery) => delivery.notificationKey)); return options.result ?? { succeeded: true, retryable: false } },
+      },
+    }
+    return { dependencies, finishes, digests, companions }
+  }
+
+  test('sends one digest for every row of the recipient and marks each row sent', async () => {
+    const f = digestFixture(2)
+    expect(await deliverDueEmailNotifications(f.dependencies)).toBe(3)
+    expect(f.digests).toHaveLength(1)
+    expect(f.digests[0]).toHaveLength(3)
+    expect(f.finishes.map((finish) => finish.status)).toEqual(['sent', 'sent', 'sent'])
+  })
+  test('leaves out a row that fails its own checks or loses its lease (released, not finished), and records the shared outcome on the rest', async () => {
+    const f = digestFixture(2, { suppressedKey: '2026-09-26T11:01:00.000Z#event-2', lostRenewal: '2026-09-26T11:02:00.000Z#event-3',
+      result: { succeeded: false, retryable: true, code: 'EmailRateLimited' } })
+    expect(await deliverDueEmailNotifications(f.dependencies)).toBe(0)
+    expect(f.digests).toEqual([['2026-09-26T11:00:00.000Z#event-1']])
+    expect(f.finishes).toEqual([
+      { key: '2026-09-26T11:01:00.000Z#event-2', status: 'suppressed', code: undefined },
+      { key: '2026-09-26T11:00:00.000Z#event-1', status: 'pending', code: 'EmailRateLimited' },
+    ])
+  })
+  test('sends what an incomplete companion scan found and reports the run for attention', async () => {
+    const f = digestFixture(2, { incomplete: true })
+    await expect(deliverDueEmailNotifications(f.dependencies)).rejects.toThrow()
+    expect(f.digests).toHaveLength(1)
+    expect(f.digests[0]).toHaveLength(3)
+  })
+  test('renews every digest row for long enough to record the shared outcome after the send', async () => {
+    const f = digestFixture(2)
+    const leases: Array<number | undefined> = []
+    const dependencies: ChannelDeliveryDependencies = {
+      ...f.dependencies,
+      store: { ...f.dependencies.store, renew: async (_delivery, _token, _now, leaseMs) => { leases.push(leaseMs); return true } },
+    }
+    expect(await deliverDueEmailNotifications(dependencies)).toBe(3)
+    expect(leases).toEqual([120_000, 120_000, 120_000])
+  })
+  test('hands every row back without sending when the renewals outlast the budget for the send', async () => {
+    const f = digestFixture(2)
+    let clock = Date.parse('2026-09-26T12:00:00.000Z')
+    const released: string[] = []
+    const dependencies: ChannelDeliveryDependencies = {
+      ...f.dependencies,
+      now: () => new Date(clock),
+      store: {
+        ...f.dependencies.store,
+        renew: async () => { clock += 10_000; return true },
+        release: async (delivery) => { released.push(delivery.notificationKey) },
+      },
+    }
+    expect(await deliverDueEmailNotifications(dependencies)).toBe(0)
+    expect(f.digests).toEqual([])
+    expect(f.finishes).toEqual([])
+    expect(released).toHaveLength(3)
+  })
+  test('sends the rows that do not fit in one digest in the next one right away', async () => {
+    const f = digestFixture(55)
+    const digest = f.dependencies.digest
+    if (!digest) throw new Error('Missing digest sender.')
+    const finished = new Set<string>()
+    const dependencies: ChannelDeliveryDependencies = {
+      ...f.dependencies,
+      store: { ...f.dependencies.store, finish: async (delivery, token, status, next, code) => {
+        finished.add(delivery.notificationKey)
+        await f.dependencies.store.finish(delivery, token, status, next, code)
+      } },
+      digest: {
+        ...digest,
+        listCompanions: async (opener, _now, limit) => ({
+          deliveries: f.companions.filter((companion) => companion.notificationKey !== opener.notificationKey &&
+            !finished.has(companion.notificationKey)).slice(0, limit),
+          complete: true,
+        }),
+      },
+    }
+    expect(await deliverDueEmailNotifications(dependencies)).toBe(56)
+    expect(f.digests.map((digest) => digest.length)).toEqual([50, 6])
+    expect(new Set(f.digests.flat()).size).toBe(56)
+  })
+  test('leaves out and suppresses a row whose retention ends while the digest is checked', async () => {
+    const f = digestFixture(2)
+    const start = Date.parse('2026-09-26T12:00:00.000Z')
+    let clock = start
+    const [first, second] = f.companions
+    if (!first || !second) throw new Error('Missing companions.')
+    f.companions[0] = { ...first, expiresAt: start / 1_000 + 2 }
+    const dependencies: ChannelDeliveryDependencies = {
+      ...f.dependencies,
+      now: () => new Date(clock),
+      store: { ...f.dependencies.store, renew: async () => { clock += 1_000; return true } },
+    }
+    expect(await deliverDueEmailNotifications(dependencies)).toBe(2)
+    expect(f.digests).toEqual([['2026-09-26T11:00:00.000Z#event-1', second.notificationKey]])
+    expect(f.finishes).toContainEqual({ key: first.notificationKey, status: 'suppressed', code: undefined })
+  })
+  test('does not wait on finishing an expired row between the retention check and the send', async () => {
+    const f = digestFixture(2)
+    const start = Date.parse('2026-09-26T12:00:00.000Z')
+    let clock = start
+    const [first, second] = f.companions
+    if (!first || !second) throw new Error('Missing companions.')
+    f.companions[0] = { ...first, expiresAt: start / 1_000 + 2 }
+    // The second row expires while the first one is being finished.
+    f.companions[1] = { ...second, expiresAt: start / 1_000 + 4 }
+    const dependencies: ChannelDeliveryDependencies = {
+      ...f.dependencies,
+      now: () => new Date(clock),
+      store: {
+        ...f.dependencies.store,
+        renew: async () => { clock += 1_000; return true },
+        finish: async (delivery, token, status, next, code) => {
+          if (delivery.notificationKey === first.notificationKey) clock += 10_000
+          await f.dependencies.store.finish(delivery, token, status, next, code)
+        },
+      },
+    }
+    await deliverDueEmailNotifications(dependencies)
+    expect(f.digests).toEqual([['2026-09-26T11:00:00.000Z#event-1', second.notificationKey]])
+    expect(f.finishes.map((finish) => finish.key).at(-1)).toBe(first.notificationKey)
+  })
+  test('leaves the companions alone when an overlapping run already holds the opener', async () => {
+    const f = digestFixture(2)
+    const claimed: string[] = []
+    const dependencies: ChannelDeliveryDependencies = {
+      ...f.dependencies,
+      store: { ...f.dependencies.store, claim: async (delivery) => {
+        claimed.push(delivery.notificationKey)
+        return delivery.notificationKey !== '2026-09-26T11:00:00.000Z#event-1'
+      } },
+    }
+    expect(await deliverDueEmailNotifications(dependencies)).toBe(0)
+    expect(claimed).toEqual(['2026-09-26T11:00:00.000Z#event-1'])
+    expect(f.digests).toEqual([])
+  })
+  test('sends instant rows on their own even with a digest sender', async () => {
+    const f = fixture({ succeeded: true, retryable: false }, emailOn)
+    let digests = 0
+    const result = await deliverDueEmailNotifications({ ...f.dependencies, digest: {
+      listCompanions: async () => { throw new Error('unexpected') }, send: async () => { digests += 1; return { succeeded: true, retryable: false } },
+    } })
+    expect(result).toBe(1)
+    expect(digests).toBe(0)
+  })
+})

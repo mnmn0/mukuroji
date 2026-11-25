@@ -9,6 +9,7 @@ import useSWR from 'swr'
 import useSWRInfinite from 'swr/infinite'
 import { useMemo, useState } from 'react'
 import {
+  getPlanningUpdateTemplate,
   getPlanningUpdateWatch,
   listPlanningUpdateComments,
   listPlanningUpdateReactions,
@@ -135,6 +136,21 @@ export function usePlanningUpdateWatch(
     ...query,
     key,
   }
+}
+
+/**
+ * Loads the Workspace's health update required fields and template.
+ *
+ * @param accessToken - Planning API access token.
+ * @param enabled - Whether authenticated fetching is enabled.
+ * @returns SWR state for the Workspace template settings.
+ */
+export function usePlanningUpdateTemplate(accessToken: string | undefined, enabled = true) {
+  return useSWR(
+    accessToken && enabled ? ['planning-update-template', accessToken] : null,
+    () => (accessToken ? getPlanningUpdateTemplate(accessToken) : undefined),
+    planningUpdateQueryConfig,
+  )
 }
 
 /** Annotation projection loaded across the visible immutable update versions. */

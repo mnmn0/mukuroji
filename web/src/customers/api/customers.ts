@@ -18,6 +18,7 @@ import type {
   CreateCustomerSavedViewInput,
   CustomerRequestImportance,
   MergeCustomerInput,
+  ProjectCustomerLinkList,
   UpdateCustomerContactInput,
   UpdateCustomerInput,
   UpdateCustomerRequestInput,
@@ -225,6 +226,40 @@ export async function getProjectCustomerImpact(
     throw new CustomerApiError(502, 'Customer impact response is invalid.')
   }
   return data
+}
+
+/** Loads the Customers linked to each Project the caller can view.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @returns The validated Project to Customer links, or null when the caller may not read Customers.
+ */
+export async function getProjectCustomerLinks(accessToken: string): Promise<ProjectCustomerLinkList | null> {
+  let data: unknown
+  try {
+    data = await requestJson(`${customersApiBaseUrl}/customers/project-links`, accessToken)
+  } catch (error) {
+    if (error instanceof CustomerApiError && error.status === 403) return null
+    throw error
+  }
+  if (!isProjectCustomerLinkList(data)) {
+    throw new CustomerApiError(502, 'Project Customer links response is invalid.')
+  }
+  return data
+}
+
+/** Checks a Project to Customer link list response.
+ *
+ * @param value Untrusted response body.
+ * @returns Whether the body is a list of Projects with their linked Customers.
+ */
+function isProjectCustomerLinkList(value: unknown): value is ProjectCustomerLinkList {
+  return isRecord(value) && Array.isArray(value.items) && value.items.every((item) =>
+    isRecord(item) && typeof item.projectId === 'string' && Array.isArray(item.customers) &&
+    item.customers.every((customer) =>
+      isRecord(customer) && typeof customer.customerId === 'string' && typeof customer.name === 'string' &&
+      typeof customer.requestCount === 'number'
+    )
+  )
 }
 
 /** Saves one accepted Team Triage Entry as a Customer Request.

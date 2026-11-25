@@ -81,8 +81,14 @@ export function isEntry(value: unknown): value is UpdateFeedEntry {
   const target = value.target
   if (!(target.type === 'project' && typeof target.teamId === 'string' && target.teamId.length > 0 &&
     typeof target.projectId === 'string' && target.projectId.length > 0) &&
+    !(target.type === 'team' && typeof target.teamId === 'string' && target.teamId.length > 0) &&
     !(target.type === 'initiative' && typeof target.entityId === 'string' && target.entityId.length > 0)) return false
-  if (value.latestUpdate === undefined) return value.readState === undefined
+  if (value.acknowledgement !== undefined && !(isRecord(value.acknowledgement) &&
+    typeof value.acknowledgement.memberKey === 'string' &&
+    typeof value.acknowledgement.acknowledgedAt === 'string' &&
+    Number.isFinite(Date.parse(value.acknowledgement.acknowledgedAt)))) return false
+  // An acknowledgement belongs to the latest update, so an entry without one cannot carry it.
+  if (value.latestUpdate === undefined) return value.readState === undefined && value.acknowledgement === undefined
   const latest = value.latestUpdate
   return isRecord(latest) && typeof latest.id === 'string' && isPositiveSafeInteger(latest.version) &&
     isHealth(latest.health) && typeof latest.risk === 'string' &&

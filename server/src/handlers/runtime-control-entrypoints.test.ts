@@ -67,7 +67,17 @@ const runtimeControlledEntrypoints: readonly RuntimeControlledEntrypoint[] = [
     surface: 'enterprise-scim-group-job',
   },
   {
+    filename: 'email-feedback-handler.ts',
+    exportName: 'handler',
+    surface: 'notification-schedule',
+  },
+  {
     filename: 'email-notifications-handler.ts',
+    exportName: 'handler',
+    surface: 'notification-schedule',
+  },
+  {
+    filename: 'push-notifications-handler.ts',
     exportName: 'handler',
     surface: 'notification-schedule',
   },

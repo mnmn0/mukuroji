@@ -3,11 +3,15 @@ import {
   type AuditEventPage,
   type AuditEventV1,
   createAuditFieldChanges,
+  createMutationAuditEventPut,
+  getConfiguredAuditTableName,
   toAuditEventView,
   type MutationAuditContext,
   type MutationAuditEventInput,
 } from '../../modules/audit/audit'
 import type {
+  PlanningDependencyChangeAction,
+  PlanningDependencyTransactionResult,
   PlanningEntityChangeAction,
   PlanningEntityTransactionResult,
   PlanningEntityTransactionSnapshot,
@@ -26,6 +30,12 @@ export const PLANNING_ENTITY_AUDIT_EVENT_TYPES: Readonly<Record<PlanningEntityCh
   moved: 'planning-entity.moved',
   archived: 'planning-entity.archived',
   restored: 'planning-entity.restored',
+}
+
+/** Audit event type recorded on both endpoints of a dependency change between Planning entities. */
+export const PLANNING_DEPENDENCY_AUDIT_EVENT_TYPES: Readonly<Record<PlanningDependencyChangeAction, string>> = {
+  created: 'planning-entity.dependency-added',
+  deleted: 'planning-entity.dependency-removed',
 }
 
 /** Milestone change that notifies the Milestone's watchers. */
@@ -80,6 +90,127 @@ export function createPlanningEntityAuditTransaction(
     (result) => createPlanningEntityAuditEvent({ workspaceId, actorMemberKey, result }),
   )
   return transaction && { prepare: (result) => transaction.prepare(result), rebaseSafe: true }
+}
+
+/**
+ * Creates the transaction that commits the audit events of one dependency change with the change.
+ *
+ * Each endpoint gets one event under its own entity, so both activity timelines show who added or
+ * removed the dependency. The other endpoint is named only in metadata, which the activity response
+ * hides from readers who cannot see it. Without an audit table no transaction is returned.
+ *
+ * @param workspaceId - Canonical Workspace ID.
+ * @param auditContext - Request audit context of the mutation.
+ * @param actorMemberKey - Workspace member key of the caller.
+ * @returns The audit transaction, or `undefined` when audit is not configured.
+ */
+export function createPlanningDependencyAuditTransaction(
+  workspaceId: string,
+  auditContext: MutationAuditContext,
+  actorMemberKey: string,
+): PlanningMutationTransaction<PlanningDependencyTransactionResult> | undefined {
+  const tableName = getConfiguredAuditTableName()
+  if (!tableName) return undefined
+  return {
+    /**
+     * Builds the audit Puts of both Planning entities for the committed dependency change.
+     *
+     * @param result - Dependency change and the Planning entities on both ends.
+     * @returns The predecessor event Put and the successor event Put as an additional item.
+     */
+    async prepare(result) {
+      const [predecessorEvent, successorEvent] = createPlanningDependencyAuditEvents({
+        workspaceId,
+        actorMemberKey,
+        result,
+      })
+      return {
+        transactWriteItem: createMutationAuditEventPut(tableName, auditContext, predecessorEvent),
+        additionalTransactWriteItems: [
+          createMutationAuditEventPut(tableName, auditContext, successorEvent),
+        ],
+      }
+    },
+    rebaseSafe: true,
+  }
+}
+
+/** Inputs for the audit events of one dependency change between Planning entities. */
+export type PlanningDependencyAuditInput = {
+  /** Canonical Workspace ID. */
+  workspaceId: string
+  /** Workspace member key of the caller. */
+  actorMemberKey: string
+  /** Committed dependency change reported by the Planning mutation. */
+  result: PlanningDependencyTransactionResult
+}
+
+/**
+ * Builds the predecessor and successor audit events of one dependency change.
+ *
+ * @param input - Workspace, caller, and committed change.
+ * @returns The predecessor event (sequence 0) and the successor event (sequence 1).
+ */
+export function createPlanningDependencyAuditEvents(
+  input: PlanningDependencyAuditInput,
+): [MutationAuditEventInput, MutationAuditEventInput] {
+  const { result } = input
+  /** Builds the event recorded under one endpoint. */
+  const eventFor = (
+    role: 'predecessor' | 'successor',
+    entity: PlanningEntityTransactionSnapshot,
+    relatedEntityId: string,
+    sequence: number,
+  ): MutationAuditEventInput => {
+    const fields = auditedDependencyFields(result.dependency)
+    const verb = result.action === 'created' ? 'Added' : 'Removed'
+    // A predecessor gains or loses a successor, and a successor a predecessor.
+    const counterpart = role === 'predecessor' ? 'successor' : 'predecessor'
+    return {
+      directoryId: input.workspaceId,
+      eventType: PLANNING_DEPENDENCY_AUDIT_EVENT_TYPES[result.action],
+      entityType: PLANNING_ENTITY_AUDIT_ENTITY_TYPE,
+      entityId: entity.id,
+      target: { type: 'planning-dependency', id: result.dependency.id },
+      action: result.action === 'created' ? 'dependency-added' : 'dependency-removed',
+      occurredAt: result.occurredAt,
+      changes: result.action === 'created'
+        ? createAuditFieldChanges(undefined, fields)
+        : createAuditFieldChanges(fields, undefined),
+      summary: excerpt(`${verb} a ${counterpart} dependency on ${entity.type}: ${entity.title}`),
+      metadata: {
+        actorMemberKey: input.actorMemberKey.toLowerCase(),
+        planningEntityType: entity.type,
+        planningRevision: result.revision,
+        dependencyId: result.dependency.id,
+        dependencyRole: role,
+        relatedEntityId,
+        ...(entity.teamId === undefined ? {} : { teamId: entity.teamId }),
+        ...(entity.projectId === undefined ? {} : { projectId: entity.projectId }),
+      },
+      sequence,
+    }
+  }
+  return [
+    eventFor('predecessor', result.predecessor, result.successor.id, 0),
+    eventFor('successor', result.successor, result.predecessor.id, 1),
+  ]
+}
+
+/**
+ * Returns the dependency fields recorded by its audit events.
+ *
+ * @param dependency - Dependency added or removed.
+ * @returns Scheduling type, lag, and the optional date constraint; endpoint IDs stay in metadata.
+ */
+function auditedDependencyFields(
+  dependency: PlanningDependencyTransactionResult['dependency'],
+): Record<string, unknown> {
+  return {
+    type: dependency.type,
+    lagDays: dependency.lagDays,
+    ...(dependency.constraint === undefined ? {} : { constraint: dependency.constraint }),
+  }
 }
 
 /** Inputs for the audit event of one Planning entity change. */
@@ -214,12 +345,21 @@ function excerpt(value: string) {
 /**
  * Creates the Planning entity activity response with the public audit event projection.
  *
- * @param page - Audit event page of one Planning entity.
- * @returns Activity page whose events carry only the public audit event fields.
+ * @param page - Audit event page of one Planning entity, already filtered for the reader by
+ *   `redactPlanningEntityAuditReferences`.
+ * @returns Activity page whose events carry the public audit event fields and a visible related entity.
  */
 export function toPlanningEntityActivityPageView(page: AuditEventPage) {
   return {
-    events: page.events.map((event) => toAuditEventView(event)),
+    events: page.events.map((event) => {
+      const view = toAuditEventView(event)
+      // The page holds events already filtered by `redactPlanningEntityAuditReferences`, so a
+      // remaining related entity is one the reader can see; it names the other dependency end.
+      const relatedEntityId = event.metadata?.relatedEntityId
+      return typeof relatedEntityId === 'string'
+        ? { ...view, metadata: { ...view.metadata, relatedEntityId } }
+        : view
+    }),
     ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
   }
 }
@@ -276,7 +416,11 @@ export function readPlanningEntityAuditScopes(
 const PLANNING_ENTITY_AUDIT_REFERENCE_FIELDS = new Set(['parentId', 'nextCycleId'])
 
 /** Metadata fields whose values name another Planning entity. */
-const PLANNING_ENTITY_AUDIT_REFERENCE_METADATA = ['sourceEntityId', 'previousCycleId'] as const
+const PLANNING_ENTITY_AUDIT_REFERENCE_METADATA = [
+  'sourceEntityId',
+  'previousCycleId',
+  'relatedEntityId',
+] as const
 
 /**
  * Hides references to Planning entities the reader cannot see, as the Planning snapshot does.

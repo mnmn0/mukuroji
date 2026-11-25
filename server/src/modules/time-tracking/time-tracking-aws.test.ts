@@ -1,7 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { describe, expect, test } from 'bun:test'
-import type { TimeEntry, TimeEntryHistory } from '@mukuroji/contracts'
+import type { TimeEntry, TimeEntryHistory, TimePeriodClose } from '@mukuroji/contracts'
 import {
   DynamoDbTimeTrackingRepository,
   TimeTrackingService,
@@ -286,6 +286,48 @@ describe('DynamoDbTimeTrackingRepository', () => {
       .rejects.toMatchObject({ status: 409, code: 'TimeEntryRevisionConflict' })
   })
 
+  test('fences a month close and reopen with the administrator membership check', async () => {
+    const close: TimePeriodClose = {
+      schemaVersion: 1,
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      month: '2026-07',
+      timeZone: 'Asia/Tokyo',
+      closedBy: 'member-1',
+      closedAt: '2026-08-02T03:00:00.000Z',
+    }
+    const commands: CommandWithInput[] = []
+    const repository = new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{}, {}], commands))
+    await repository.createPeriodClose(close, undefined, undefined, [ownerMembershipCheck])
+    await repository.deletePeriodClose(close, undefined, undefined, [ownerMembershipCheck])
+    for (const command of commands) {
+      const items = command.input.TransactItems
+      expect(Array.isArray(items) ? items[1] : undefined).toEqual(ownerMembershipCheck)
+    }
+
+    /** Builds a repository whose transactions fail with the given cancellation reasons. */
+    const createFailingRepository = (reasons: readonly string[]) => {
+      const client = DynamoDBDocumentClient.from(new DynamoDBClient({}))
+      Object.defineProperty(client, 'send', {
+        configurable: true,
+        value: async (): Promise<unknown> => {
+          throw Object.assign(new Error('Transaction cancelled'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: reasons.map((Code) => ({ Code })),
+          })
+        },
+      })
+      return new DynamoDbTimeTrackingRepository('analytics-table', client)
+    }
+    await expect(createFailingRepository(['None', 'ConditionalCheckFailed']).createPeriodClose(close, undefined, undefined, [ownerMembershipCheck]))
+      .rejects.toMatchObject({ status: 409, code: 'TimePeriodAuthorizationChanged' })
+    await expect(createFailingRepository(['None', 'ConditionalCheckFailed']).deletePeriodClose(close, undefined, undefined, [ownerMembershipCheck]))
+      .rejects.toMatchObject({ status: 409, code: 'TimePeriodAuthorizationChanged' })
+    // A month someone else already closed still reports the close conflict.
+    await expect(createFailingRepository(['ConditionalCheckFailed', 'None']).createPeriodClose(close, undefined, undefined, [ownerMembershipCheck]))
+      .rejects.toMatchObject({ code: 'TimePeriodAlreadyClosed' })
+  })
+
   test('refuses a stored entry with neither a Work Item nor a category', async () => {
     const { workItemId: _workItemId, ...entry } = createEntry('project-1')
     const repository = new DynamoDbTimeTrackingRepository(
@@ -391,6 +433,34 @@ describe('DynamoDbTimeTrackingRepository', () => {
     })
     expect(commands[1]?.input.TransactItems).toHaveLength(2)
     expect(JSON.stringify(commands[1]?.input.TransactItems)).toContain('audit-table')
+  })
+
+  test('keys a Project budget by its Team and Project', async () => {
+    const commands: CommandWithInput[] = []
+    const service = new TimeTrackingService(
+      new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{}, {}, {}], commands)),
+      { now: () => new Date('2026-08-02T12:00:00.000Z') },
+    )
+
+    await service.saveBudget({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      scopeType: 'project',
+      scopeId: 'project-1',
+      amountMinor: 50_000,
+      currency: 'JPY',
+      expectedRevision: 0,
+      updatedBy: 'manager-1',
+    })
+    await service.getBudget('workspace-1', 'team-2', 'project', 'project-1')
+
+    expect(commands[0]?.input.Key).toEqual({ workspaceId: 'workspace-1', recordKey: 'TIME_BUDGET#project#team-1#project-1' })
+    expect(commands[1]?.input.Item).toMatchObject({
+      recordKey: 'TIME_BUDGET#project#team-1#project-1',
+      teamId: 'team-1',
+      scopeId: 'project-1',
+    })
+    expect(commands[2]?.input.Key).toEqual({ workspaceId: 'workspace-1', recordKey: 'TIME_BUDGET#project#team-2#project-1' })
   })
 
   test('writes timer start and its audit event in one transaction', async () => {

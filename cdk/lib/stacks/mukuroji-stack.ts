@@ -45,11 +45,14 @@ import { buildScheduledJobsWorker } from '../subsystems/workers/scheduled-jobs';
 import {
   defineAnalyticsScheduleJob,
   defineCycleScheduleJob,
+  defineInboxDigestJob,
   defineJapanesePublicHolidaySyncJob,
   defineNotificationScheduleJob,
 } from '../subsystems/workers/schedules';
 import { defineSlackNotificationJob } from '../subsystems/workers/slack-notifications';
 import { defineEmailNotificationJob } from '../subsystems/workers/email-notifications';
+import { defineEmailFeedback } from '../subsystems/workers/email-feedback';
+import { definePushNotificationJob } from '../subsystems/workers/push-notifications';
 import { buildTenantOperationWorker } from '../subsystems/workers/tenant-operation';
 import { defineTriageScheduleJob } from '../subsystems/workers/triage';
 import { buildWebhookDeliveryWorkers } from '../subsystems/workers/webhook-delivery';
@@ -312,6 +315,7 @@ export class MukurojiStack extends cdk.Stack {
         runtimeControls,
       })
       : undefined;
+    const emailFeedback = defineEmailFeedback(this, { dataStores, parameters });
     // The order matches server/src/handlers/scheduled-jobs-handler.ts.
     const scheduledJobs = buildScheduledJobsWorker(this, {
       lambdaBuildPaths,
@@ -321,10 +325,15 @@ export class MukurojiStack extends cdk.Stack {
         defineTriageScheduleJob({ dataStores, parameters }),
         ...(softwareFactoryEnabled ? [defineAgentRunTriageJob({ dataStores, parameters })] : []),
         defineSlackNotificationJob(this, { dataStores, parameters, webOrigin: webDistribution.webOrigin }),
-        defineEmailNotificationJob(this, { dataStores, parameters, webOrigin: webDistribution.webOrigin }),
+        defineEmailNotificationJob(this, {
+          dataStores, parameters, webOrigin: webDistribution.webOrigin, configurationSet: emailFeedback.configurationSet,
+        }),
+        definePushNotificationJob(this, { dataStores, parameters, webOrigin: webDistribution.webOrigin }),
+        emailFeedback.job,
         defineAnalyticsScheduleJob({ dataStores, parameters }),
         defineNotificationScheduleJob({ dataStores, parameters }),
         defineCycleScheduleJob({ dataStores, parameters }),
+        defineInboxDigestJob({ dataStores, parameters }),
         defineJapanesePublicHolidaySyncJob({ dataStores, parameters }),
       ],
     });

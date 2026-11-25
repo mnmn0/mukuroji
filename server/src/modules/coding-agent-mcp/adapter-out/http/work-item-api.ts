@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
   isCanonicalWorkItemKey,
+  type PublicProjectCharter,
   AGENT_SETTINGS_BRIEF_MAX_BYTES, AGENT_SETTINGS_MAX_PROJECT_BRIEFS, AGENT_SETTINGS_MAX_READY_STATUSES,
   AGENT_SETTINGS_MAX_RESUMABLE_STATUSES,
   WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT, WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
@@ -36,6 +37,16 @@ const scheduleSchema = z.discriminatedUnion('mode', [
     ...scheduleBase, mode: z.literal('milestone'), startDate: z.iso.date(), endDate: z.iso.date(), durationDays: z.literal(0),
   }),
 ])
+const charterPersonSchema = z.object({ memberId: identifier, displayName: z.string() })
+const projectCharterSchema: z.ZodType<PublicProjectCharter> = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, projectId: identifier,
+  lifecycleState: z.enum(['proposed', 'approved', 'active', 'on-hold', 'closed', 'archived']),
+  revision: z.number().int().nonnegative(), updatedAt: z.iso.datetime().optional(),
+  code: z.string().optional(), description: z.string().optional(), purpose: z.string().optional(),
+  owner: charterPersonSchema.optional(), sponsor: charterPersonSchema.optional(),
+  plannedStartDate: z.iso.date().optional(), plannedEndDate: z.iso.date().optional(),
+  tags: z.array(z.string()), repositoryUrls: z.array(z.string()),
+})
 /** Validates a Work Item as the Public API returns it. */
 export const taskSchema: z.ZodType<AgentTask> = z.object({
   id: identifier, teamId: identifier, revision: z.number().int().positive(),
@@ -87,6 +98,17 @@ export const catalogSchema: z.ZodType<AgentCatalog> = z.object({
       })),
     }),
     customFields: z.array(z.record(z.string(), z.unknown())),
+  })),
+  // Templates come from their own endpoint; the type catalog never lists them.
+  templates: z.array(z.never()).default([]),
+})
+/** Validates the Work Item templates a Team can create from. */
+export const templateListSchema = z.object({
+  teamId: identifier,
+  templates: z.array(z.object({
+    id: identifier, version: z.number().int().positive(), name: z.string(), title: z.string(),
+    description: z.string().optional(), workItemTypeId: identifier.optional(), workflowStatusId: identifier.optional(),
+    priority: z.enum(['high', 'medium', 'low']).optional(), acceptanceCriteria: z.array(z.string()),
   })),
 })
 /** Validates one Work Item comment. */
@@ -188,9 +210,18 @@ export function createAgentWorkItemApi(
   return {
     /** Reads and validates the current Team catalog. */
     async catalog(assignedProjectId) {
-      const catalog = await request('work-item-types', catalogSchema, 'GET', undefined, undefined, { assignedProjectId })
-      if (catalog.teamId !== config.teamId) throw new AgentTaskError('invalid_response', 'The API returned a mismatched catalog scope.')
-      return catalog
+      const [catalog, templateList] = await Promise.all([
+        request('work-item-types', catalogSchema, 'GET', undefined, undefined, { assignedProjectId }),
+        // A server older than template support has no such endpoint, so it offers no templates.
+        request('work-item-templates', templateListSchema).catch((error: unknown) => {
+          if (error instanceof AgentTaskError && error.code === 'not_found') return { teamId: config.teamId, templates: [] }
+          throw error
+        }),
+      ])
+      if (catalog.teamId !== config.teamId || templateList.teamId !== config.teamId) {
+        throw new AgentTaskError('invalid_response', 'The API returned a mismatched catalog scope.')
+      }
+      return { ...catalog, templates: templateList.templates }
     },
     /** Reads one Team-qualified task. */
     async get(id) { return scoped(await request(`work-items/${encodeURIComponent(id)}`, taskSchema), id) },
@@ -389,6 +420,20 @@ export function createAgentWorkItemApi(
         if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
         throw error
       }
+    },
+    /** Reads a Project charter of the configured Team; a server older than the endpoint has none. */
+    async projectCharter(projectId) {
+      let found: PublicProjectCharter
+      try {
+        found = await request(`projects/${encodeURIComponent(projectId)}/charter`, projectCharterSchema)
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+        throw error
+      }
+      if (found.teamId !== config.teamId || found.projectId !== projectId) {
+        throw new AgentTaskError('invalid_response', 'The API returned the charter of another Project.')
+      }
+      return found
     },
     /** Reads one linked Document as Markdown. */
     async document(id, documentId) {

@@ -1037,6 +1037,11 @@ export type PublicCreateTeamIssueRequestBody = {
   assigneeUserId?: unknown
   /** Contributor assignments already normalized by the API handler. */
   contributorAssignments?: unknown
+  /**
+   * Acceptance criteria. The API handler replaces client input with the normalized list (server
+   * IDs included) before it reaches the adapter.
+   */
+  acceptanceCriteria?: unknown
   /** Explicit canonical schedule required for every new Work Item. */
   schedule: unknown
   /**
@@ -2555,6 +2560,9 @@ export class DynamoDbTeamIssuesClient {
     const contributorAssignments = input.contributorAssignments === undefined
       ? []
       : readNormalizedContributorAssignments(input.contributorAssignments)
+    const acceptanceCriteria = input.acceptanceCriteria === undefined
+      ? []
+      : readNormalizedAcceptanceCriteria(input.acceptanceCriteria)
     const schedule = readWorkItemScheduleInput(input.schedule)
     const dueDate = deriveWorkItemScheduleDueDate(schedule)
     const priority = readWorkItemPriority(input.priority)
@@ -2703,6 +2711,9 @@ export class DynamoDbTeamIssuesClient {
       if (contributorAssignments.length > 0) {
         item.contributorAssignments = contributorAssignments
       }
+      if (acceptanceCriteria.length > 0) {
+        item.acceptanceCriteria = acceptanceCriteria
+      }
 
       if (assignedProjectId) {
         item.assignedProjectId = assignedProjectId
@@ -2750,6 +2761,7 @@ export class DynamoDbTeamIssuesClient {
           'assignedProjectId',
           'assigneeUserId',
           'contributorAssignments',
+          'acceptanceCriteria',
           'workflowStatusId',
           'statusCategory',
           'workItemTypeId',
@@ -2775,6 +2787,7 @@ export class DynamoDbTeamIssuesClient {
           notificationMessage: createdMessage,
           notificationCandidates: [
             { memberKey: assigneeUserId, reason: 'assignment' },
+            ...createContributorNotificationCandidates(item, []),
           ],
           afterRevision: item.revision,
         },
@@ -2943,6 +2956,7 @@ export class DynamoDbTeamIssuesClient {
             { consistentIssueRead: true, includeEvents: false },
           ).catch(() => undefined)
           if (existing && isMatchingIdempotentWorkItemCreate(existing.issue, {
+            acceptanceCriteria,
             actorUserId,
             assigneeUserId,
             assignedProjectId,
@@ -5926,11 +5940,13 @@ export function readIdempotencyResourceId(value: unknown) {
  *
  * @param issue - Work Item already stored under the caller-selected resource ID.
  * @param expected - Normalized fields of the create request being retried.
- * @returns Whether every logical create field, including contributors, matches the stored Work Item.
+ * @returns Whether every logical create field, including contributors and acceptance criteria texts, matches
+ * the stored Work Item.
  */
 function isMatchingIdempotentWorkItemCreate(
   issue: TeamIssueResponseItem,
   expected: {
+    acceptanceCriteria: readonly WorkItemAcceptanceCriterion[]
     actorUserId: string
     assigneeUserId: string
     assignedProjectId: string | null | undefined
@@ -5948,6 +5964,8 @@ function isMatchingIdempotentWorkItemCreate(
   },
 ) {
   return issue.creatorMemberKey === expected.actorUserId &&
+    // Criterion IDs are generated per attempt and `satisfied` changes after creation, so only the texts count.
+    acceptanceCriterionTextsEqual(issue.acceptanceCriteria ?? [], expected.acceptanceCriteria) &&
     issue.assigneeUserId === expected.assigneeUserId &&
     issue.assignedProjectId === (expected.assignedProjectId ?? undefined) &&
     contributorAssignmentListsLogicallyEqual(
@@ -5965,6 +5983,20 @@ function isMatchingIdempotentWorkItemCreate(
     issue.workItemTypeId === expected.workItemTypeId &&
     issue.workflowSchemaVersion === expected.workflowSchemaVersion &&
     issue.workflowStatusId === expected.workflowStatusId
+}
+
+/**
+ * Compares acceptance criteria lists by their texts in order.
+ *
+ * @param left - First acceptance criteria list.
+ * @param right - Second acceptance criteria list.
+ * @returns Whether both lists hold the same texts in the same order.
+ */
+function acceptanceCriterionTextsEqual(
+  left: readonly WorkItemAcceptanceCriterion[],
+  right: readonly WorkItemAcceptanceCriterion[],
+): boolean {
+  return left.length === right.length && left.every((criterion, index) => criterion.text === right[index]?.text)
 }
 
 /**
@@ -6320,11 +6352,11 @@ export function createTeamIssueDeepLink(teamId: string, issueId: string) {
 export function createWorkItemNotificationCandidates(
   before: Pick<
     TeamIssueItem,
-    'assigneeUserId' | 'workflowStatusId' | 'schedule' | 'archivedAt' | 'creatorMemberKey'
+    'assigneeUserId' | 'workflowStatusId' | 'schedule' | 'archivedAt' | 'creatorMemberKey' | 'contributorAssignments'
   >,
   after: Pick<
     TeamIssueItem,
-    'assigneeUserId' | 'workflowStatusId' | 'schedule' | 'archivedAt' | 'creatorMemberKey'
+    'assigneeUserId' | 'workflowStatusId' | 'schedule' | 'archivedAt' | 'creatorMemberKey' | 'contributorAssignments'
   >,
 ) {
   const candidates: Array<{ memberKey: string; reason: string }> = []
@@ -6349,7 +6381,39 @@ export function createWorkItemNotificationCandidates(
     candidates.push({ memberKey: after.creatorMemberKey, reason: 'creator' })
   }
 
-  return candidates
+  return [
+    ...candidates,
+    ...createContributorNotificationCandidates(after, before.contributorAssignments ?? []),
+  ]
+}
+
+/**
+ * Notifies the members who newly take a share of a Work Item as contributors.
+ *
+ * A contributor hears only that they joined the work: status, schedule, and reminder
+ * notifications stay with the accountable owner, and approvals and watchers keep their own
+ * reasons. A member counts as newly added when they had no contributor entry before the change;
+ * the owner and a member added with a share already `done` are left out, so a contributor
+ * entry never doubles the owner's notifications.
+ *
+ * @param after - Work Item after the change.
+ * @param previous - Contributors stored before the change; empty for a new Work Item.
+ * @returns One `contributor` candidate per newly added member.
+ */
+export function createContributorNotificationCandidates(
+  after: Pick<TeamIssueItem, 'assigneeUserId' | 'contributorAssignments'>,
+  previous: readonly WorkItemContributorAssignment[],
+): Array<{ memberKey: string; reason: string }> {
+  const previousMembers = new Set(previous.flatMap((assignment) =>
+    assignment.memberUserId === undefined ? [] : [assignment.memberUserId.toLowerCase()]))
+  const owner = after.assigneeUserId.trim().toLowerCase()
+  return (after.contributorAssignments ?? []).flatMap((assignment) => {
+    const memberKey = assignment.memberUserId?.toLowerCase()
+    if (!memberKey || memberKey === owner || previousMembers.has(memberKey) || assignment.status === 'done') {
+      return []
+    }
+    return [{ memberKey, reason: 'contributor' }]
+  })
 }
 
 /**

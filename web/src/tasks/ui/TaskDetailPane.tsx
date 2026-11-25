@@ -110,6 +110,7 @@ import { WorkItemKeyActions } from '../../issues/ui/WorkItemKeyActions'
 import { TaskActualDatesPanel } from './TaskActualDatesPanel'
 import { TaskScheduleBaselinePanel } from './TaskScheduleBaselinePanel'
 import { WorkItemArchiveButton } from '../../issues/ui/WorkItemArchiveButton'
+import { MarkdownDescriptionField } from '../../issues/ui/MarkdownDescriptionField'
 import { usePromoteProjectRisk } from '../../projects/mutations/usePromoteProjectRisk'
 
 /** Context passed from the Work Item container to the feature-owned AI renderer. */
@@ -398,6 +399,8 @@ export function TaskDetailPane({
     collaborationRoute?.onCollaborationTabChange,
   )
   const editorFormId = useId()
+  // True while the description field is still inserting uploaded attachments; saving waits for it.
+  const [isDescriptionUploading, setIsDescriptionUploading] = useState(false)
   const scheduleFormId = useId()
   const {
     data: triageSourcesPages,
@@ -841,6 +844,7 @@ export function TaskDetailPane({
     if (
       isReadOnly ||
       !task.teamId ||
+      isDescriptionUploading ||
       isIssueSavingRef.current ||
       isAiPlanningOperationPendingRef.current ||
       isAiSummaryOperationPendingRef.current
@@ -1183,21 +1187,21 @@ export function TaskDetailPane({
         )
       case 'description':
         return (
-          <fieldset
-            className="contents"
-            disabled={isReadOnly || isWorkItemMutationPending}
-          >
-            <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('tasks.detail.description')}
-              <textarea
-                className="workbench-input min-h-24 w-full min-w-0 px-3 py-2 leading-6 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={seededDescription}
-                form={editorFormId}
-                key={`description:${editorIdentity}:${activeAiDraft?.description ? activeAiFormSeed?.revision ?? 0 : 0}`}
-                name="description"
-              />
-            </label>
-          </fieldset>
+          <>
+            {/* The key changes once when the detail arrives, so the saved text seeds the field. */}
+            <MarkdownDescriptionField
+              artifacts={artifacts}
+              defaultValue={seededDescription}
+              disabled={isReadOnly || isWorkItemMutationPending}
+              form={editorFormId}
+              key={`description:${editorIdentity}:${issue ? 'loaded' : 'pending'}:${activeAiDraft?.description ? activeAiFormSeed?.revision ?? 0 : 0}`}
+              label={t('tasks.detail.description')}
+              name="description"
+              onUploadingChange={setIsDescriptionUploading}
+              readOnly={isReadOnly}
+              t={t}
+            />
+          </>
         )
       case 'custom-fields':
         return hasCustomFields ? (
@@ -1720,7 +1724,7 @@ export function TaskDetailPane({
         <button
           className="workbench-button-primary min-h-[44px] px-4 disabled:border-slate-300 disabled:bg-slate-300"
           form={editorFormId}
-          disabled={isReadOnly || isWorkItemMutationPending}
+          disabled={isReadOnly || isWorkItemMutationPending || isDescriptionUploading}
           type="submit"
         >
           {t('issues.detail.save')}

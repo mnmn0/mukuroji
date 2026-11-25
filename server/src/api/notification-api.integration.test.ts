@@ -1639,6 +1639,73 @@ test('shows Planning update activity to an Enterprise member with only Planning 
   expect(probe.visibility.get(comment.id)).toBe(true)
 })
 
+test('shows a Team update reminder to an Enterprise owner with only Team Planning access', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [],
+    teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+  })
+  const workspaceId = 'user#demo@example.com'
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (requestedWorkspaceId) => ({
+    ...await readSnapshot(requestedWorkspaceId),
+    customRoles: [{
+      workspaceId,
+      roleId: 'custom:team-planner',
+      name: 'Team planner',
+      permissions: ['planning.read', 'planning.write'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: '2026-07-01T00:00:00.000Z',
+      updatedAt: '2026-07-01T00:00:00.000Z',
+    }],
+    roleAssignments: [{
+      workspaceId,
+      assignmentId: 'notification-team-planner',
+      principalKind: 'member',
+      principalId: 'demo@example.com',
+      roleId: 'custom:team-planner',
+      scope: { workspaceId, kind: 'team', targetId: 'core-team' },
+      source: 'direct',
+    }],
+  })
+  const nextDueAt = '2026-08-10T00:00:00.000Z'
+  await getTestAppDependencies().workItems.planning.configureUpdateCadence(workspaceId, {
+    target: { type: 'team', teamId: 'core-team' },
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt,
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  }, { workItems: [] })
+  const reminder = createNotificationItem({
+    id: 'enterprise-team-planning-reminder',
+    eventType: 'planning-update.reminder',
+    reasons: ['reminder'],
+    issueId: undefined,
+    teamId: 'core-team',
+    planningTargetType: 'team',
+    planningTargetId: 'core-team',
+    planningTargetRecordKey: 'UPDATE_TARGET#TEAM#core-team',
+    planningNextDueAt: nextDueAt,
+    planningNotificationKind: 'reminder',
+  })
+  const probe = createNotificationVisibilityProbe([reminder])
+  setTestAppDependencies({ enterpriseIdentity: identity, notifications: probe.client })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  // The Team target has no Work Item to read, so Work Item read access is not required.
+  expect(probe.visibility.get(reminder.id)).toBe(true)
+})
+
 test('shows a scheduled report delivery only while its recipient can still read the report', async () => {
   const repository = new InMemoryAnalyticsRepository()
   const filter = {

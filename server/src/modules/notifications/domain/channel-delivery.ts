@@ -1,8 +1,8 @@
 /** External channels that drain a durable per-notification delivery queue. */
-export type ExternalDeliveryChannel = 'slack' | 'email'
+export type ExternalDeliveryChannel = 'slack' | 'email' | 'push'
 
 /** Every external channel whose queue state can live on the same notification row. */
-export const EXTERNAL_DELIVERY_CHANNELS: readonly ExternalDeliveryChannel[] = Object.freeze(['slack', 'email'])
+export const EXTERNAL_DELIVERY_CHANNELS: readonly ExternalDeliveryChannel[] = Object.freeze(['slack', 'email', 'push'])
 
 /** Number of independent partitions in each channel's delivery due index. */
 export const CHANNEL_DELIVERY_SHARDS = 16
@@ -36,4 +36,13 @@ export function channelFailedDeliveryShard(channel: ExternalDeliveryChannel, rec
  */
 export function emailDeliveryShard(recipientKey: string): string {
   return channelDeliveryShard('email', recipientKey)
+}
+
+/**
+ * Distributes recipients deterministically across the bounded push delivery queue.
+ * @param recipientKey - Canonical recipient partition.
+ * @returns Stable non-secret queue partition.
+ */
+export function pushDeliveryShard(recipientKey: string): string {
+  return channelDeliveryShard('push', recipientKey)
 }
