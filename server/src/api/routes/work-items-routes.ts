@@ -6039,9 +6039,9 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         completionTransition,
       ) => {
         // The decider changes the status, so the workflow's transition actor roles apply to them.
-        // A reviewer may hold no Team role; then only the assignee role can hold, so a failed read
-        // leaves the manager role unmet instead of blocking a decision no rule restricts.
-        // A reviewer may hold no Team role; only that denial falls back, and other failures surface.
+        // A reviewer may hold no Team role; then only the assignee role can hold, so that denial
+        // leaves the manager role unmet instead of blocking a decision no rule restricts. Any other
+        // failure surfaces.
         const deciderContext = await requireTeamPermission(principal, scope.teamId, 'viewer')
           .catch((error: unknown) => {
             if (error instanceof ProjectDataError && error.status === 403) return undefined

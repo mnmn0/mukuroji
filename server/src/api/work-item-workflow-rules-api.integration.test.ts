@@ -160,6 +160,20 @@ test('does not check required fields when the status does not change', async () 
   expect((await patchWorkItem({ title: 'Renamed' })).status).toBe(200)
 })
 
+test('fences the caller\'s roles at commit when the status changes, and not otherwise', async () => {
+  const calls = configureFakeProjectClients(true, { role: 'manager', detailAssigneeUserId: 'sato@example.com' })
+  configureRules({ allowedActorRoles: ['project-manager'] })
+
+  expect((await patchWorkItem({ workflowStatusId: 'review' })).status).toBe(200)
+  expect(calls.issueUpdates[0]?.authorizationSnapshot).toMatchObject({
+    memberKey: 'demo@example.com',
+    workspaceMemberVersion: 1,
+  })
+
+  expect((await patchWorkItem({ title: 'Renamed' })).status).toBe(200)
+  expect(calls.issueUpdates[1]?.authorizationSnapshot).toBeUndefined()
+})
+
 const credential: AuthenticatedDeveloperCredential = {
   kind: 'api-key',
   workspaceId: 'user#demo@example.com',
