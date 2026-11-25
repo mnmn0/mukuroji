@@ -392,12 +392,18 @@ export type AgentRunReport = {
 /** Report kinds that ask a person to decide, and that a person can answer. */
 export const AGENT_RUN_QUESTION_REPORT_KINDS = ['blocker', 'handoff'] as const satisfies readonly AgentRunReportKind[]
 
-/** Longest answer to a report, in characters. */
+/** Longest answer to a report that a person can send, in characters. */
 export const AGENT_RUN_REPORT_ANSWER_MAX_LENGTH = 10_000
+
+/**
+ * Longest answer a report read returns, in characters. An answer is read as its Work Item comment now
+ * stands, and an edited comment may be as long as any comment.
+ */
+export const AGENT_RUN_REPORT_ANSWER_READ_MAX_LENGTH = 20_000
 
 /** A person's recorded answer to a `blocker` or `handoff` report. */
 export type AgentRunReportAnswer = {
-  /** Answer text as Markdown. */
+  /** Answer text as Markdown, as its comment now stands; at most {@link AGENT_RUN_REPORT_ANSWER_READ_MAX_LENGTH} characters. */
   body: string
   /** Workspace member who answered. */
   answeredBy: string

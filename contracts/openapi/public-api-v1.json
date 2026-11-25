@@ -652,7 +652,7 @@
             "type": "string"
           },
           "body": {
-            "maxLength": 10000,
+            "maxLength": 20000,
             "minLength": 1,
             "type": "string"
           },

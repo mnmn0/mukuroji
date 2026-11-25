@@ -3,7 +3,7 @@ import {
   isCanonicalWorkItemKey,
   type PublicProjectCharter,
   AGENT_SETTINGS_BRIEF_MAX_BYTES, AGENT_SETTINGS_MAX_PROJECT_BRIEFS, AGENT_SETTINGS_MAX_READY_STATUSES,
-  AGENT_SETTINGS_MAX_RESUMABLE_STATUSES, AGENT_RUN_QUESTIONS_MAX_ITEMS, AGENT_RUN_REPORT_ANSWER_MAX_LENGTH,
+  AGENT_SETTINGS_MAX_RESUMABLE_STATUSES, AGENT_RUN_QUESTIONS_MAX_ITEMS, AGENT_RUN_REPORT_ANSWER_READ_MAX_LENGTH,
   WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT, WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
 } from '@mukuroji/contracts'
 import type {
@@ -140,7 +140,7 @@ const reportSchema = z.object({
   createdAt: z.iso.datetime(),
   // Servers older than answers omit it.
   answer: z.object({
-    body: z.string().min(1).max(AGENT_RUN_REPORT_ANSWER_MAX_LENGTH), answeredBy: z.string().min(1),
+    body: z.string().min(1).max(AGENT_RUN_REPORT_ANSWER_READ_MAX_LENGTH), answeredBy: z.string().min(1),
     answeredAt: z.iso.datetime(), commentId: identifier,
   }).optional(),
 })
