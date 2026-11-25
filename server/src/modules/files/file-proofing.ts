@@ -87,6 +87,8 @@ export const GUARDDUTY_SCAN_STATUS_TAG = 'GuardDutyMalwareScanStatus'
 
 /** Physical Planning META key that serializes canonical Work Item projections. */
 const PLANNING_META_RECORD_KEY = 'META'
+/** Most keys DynamoDB BatchGetItem accepts in one request. */
+const BATCH_GET_MAX_KEYS = 100
 
 /** DynamoDB reverse index used for direct File ID evidence resolution. */
 const FILE_ID_INDEX_NAME = 'FileIdIndex'
@@ -322,6 +324,18 @@ export type CreateWorkItemApprovalInput = {
   completionTransition?: string
 }
 
+/** 固定した Document version に対する approval request 作成入力です。 */
+export type CreateDocumentVersionApprovalInput = {
+  /** 対象 Document ID です。 */
+  documentId: string
+  /** 名前を付けて固定した canonical version ID です。 */
+  versionId: string
+  /** Reviewer の Workspace member key 一覧です。 */
+  reviewerMemberKeys: string[]
+  /** 判断期限の ISO 8601 timestamp です。 */
+  dueAt: string
+}
+
 /** Reviewer decision の入力です。 */
 export type CreateFileApprovalDecisionInput = {
   /** Reviewer の判断です。 */
@@ -542,6 +556,32 @@ type StoredFileApprovalIndexItem = {
   retentionUntil?: string
   /** DynamoDB TTL epoch seconds です。 */
   expiresAt?: number
+}
+
+/** Document ID から approval を列挙する逆引き pointer row です。 */
+type StoredDocumentApprovalIndexItem = {
+  /** `WORKSPACE#<workspaceId>#DOCUMENT#<documentId>` 形式の partition key です。 */
+  scopeKey: string
+  /** `APPROVAL#<createdAt>#<approvalId>` 形式の sort key です。 */
+  recordKey: string
+  /** Row discriminator です。 */
+  entryType: 'document-approval-index'
+  /** 対象 Document ID です。 */
+  documentId: string
+  /** 対象 Document version ID です。 */
+  versionId: string
+  /** Main approval row の ID です。 */
+  approvalId: string
+  /** Main approval row を持つ Work Item scope key です。 */
+  sourceScopeKey: string
+}
+
+/** Main approval row を指す pointer です。 */
+type ApprovalRowPointer = {
+  /** Main approval row を持つ Work Item scope key です。 */
+  sourceScopeKey: string
+  /** Main approval row の ID です。 */
+  approvalId: string
 }
 
 /** Reviewer 別 Inbox query 用の approval projection row です。 */
@@ -850,6 +890,41 @@ export interface FileProofingClient {
     input: CreateWorkItemApprovalInput,
     auditContext?: MutationAuditContext,
   ): Promise<ApprovalRequest>
+  /**
+   * Creates an approval request for a pinned Document version on the Work Item that links it
+   * as a deliverable.
+   *
+   * @param scope - Work Item scope that owns the approval.
+   * @param actor - Requesting actor; Document read access is verified by the caller.
+   * @param input - Document version subject, reviewers, and due date.
+   * @param auditContext - Mutation audit and idempotency context.
+   * @param subjectConditionChecks - Condition checks from the Document owner that keep the
+   *   requester's Document edit permission and the pinned version unchanged until the save.
+   * @returns The created approval request.
+   */
+  createDocumentVersionApproval(
+    scope: FileProofingScope,
+    actor: FileProofingActor,
+    input: CreateDocumentVersionApprovalInput,
+    auditContext?: MutationAuditContext,
+    subjectConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
+  ): Promise<ApprovalRequest>
+  /**
+   * Lists approval requests created for versions of one Document, newest first.
+   *
+   * Work Item access is not checked here; the caller filters the result by the
+   * Work Item each approval belongs to.
+   *
+   * @param workspaceId - Workspace that owns the Document.
+   * @param documentId - Document whose version approvals are listed.
+   * @param actor - Viewer used for capabilities and guest filtering.
+   * @returns Approval requests for the Document's versions.
+   */
+  listDocumentApprovals(
+    workspaceId: string,
+    documentId: string,
+    actor: FileProofingActor,
+  ): Promise<ApprovalRequest[]>
   /**
    * Reads pending Work Item approvals that carry a completion transition.
    *
@@ -2207,6 +2282,160 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
   }
 
   /**
+   * Creates an approval request for a pinned Document version on the Work Item that links it
+   * as a deliverable.
+   *
+   * @param scope - Work Item scope that owns the approval.
+   * @param actor - Requesting actor; Document read access is verified by the caller.
+   * The transaction also checks that the Work Item still belongs to the Project the request was
+   * authorized for, and carries the Document owner's checks for the requester's edit permission,
+   * so a concurrent Work Item move or permission change rejects the whole request.
+   *
+   * @param input - Document version subject, reviewers, and due date.
+   * @param auditContext - Mutation audit and idempotency context.
+   * @param subjectConditionChecks - Condition checks from the Document owner that keep the
+   *   requester's Document edit permission and the pinned version unchanged until the save.
+   * @returns The created approval request.
+   */
+  async createDocumentVersionApproval(
+    scope: FileProofingScope,
+    actor: FileProofingActor,
+    input: CreateDocumentVersionApprovalInput,
+    auditContext?: MutationAuditContext,
+    subjectConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+  ): Promise<ApprovalRequest> {
+    requireApprovalWrite(actor)
+    requireWorkItemScope(scope)
+    await this.ensureReady()
+    const scopeKey = createFileProofingScopeKey(scope)
+    const documentId = requireLimitedText(input.documentId, 'Document ID', 320)
+    const versionId = requireLimitedText(input.versionId, 'Document version ID', 400)
+    if (!versionId.startsWith(`${documentId}:`)) {
+      throw new FileProofingError(400, 'InvalidApprovalSubject', 'Document version does not belong to the Document.')
+    }
+    const reviewers = normalizeApprovalReviewers(input.reviewerMemberKeys)
+    const approvalId = createMutationResourceId('approval', auditContext, scopeKey)
+    if (auditContext) {
+      // A retry after a lost response returns the saved approval even when its due date has
+      // passed since, so the future-date rule only applies to a new request.
+      const existing = await this.getApproval(scopeKey, approvalId, false)
+      if (existing) {
+        requireMatchingIdempotencyFingerprint(existing.requestFingerprint, auditContext)
+        return toApprovalRequest(existing, actor)
+      }
+    }
+    const dueAt = normalizeFutureTimestamp(input.dueAt, 'Approval due date')
+    const now = auditContext?.occurredAt ?? new Date().toISOString()
+    const item: StoredApprovalItem = {
+      scopeKey,
+      recordKey: createApprovalRecordKey(approvalId),
+      entryType: 'approval',
+      workspaceId: scope.workspaceId,
+      teamId: scope.teamId,
+      issueId: scope.issueId!,
+      ...(scope.projectId ? { projectId: scope.projectId } : {}),
+      id: approvalId,
+      subjectType: 'document-version',
+      documentId,
+      versionId,
+      revision: 1,
+      status: 'pending',
+      reviewers,
+      dueAt,
+      requestedByMemberKey: actor.memberKey,
+      requestedByKind: actor.kind ?? 'member',
+      createdAt: now,
+      updatedAt: now,
+      capabilities: { canCancel: false, canDecide: false },
+      ...(auditContext ? { requestFingerprint: auditContext.requestFingerprint } : {}),
+    }
+    const transactionItems = createApprovalProjectionPutItems(this.tableName, item)
+    transactionItems.push(createApprovalSummaryUpdate(
+      this.tableName,
+      scopeKey,
+      now,
+      { approvalId, dueAt, pending: 1 },
+    ))
+    const guardStart = transactionItems.length
+    if (this.workItemsTableName) {
+      transactionItems.push(createWorkItemProjectConditionCheck(this.workItemsTableName, scope))
+    }
+    transactionItems.push(...subjectConditionChecks)
+    const guardEnd = transactionItems.length
+    addAuditItem(transactionItems, this.auditTableName, auditContext, {
+      directoryId: scope.workspaceId,
+      eventType: 'approval.requested',
+      entityType: 'work-item',
+      entityId: createWorkItemAuditEntityId(scope),
+      target: { type: 'approval', id: approvalId },
+      action: 'requested',
+      metadata: {
+        ...createApprovalAuditMetadata(scope, actor, item),
+        approvalId,
+        dueAt,
+        notificationCandidates: reviewers.map((reviewer) => ({
+          memberKey: reviewer.memberKey,
+          reason: 'approval-requested',
+        })),
+      },
+    })
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactionItems }))
+    } catch (error) {
+      if (!isConditionalTransactionError(error)) {
+        throw error
+      }
+      const existing = await this.getApproval(scopeKey, approvalId, false)
+      if (existing) {
+        requireMatchingIdempotencyFingerprint(existing.requestFingerprint, auditContext)
+        return toApprovalRequest(existing, actor)
+      }
+      if (readConditionalFailureIndexes(error).some((index) => index >= guardStart && index < guardEnd)) {
+        throw new FileProofingError(
+          409,
+          'ApprovalAuthorizationChanged',
+          'The Work Item or Document access changed. Reload and try again.',
+          { cause: error },
+        )
+      }
+      throw new FileProofingError(
+        409,
+        auditContext ? 'IdempotencyKeyReused' : 'ApprovalRevisionConflict',
+        'Approval state changed. Reload and try again.',
+        { cause: error },
+      )
+    }
+
+    return toApprovalRequest(item, actor)
+  }
+
+  /**
+   * Lists approval requests created for versions of one Document, newest first.
+   *
+   * @param workspaceId - Workspace that owns the Document.
+   * @param documentId - Document whose version approvals are listed.
+   * @param actor - Viewer used for capabilities and guest filtering.
+   * @returns Approval requests for the Document's versions.
+   */
+  async listDocumentApprovals(
+    workspaceId: string,
+    documentId: string,
+    actor: FileProofingActor,
+  ): Promise<ApprovalRequest[]> {
+    if (actor.guest) return []
+    await this.ensureReady()
+    const pointers = (await this.queryScope(createDocumentApprovalScopeKey(workspaceId, documentId), 'APPROVAL#'))
+      .filter(isStoredDocumentApprovalIndexItem)
+      .filter((pointer) => pointer.documentId === documentId)
+    const approvals = await this.batchGetApprovalItems(pointers)
+    return [...approvals.values()]
+      .filter((approval) => readDocumentApprovalSubject(approval)?.documentId === documentId)
+      .map((approval) => toApprovalRequest(approval, actor))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+  }
+
+  /**
    * Reads pending Work Item approval transitions and fences their approval rows.
    *
    * @param scope - Work Item scope whose approval rows are checked.
@@ -2956,15 +3185,44 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
 
   /** Compact reviewer pointers が参照する main approval rows を batch read します。 */
   private async batchGetReviewerApprovalItems(items: readonly StoredReviewerApprovalItem[]) {
+    return this.batchGetApprovalItems(items)
+  }
+
+  /**
+   * Reads main approval rows through pointers, keyed by scope key and approval ID.
+   *
+   * The keys are read in chunks of at most {@link BATCH_GET_MAX_KEYS}, the BatchGetItem limit,
+   * and each chunk retries its unprocessed keys.
+   *
+   * @param items - Pointers to the Work Item scope and approval ID of each row.
+   * @returns Approval rows that still exist.
+   */
+  private async batchGetApprovalItems(items: readonly ApprovalRowPointer[]) {
     const approvals = new Map<string, StoredApprovalItem>()
-    let keys: Record<string, unknown>[] = [...new Map(items.map((item) => [
+    const allKeys: Record<string, unknown>[] = [...new Map(items.map((item) => [
       createReviewerApprovalPointerKey(item),
       {
         scopeKey: item.sourceScopeKey,
         recordKey: createApprovalRecordKey(item.approvalId),
       },
     ])).values()]
+    for (let index = 0; index < allKeys.length; index += BATCH_GET_MAX_KEYS) {
+      await this.batchGetApprovalChunk(allKeys.slice(index, index + BATCH_GET_MAX_KEYS), approvals)
+    }
+    return approvals
+  }
 
+  /**
+   * Reads one BatchGetItem-sized chunk of approval rows, retrying unprocessed keys.
+   *
+   * @param chunk - At most {@link BATCH_GET_MAX_KEYS} approval row keys.
+   * @param approvals - Rows read so far, keyed by scope key and approval ID; filled in place.
+   */
+  private async batchGetApprovalChunk(
+    chunk: Record<string, unknown>[],
+    approvals: Map<string, StoredApprovalItem>,
+  ) {
+    let keys = chunk
     for (let attempt = 0; keys.length > 0 && attempt < 5; attempt += 1) {
       const response = await this.documentClient.send(new BatchGetCommand({
         RequestItems: {
@@ -2988,7 +3246,6 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         'Reviewer approvals could not be read completely.',
       )
     }
-    return approvals
   }
 
   /** Scope partition を prefix query します。 */
@@ -3330,8 +3587,19 @@ function createReviewerScopeKey(workspaceId: string, memberKey: string) {
   return `WORKSPACE#${requireText(workspaceId, 'Workspace ID')}#REVIEWER#${normalizeMemberKey(memberKey)}`
 }
 
+/**
+ * Builds the partition key that lists approvals of one Document's versions.
+ *
+ * @param workspaceId - Workspace that owns the Document.
+ * @param documentId - Document whose approvals are indexed.
+ * @returns The Document approval index partition key.
+ */
+function createDocumentApprovalScopeKey(workspaceId: string, documentId: string) {
+  return `WORKSPACE#${requireText(workspaceId, 'Workspace ID')}#DOCUMENT#${requireText(documentId, 'Document ID')}`
+}
+
 /** Compact reviewer pointer の map key を作成します。 */
-function createReviewerApprovalPointerKey(item: StoredReviewerApprovalItem) {
+function createReviewerApprovalPointerKey(item: ApprovalRowPointer) {
   return `${item.sourceScopeKey}\0${item.approvalId}`
 }
 
@@ -3682,7 +3950,7 @@ function toDeliverableApprovalState(status: ApprovalRequestStatus): ProjectDeliv
 
 /** 保存済み approval から File version subject を安全に復元します。 */
 function readFileApprovalSubject(item: StoredApprovalItem) {
-  if (item.subjectType === 'work-item') return undefined
+  if (item.subjectType === 'work-item' || item.subjectType === 'document-version') return undefined
   if (typeof item.fileId === 'string' && item.fileId && typeof item.versionId === 'string' && item.versionId) {
     return { fileId: item.fileId, versionId: item.versionId }
   }
@@ -3690,6 +3958,24 @@ function readFileApprovalSubject(item: StoredApprovalItem) {
     503,
     'InvalidApprovalState',
     'File approval subject metadata is incomplete.',
+  )
+}
+
+/**
+ * Reads the Document version subject of a stored approval, failing closed for incomplete metadata.
+ *
+ * @param item - Stored approval row.
+ * @returns The Document and version IDs, or undefined for other subjects.
+ */
+function readDocumentApprovalSubject(item: StoredApprovalItem) {
+  if (item.subjectType !== 'document-version') return undefined
+  if (typeof item.documentId === 'string' && item.documentId && typeof item.versionId === 'string' && item.versionId) {
+    return { documentId: item.documentId, versionId: item.versionId }
+  }
+  throw new FileProofingError(
+    503,
+    'InvalidApprovalState',
+    'Document approval subject metadata is incomplete.',
   )
 }
 
@@ -3717,6 +4003,7 @@ function toApprovalRequest(item: StoredApprovalItem, actor: FileProofingActor): 
     reviewer.status === 'pending'
   )
   const fileSubject = readFileApprovalSubject(item)
+  const documentSubject = readDocumentApprovalSubject(item)
   const requestedByKind = readApprovalRequesterKind(item)
   const approval = {
     id: item.id,
@@ -3742,17 +4029,26 @@ function toApprovalRequest(item: StoredApprovalItem, actor: FileProofingActor): 
       ),
     },
   }
-  return fileSubject
-    ? {
-        ...approval,
-        subjectType: 'file-version',
-        fileId: fileSubject.fileId,
-        versionId: fileSubject.versionId,
-      }
-    : {
-        ...approval,
-        subjectType: 'work-item',
-      }
+  if (fileSubject) {
+    return {
+      ...approval,
+      subjectType: 'file-version',
+      fileId: fileSubject.fileId,
+      versionId: fileSubject.versionId,
+    }
+  }
+  if (documentSubject) {
+    return {
+      ...approval,
+      subjectType: 'document-version',
+      documentId: documentSubject.documentId,
+      versionId: documentSubject.versionId,
+    }
+  }
+  return {
+    ...approval,
+    subjectType: 'work-item',
+  }
 }
 
 /** Stored file 内の version を取得します。 */
@@ -3956,6 +4252,19 @@ function createApprovalProjectionPutItems(
       reviewerMemberKeys: approval.reviewers.map((reviewer) => reviewer.memberKey),
     }
     transactionItems.push({ Put: { TableName: tableName, Item: fileApprovalIndex } })
+  }
+  const documentSubject = readDocumentApprovalSubject(approval)
+  if (documentSubject) {
+    const documentApprovalIndex: StoredDocumentApprovalIndexItem = {
+      scopeKey: createDocumentApprovalScopeKey(approval.workspaceId, documentSubject.documentId),
+      recordKey: `APPROVAL#${approval.createdAt}#${approval.id}`,
+      entryType: 'document-approval-index',
+      documentId: documentSubject.documentId,
+      versionId: documentSubject.versionId,
+      approvalId: approval.id,
+      sourceScopeKey: approval.scopeKey,
+    }
+    transactionItems.push({ Put: { TableName: tableName, Item: documentApprovalIndex } })
   }
   for (const reviewer of approval.reviewers) {
     const projection: StoredReviewerApprovalItem = {
@@ -4267,16 +4576,18 @@ function createApprovalAuditMetadata(
   approval: StoredApprovalItem,
 ) {
   const fileSubject = readFileApprovalSubject(approval)
+  const documentSubject = readDocumentApprovalSubject(approval)
   return {
     actorMemberKey: actor.memberKey,
     actorKind: actor.kind ?? 'member',
     requesterKey: approval.requestedByMemberKey,
     requesterKind: readApprovalRequesterKind(approval),
-    subjectType: fileSubject ? 'file-version' : 'work-item',
+    subjectType: fileSubject ? 'file-version' : documentSubject ? 'document-version' : 'work-item',
     teamId: scope.teamId,
     issueId: scope.issueId,
     projectId: scope.projectId,
     ...(fileSubject ? { fileId: fileSubject.fileId, versionId: fileSubject.versionId } : {}),
+    ...(documentSubject ? { documentId: documentSubject.documentId, versionId: documentSubject.versionId } : {}),
     // A Project approval opens the Project screen, which hosts the files tab; the Web has no
     // dedicated Project file route.
     deepLink: scope.kind === 'work-item'
@@ -4550,6 +4861,60 @@ function isConditionalTransactionError(error: unknown) {
     failureCodes.every((code) => code === 'ConditionalCheckFailed')
 }
 
+/**
+ * Lists the transaction items whose condition failed in a cancelled transaction.
+ *
+ * @param error - Error thrown by TransactWriteItems.
+ * @returns Indexes of the items whose cancellation reason is ConditionalCheckFailed.
+ */
+function readConditionalFailureIndexes(error: unknown): number[] {
+  if (
+    typeof error !== 'object' || error === null ||
+    !('CancellationReasons' in error) || !Array.isArray(error.CancellationReasons)
+  ) {
+    return []
+  }
+  return error.CancellationReasons.flatMap((reason: unknown, index) =>
+    typeof reason === 'object' && reason !== null &&
+      'Code' in reason && reason.Code === 'ConditionalCheckFailed'
+      ? [index]
+      : []
+  )
+}
+
+/**
+ * Builds the check that the Work Item still exists and belongs to the Project, or to no Project,
+ * that the approval request was authorized for.
+ *
+ * @param workItemsTableName - Work Item table name.
+ * @param scope - Work Item scope read when the request was authorized.
+ * @returns The transaction condition check.
+ */
+function createWorkItemProjectConditionCheck(
+  workItemsTableName: string,
+  scope: FileProofingScope,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  return {
+    ConditionCheck: {
+      TableName: workItemsTableName,
+      Key: {
+        directoryTeamId: `${scope.workspaceId}#team#${scope.teamId}`,
+        issueId: requireText(scope.issueId ?? '', 'Work Item ID'),
+      },
+      ...(scope.projectId
+        ? {
+            ConditionExpression: 'attribute_exists(issueId) AND #assignedProjectId = :projectId',
+            ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId' },
+            ExpressionAttributeValues: { ':projectId': scope.projectId },
+          }
+        : {
+            ConditionExpression: 'attribute_exists(issueId) AND attribute_not_exists(#assignedProjectId)',
+            ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId' },
+          }),
+    },
+  }
+}
+
 /** DynamoDB single-item conditional write error かどうかを判定します。 */
 function isConditionalWriteError(error: unknown) {
   return typeof error === 'object' && error !== null &&
@@ -4640,6 +5005,20 @@ function isValidApprovalDueAtKey(value: unknown): value is string {
   return separatorIndex > 0 &&
     separatorIndex < value.length - 1 &&
     isCanonicalTimestamp(value.slice(0, separatorIndex))
+}
+
+/**
+ * Checks whether a row is a Document approval index pointer.
+ *
+ * @param value - Row read from the table.
+ * @returns Whether the row is a well-formed pointer.
+ */
+function isStoredDocumentApprovalIndexItem(value: unknown): value is StoredDocumentApprovalIndexItem {
+  return typeof value === 'object' && value !== null &&
+    'entryType' in value && value.entryType === 'document-approval-index' &&
+    'documentId' in value && typeof value.documentId === 'string' &&
+    'approvalId' in value && typeof value.approvalId === 'string' && value.approvalId.length > 0 &&
+    'sourceScopeKey' in value && typeof value.sourceScopeKey === 'string' && value.sourceScopeKey.length > 0
 }
 
 /** Reviewer projection row を判定します。 */

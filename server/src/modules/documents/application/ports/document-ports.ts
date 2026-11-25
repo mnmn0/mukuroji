@@ -4,6 +4,8 @@ import type {
   DocumentDetail,
   DocumentNode,
   DocumentTreeResponse,
+  DocumentVersion,
+  DocumentVersionDetail,
   DocumentVersionsResponse,
 } from '@mukuroji/contracts'
 import type {
@@ -21,6 +23,7 @@ import type {
   ExportDocumentRequest,
   GetDocumentCommentWindowRevisionRequest,
   GetDocumentRequest,
+  GetDocumentVersionRequest,
   HeartbeatDocumentPresenceRequest,
   InstantiateDocumentTemplateRequest,
   ListDocumentBacklinksRequest,
@@ -28,6 +31,7 @@ import type {
   ListDocumentVersionsRequest,
   ListDocumentsRequest,
   ListRecentDocumentsRequest,
+  PinDocumentVersionRequest,
   PrepareDocumentOperationsResponse,
   RenderedDocumentExport,
   ResolvedDocumentPublicShare,
@@ -210,6 +214,20 @@ export interface DocumentVersionsPort {
    * @returns Restored current Document detail.
    */
   restoreVersion(input: RestoreDocumentVersionRequest): Promise<DocumentDetail>
+  /**
+   * Returns one retained version with a read-only snapshot of its content.
+   *
+   * @param input - Version to read and the viewer's authorization snapshot.
+   * @returns Version metadata and the read-only Document snapshot.
+   */
+  getVersion(input: GetDocumentVersionRequest): Promise<DocumentVersionDetail>
+  /**
+   * Names a retained version and keeps it beyond the version retention period.
+   *
+   * @param input - Version to pin, its validated name, and the editor's authorization snapshot.
+   * @returns Pinned version metadata.
+   */
+  pinVersion(input: PinDocumentVersionRequest): Promise<DocumentVersion>
 }
 
 /** Stores viewer-specific favorite and recent-document preferences. */

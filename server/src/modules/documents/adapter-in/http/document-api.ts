@@ -1,3 +1,8 @@
+import {
+  DOCUMENT_VERSION_NAME_MAX_LENGTH,
+  type ApprovalRequest,
+  type CreateDocumentVersionApprovalInput,
+} from '@mukuroji/contracts'
 import type {
   ApplyDocumentOperationsInput,
   ArchiveDocumentInput,
@@ -207,12 +212,43 @@ export type DocumentApiDependencies = {
     context: Context,
   ) => Promise<DocumentRealtimeTicket | undefined>
   /**
+   * 閲覧を確認済みの固定 version について、成果物の Work Item に承認依頼を作成します。
+   * Work Item の認可、reviewer の検証、承認の保存は Work Item 側の source of truth が行います。
+   * 依頼者の Document 編集権限は `access` で再確認し、保存 transaction の条件に含めます。
+   * 未設定の runtime では承認依頼 route が 503 を返します。
+   */
+  requestVersionApproval?: (
+    principal: DocumentApiPrincipal,
+    request: DocumentVersionApprovalRequest,
+    context: Context,
+    access: DocumentAccessContext,
+  ) => Promise<ApprovalRequest>
+  /**
+   * 閲覧を確認済みの Document の version に出された承認依頼のうち、
+   * principal が Work Item を閲覧できるものを新しい順に返します。
+   */
+  listVersionApprovals?: (
+    principal: DocumentApiPrincipal,
+    documentId: string,
+    context: Context,
+  ) => Promise<ApprovalRequest[]>
+  /**
    * Document の購読者へ内容を含まない変更通知を best-effort で送ります。
    */
   publishChange?: (
     workspaceId: string,
     change: DocumentRealtimeChange,
   ) => Promise<void>
+}
+
+/**
+ * 固定した Document version の承認依頼を Work Item に作成する依頼です。
+ */
+export type DocumentVersionApprovalRequest = CreateDocumentVersionApprovalInput & {
+  /** 承認対象の Document ID です。 */
+  documentId: string
+  /** 承認対象の canonical version ID（`<documentId>:<revision>`）です。 */
+  versionId: string
 }
 
 /** Document の変更通知を購読するために browser へ一度だけ返す ticket です。 */
@@ -693,6 +729,88 @@ export function registerDocumentApiRoutes(
         part: 'document',
       })
       return c.json({ document, restoredFromVersionId: versionId })
+    })
+  })
+
+  app.get('/api/documents/:documentId/versions/:versionId', async (c) => {
+    return withDocumentPrincipal(c, dependencies, async (principal, access) => {
+      const version = await dependencies.getClient().getVersion({
+        workspaceId: principal.workspaceId,
+        documentId: readRequiredDocumentId(c),
+        versionId: readRequiredVersionId(c),
+        access,
+      })
+      return c.json({ version })
+    })
+  })
+
+  app.post('/api/documents/:documentId/versions/:versionId/pin', async (c) => {
+    return withDocumentPrincipal(c, dependencies, async (principal, access) => {
+      const body = await readJson<unknown>(c)
+      const idempotencyKey = c.req.header('Idempotency-Key')?.trim()
+      const version = await dependencies.getClient().pinVersion({
+        workspaceId: principal.workspaceId,
+        documentId: readRequiredDocumentId(c),
+        versionId: readRequiredVersionId(c),
+        name: readDocumentVersionName(isRecord(body) ? body.name : undefined),
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+        access,
+      })
+      return c.json({ version })
+    })
+  })
+
+  app.post('/api/documents/:documentId/versions/:versionId/approvals', async (c) => {
+    return withDocumentPrincipal(c, dependencies, async (principal, access) => {
+      const input = parseCreateDocumentVersionApprovalInput(await readJson<unknown>(c))
+      const documentId = readRequiredDocumentId(c)
+      // Requesting approval publishes the version as a deliverable, so it needs the same
+      // Document edit permission as pinning it, not only read access.
+      const current = await dependencies.getClient().get({
+        workspaceId: principal.workspaceId,
+        documentId,
+        access,
+      })
+      if (!current.capabilities.canEdit) {
+        throw new DocumentError(403, 'DocumentEditDenied', 'Document edit permission is required.')
+      }
+      const detail = await dependencies.getClient().getVersion({
+        workspaceId: principal.workspaceId,
+        documentId,
+        versionId: readRequiredVersionId(c),
+        access,
+      })
+      if (detail.version.name === undefined) {
+        throw new DocumentError(
+          409,
+          'DocumentVersionNotPinned',
+          'Only a named version can be requested for approval.',
+        )
+      }
+      if (dependencies.requestVersionApproval === undefined) {
+        throw new DocumentError(503, 'DocumentApprovalUnavailable', 'Document approvals are unavailable.')
+      }
+      const approval = await dependencies.requestVersionApproval(principal, {
+        ...input,
+        documentId,
+        versionId: detail.version.id,
+      }, c, access)
+      return c.json({ approval }, 201)
+    })
+  })
+
+  app.get('/api/documents/:documentId/approvals', async (c) => {
+    return withDocumentPrincipal(c, dependencies, async (principal, access) => {
+      const document = await dependencies.getClient().get({
+        workspaceId: principal.workspaceId,
+        documentId: readRequiredDocumentId(c),
+        access,
+        includeArchived: true,
+      })
+      const approvals = dependencies.listVersionApprovals === undefined
+        ? []
+        : await dependencies.listVersionApprovals(principal, document.id, c)
+      return c.json({ approvals })
     })
   })
 
@@ -2115,6 +2233,77 @@ function readRequiredDocumentId(c: Context) {
     throw new DocumentError(400, 'InvalidDocumentId', 'Document ID is required.')
   }
   return documentId
+}
+
+/**
+ * Reads the required version ID route parameter.
+ *
+ * @param c - Hono request context.
+ * @returns The trimmed version ID.
+ * @throws DocumentError when the parameter is missing.
+ */
+function readRequiredVersionId(c: Context) {
+  const versionId = c.req.param('versionId')?.trim()
+  if (!versionId) {
+    throw new DocumentError(400, 'InvalidDocumentVersion', 'Version ID is required.')
+  }
+  return versionId
+}
+
+/**
+ * Validates the name given to a pinned version.
+ *
+ * @param value - Untrusted request value.
+ * @returns The trimmed name.
+ * @throws DocumentError when the name is not a non-empty string within the length limit.
+ */
+function readDocumentVersionName(value: unknown) {
+  const name = typeof value === 'string' ? value.trim() : ''
+  if (!name || name.length > DOCUMENT_VERSION_NAME_MAX_LENGTH) {
+    throw new DocumentError(
+      400,
+      'InvalidDocumentVersionName',
+      `Version name must be 1-${DOCUMENT_VERSION_NAME_MAX_LENGTH} characters.`,
+    )
+  }
+  return name
+}
+
+/**
+ * Validates the shape of a Document version approval request body.
+ *
+ * Reviewer membership, Work Item access, and the due date are validated by the
+ * Work Item approval owner; this only rejects malformed input early.
+ *
+ * @param value - Untrusted request body.
+ * @returns The typed approval input.
+ * @throws DocumentError when a field is missing or malformed.
+ */
+function parseCreateDocumentVersionApprovalInput(value: unknown): CreateDocumentVersionApprovalInput {
+  if (!isRecord(value)) {
+    throw new DocumentError(400, 'InvalidDocumentApproval', 'Approval request body is required.')
+  }
+  const teamId = typeof value.teamId === 'string' ? value.teamId.trim() : ''
+  const issueId = typeof value.issueId === 'string' ? value.issueId.trim() : ''
+  const dueAt = typeof value.dueAt === 'string' ? value.dueAt.trim() : ''
+  const reviewerMemberKeys = Array.isArray(value.reviewerMemberKeys)
+    ? value.reviewerMemberKeys.filter((memberKey): memberKey is string => typeof memberKey === 'string')
+    : []
+  if (
+    !teamId ||
+    !issueId ||
+    !dueAt ||
+    !Array.isArray(value.reviewerMemberKeys) ||
+    reviewerMemberKeys.length !== value.reviewerMemberKeys.length ||
+    reviewerMemberKeys.length === 0
+  ) {
+    throw new DocumentError(
+      400,
+      'InvalidDocumentApproval',
+      'Team ID, Work Item ID, reviewers, and a due date are required.',
+    )
+  }
+  return { teamId, issueId, dueAt, reviewerMemberKeys }
 }
 
 function readExpectedRevision(value: unknown) {
