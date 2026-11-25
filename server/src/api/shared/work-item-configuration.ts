@@ -35,7 +35,7 @@ import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { getEnv } from './runtime-config'
 import { isRecord } from './value-guards'
 import { createPlanningCallerAuthorizationConditionChecks } from './planning-access'
-import { principalManagesTeamWorkItem, type ProjectPrincipal, type WorkspacePrincipal } from './project-access'
+import { principalManagesTeamWorkItem, type WorkspacePrincipal } from './project-access'
 import { readNewWorkItemAcceptanceCriteria } from './work-item-acceptance-criteria'
 import { requireActiveWorkspaceAssignee, type TeamPermissionContext } from './workspace-access'
 
