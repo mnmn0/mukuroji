@@ -3233,11 +3233,13 @@ function configureFakeProjectClients(
         }
       },
       async listStartedWorkItemIds(_directoryId, teamId, readOptions) {
+        // The cursor is an offset, so a board test also sees the index stop early and continue.
+        const started = createFakeTeamIssues(teamId).filter((issue) => issue.statusCategory === 'started')
+        const offset = Number.isSafeInteger(Number(readOptions.cursor)) ? Number(readOptions.cursor) : 0
+        const end = offset + readOptions.limit
         return {
-          workItemIds: createFakeTeamIssues(teamId)
-            .filter((issue) => issue.statusCategory === 'started')
-            .slice(0, readOptions.limit)
-            .map((issue) => issue.id),
+          workItemIds: started.slice(offset, end).map((issue) => issue.id),
+          ...(end < started.length ? { nextCursor: String(end) } : {}),
         }
       },
       async getTeamIssuePage(directoryId, teamId, readOptions) {

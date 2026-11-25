@@ -648,9 +648,12 @@ export async function listWebTeamAgentRunBoard(
   continuation?: FactoryBoardContinuation,
 ): Promise<TeamAgentRunBoardResponse> {
   const permission = await requireTeamPermission(principal, teamId, 'viewer')
-  const now = new Date()
-  const since = continuation?.since ??
-    new Date(now.getTime() - FACTORY_BOARD_COMPLETED_WINDOW_HOURS * millisecondsPerHour).toISOString()
+  const completedWindow = FACTORY_BOARD_COMPLETED_WINDOW_HOURS * millisecondsPerHour
+  // Every page of one board is evaluated at the first page's read time: the completed-lane window
+  // starts where the first page started it, and lanes and stalled leases use the same time, so a
+  // later page neither drops a run the first page's window holds nor classifies it differently.
+  const now = continuation === undefined ? new Date() : new Date(Date.parse(continuation.since) + completedWindow)
+  const since = continuation?.since ?? new Date(now.getTime() - completedWindow).toISOString()
   const empty: { workItemIds: string[]; nextCursor?: string } = { workItemIds: [] }
   const noActiveRuns: { runs: Map<string, StoredAgentRun>; nextCursor?: string } = { runs: new Map() }
   const [active, recent, failed, started, manager, writable] = await Promise.all([

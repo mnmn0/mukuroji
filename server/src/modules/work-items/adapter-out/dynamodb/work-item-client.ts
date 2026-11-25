@@ -2311,9 +2311,14 @@ export class DynamoDbTeamIssuesClient {
         ScanIndexForward: false,
         Limit: limit,
       }))
-      const workItemIds = (response.Items ?? []).flatMap((item) =>
-        item.directoryTeamId === directoryTeamId && typeof item.issueId === 'string' ? [item.issueId] : []
-      )
+      // A row of another Team or without an ID under this Team's partition is broken, so the read
+      // fails instead of returning a page that looks complete.
+      const workItemIds = (response.Items ?? []).map((item) => {
+        if (item.directoryTeamId !== directoryTeamId || typeof item.issueId !== 'string') {
+          throw new ProjectDataError(503, 'InvalidTeamIssue', 'Started Work Item index row is invalid.')
+        }
+        return item.issueId
+      })
       return {
         workItemIds,
         ...(response.LastEvaluatedKey

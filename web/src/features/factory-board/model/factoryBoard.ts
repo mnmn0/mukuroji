@@ -201,8 +201,9 @@ export function isFactoryBoardIncomplete(board: Pick<TeamAgentRunBoardResponse, 
 }
 
 /**
- * Combines the pages of a board read with continuation tokens into one board. The first page sets
- * the read time; the last page tells which sources are still unread and how to continue. A Work
+ * Combines the pages of a board read with continuation tokens into one board. The server evaluates
+ * every later page at the first page's read time, so the first page's `generatedAt` holds for every
+ * item; the last page tells which sources are still unread and how to continue. A Work
  * Item that appears on more than one page keeps its first, freshest-read entry.
  *
  * @param pages - Pages in read order; the first page has no continuation input.

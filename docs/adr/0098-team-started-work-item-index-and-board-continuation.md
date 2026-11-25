@@ -37,8 +37,9 @@ Work Items table に sparse GSI `TeamStartedWorkItemIndex` を追加する。
 board の応答に opaque な `continuation` を追加する。上限で止まった source（active Run、24 時間以内の
 終了 Run、失敗 Run、started の Work Item）ごとの store cursor と、最初の page が使った「24 時間」の
 起点を持つ。`GET /api/teams/{teamId}/agent-runs?continuation=...` は、token にある source だけを cursor から
-続けて読み、次の token を返す。Web は「続きの Run とタスクを読み込む」で次の page を足し、Work Item が
-複数の page に出た場合は先に読んだ方を使う。
+続けて読み、次の token を返す。続きの page は最初の page の読み取り時刻（起点 + 24 時間）で評価し、
+lane の分類、lease の停滞判定、`generatedAt` を最初の page とそろえる。Web は「続きの Run とタスクを
+読み込む」で次の page を足し、Work Item が複数の page に出た場合は先に読んだ方を使う。
 
 store の cursor は DynamoDB の key を含み、page は閲覧できない Work Item の行で止まることもあるため、
 token は server の cursor secret から導いた鍵で AES-256-GCM により暗号化・認証し、Workspace・Team・

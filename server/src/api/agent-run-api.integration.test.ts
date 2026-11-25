@@ -2522,6 +2522,8 @@ describe('Factory board route', () => {
       )
       expect(response.status).toBe(200)
       const body: TeamAgentRunBoardResponse = await response.json()
+      // A later page is evaluated at the first page's read time, so lanes and windows agree.
+      expect(body.generatedAt).toBe(first.body.generatedAt)
       for (const item of body.items) seen.add(item.workItem.id)
       continuation = body.continuation
       pages += 1
