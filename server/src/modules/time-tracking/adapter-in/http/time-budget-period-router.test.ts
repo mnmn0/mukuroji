@@ -18,7 +18,11 @@ function toHttpStatus(status: number): 400 | 403 | 404 | 409 | 500 {
  */
 function createFixture() {
   const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
-    now: () => new Date('2026-08-02T12:00:00.000Z'),
+    // Each save gets its own time, as a budget saved again after a delete is told apart by it.
+    now: (() => {
+      let tick = 0
+      return () => new Date(Date.UTC(2026, 7, 2, 12, 0, tick++))
+    })(),
     createId: (() => {
       let id = 0
       return () => `id-${++id}`
@@ -107,6 +111,9 @@ describe('budgets per period', () => {
 
     const fiscal = await readSummary(router, '2026-04-01', '2027-03-31')
     expect(fiscal.budget).toMatchObject({ amountMinor: 600_000, periodBudget: true })
+    // A report that names its period as instants compares with the same budget.
+    const instants = await readSummary(router, '2026-03-31T15:00:00.000Z', '2027-03-31T15:00:00.000Z')
+    expect(instants.budget).toMatchObject({ amountMinor: 600_000, periodBudget: true })
     expect(fiscal.budgetPeriods).toMatchObject([
       { periodFrom: '2026-04-01', periodTo: '2027-03-31' },
       { periodFrom: '2027-04-01', periodTo: '2028-03-31' },
@@ -120,6 +127,10 @@ describe('budgets per period', () => {
     const router = createFixture()
     const missing = await putProjectBudget(router, { amountMinor: 1, currency: 'JPY', periodFrom: '2026-04-01', periodBudget: true, expectedRevision: 0 })
     expect(await missing.json()).toMatchObject({ code: 'InvalidBudgetPeriod' })
+    const notBoolean = await putProjectBudget(router, {
+      amountMinor: 1, currency: 'JPY', periodFrom: '2026-04-01', periodTo: '2026-09-30', periodBudget: 'yes', expectedRevision: 0,
+    })
+    expect(notBoolean.status).toBe(400)
     expect((await putProjectBudget(router, {
       amountMinor: 1, currency: 'JPY', periodFrom: '2026-04-01', periodTo: '2026-09-30', periodBudget: true, expectedRevision: 0,
     })).status).toBe(200)
@@ -141,5 +152,18 @@ describe('budgets per period', () => {
     expect(gone.status).toBe(404)
     const summary = await readSummary(router, '2026-04-01', '2026-09-30')
     expect(summary).not.toHaveProperty('budgetPeriods')
+  })
+
+  test('a delete of a budget read before it was deleted and saved again is rejected', async () => {
+    const router = createFixture()
+    const body = { amountMinor: 1, currency: 'JPY', periodFrom: '2026-04-01', periodTo: '2026-09-30', periodBudget: true, expectedRevision: 0 }
+    const first: { budget: { updatedAt: string } } = await (await putProjectBudget(router, body)).json()
+    const path = '/api/teams/team-1/projects/project-1/time-budget/periods/2026-04-01/2026-09-30'
+    const read = `${path}?expectedRevision=1&expectedUpdatedAt=${encodeURIComponent(first.budget.updatedAt)}`
+    expect((await router.request(read, { method: 'DELETE', headers })).status).toBe(204)
+    expect((await putProjectBudget(router, body)).status).toBe(200)
+    // The new budget is at revision 1 again, but the old read names the first save.
+    const stale = await router.request(read, { method: 'DELETE', headers })
+    expect(stale.status).toBe(409)
   })
 })

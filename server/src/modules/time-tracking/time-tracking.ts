@@ -525,6 +525,11 @@ export type DeleteTimeBudgetPeriodInput = {
   periodTo: string
   /** Revision of the budget the caller read. */
   expectedRevision: number
+  /**
+   * Save time of the budget the caller read. A budget deleted and saved again restarts at the
+   * same revision, so this tells a stale delete from one of the new budget.
+   */
+  expectedUpdatedAt?: string
   /** Actor deleting the budget. */
   deletedBy: string
 }
@@ -1704,7 +1709,7 @@ export class TimeTrackingService {
     const expectedRevision = requireInteger(input.expectedRevision, 'Budget revision', 1, Number.MAX_SAFE_INTEGER)
     const current = await this.repository.getBudget(workspaceId, teamId, input.scopeType, scopeId, period)
     if (!current) throw new TimeTrackingError(404, 'TimeBudgetNotFound', 'The scope has no budget for that period.')
-    if (current.revision !== expectedRevision) {
+    if (current.revision !== expectedRevision || (input.expectedUpdatedAt !== undefined && current.updatedAt !== input.expectedUpdatedAt)) {
       throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
     }
     const deletedAt = readNow(this.now).toISOString()
@@ -2290,7 +2295,12 @@ export class TimeTrackingService {
       ? await this.repository.listBudgetPeriods(input.workspaceId, input.teamId, budgetScope.scopeType, budgetScope.scopeId)
       : undefined
     // A budget for exactly the report period is the one to compare; otherwise the default budget.
-    const periodBudget = budgetPeriods?.find((candidate) => candidate.periodFrom === input.from && candidate.periodTo === input.to)
+    // Both are compared as instants in the report timezone, since a report may name its period either way.
+    const periodBudget = budgetPeriods?.find((candidate) => {
+      if (!candidate.periodFrom || !candidate.periodTo) return false
+      const candidatePeriod = normalizePeriod(candidate.periodFrom, candidate.periodTo, input.timeZone)
+      return candidatePeriod.from === period.from && candidatePeriod.to === period.to
+    })
     const budget = !includeBudget
       ? undefined
       : periodBudget ?? await this.repository.getBudget(input.workspaceId, input.teamId, budgetScope.scopeType, budgetScope.scopeId)
@@ -2876,7 +2886,8 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   /** Deletes a budget per period at its read revision. */
   async deleteBudgetPeriod(budget: TimeBudget, _auditPut?: AuditTransactWriteItem) {
     const key = budgetKey(budget.workspaceId, budget.teamId, budget.scopeType, budget.scopeId, budgetStoragePeriod(budget))
-    if (this.budgets.get(key)?.revision !== budget.revision) {
+    const current = this.budgets.get(key)
+    if (current?.revision !== budget.revision || current.updatedAt !== budget.updatedAt) {
       throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
     }
     this.budgets.delete(key)
@@ -3293,8 +3304,9 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
           workspaceId: budget.workspaceId,
           recordKey: budgetRecordKey(budget.teamId, budget.scopeType, budget.scopeId, budgetStoragePeriod(budget)),
         },
-        ConditionExpression: 'revision = :expectedRevision',
-        ExpressionAttributeValues: { ':expectedRevision': budget.revision },
+        // A budget saved again after a delete restarts at the same revision, so its save time is checked too.
+        ConditionExpression: 'revision = :expectedRevision AND updatedAt = :expectedUpdatedAt',
+        ExpressionAttributeValues: { ':expectedRevision': budget.revision, ':expectedUpdatedAt': budget.updatedAt },
       },
     }
     try {
@@ -4774,10 +4786,25 @@ function readStoredBudget(value: unknown): TimeBudget {
     currency: readString(record.currency, 'Stored budget currency'),
     ...(readOptionalString(record.periodFrom) ? { periodFrom: readOptionalString(record.periodFrom) } : {}),
     ...(readOptionalString(record.periodTo) ? { periodTo: readOptionalString(record.periodTo) } : {}),
-    ...(record.periodBudget === true ? { periodBudget: true } : {}),
+    ...readStoredBudgetPeriodFlag(record),
     revision: readNumber(record.revision, 'Stored budget revision'),
     updatedAt: readString(record.updatedAt, 'Stored budget timestamp'),
   }
+}
+
+/**
+ * Reads the budget-per-period flag of a stored budget, rejecting a flagged row without its period.
+ *
+ * @param record - Stored budget record.
+ * @returns The flag to spread into the budget.
+ * @throws TimeTrackingError with `InvalidStoredTimeTrackingRecord` for a flag without both dates.
+ */
+function readStoredBudgetPeriodFlag(record: Record<string, unknown>): { periodBudget?: true } {
+  if (record.periodBudget === undefined) return {}
+  if (record.periodBudget !== true || !readOptionalString(record.periodFrom) || !readOptionalString(record.periodTo)) {
+    throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored budget period is invalid.')
+  }
+  return { periodBudget: true }
 }
 
 /**

@@ -691,7 +691,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...await readRequestCurrency(dependencies, principal, body.currency),
         ...(body.periodFrom === undefined ? {} : { periodFrom: readRequiredString(body.periodFrom, 'Budget period start') }),
         ...(body.periodTo === undefined ? {} : { periodTo: readRequiredString(body.periodTo, 'Budget period end') }),
-        ...(body.periodBudget === true ? { periodBudget: true } : {}),
+        ...(body.periodBudget === undefined ? {} : { periodBudget: readRequiredBoolean(body.periodBudget, 'Period budget') }),
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
         updatedBy: principal.userKey,
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
@@ -718,7 +718,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...await readRequestCurrency(dependencies, principal, body.currency),
         ...(body.periodFrom === undefined ? {} : { periodFrom: readRequiredString(body.periodFrom, 'Budget period start') }),
         ...(body.periodTo === undefined ? {} : { periodTo: readRequiredString(body.periodTo, 'Budget period end') }),
-        ...(body.periodBudget === true ? { periodBudget: true } : {}),
+        ...(body.periodBudget === undefined ? {} : { periodBudget: readRequiredBoolean(body.periodBudget, 'Period budget') }),
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
         updatedBy: principal.userKey,
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
@@ -766,15 +766,22 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
  * @param context - Request whose path names the period and whose query names `expectedRevision`.
  * @returns Period dates and revision.
  */
-function readBudgetPeriodParams(context: Context): { periodFrom: string; periodTo: string; expectedRevision: number } {
+function readBudgetPeriodParams(context: Context): {
+  periodFrom: string
+  periodTo: string
+  expectedRevision: number
+  expectedUpdatedAt?: string
+} {
   const revision = Number(context.req.query('expectedRevision'))
   if (!Number.isSafeInteger(revision) || revision < 1) {
     throw new TimeTrackingError(400, 'InvalidRevision', 'expectedRevision must be a positive integer.')
   }
+  const expectedUpdatedAt = context.req.query('expectedUpdatedAt')
   return {
     periodFrom: readRequiredString(context.req.param('periodFrom'), 'Budget period start'),
     periodTo: readRequiredString(context.req.param('periodTo'), 'Budget period end'),
     expectedRevision: revision,
+    ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}),
   }
 }
 

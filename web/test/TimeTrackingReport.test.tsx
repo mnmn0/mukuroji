@@ -255,13 +255,14 @@ describe('time report API', () => {
     expect(requests[0]?.body).toEqual({ amountMinor: 300_000, currency: 'JPY', periodFrom: '2026-11-01', periodTo: '2026-11-30', periodBudget: true, expectedRevision: 0 })
 
     requests = respondWith('')
-    await deleteTimeBudgetPeriod('token', 'core-team', { scopeType: 'project', projectId: 'atlas' }, { periodFrom: '2026-12-01', periodTo: '2026-12-31', revision: 3 })
+    await deleteTimeBudgetPeriod('token', 'core-team', { scopeType: 'project', projectId: 'atlas' }, { periodFrom: '2026-12-01', periodTo: '2026-12-31', revision: 3, updatedAt: '2026-11-03T00:00:00.000Z' })
     expect(requests[0]?.method).toBe('DELETE')
     expect(requests[0]?.url.pathname).toBe('/api/teams/core-team/projects/atlas/time-budget/periods/2026-12-01/2026-12-31')
     expect(requests[0]?.url.searchParams.get('expectedRevision')).toBe('3')
+    expect(requests[0]?.url.searchParams.get('expectedUpdatedAt')).toBe('2026-11-03T00:00:00.000Z')
 
     respondWith({ code: 'TimeBudgetRevisionConflict', message: 'stale' }, 409)
-    await expect(deleteTimeBudgetPeriod('token', 'core-team', { scopeType: 'team' }, { periodFrom: '2026-12-01', periodTo: '2026-12-31', revision: 2 }))
+    await expect(deleteTimeBudgetPeriod('token', 'core-team', { scopeType: 'team' }, { periodFrom: '2026-12-01', periodTo: '2026-12-31', revision: 2, updatedAt: '2026-11-03T00:00:00.000Z' }))
       .rejects.toMatchObject({ status: 409 })
   })
 })

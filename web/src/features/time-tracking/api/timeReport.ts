@@ -284,11 +284,12 @@ export async function deleteTimeBudgetPeriod(
   accessToken: string,
   teamId: string,
   scope: TimeReportBudgetScope,
-  budget: Pick<TimeBudget, 'periodFrom' | 'periodTo' | 'revision'>,
+  budget: Pick<TimeBudget, 'periodFrom' | 'periodTo' | 'revision' | 'updatedAt'>,
 ): Promise<void> {
   if (!budget.periodFrom || !budget.periodTo) throw createInvalidTimeTrackingResponseError('Time budget period')
   const scopePath = scope.scopeType === 'team' ? '' : `/projects/${encodeURIComponent(scope.projectId)}`
-  const query = new URLSearchParams({ expectedRevision: String(budget.revision) })
+  // The save time tells this budget from one saved again for the same period after a delete.
+  const query = new URLSearchParams({ expectedRevision: String(budget.revision), expectedUpdatedAt: budget.updatedAt })
   await requestTimeTrackingJson(
     createTeamTimeTrackingUrl(
       teamId,

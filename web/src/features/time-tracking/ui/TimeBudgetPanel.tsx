@@ -171,9 +171,12 @@ export function TimeBudgetPanel({
    */
   const deletePeriod = async (target: TimeBudget) => {
     setMessage(undefined)
+    // Only an editor of the deleted budget closes; a form opened while the delete ran stays open.
+    const editsDeletedBudget = editTarget === 'shown' && budget?.periodBudget === true &&
+      budget.periodFrom === target.periodFrom && budget.periodTo === target.periodTo
     try {
       await onDeletePeriod(target)
-      setEditTarget(undefined)
+      if (editsDeletedBudget) setEditTarget(undefined)
       setMessage({ tone: 'status', text: t('timeTracking.budget.periodDeleted') })
     } catch (error) {
       setMessage({ tone: 'error', text: describeTimeTrackingFailure(t, error) })

@@ -19,13 +19,14 @@ export type TimeBudgetPeriodListProps = {
 }
 
 /**
- * Reads the key of a budget per period, which its period identifies within the scope.
+ * Reads the key of a budget per period: its scope and period, so a delete confirmed for one scope
+ * is not carried over to the same period of another.
  *
  * @param budget - Budget per period.
  * @returns Key of the budget.
  */
 function periodKeyOf(budget: TimeBudget): string {
-  return `${budget.periodFrom ?? ''}/${budget.periodTo ?? ''}`
+  return `${budget.teamId}/${budget.scopeType}/${budget.scopeId}/${budget.periodFrom ?? ''}/${budget.periodTo ?? ''}`
 }
 
 /**
