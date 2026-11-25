@@ -281,6 +281,8 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
     async questions() { return undefined },
     async projectCharter() { return undefined },
     async document() { throw new AgentTaskError('not_found', 'Not found') },
+    async attachments() { return undefined },
+    async attachmentDownload() { throw new AgentTaskError('not_found', 'Not found') },
     ...overrides,
   }
   /** Releases a run as a person would from the Web application. */
@@ -1065,6 +1067,57 @@ describe('agent task lifecycle', () => {
     await expect(movingService.documents('one')).rejects.toMatchObject({ code: 'out_of_scope' })
     moving.records.set('one', task('one', { assignedProjectId: 'project-a' }))
     await expect(movingService.document('one', 'spec')).rejects.toMatchObject({ code: 'out_of_scope' })
+  })
+
+  test('shows downloadable attachments in get_task and issues URLs only through tasks in scope', async () => {
+    const attachment = {
+      id: 'file-1', name: 'spec.pdf', versionId: 'version-2', versionNumber: 2,
+      contentType: 'application/pdf', sizeBytes: 2048, updatedAt: '2026-09-01T00:00:00.000Z',
+    }
+    const download = { fileId: 'file-1', versionId: 'version-2', url: 'https://files.example.test/file-1', expiresAt: '2026-09-01T00:05:00.000Z' }
+    const reads: string[] = []
+    const api = {
+      async attachments(id: string) {
+        reads.push(`list:${id}`)
+        return [attachment]
+      },
+      async attachmentDownload(id: string, fileId: string) {
+        reads.push(`download:${id}:${fileId}`)
+        if (fileId !== 'file-1') throw new AgentTaskError('not_found', 'Not found')
+        return download
+      },
+    }
+    const tasks = [task('one', { assignedProjectId: 'project-a' }), task('two', { assignedProjectId: 'project-b' })]
+    const { service } = fixture(tasks, api)
+    const scoped = fixture(tasks, api)
+    const scopedService = createAgentTasks(scoped.api, { ...baseScope, assignedProjectId: 'project-a' })
+
+    expect(await service.get('one')).toMatchObject({ task: { id: 'one' }, attachments: [attachment] })
+    expect(await service.attachments('one')).toEqual({ items: [attachment] })
+    expect(await service.attachmentDownload('one', 'file-1')).toEqual(download)
+    await expect(service.attachmentDownload('one', 'pending')).rejects.toMatchObject({ code: 'not_found' })
+    await expect(scopedService.attachments('two')).rejects.toMatchObject({ code: 'out_of_scope' })
+    await expect(scopedService.attachmentDownload('two', 'file-1')).rejects.toMatchObject({ code: 'out_of_scope' })
+    expect(reads).toEqual(['list:one', 'list:one', 'download:one:file-1', 'download:one:pending'])
+
+    const oldServer = fixture([task('one')])
+    expect(await oldServer.service.get('one')).toMatchObject({ attachments: null })
+    await expect(oldServer.service.attachments('one')).rejects.toMatchObject({ code: 'unsupported' })
+    const noFilePermission = fixture([task('one')], {
+      async attachments() { throw new AgentTaskError('forbidden', 'Denied') },
+    })
+    expect(await noFilePermission.service.get('one')).toMatchObject({ attachments: null })
+
+    // A task that moves out of the configured Project while a URL is issued returns nothing.
+    const moving = fixture([task('one', { assignedProjectId: 'project-a' })])
+    const movingService = createAgentTasks({
+      ...moving.api,
+      async attachmentDownload() {
+        moving.records.set('one', task('one', { assignedProjectId: 'project-b' }))
+        return download
+      },
+    }, { ...baseScope, assignedProjectId: 'project-a' })
+    await expect(movingService.attachmentDownload('one', 'file-1')).rejects.toMatchObject({ code: 'out_of_scope' })
   })
 
   test('sends the estimate on its own and passes remaining effort and progress through', async () => {

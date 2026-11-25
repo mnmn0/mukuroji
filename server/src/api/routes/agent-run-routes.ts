@@ -14,6 +14,7 @@ import { toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
 import {
   getWebAgentSettings,
   listWebTeamAgentRunBoard,
+  readFactoryBoardContinuation,
   listWebWorkItemAgentRunReports,
   listWebWorkItemAgentRuns,
   releaseWebAgentRun,
@@ -21,6 +22,7 @@ import {
 } from './web-agent-run-service'
 import { answerWebAgentRunReport } from './web-agent-run-answer-service'
 import { getWebTeamFactoryAnalytics, readFactoryAnalyticsPeriod } from './web-agent-run-analytics-service'
+import { getWebTeamAgentRunHistory, readAgentRunHistoryRequest } from './web-agent-run-history-service'
 
 /** Default number of runs in a Work Item history page. */
 const defaultHistoryPageSize = 20
@@ -112,7 +114,13 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
     if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-      return c.json(await listWebTeamAgentRunBoard(principal, c.req.param('teamId'), c.req.header('X-Correlation-Id')?.trim() || undefined))
+      const continuation = c.req.query('continuation')
+      return c.json(await listWebTeamAgentRunBoard(
+        principal,
+        c.req.param('teamId'),
+        c.req.header('X-Correlation-Id')?.trim() || undefined,
+        continuation === undefined ? undefined : readFactoryBoardContinuation(continuation, principal, c.req.param('teamId')),
+      ))
     } catch (error) {
       return toAgentRunErrorResponse(c, error)
     }
@@ -151,6 +159,26 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
         body,
         createRequestMutationContext(c, principal.directoryId, principal.actorId, principal.userKey, { runId, sequence, body }),
       ), 201)
+    } catch (error) {
+      return toAgentRunErrorResponse(c, error)
+    }
+  })
+
+  routeApp.get('/api/teams/:teamId/agent-runs/history', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const request = readAgentRunHistoryRequest({
+        from: c.req.query('from'),
+        to: c.req.query('to'),
+        outcome: c.req.query('outcome'),
+        assigneeUserId: c.req.query('assigneeUserId'),
+        runtime: c.req.query('runtime'),
+        projectId: c.req.query('projectId'),
+      })
+      c.header('Cache-Control', 'private, no-store')
+      return c.json(await getWebTeamAgentRunHistory(principal, c.req.param('teamId'), request))
     } catch (error) {
       return toAgentRunErrorResponse(c, error)
     }

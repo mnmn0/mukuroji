@@ -14,6 +14,7 @@ import {
   filterFactoryBoardItems,
   groupFactoryBoardItems,
   isFactoryBoardIncomplete,
+  mergeFactoryBoardPages,
   readFactoryBoardFilterOptions,
   readLeaseMinutesRemaining,
 } from '../src/features/factory-board/model/factoryBoard'
@@ -80,6 +81,14 @@ describe('Factory board API', () => {
       await expect(getTeamAgentRunBoard('token', 'core')).rejects.toMatchObject({ status: 502 })
     }
     respondWith({ ...factoryBoardFixture, finishedRunsHasMore: 'yes' })
+    await expect(getTeamAgentRunBoard('token', 'core')).rejects.toMatchObject({ status: 502 })
+  })
+
+  test('passes and reads the continuation of a board that reached a read bound', async () => {
+    const urls = respondWith({ ...factoryBoardFixture, finishedRunsHasMore: true, continuation: 'next page' })
+    expect(await getTeamAgentRunBoard('token', 'core', 'previous page')).toMatchObject({ continuation: 'next page' })
+    expect(urls).toEqual(['/api/teams/core/agent-runs?continuation=previous%20page'])
+    respondWith({ ...factoryBoardFixture, continuation: '' })
     await expect(getTeamAgentRunBoard('token', 'core')).rejects.toMatchObject({ status: 502 })
   })
 
@@ -184,6 +193,22 @@ describe('Factory board lanes', () => {
     expect(ids({ projectId: 'refero', runtime: 'kiro' })).toEqual(['schema-change'])
   })
 
+  test('combines continued pages and keeps the first entry of a Work Item', () => {
+    const [first, second, third] = factoryBoardFixture.items
+    if (!first || !second || !third) throw new Error('The fixture has three items.')
+    const merged = mergeFactoryBoardPages([
+      { ...factoryBoardFixture, items: [first, second], finishedRunsHasMore: true, continuation: 'page-2' },
+      { ...factoryBoardFixture, generatedAt: '2030-01-01T00:00:00.000Z', items: [{ ...second, workItem: { ...second.workItem, title: 'Later read' } }, third] },
+    ])
+    expect(merged?.items.map((item) => item.workItem.id)).toEqual([first.workItem.id, second.workItem.id, third.workItem.id])
+    expect(merged?.items[1]?.workItem.title).toBe(second.workItem.title)
+    expect(merged?.generatedAt).toBe(factoryBoardFixture.generatedAt)
+    // The last page tells what is still unread.
+    expect(merged && isFactoryBoardIncomplete(merged)).toBe(false)
+    expect(merged?.continuation).toBeUndefined()
+    expect(mergeFactoryBoardPages([])).toBeUndefined()
+  })
+
   test('reads lease time and whether the board is incomplete', () => {
     expect(readLeaseMinutesRemaining('2026-10-22T02:12:00.000Z', now)).toBe(12)
     expect(readLeaseMinutesRemaining('2026-10-22T01:40:00.000Z', now)).toBe(-20)
@@ -215,6 +240,15 @@ describe('Factory board view', () => {
       {...overrides}
     />,
   )
+
+  test('offers to load the rest only when the board can continue', () => {
+    const incomplete = { ...factoryBoardFixture, startedWorkItemsHasMore: true, continuation: 'page-2' }
+    expect(render({ board: incomplete, onLoadMore: () => undefined })).toContain(labels.loadMore)
+    expect(render({ board: incomplete, onLoadMore: () => undefined, isLoadingMore: true })).toContain(labels.loadingMore)
+    expect(render({ board: incomplete })).not.toContain('factory-board-load-more')
+    expect(render({ board: { ...incomplete, continuation: undefined }, onLoadMore: () => undefined })).not.toContain('factory-board-load-more')
+    expect(render({ board: incomplete, onLoadMore: () => undefined })).toContain(labels.incomplete)
+  })
 
   test('uses the shared locale dictionaries for both locales', () => {
     expect(createFactoryBoardLabels('ja').lanes.decision).toBe(createTranslator('ja')('factoryBoard.lane.decision'))

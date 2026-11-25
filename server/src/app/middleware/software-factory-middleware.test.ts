@@ -11,6 +11,7 @@ const SOFTWARE_FACTORY_REQUESTS: readonly (readonly [method: string, path: strin
   ['POST', '/api/teams/team-1/work-items/item-1/agent-runs/run_1/reports/1/answer'],
   ['GET', '/api/teams/team-1/agent-runs'],
   ['GET', '/api/teams/team-1/agent-runs/analytics'],
+  ['GET', '/api/teams/team-1/agent-runs/history'],
   ['POST', '/api/teams/team-1/agent-runs/run-1/release'],
   ['GET', '/api/teams/team-1/agent-settings'],
   ['PUT', '/api/teams/team-1/agent-settings'],
