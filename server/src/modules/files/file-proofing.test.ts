@@ -2691,15 +2691,72 @@ describe('annotation resolution and project file approval', () => {
       session.version.id,
       second.id,
     )).rejects.toMatchObject({ code: 'AnnotationDeleteDenied', status: 403 })
-    await client.deleteAnnotation(scope, writer, session.file.id, session.version.id, second.id)
-    const remaining = await client.listAnnotations(scope, manager, session.file.id, session.version.id)
-    expect(remaining.map((annotation) => annotation.id)).toEqual([first.id])
+    const third = await annotate(writer, 'third-annotation')
+    const thirdDeleteContext = createAuditContext('delete-third', { delete: third.id })
+    await client.deleteAnnotation(scope, writer, session.file.id, session.version.id, third.id, thirdDeleteContext)
+    // Reusing that key to delete another annotation is a reused key, and nothing is deleted.
     await expect(client.deleteAnnotation(
       scope,
       writer,
       session.file.id,
       session.version.id,
       second.id,
+      createAuditContext('delete-third', { delete: second.id }),
+    )).rejects.toMatchObject({ code: 'IdempotencyKeyReused', status: 409 })
+    const deleteContext = createAuditContext('delete-second', { delete: second.id })
+    await client.deleteAnnotation(scope, writer, session.file.id, session.version.id, second.id, deleteContext)
+    const remaining = await client.listAnnotations(scope, manager, session.file.id, session.version.id)
+    expect(remaining.map((annotation) => annotation.id)).toEqual([first.id])
+    // A retry of the committed delete (same actor, target, and Idempotency-Key) succeeds.
+    await expect(client.deleteAnnotation(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      second.id,
+      deleteContext,
+    )).resolves.toBeUndefined()
+    // The same key with another request body is a reused key, not a retry.
+    await expect(client.deleteAnnotation(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      second.id,
+      createAuditContext('delete-second', { delete: 'other' }),
+    )).rejects.toMatchObject({ code: 'IdempotencyKeyReused', status: 409 })
+    // Another actor's retry under the same receipt is not the same request.
+    await expect(client.deleteAnnotation(
+      scope,
+      manager,
+      session.file.id,
+      session.version.id,
+      second.id,
+      deleteContext,
+    )).rejects.toMatchObject({ code: 'AnnotationNotFound', status: 404 })
+    // A new delete request of the deleted annotation, or one without a key, stays not found.
+    await expect(client.deleteAnnotation(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      second.id,
+      createAuditContext('delete-second-again', { delete: second.id }),
+    )).rejects.toMatchObject({ code: 'AnnotationNotFound', status: 404 })
+    await expect(client.deleteAnnotation(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      second.id,
+    )).rejects.toMatchObject({ code: 'AnnotationNotFound', status: 404 })
+    await expect(client.deleteAnnotation(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      'never-existed',
+      createAuditContext('delete-missing', { delete: 'never-existed' }),
     )).rejects.toMatchObject({ code: 'AnnotationNotFound', status: 404 })
     expect((await client.list(scope, manager)).files[0]?.unresolvedAnnotationCount).toBe(1)
   })

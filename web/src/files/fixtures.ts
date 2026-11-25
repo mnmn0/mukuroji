@@ -276,6 +276,7 @@ export const projectDeliverablesControllerFixture = {
   deliverables: projectDeliverableFixtures,
   filters: { approval: 'all', unresolvedOnly: false },
   setFilters: () => undefined,
+  isScoped: true,
   isLoading: false,
   isLoadingMore: false,
   hasError: false,

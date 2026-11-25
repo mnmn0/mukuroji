@@ -111,6 +111,7 @@ const knownProjectDirectoryAuxiliaryEntryTypes = new Set([
 
 const knownFileProofingAuxiliaryEntryTypes = new Set([
   'annotation',
+  'annotation-delete-receipt',
   'approval',
   'approval-summary',
   'download',

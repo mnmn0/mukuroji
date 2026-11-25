@@ -555,6 +555,12 @@ export function useFileArtifacts({
       await refresh().catch(() => undefined)
       return true
     } catch (deleteError) {
+      if (isAnnotationAlreadyGone(deleteError)) {
+        // The annotation no longer exists, whether an earlier attempt deleted it or someone
+        // else did, so the delete reached its goal and the list must drop it.
+        await refresh().catch(() => undefined)
+        return true
+      }
       console.error('File annotation delete failed:', deleteError)
       return false
     }
@@ -730,4 +736,14 @@ export function useFileArtifacts({
   ])
 
   return controller
+}
+
+/**
+ * Tells whether an annotation delete failed only because the annotation is already gone.
+ *
+ * @param error - Error thrown by the delete request.
+ * @returns Whether the API answered `404 AnnotationNotFound`.
+ */
+function isAnnotationAlreadyGone(error: unknown): boolean {
+  return error instanceof FilesApiError && error.status === 404 && error.code === 'AnnotationNotFound'
 }

@@ -31,11 +31,15 @@ Work Item を別の Project へ移しても書き換えない。
 - 各 partition は `FILE#` を先に読み、表示できる file があるときだけ `APPROVAL#` と `ANNOTATION#` を読む。
   同時に読む partition は 8 件までにする。
 - 承認状態と未解決の絞り込みは page 内で行う。CSV はブラウザが全 page を読んで作る。
+- 範囲は URL の 1 Team に限る。Web は選択した Team、なければ Project を持つ唯一の Team を使う。同じ Project ID が
+  複数の Team にあり Team を選んでいないときは読まず、Team を選ぶよう案内する。Team をまたぐ一覧は作らない。
 
 ### Project file の承認
 
 - `/api/teams/{teamId}/projects/{projectId}/approvals` 配下に作成・判断・取消を追加し、approval row は Project
   partition に `issueId` なしで保存する。subject は `file-version` だけで、`completionTransition` は 400 で拒否する。
+- Reviewer は、選出時に decision endpoint と同じく Project の `files.read` と `files.approve` を持つ active member に
+  限る。判断できない reviewer を選べると、pending approval が版の差し替えと削除を止めたままになるため。
 - Reviewer Inbox と外部通知の配信前の再確認は、Project の現在の閲覧権限と file の削除・guest 共有で行う。
   Audit event の entity は Project にする。Focus は Work Item に紐づく approval だけを扱い続ける。
 
@@ -43,6 +47,9 @@ Work Item を別の Project へ移しても書き換えない。
 
 - 解決・再開は guest 以外の書き込める member、削除は作成者だけが行える。どちらも file の未削除を
   `ConditionCheck` で確かめ、条件付きの Put / Delete と audit event を同じ transaction で保存する。
+- 削除は同じ transaction で、scope と idempotency key hash から ID を決めた `ANNOTATION_DELETE#` receipt row
+  （作成者・対象・request fingerprint・TTL）を保存する。応答が失われた削除の再送は receipt と一致すれば成功にし、
+  存在しなかった annotation の削除は 404 のままにする。整合性検査と restore drill はこの row を補助 row として扱う。
 - 未解決件数は file 一覧と approval に派生値として付け、row には保存しない。注釈は次の version に引き継がない。
 
 ## 結果

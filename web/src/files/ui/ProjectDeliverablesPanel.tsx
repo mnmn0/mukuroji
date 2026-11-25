@@ -128,7 +128,7 @@ export function ProjectDeliverablesPanel({
           </label>
           <button
             className="workbench-button-secondary h-8 px-3 text-xs disabled:opacity-50"
-            disabled={isExporting || controller.isLoading}
+            disabled={isExporting || controller.isLoading || !controller.isScoped}
             onClick={() => void exportCsv()}
             type="button"
           >
@@ -164,6 +164,9 @@ function ProjectDeliverablesBody({
   /** Translator of the display locale. */
   t: ReturnType<typeof createTranslator>
 }) {
+  if (!controller.isScoped) {
+    return <p className="px-5 py-4 text-sm font-medium text-[var(--workbench-muted)]">{t('files.deliverables.selectTeam')}</p>
+  }
   if (controller.isLoading) {
     return <p className="px-5 py-4 text-sm font-medium text-[var(--workbench-muted)]">{t('files.deliverables.loading')}</p>
   }
@@ -214,7 +217,17 @@ function ProjectDeliverablesBody({
         </div>
       )}
       {controller.hasError && controller.deliverables.length > 0 ? (
-        <p className="mt-3 text-sm font-semibold text-fg-red-700" role="alert">{t('files.deliverables.error')}</p>
+        <div className="mt-3 flex flex-wrap items-center gap-3" role="alert">
+          <p className="text-sm font-semibold text-fg-red-700">{t('files.deliverables.error')}</p>
+          {/* The loaded rows stay; the retry re-reads every loaded page. */}
+          <button
+            className="workbench-button-secondary h-8 px-3 text-xs"
+            onClick={() => void controller.refresh()}
+            type="button"
+          >
+            {t('files.deliverables.retry')}
+          </button>
+        </div>
       ) : null}
       {controller.hasMore ? (
         <div className="mt-3 flex items-center gap-3">

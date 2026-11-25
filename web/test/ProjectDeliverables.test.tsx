@@ -69,6 +69,62 @@ describe('Project deliverables', () => {
       .toEqual(projectDeliverableFixtures.map((deliverable) => deliverable.file.id))
   })
 
+  test('rejects a page whose row lacks a field the list or the CSV reads', async () => {
+    const [workItemRow, projectRow] = projectDeliverableFixtures
+    const fileWithoutUpdatedAt = Object.fromEntries(
+      Object.entries(workItemRow!.file).filter(([key]) => key !== 'updatedAt'),
+    )
+    const ownerWithoutTitle = Object.fromEntries(
+      Object.entries(workItemRow!.owner).filter(([key]) => key !== 'title'),
+    )
+    const malformedRows: unknown[] = [
+      { ...workItemRow, file: fileWithoutUpdatedAt },
+      { ...workItemRow, file: { ...workItemRow!.file, currentVersion: {} } },
+      { ...workItemRow, file: { ...workItemRow!.file, currentVersion: { ...workItemRow!.file.currentVersion, number: '1' } } },
+      { ...workItemRow, file: { ...workItemRow!.file, currentVersion: { ...workItemRow!.file.currentVersion, scanStatus: 'unknown' } } },
+      { ...workItemRow, owner: ownerWithoutTitle },
+      { ...workItemRow, owner: { ...workItemRow!.owner, issueId: undefined } },
+      { ...projectRow, owner: { kind: 'project', teamId: 'core-team' } },
+      { ...workItemRow, approvalState: 'archived' },
+      { ...workItemRow, unresolvedAnnotationCount: -1 },
+    ]
+    for (const row of malformedRows) {
+      globalThis.fetch = (async () => new Response(JSON.stringify({ deliverables: [projectRow, row] }))) as typeof fetch
+      await expect(getProjectDeliverables('core', 'project-1', 'token', { approval: 'all', unresolvedOnly: false }))
+        .rejects.toMatchObject({ status: 502, code: 'InvalidDeliverableResponse' })
+    }
+  })
+
+  test('reads a long continuation to its end and stops on a repeated cursor', async () => {
+    const pageCount = 150
+    let requests = 0
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      requests += 1
+      const cursor = new URL(String(input), 'https://app.example.test').searchParams.get('cursor')
+      const index = cursor ? Number(cursor.replace('page-', '')) : 0
+      return new Response(JSON.stringify(index + 1 < pageCount
+        ? { deliverables: [], nextCursor: `page-${index + 1}` }
+        : { deliverables: projectDeliverableFixtures.slice(0, 1) }))
+    }) as typeof fetch
+
+    const deliverables = await loadAllProjectDeliverables('core', 'refero', 'token', {
+      approval: 'all',
+      unresolvedOnly: false,
+    })
+    expect(requests).toBe(pageCount)
+    expect(deliverables).toHaveLength(1)
+
+    requests = 0
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      requests += 1
+      const cursor = new URL(String(input), 'https://app.example.test').searchParams.get('cursor')
+      return new Response(JSON.stringify({ deliverables: [], nextCursor: cursor === 'page-1' ? 'page-2' : 'page-1' }))
+    }) as typeof fetch
+    await expect(loadAllProjectDeliverables('core', 'refero', 'token', { approval: 'all', unresolvedOnly: false }))
+      .rejects.toThrow('repeated cursor')
+    expect(requests).toBe(3)
+  })
+
   test('exports owner, version, approval, and open comments with spreadsheet-safe cells', () => {
     const csv = createProjectDeliverablesCsv([
       ...projectDeliverableFixtures.slice(0, 2),
@@ -127,6 +183,31 @@ describe('Project deliverables', () => {
     expect(emptyHtml).not.toContain('Load more')
   })
 
+  test('offers a retry that keeps loaded rows and asks for a Team when none is chosen', () => {
+    const failedHtml = renderToStaticMarkup(
+      <ProjectDeliverablesPanel
+        controller={{ ...projectDeliverablesControllerFixture, hasError: true, hasMore: false }}
+        exportFileName="refero-deliverables"
+        locale="en"
+        onDownloadCsv={() => undefined}
+      />,
+    )
+    expect(failedHtml).toContain('project-plan.pdf')
+    expect(failedHtml).toContain('Could not load deliverables.')
+    expect(failedHtml).toContain('>Retry</button>')
+
+    const unscopedHtml = renderToStaticMarkup(
+      <ProjectDeliverablesPanel
+        controller={{ ...projectDeliverablesControllerFixture, deliverables: [], hasMore: false, isScoped: false }}
+        exportFileName="refero-deliverables"
+        locale="en"
+        onDownloadCsv={() => undefined}
+      />,
+    )
+    expect(unscopedHtml).toContain('Deliverables appear once the Team is known.')
+    expect(unscopedHtml).not.toContain('No deliverables match the filters.')
+  })
+
   test('reloads the files and the deliverables after a new annotation', async () => {
     const requests: string[] = []
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -165,6 +246,64 @@ describe('Project deliverables', () => {
     expect(annotation?.id).toBe(fileAnnotationFixtures[0]!.id)
     expect(requests[0]).toStartWith('POST /api/teams/core/projects/refero/files/')
     // The file collection reload ends by reloading the deliverables list.
+    expect(deliverableRefreshes).toBe(1)
+  })
+
+  test('treats an annotation that is already gone as deleted and reloads the lists', async () => {
+    const requests: string[] = []
+    let deleteStatus = 404
+    let deleteCode = 'AnnotationNotFound'
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = init?.method ?? 'GET'
+      requests.push(`${method} ${String(input)}`)
+      if (method === 'DELETE') {
+        return new Response(JSON.stringify({ code: deleteCode, message: 'gone' }), { status: deleteStatus })
+      }
+      return new Response(JSON.stringify(
+        { files: [], approvals: [], capabilities: { canUpload: true, canRequestApproval: true, canGrantGuestAccess: false } },
+      ))
+    }) as typeof fetch
+    let deliverableRefreshes = 0
+    let controller: FileArtifactsController | undefined
+
+    /** Captures the file controller of a Project scope. */
+    function ControllerProbe() {
+      controller = useFileArtifacts({
+        accessToken: 'token',
+        onRefreshed: () => {
+          deliverableRefreshes += 1
+        },
+        scope: { kind: 'project', teamId: 'core', projectId: 'refero' },
+      })
+      return null
+    }
+    renderToStaticMarkup(
+      <SWRConfig value={{ provider: () => new Map(), revalidateOnMount: false }}>
+        <ControllerProbe />
+      </SWRConfig>,
+    )
+    if (!controller) throw new Error('The file controller was not rendered.')
+
+    const annotation = fileAnnotationFixtures[0]!
+    expect(await controller.deleteAnnotation(imageFileFixture, imageFileFixture.currentVersion, annotation))
+      .toBe(true)
+    expect(requests).toEqual([
+      `DELETE /api/teams/core/projects/refero/files/${imageFileFixture.id}/versions/${imageFileFixture.currentVersion.id}/annotations/${annotation.id}`,
+    ])
+    // The file collection reload ends by reloading the deliverables list.
+    expect(deliverableRefreshes).toBe(1)
+
+    // Another failure is still a failure and reloads nothing.
+    deleteStatus = 403
+    deleteCode = 'AnnotationDeleteDenied'
+    const originalConsoleError = console.error
+    console.error = () => undefined
+    try {
+      expect(await controller.deleteAnnotation(imageFileFixture, imageFileFixture.currentVersion, annotation))
+        .toBe(false)
+    } finally {
+      console.error = originalConsoleError
+    }
     expect(deliverableRefreshes).toBe(1)
   })
 

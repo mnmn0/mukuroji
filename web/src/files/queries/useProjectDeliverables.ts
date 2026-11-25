@@ -7,9 +7,6 @@ import { useCallback, useState } from 'react'
 import useSWRInfinite from 'swr/infinite'
 import { getProjectDeliverables } from '../api/deliverables'
 
-/** Most pages the CSV export reads, so a runaway cursor cannot loop forever. */
-const deliverableExportMaxPages = 100
-
 /**
  * Filters of the Project deliverables list.
  */
@@ -40,6 +37,11 @@ export type ProjectDeliverablesController = {
    * Replaces the filters and reloads from the first page.
    */
   setFilters: (filters: ProjectDeliverableFilters) => void
+  /**
+   * Whether the list has a Team and Project to read. Without one, nothing is read and the list
+   * asks for a Team instead of showing an empty result.
+   */
+  isScoped: boolean
   /**
    * Whether the first page is loading.
    */
@@ -78,7 +80,7 @@ export type ProjectDeliverablesController = {
  * @param accessToken - Files API access token.
  * @param filters - Filters of the list.
  * @returns Every matching deliverable, page by page.
- * @throws Error when the pages do not end within the export page limit.
+ * @throws Error when the server returns a cursor it already returned, which would loop forever.
  */
 export async function loadAllProjectDeliverables(
   teamId: string,
@@ -87,17 +89,23 @@ export async function loadAllProjectDeliverables(
   filters: ProjectDeliverableFilters,
 ): Promise<ProjectDeliverable[]> {
   const deliverables: ProjectDeliverable[] = []
+  // A healthy continuation is read to its end however long it is; only a cursor that comes back
+  // a second time is a loop, and it fails the export instead of writing a partial CSV.
+  const seenCursors = new Set<string>()
   let cursor: string | undefined
-  for (let page = 0; page < deliverableExportMaxPages; page += 1) {
+  for (;;) {
     const result = await getProjectDeliverables(teamId, projectId, accessToken, {
       ...filters,
       ...(cursor ? { cursor } : {}),
     })
     deliverables.push(...result.deliverables)
     if (!result.nextCursor) return deliverables
+    if (seenCursors.has(result.nextCursor)) {
+      throw new Error('Project deliverables returned a repeated cursor.')
+    }
+    seenCursors.add(result.nextCursor)
     cursor = result.nextCursor
   }
-  throw new Error('Project deliverables exceed the export page limit.')
 }
 
 /**
@@ -155,6 +163,7 @@ export function useProjectDeliverables(
     deliverables: pages?.flatMap((page) => page.deliverables) ?? [],
     filters,
     setFilters,
+    isScoped: scope !== undefined,
     isLoading: Boolean(accessToken && scope) && query.isLoading,
     isLoadingMore: query.isValidating && pages !== undefined && query.size > pages.length,
     hasError: query.error !== undefined,

@@ -111,7 +111,9 @@ export async function requireApprovalReviewers(
 
 /**
  * Requires every reviewer of a Project file approval to be active and able to read the Project's
- * files. The approval shows no Work Item, so `work-items.read` is not required.
+ * files and record a decision on them. The decision endpoint requires `files.approve`, so a
+ * member who could not decide is never chosen. The approval shows no Work Item, so
+ * `work-items.read` is not required.
  *
  * @param workspaceId - Owning Workspace identifier.
  * @param teamId - Team that owns the Project.
@@ -129,9 +131,9 @@ export async function requireProjectFileApprovalReviewers(
     ambientAutomationActionExecutorDependencies,
 ) {
   return await requireReviewersWithScopeAccess(
-    { workspaceId, teamId, assignedProjectId: projectId, permissions: ['files.read'] },
+    { workspaceId, teamId, assignedProjectId: projectId, permissions: ['files.read', 'files.approve'] },
     reviewerMemberKeys,
-    (memberKey) => `Reviewer "${memberKey}" cannot view the Project files.`,
+    (memberKey) => `Reviewer "${memberKey}" cannot review the Project files.`,
     dependencies,
   )
 }

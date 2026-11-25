@@ -1,6 +1,8 @@
 import type {
+  FileScanStatus,
   ProjectDeliverable,
   ProjectDeliverableApprovalFilter,
+  ProjectDeliverableApprovalState,
   ProjectDeliverablePage,
 } from '@mukuroji/contracts'
 import { FilesApiError } from './errors'
@@ -72,22 +74,92 @@ export async function getProjectDeliverables(
   }
 }
 
+/** Approval states a deliverable row may carry. */
+const deliverableApprovalStates: ReadonlySet<unknown> = new Set<ProjectDeliverableApprovalState>([
+  'none',
+  'pending',
+  'approved',
+  'rejected',
+  'changes-requested',
+])
+
+/** Scan states a deliverable's current version may carry. */
+const deliverableScanStatuses: ReadonlySet<unknown> = new Set<FileScanStatus>([
+  'pending',
+  'scanning',
+  'available',
+  'blocked',
+  'failed',
+])
+
 /**
- * Checks the fields of a deliverable row that the list reads.
+ * Checks the fields of a deliverable row that the list and the CSV export read, so a malformed
+ * row fails the page instead of breaking a render or an export later.
  *
  * @param value - Untrusted response row.
  * @returns Whether the row is a deliverable.
  */
 function isProjectDeliverable(value: unknown): value is ProjectDeliverable {
   return isRecord(value) &&
-    isRecord(value.file) &&
-    typeof value.file.id === 'string' &&
-    typeof value.file.name === 'string' &&
-    isRecord(value.file.currentVersion) &&
-    isRecord(value.owner) &&
-    (value.owner.kind === 'project' || value.owner.kind === 'work-item') &&
-    typeof value.approvalState === 'string' &&
-    typeof value.unresolvedAnnotationCount === 'number'
+    isDeliverableFile(value.file) &&
+    isDeliverableOwner(value.owner) &&
+    deliverableApprovalStates.has(value.approvalState) &&
+    (value.approvalId === undefined || typeof value.approvalId === 'string') &&
+    isAnnotationCount(value.unresolvedAnnotationCount)
+}
+
+/**
+ * Checks the file fields of a deliverable row: identity, name, update time, and current version.
+ *
+ * @param value - Untrusted `file` value.
+ * @returns Whether the file has every field the list and the CSV read.
+ */
+function isDeliverableFile(value: unknown): boolean {
+  return isRecord(value) &&
+    isNonEmptyString(value.id) &&
+    typeof value.name === 'string' &&
+    isNonEmptyString(value.updatedAt) &&
+    isRecord(value.currentVersion) &&
+    isNonEmptyString(value.currentVersion.id) &&
+    typeof value.currentVersion.number === 'number' &&
+    Number.isInteger(value.currentVersion.number) &&
+    value.currentVersion.number > 0 &&
+    deliverableScanStatuses.has(value.currentVersion.scanStatus)
+}
+
+/**
+ * Checks the owner of a deliverable row: the Project, or a Work Item with its identity and title.
+ *
+ * @param value - Untrusted `owner` value.
+ * @returns Whether the owner has every identifier and display field the list reads.
+ */
+function isDeliverableOwner(value: unknown): boolean {
+  if (!isRecord(value) || !isNonEmptyString(value.teamId)) return false
+  if (value.kind === 'project') return isNonEmptyString(value.projectId)
+  return value.kind === 'work-item' &&
+    isNonEmptyString(value.issueId) &&
+    typeof value.title === 'string' &&
+    (value.key === undefined || typeof value.key === 'string')
+}
+
+/**
+ * Checks an unresolved annotation count.
+ *
+ * @param value - Untrusted count.
+ * @returns Whether the value is a non-negative integer.
+ */
+function isAnnotationCount(value: unknown): boolean {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+}
+
+/**
+ * Checks for a non-empty string.
+ *
+ * @param value - Value to check.
+ * @returns Whether the value is a string with at least one character.
+ */
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
 }
 
 /**

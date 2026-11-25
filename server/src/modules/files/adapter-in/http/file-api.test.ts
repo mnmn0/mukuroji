@@ -1183,7 +1183,7 @@ test('requests approval of a Project file without a Work Item completion target'
   expect(requests).toEqual([{ kind: 'project', projectId: 'refero', reviewerMemberKeys: ['sato@example.com'] }])
 })
 
-test('accepts a Project file reviewer whose Enterprise role reads files but not Work Items', async () => {
+test('accepts a Project file reviewer whose Enterprise role reads and approves files but not Work Items', async () => {
   configureFakeProjectClients(true, { role: 'member' })
   const workspaceId = 'user#demo@example.com'
   const identity = new InMemoryEnterpriseIdentityClient()
@@ -1196,6 +1196,10 @@ test('accepts a Project file reviewer whose Enterprise role reads files but not 
   }
   const projectOnly: EnterpriseCustomRole = {
     ...filesOnly, roleId: 'custom:project-only', name: 'Project only', permissions: ['teams.read', 'projects.read'],
+  }
+  const readOnly: EnterpriseCustomRole = {
+    ...filesOnly, roleId: 'custom:file-reader', name: 'File reader',
+    permissions: ['teams.read', 'projects.read', 'files.read'],
   }
   identity.getSnapshot = async (id) => ({
     ...await readIdentity(id),
@@ -1210,8 +1214,13 @@ test('accepts a Project file reviewer whose Enterprise role reads files but not 
         principalKind: 'member', principalId: 'suzuki@example.com', roleId: projectOnly.roleId,
         scope: { workspaceId, kind: 'project', targetId: 'refero', parentTeamId: 'core-team' }, source: 'direct',
       },
+      {
+        workspaceId, assignmentId: 'file-reader',
+        principalKind: 'member', principalId: 'tanaka@example.com', roleId: readOnly.roleId,
+        scope: { workspaceId, kind: 'project', targetId: 'refero', parentTeamId: 'core-team' }, source: 'direct',
+      },
     ],
-    customRoles: [filesOnly, projectOnly],
+    customRoles: [filesOnly, projectOnly, readOnly],
   })
   const created: string[][] = []
   setTestAppDependencies({
@@ -1247,6 +1256,10 @@ test('accepts a Project file reviewer whose Enterprise role reads files but not 
   const denied = await request('suzuki@example.com')
   expect(denied.status).toBe(409)
   expect(await denied.json()).toMatchObject({ code: 'ApprovalReviewerAccessDenied' })
+  // A reviewer who reads the files but cannot record a decision is not chosen either.
+  const cannotDecide = await request('tanaka@example.com')
+  expect(cannotDecide.status).toBe(409)
+  expect(await cannotDecide.json()).toMatchObject({ code: 'ApprovalReviewerAccessDenied' })
   expect(created).toEqual([['sato@example.com']])
 })
 

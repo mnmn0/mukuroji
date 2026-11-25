@@ -644,6 +644,34 @@ type StoredDownloadItem = {
   requestFingerprint?: string
 }
 
+/**
+ * Receipt of a committed annotation delete, written in the delete transaction so that a retry of
+ * the same request (same actor, target, and `Idempotency-Key`) after a lost response succeeds
+ * instead of answering `404 AnnotationNotFound`.
+ */
+type StoredAnnotationDeleteReceiptItem = {
+  /** DynamoDB partition key of the file scope. */
+  scopeKey: string
+  /** DynamoDB sort key, derived from the scope and the idempotency key hash. */
+  recordKey: string
+  /** Row discriminator. */
+  entryType: 'annotation-delete-receipt'
+  /** File of the deleted annotation. */
+  fileId: string
+  /** Version of the deleted annotation. */
+  versionId: string
+  /** Deleted annotation ID. */
+  annotationId: string
+  /** Normalized member key of the author who deleted the annotation. */
+  actorMemberKey: string
+  /** Idempotency fingerprint of the delete request. */
+  requestFingerprint: string
+  /** Time of the delete. */
+  deletedAt: string
+  /** DynamoDB TTL, in epoch seconds. */
+  expiresAt: number
+}
+
 /** Object storage adapter が返す verified object metadata です。 */
 export type VerifiedFileObject = {
   /** Object の byte 数です。 */
@@ -1762,7 +1790,20 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     requireFileWrite(actor)
     await this.ensureReady()
     const scopeKey = createFileProofingScopeKey(scope)
-    const current = await this.readAnnotationForMutation(scopeKey, fileId, versionId, annotationId)
+    let current: StoredAnnotationItem
+    try {
+      current = await this.readAnnotationForMutation(scopeKey, fileId, versionId, annotationId)
+    } catch (error) {
+      if (
+        error instanceof FileProofingError &&
+        error.code === 'AnnotationNotFound' &&
+        await this.hasAnnotationDeleteReceipt(scopeKey, actor, fileId, versionId, annotationId, auditContext)
+      ) {
+        // The same request already deleted the annotation and only its response was lost.
+        return
+      }
+      throw error
+    }
     if (normalizeMemberKey(current.authorMemberKey) !== normalizeMemberKey(actor.memberKey)) {
       throw new FileProofingError(
         403,
@@ -1782,6 +1823,28 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         },
       },
     ]
+    if (auditContext) {
+      const deletedAt = auditContext.occurredAt
+      const receipt: StoredAnnotationDeleteReceiptItem = {
+        scopeKey,
+        recordKey: createAnnotationDeleteReceiptRecordKey(scopeKey, auditContext),
+        entryType: 'annotation-delete-receipt',
+        fileId,
+        versionId,
+        annotationId: current.id,
+        actorMemberKey: normalizeMemberKey(actor.memberKey),
+        requestFingerprint: auditContext.requestFingerprint,
+        deletedAt,
+        expiresAt: epochSecondsAfterDays(deletedAt, this.retentionDays),
+      }
+      transactionItems.push({
+        Put: {
+          TableName: this.tableName,
+          Item: receipt,
+          ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+        },
+      })
+    }
     addAuditItem(transactionItems, this.auditTableName, auditContext, {
       directoryId: scope.workspaceId,
       eventType: 'annotation.deleted',
@@ -1800,6 +1863,8 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       if (!await this.getItem<StoredAnnotationItem>(scopeKey, current.recordKey)) {
         return
       }
+      // A receipt already stored under this key belongs to another request: the key was reused.
+      await this.hasAnnotationDeleteReceipt(scopeKey, actor, fileId, versionId, annotationId, auditContext)
       throw new FileProofingError(
         409,
         'AnnotationConflict',
@@ -1807,6 +1872,40 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         { cause: error },
       )
     }
+  }
+
+  /**
+   * Tells whether the same delete request already deleted the annotation: a receipt exists for
+   * the request's idempotency key, and its actor, target, and request fingerprint match.
+   *
+   * @param scopeKey - Partition key of the scope.
+   * @param actor - Member retrying the delete.
+   * @param fileId - Annotated file.
+   * @param versionId - Annotated version.
+   * @param annotationId - Annotation the retry targets.
+   * @param auditContext - Mutation context of the retry; without it there is no receipt to find.
+   * @returns Whether the retry should succeed without deleting anything.
+   * @throws FileProofingError `409 IdempotencyKeyReused` when the key was used for another request.
+   */
+  private async hasAnnotationDeleteReceipt(
+    scopeKey: string,
+    actor: FileProofingActor,
+    fileId: string,
+    versionId: string,
+    annotationId: string,
+    auditContext: MutationAuditContext | undefined,
+  ): Promise<boolean> {
+    if (!auditContext) return false
+    const receipt = await this.getItem<unknown>(
+      scopeKey,
+      createAnnotationDeleteReceiptRecordKey(scopeKey, auditContext),
+    )
+    if (!isStoredAnnotationDeleteReceiptItem(receipt)) return false
+    requireMatchingIdempotencyFingerprint(receipt.requestFingerprint, auditContext)
+    return receipt.actorMemberKey === normalizeMemberKey(actor.memberKey) &&
+      receipt.fileId === fileId &&
+      receipt.versionId === versionId &&
+      receipt.annotationId === annotationId
   }
 
   /**
@@ -3204,6 +3303,18 @@ function createAnnotationRecordPrefix(fileId: string, versionId: string) {
   return `ANNOTATION#${requireText(fileId, 'File ID')}#${requireText(versionId, 'Version ID')}#`
 }
 
+/**
+ * Builds the record key of an annotation delete receipt. The prefix does not start with
+ * `ANNOTATION#`, so annotation queries never read receipts.
+ *
+ * @param scopeKey - Partition key of the file scope.
+ * @param context - Mutation context whose idempotency key hash identifies the request.
+ * @returns The receipt record key.
+ */
+function createAnnotationDeleteReceiptRecordKey(scopeKey: string, context: MutationAuditContext) {
+  return `ANNOTATION_DELETE#${createMutationResourceId('annotation_delete', context, scopeKey)}`
+}
+
 /** Reviewer query partition key を作成します。 */
 function createReviewerScopeKey(workspaceId: string, memberKey: string) {
   return `WORKSPACE#${requireText(workspaceId, 'Workspace ID')}#REVIEWER#${normalizeMemberKey(memberKey)}`
@@ -4445,6 +4556,24 @@ function isStoredFileItem(value: unknown): value is StoredFileItem {
 function isStoredAnnotationItem(value: unknown): value is StoredAnnotationItem {
   return typeof value === 'object' && value !== null &&
     'entryType' in value && value.entryType === 'annotation'
+}
+
+/**
+ * Checks for an annotation delete receipt row with every field the retry check compares.
+ *
+ * @param value - Stored row, if any.
+ * @returns Whether the row is a well-formed annotation delete receipt.
+ */
+function isStoredAnnotationDeleteReceiptItem(
+  value: unknown,
+): value is StoredAnnotationDeleteReceiptItem {
+  return typeof value === 'object' && value !== null &&
+    'entryType' in value && value.entryType === 'annotation-delete-receipt' &&
+    'fileId' in value && typeof value.fileId === 'string' &&
+    'versionId' in value && typeof value.versionId === 'string' &&
+    'annotationId' in value && typeof value.annotationId === 'string' &&
+    'actorMemberKey' in value && typeof value.actorMemberKey === 'string' &&
+    'requestFingerprint' in value && typeof value.requestFingerprint === 'string'
 }
 
 /** Approval item row を判定します。 */

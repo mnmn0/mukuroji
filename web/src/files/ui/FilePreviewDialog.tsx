@@ -74,6 +74,9 @@ export function FilePreviewDialog({
   const annotationSaveOperationRef = useRef(0)
   const selectedVersionKey = `${file.id}:${selectedVersion.id}`
   const selectedVersionKeyRef = useRef(selectedVersionKey)
+  // Advances on every version selection, so a result started on version A is dropped after
+  // A -> B -> A even though the key is A again: the list was reloaded in between.
+  const versionSelectionGenerationRef = useRef(0)
   const getAnnotations = controller.getAnnotations
   const getVersionAccess = controller.getVersionAccess
 
@@ -87,6 +90,7 @@ export function FilePreviewDialog({
     }
 
     annotationSaveOperationRef.current += 1
+    versionSelectionGenerationRef.current += 1
     selectedVersionKeyRef.current = selectedVersionKey
     setIsSaving(false)
     setSaveFailed(false)
@@ -229,12 +233,17 @@ export function FilePreviewDialog({
   ) => {
     if (busyAnnotationId) return
     const operationKey = selectedVersionKey
+    const operationGeneration = versionSelectionGenerationRef.current
+    /** Tells whether the version the change started on is still the same selection. */
+    const isSameSelection = () =>
+      selectedVersionKeyRef.current === operationKey &&
+      versionSelectionGenerationRef.current === operationGeneration
     setBusyAnnotationId(annotation.id)
     setAnnotationActionFailed(false)
     try {
       if (action === 'delete') {
         const deleted = await controller.deleteAnnotation(file, selectedVersion, annotation)
-        if (selectedVersionKeyRef.current !== operationKey) return
+        if (!isSameSelection()) return
         if (deleted) {
           setAnnotations((current) => current.filter((candidate) => candidate.id !== annotation.id))
         } else {
@@ -248,7 +257,7 @@ export function FilePreviewDialog({
         annotation,
         action === 'resolve',
       )
-      if (selectedVersionKeyRef.current !== operationKey) return
+      if (!isSameSelection()) return
       if (changed) {
         setAnnotations((current) => current.map((candidate) =>
           candidate.id === changed.id ? changed : candidate
@@ -365,6 +374,7 @@ export function FilePreviewDialog({
                 const nextVersionId = event.target.value
 
                 annotationSaveOperationRef.current += 1
+                versionSelectionGenerationRef.current += 1
                 selectedVersionKeyRef.current = `${file.id}:${nextVersionId}`
                 setIsSaving(false)
                 setSaveFailed(false)

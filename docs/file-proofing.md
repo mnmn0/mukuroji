@@ -29,6 +29,7 @@ recordKey = FILE#<fileId>
           | FILE_APPROVAL#<fileId>#<approvalId>
           | APPROVAL_SUMMARY
           | DOWNLOAD#<downloadId>
+          | ANNOTATION_DELETE#<receiptId>
 ```
 
 Comment attachment は親 Work Item partition に保存し、`targetType=comment` / `targetId=<commentId>` で区別する。File row は全 version の immutable object key、scan state、現在 version、guest access、soft-delete retention を保持する。Approval main row は `subjectType=file-version|work-item` と `requestedByKind=member|service` を持つ。`FILE_APPROVAL` row は file-version subject だけに作成し、file delete 時に関連 approval/reviewer metadata を file prefix の強整合 Query だけで列挙する逆引き projection で、approval state と同じ transaction で保存する。Work Item subject は file row や逆引き row を要求しない。download URL の発行は URL 自体ではなく actor/file/version/time だけを履歴に残す。
@@ -57,7 +58,7 @@ POST   .../versions/{versionId}/annotations/{annotationId}/reopen
 DELETE .../versions/{versionId}/annotations/{annotationId}
 ```
 
-解決と再開は scope に書き込める member（guest 以外）なら誰でも行え、`resolvedAt` と `resolvedByMemberKey` を annotation row に保存・削除する。削除は作成者だけが行える。どちらも file が削除されていないことを `ConditionCheck` で確かめ、解決状態または作成者を条件にした Put / Delete と `annotation.resolved` / `annotation.reopened` / `annotation.deleted` の audit event を同じ transaction で保存する。すでに目的の状態にある解決・再開は変更せずに現在の annotation を返す。Annotation は version に紐づき、次の version へは引き継がない。
+解決と再開は scope に書き込める member（guest 以外）なら誰でも行え、`resolvedAt` と `resolvedByMemberKey` を annotation row に保存・削除する。削除は作成者だけが行える。どちらも file が削除されていないことを `ConditionCheck` で確かめ、解決状態または作成者を条件にした Put / Delete と `annotation.resolved` / `annotation.reopened` / `annotation.deleted` の audit event を同じ transaction で保存する。すでに目的の状態にある解決・再開は変更せずに現在の annotation を返す。削除は同じ transaction で `ANNOTATION_DELETE#` receipt（scope と idempotency key hash から決めた ID、作成者・file・version・annotation・request fingerprint、`FILE_RETENTION_DAYS` 後の TTL）を保存する。応答が失われた削除を同じ作成者・対象・`Idempotency-Key` で再送すると、annotation がなくても receipt と一致すれば 204 を返す。fingerprint が異なる key の再利用は 409 `IdempotencyKeyReused`、存在しなかった annotation や別の key による削除は 404 `AnnotationNotFound` のままにする。receipt の prefix は `ANNOTATION#` で始まらないため、annotation の Query には含まれない。Annotation は version に紐づき、次の version へは引き継がない。
 
 scope の一覧（`GET .../files`）は `ANNOTATION#` prefix も Query し、各 file の現在 version と各 file-version approval の対象 version に残る未解決 annotation の件数を `unresolvedAnnotationCount` として返す。
 
@@ -73,7 +74,7 @@ POST /api/teams/{teamId}/projects/{projectId}/approvals/{approvalId}/cancel
 GET  /api/approvals/reviewer?limit=50&cursor=<opaque>
 ```
 
-Project file の approval row は Project partition に保存し、`issueId` を持たない。subject は `file-version` だけで、完了時に遷移する Work Item がないため `completionTransition` は 400 `ApprovalCompletionTransitionUnsupported` で拒否する。Reviewer は Project の file を読める（Enterprise role では Project の `files.read` を持つ）active member に限り、Work Item を出さないため `work-items.read` は求めない。Reviewer Inbox と外部通知は Project の現在の閲覧権限と file の削除・guest 共有を再確認してから表示・配信する。Audit event の entity は Project で、deep link は Project の画面（`/projects/{projectId}/issues`）を指す。Focus は Work Item に紐づく approval だけを扱う。
+Project file の approval row は Project partition に保存し、`issueId` を持たない。subject は `file-version` だけで、完了時に遷移する Work Item がないため `completionTransition` は 400 `ApprovalCompletionTransitionUnsupported` で拒否する。Reviewer は Project の file を読んで判断を記録できる（Enterprise role では Project の `files.read` と、decision endpoint が要求する `files.approve` を持つ）active member に限り、Work Item を出さないため `work-items.read` は求めない。判断を記録できない member を選べると、pending approval が版の差し替えと削除を止めたままになるため、選出時と decision 時で同じ権限を確認する。Guest など外部メンバーの permission ceiling も decision の request 境界と同じく、設定済みの外部アクセス policy があるときか Enterprise role で判定するときだけ適用し、policy のない Workspace の guest は従来どおり Project の閲覧権限で選べる。Reviewer Inbox と外部通知は Project の現在の閲覧権限と file の削除・guest 共有を再確認してから表示・配信する。Audit event の entity は Project で、deep link は Project の画面（`/projects/{projectId}/issues`）を指す。Focus は Work Item に紐づく approval だけを扱う。
 
 Request は最大 20 人の active Workspace reviewer と期限を必須にし、decision comment は 2,000 文字までに制限する。Reviewer decision は approval revision で optimistic concurrency を行い、`approved` / `rejected` / `changes-requested` を保存する。File-version subject の pending approval 中は対象 version の差し替えと file delete を拒否する。Member requester または manager は revision 条件付き cancel で reviewer projection、pending count、summary を同じ transaction 内で解除できる。Automation の service requester は member identity として cancel できず、manager capability が必要になる。全 reviewer が承認した transaction では、Request 時に現在の configuration から選択・保存した完了先 workflow status へ canonical Work Item を遷移する。Decision 直前に configuration と Work Item を強整合 read し、両方の revision を transaction 条件に含めるため、完了先 transition の削除や同時更新は 409 conflict として全体を rollback する。Legacy Work Item は read-only のため Approval mutation の対象にしない。Approval row、reviewer projection、任意の File pending count、summary、Work Item transition、audit/outbox event のいずれかが競合した場合も全体を rollback する。
 
@@ -90,7 +91,8 @@ Project に直接添付した file と、Project の Work Item（comment 添付�
 - 1 page は Project の Work Item 一覧（`assignedProjectId` index）の順に `limit`（既定 50、最大 100）件の Work Item を読み、その Work Item の file をすべて返す。1 page 目だけ Project 自体の file も含める。`nextCursor` は Work Item 一覧の opaque cursor をそのまま使う。page 内は file の更新日の新しい順に並べる。
 - 読む Work Item は、URL の Team が所有し、現在の `assignedProjectId` が URL の Project で、archive されておらず、呼び出し元が Project を閲覧できるものに限る。index は結果整合のため、候補の canonical Work Item を strongly consistent read で読み直し、その現在の割り当て・archive・閲覧権限で判定してから添付を読む。file row に保存された作成時の Project ではなく Work Item の現在の割り当てで判定するため、別 Project へ移した Work Item の添付は出ない。Enterprise role で Project の `work-items.read` を持たない人には Work Item を読まず、Project 自体の file だけを返す。Guest には `guestAccess` の file だけを返す。
 - Work Item ごとの partition は `FILE#` を先に Query し、表示できる file がある partition だけ `APPROVAL#` と `ANNOTATION#` を Query する。同時に読む partition は 8 件までにする。
-- 承認状態と未解決の絞り込みは page 内で行うため、条件に合う行がない page もある。CSV 出力は Web が全 page を読んで作る。
+- 承認状態と未解決の絞り込みは page 内で行うため、条件に合う行がない page もある。CSV 出力は Web が全 page を読んで作り、`nextCursor` がなくなるまで読む（同じ cursor が再び返ったときだけ失敗にする）。
+- 一覧と CSV の範囲は URL の 1 Team に限る。Web は選択した Team、なければ Project を持つ唯一の Team を使い、表示中の Work Item の順序には依存しない。同じ Project ID が複数の Team にあり Team を選んでいないときは読まず、Team を選ぶよう案内する。Work Item の Project 変更・archive・復元・一括操作の後は一覧を背景で再取得する。
 
 ## Audit / retention
 
