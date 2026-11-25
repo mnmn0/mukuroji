@@ -186,6 +186,21 @@ describe('automation rule definition draft', () => {
 })
 
 describe('AutomationRuleDefinitionEditor', () => {
+  test('locks the inputs while a save is in progress', () => {
+    const props = {
+      locale: 'ja' as const,
+      rule,
+      options: { members: [], teams: [], projects: [], statuses: [], customFields: [], workItemTemplates: [] },
+      onSave: () => undefined,
+      onCancel: () => undefined,
+    }
+    const saving = renderToStaticMarkup(createElement(AutomationRuleDefinitionEditor, { ...props, isSaving: true }))
+    const idle = renderToStaticMarkup(createElement(AutomationRuleDefinitionEditor, props))
+
+    expect(saving).toContain('<fieldset class="m-0 grid min-w-0 gap-4 border-0 p-0" disabled="">')
+    expect(idle).toContain('<fieldset class="m-0 grid min-w-0 gap-4 border-0 p-0">')
+  })
+
   test('renders conditions, ordered actions, and the dry run', () => {
     const markup = renderToStaticMarkup(createElement(AutomationRuleDefinitionEditor, {
       locale: 'ja',

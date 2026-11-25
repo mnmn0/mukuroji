@@ -158,6 +158,9 @@ export function AutomationRuleDefinitionEditor({
   )
   const nextConditionKey = useRef(draft.conditions.length)
   const [newActionType, setNewActionType] = useState<AutomationRuleDraftActionType>('notify')
+  // Tracks this editor's own save, so the inputs stay locked even if the shared busy state changes.
+  const [submitting, setSubmitting] = useState(false)
+  const saving = isSaving || submitting
   const presets = useMemo(() => createConditionFieldPresets(t, options.customFields), [t, options.customFields])
   const valid = isAutomationRuleDraftValid(draft)
 
@@ -194,11 +197,14 @@ export function AutomationRuleDefinitionEditor({
    */
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!valid || isSaving) return
+    if (!valid || saving) return
+    setSubmitting(true)
     try {
       await onSave(createAutomationRuleDraftUpdate(rule, draft))
     } catch {
       return
+    } finally {
+      setSubmitting(false)
     }
   }
 
@@ -217,6 +223,8 @@ export function AutomationRuleDefinitionEditor({
           {t('automation.ruleEdit.description')}
         </p>
       </div>
+      {/* Inputs are locked while saving so nothing typed after the save starts is lost when it closes. */}
+      <fieldset className="m-0 grid min-w-0 gap-4 border-0 p-0" disabled={saving}>
       <label className={labelClassName}>
         {t('automation.common.name')}
         <input
@@ -376,6 +384,7 @@ export function AutomationRuleDefinitionEditor({
           </button>
         </div>
       </fieldset>
+      </fieldset>
 
       {onDryRun ? (
         <DryRunSection
@@ -391,7 +400,7 @@ export function AutomationRuleDefinitionEditor({
       <div className="flex flex-wrap justify-end gap-2">
         <button
           className="workbench-button-secondary min-h-10 px-4 disabled:cursor-not-allowed disabled:opacity-55"
-          disabled={isSaving}
+          disabled={saving}
           type="button"
           onClick={onCancel}
         >
@@ -400,10 +409,10 @@ export function AutomationRuleDefinitionEditor({
         <button
           className="workbench-button-primary min-h-10 px-5 disabled:cursor-not-allowed disabled:opacity-55"
           data-testid="automation-rule-edit-save"
-          disabled={!valid || isSaving}
+          disabled={!valid || saving}
           type="submit"
         >
-          {t(isSaving ? 'automation.common.saving' : 'automation.ruleEdit.save')}
+          {t(saving ? 'automation.common.saving' : 'automation.ruleEdit.save')}
         </button>
       </div>
     </form>
