@@ -99,6 +99,7 @@ describe('my requests view', () => {
         <MyRequestsView
           canLoadMore={false}
           hasDetailError={false}
+          isDetailLoading={false}
           hasLoadError={false}
           isLoading={false}
           locale="en"
@@ -117,5 +118,31 @@ describe('my requests view', () => {
     expect(markup).toContain('Which laptop?')
     expect(markup).not.toContain('<textarea')
     expect(markup).not.toContain('href="/teams/')
+  })
+
+  test('announces list and detail loading', () => {
+    const markup = renderToStaticMarkup(
+      <MemoryRouter>
+        <MyRequestsView
+          canLoadMore={false}
+          hasDetailError={false}
+          hasLoadError={false}
+          isDetailLoading
+          isLoading
+          locale="en"
+          onLoadMore={() => undefined}
+          onRetryDetail={() => undefined}
+          onRetryList={() => undefined}
+          onReply={async () => undefined}
+          onSelectRequest={() => undefined}
+          requests={[]}
+          selectedRequestId="req-1"
+          t={createTranslator('en')}
+        />
+      </MemoryRouter>,
+    )
+    expect(markup).toContain('Loading your requests…')
+    expect(markup).toContain('Loading this request…')
+    expect(markup).not.toContain('No requests yet')
   })
 })

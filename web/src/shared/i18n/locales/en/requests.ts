@@ -225,6 +225,8 @@ export const requestsMessages = {
   'requests.mine.empty': 'No requests yet. Requests you send from internal forms while signed in appear here.',
   'requests.mine.loadError': 'Your requests could not be loaded. Try again later.',
   'requests.mine.retry': 'Try again',
+  'requests.mine.loading': 'Loading your requests…',
+  'requests.mine.detailLoading': 'Loading this request…',
   'requests.mine.loadMore': 'Show more',
   'requests.mine.listLabel': 'My requests',
   'requests.mine.submittedAt': 'Sent {date}',

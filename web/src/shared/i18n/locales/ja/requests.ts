@@ -225,6 +225,8 @@ export const requestsMessages = {
   'requests.mine.empty': 'まだ依頼はありません。サインインして社内向けフォームから送った依頼がここに表示されます。',
   'requests.mine.loadError': '依頼を読み込めませんでした。時間をおいて再度お試しください。',
   'requests.mine.retry': '再読み込み',
+  'requests.mine.loading': '依頼を読み込んでいます…',
+  'requests.mine.detailLoading': '依頼の詳細を読み込んでいます…',
   'requests.mine.loadMore': 'さらに表示',
   'requests.mine.listLabel': '自分の依頼の一覧',
   'requests.mine.submittedAt': '{date} に送信',

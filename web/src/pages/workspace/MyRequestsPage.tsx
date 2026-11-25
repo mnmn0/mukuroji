@@ -51,6 +51,7 @@ export function MyRequestsPage() {
           canLoadMore={Boolean(lastPage?.nextCursor)}
           hasDetailError={Boolean(detail.error)}
           hasLoadError={Boolean(list.error)}
+          isDetailLoading={Boolean(selectedRequestId) && detail.isLoading}
           isLoading={list.isLoading}
           locale={workspace.locale}
           onLoadMore={() => void list.setSize(list.size + 1)}

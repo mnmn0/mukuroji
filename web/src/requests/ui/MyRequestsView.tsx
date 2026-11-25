@@ -25,6 +25,8 @@ export type MyRequestsViewProps = {
   onSelectRequest: (requestId: string | undefined) => void
   /** Detail of the selected request, once loaded. */
   selectedRequest?: MyRequestDetail
+  /** Whether the selected request is loading for the first time. */
+  isDetailLoading: boolean
   /** Whether the selected request failed to load. */
   hasDetailError: boolean
   /** Loads the selected request again after it failed. */
@@ -54,6 +56,9 @@ export function MyRequestsView(props: MyRequestsViewProps) {
       >
         {props.hasLoadError ? (
           <LoadErrorNotice onRetry={props.onRetryList} t={t} />
+        ) : null}
+        {props.isLoading && !props.hasLoadError ? (
+          <LoadingNotice message={t('requests.mine.loading')} />
         ) : null}
         {!props.isLoading && !props.hasLoadError && requests.length === 0 ? (
           <p className="text-sm text-[var(--workbench-muted)]">{t('requests.mine.empty')}</p>
@@ -111,6 +116,8 @@ export function MyRequestsView(props: MyRequestsViewProps) {
                 request={props.selectedRequest}
                 t={t}
               />
+            ) : props.isDetailLoading ? (
+              <LoadingNotice message={t('requests.mine.detailLoading')} />
             ) : null}
           </>
         ) : (
@@ -118,6 +125,20 @@ export function MyRequestsView(props: MyRequestsViewProps) {
         )}
       </section>
     </div>
+  )
+}
+
+/**
+ * Announces that data is loading, for sighted and screen-reader users.
+ *
+ * @param props - The loading message.
+ * @returns The polite loading status.
+ */
+function LoadingNotice({ message }: { message: string }) {
+  return (
+    <p aria-live="polite" className="text-sm text-[var(--workbench-muted)]" role="status">
+      {message}
+    </p>
   )
 }
 

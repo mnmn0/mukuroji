@@ -36,6 +36,7 @@ const meta = {
     onRetryDetail: fn(),
     onSelectRequest: fn(),
     hasDetailError: false,
+    isDetailLoading: false,
     onReply: fn(async () => undefined),
     locale: 'ja',
     t: createTranslator('ja'),
@@ -88,5 +89,20 @@ export const LoadError: Story = {
   play: async ({ args, canvasElement }) => {
     await userEvent.click(within(canvasElement).getByRole('button', { name: '再読み込み' }))
     await expect(args.onRetryList).toHaveBeenCalled()
+  },
+}
+
+/** 一覧と選んだ依頼の詳細を読み込んでいる状態です。 */
+export const Loading: Story = {
+  args: {
+    requests: [],
+    isLoading: true,
+    selectedRequestId: myRequestAwaitingReplyFixture.id,
+    isDetailLoading: true,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText('依頼を読み込んでいます…')).toBeInTheDocument()
+    await expect(canvas.getByText('依頼の詳細を読み込んでいます…')).toBeInTheDocument()
   },
 }
