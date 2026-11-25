@@ -1,9 +1,8 @@
-import { useCallback, useMemo, useRef } from 'react'
+import { useCallback, useMemo } from 'react'
 import { useSearchParams } from 'react-router'
-import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { createTranslator } from '../../shared/i18n/i18n'
-import { replyToMyRequest } from '../../requests/api/myRequests'
 import { readMyRequestId } from '../../requests/model/myRequests'
+import { useReplyToMyRequest } from '../../requests/mutations/useReplyToMyRequest'
 import { useMyRequest, useMyRequests } from '../../requests/queries/useRequestIntakeQueries'
 import { MyRequestsView } from '../../requests/ui/MyRequestsView'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
@@ -18,7 +17,6 @@ export function MyRequestsPage() {
   const workspace = useWorkspaceRouteContext()
   const [searchParams, setSearchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
-  const mutationRunner = useRef(createMutationRequestRunner()).current
   const selectedRequestId = readMyRequestId(searchParams.get('requestId'))
   const list = useMyRequests(workspace.accessToken, workspace.canLoadWorkspaceData)
   const detail = useMyRequest(
@@ -41,16 +39,10 @@ export function MyRequestsPage() {
     })
   }, [setSearchParams])
 
-  /** Sends a reply and reloads the request and the list. */
-  const reply = useCallback(async (requestId: string, body: string) => {
-    if (!accessToken) throw new Error('Not signed in.')
-    await mutationRunner.run(
-      `my-request:reply:${requestId}`,
-      body,
-      (context) => replyToMyRequest(accessToken, requestId, { body }, context),
-    )
-    await Promise.all([mutateDetail(), mutateList()])
-  }, [accessToken, mutateDetail, mutateList, mutationRunner])
+  const reply = useReplyToMyRequest(accessToken, {
+    revalidateDetail: mutateDetail,
+    revalidateList: mutateList,
+  })
 
   return (
     <WorkspaceRouteContent>

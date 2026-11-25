@@ -102,7 +102,7 @@ form title、状況、受付番号、requester thread（staff message と reques
 回答、routing、triage owner、event summary（却下理由など）、重複先を含めない。Reply は
 thread link と同じ rate limit と冪等 receipt を共有し、Enterprise の権限は自分の設定と同じ self-service（`workspace.read`）として扱う。
 
-Work Item は requester が現在その Team / Project の viewer で、かつ `work-items.read` を持つ場合だけ key・title・status category を返し、
+Work Item は requester が現在その Team / Project で `work-items.read` を持つ場合（Team / Project 単位の Enterprise 付与と従来の Project 参加を含み、Work Item の route と同じ判定）だけ key・title・status category を返し、
 読めない場合は `restricted` として完了したかどうかだけを返す。
 
 追加情報の依頼、見送り、重複、受付（Work Item 作成または既存 Work Item への link）、作成した

@@ -157,51 +157,35 @@ async function readMyRequestWorkItem(
   principal: WorkspacePrincipal,
   reference: RequestWorkItemReference,
 ): Promise<MyRequestWorkItem | undefined> {
-  let completed: boolean
+  let issue: Awaited<ReturnType<typeof workItemDependencies.teamIssues.getTeamIssueDetail>>['issue']
   try {
-    const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+    // A consistent read, so a Work Item just moved to another Project is judged by its
+    // committed scope rather than shown through its previous one.
+    issue = (await workItemDependencies.teamIssues.getTeamIssueDetail(
       principal.directoryId,
       reference.teamId,
       reference.workItemId,
-      { consistentIssueRead: false, includeEvents: false },
-    )
-    completed = detail.issue.statusCategory === 'completed'
+      { consistentIssueRead: true, includeEvents: false },
+    )).issue
   } catch (error) {
     if (isTeamIssueNotFoundError(error)) return undefined
     throw error
   }
-  try {
-    const { detail } = await loadAuthorizedTeamIssue(
-      principal,
-      reference.teamId,
-      reference.workItemId,
-      'viewer',
-      // Authorize on the committed scope, so a Work Item just moved to another Project is not
-      // shown through its previous one.
-      { consistentIssueRead: true, includeEvents: false },
-    )
-    // "My requests" is authorized as a Workspace read, so Work Item read is checked here at the
-    // Work Item's current Team and Project, as the Work Item routes require it.
-    if (!await canRequesterReadWorkItem(principal, detail.issue.teamId, detail.issue.assignedProjectId)) {
-      return { visibility: 'restricted', completed }
-    }
-    return {
-      visibility: 'visible',
-      teamId: detail.issue.teamId,
-      workItemId: detail.issue.id,
-      ...(detail.issue.key ? { key: detail.issue.key } : {}),
-      title: detail.issue.title,
-      statusCategory: detail.issue.statusCategory,
-      completed: detail.issue.statusCategory === 'completed',
-    }
-  } catch (error) {
-    if (
-      (error instanceof ProjectDataError || error instanceof WorkspaceAccessError) &&
-      (error.status === 403 || error.status === 404)
-    ) {
-      return { visibility: 'restricted', completed }
-    }
-    throw error
+  const completed = issue.statusCategory === 'completed'
+  // "My requests" is authorized as a Workspace read, so Work Item read is evaluated here for the
+  // member at the Work Item's current Team and Project, including Team- or Project-scoped
+  // Enterprise grants, as the Work Item routes require it.
+  if (!await canRequesterReadWorkItem(principal, issue.teamId, issue.assignedProjectId)) {
+    return { visibility: 'restricted', completed }
+  }
+  return {
+    visibility: 'visible',
+    teamId: issue.teamId,
+    workItemId: issue.id,
+    ...(issue.key ? { key: issue.key } : {}),
+    title: issue.title,
+    statusCategory: issue.statusCategory,
+    completed,
   }
 }
 
