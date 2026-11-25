@@ -846,6 +846,13 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/ai-assistance*',
     permission: 'workspace.read',
   },
+  // Answering a question about one's own request is self-service; the route still proves the
+  // member sent the request.
+  {
+    method: 'POST',
+    pathPattern: '/api/my-requests/:submissionId/replies',
+    permission: 'workspace.read',
+  },
   { method: 'GET', pathPattern: '/api/*', permission: 'workspace.read' },
   { method: '*', pathPattern: '/api/*', permission: 'workspace.write' },
 ] as const satisfies readonly EnterpriseRoutePermissionRule[]

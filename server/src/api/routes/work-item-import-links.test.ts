@@ -10,7 +10,11 @@ import {
 import { DEFAULT_WORK_ITEM_CONFIGURATION } from '../../modules/work-items/work-item-configuration'
 import { findWorkItemDependencyScheduleConflicts } from '../../modules/planning'
 import type { WorkItemImportLink } from '../../modules/work-items/work-item-import-structure'
-import { findWorkItemImportTeamLinkOverflow, validateWorkItemImportParentLinks } from './work-item-import-links'
+import {
+  findWorkItemImportTeamLinkOverflow,
+  readWorkItemImportRowAcceptanceCriteria,
+  validateWorkItemImportParentLinks,
+} from './work-item-import-links'
 
 const configuration: ResolvedWorkItemConfiguration = {
   configuration: {
@@ -91,5 +95,17 @@ test('reports the import link that the links a Team already stores push past the
   ])
   expect(findWorkItemImportTeamLinkOverflow(links, WORK_ITEM_TEAM_RELATION_LINK_LIMIT)).toEqual([
     expect.objectContaining({ row: 2, field: 'parentKey', code: 'ImportRelationLimitExceeded' }),
+  ])
+})
+
+test('creates each import row with its acceptance criteria so a status that requires them can be entered', () => {
+  const criteria = readWorkItemImportRowAcceptanceCriteria([
+    { kind: 'acceptance-criteria', row: 2, criteria: [{ text: 'Reviewed', satisfied: true }, { text: 'Tested', satisfied: false }] },
+    { kind: 'acceptance-criteria', row: 3, criteria: [] },
+    { kind: 'parent', childRow: 3, parentRow: 2 },
+  ])
+
+  expect([...criteria.entries()]).toEqual([
+    [2, [{ text: 'Reviewed', satisfied: true }, { text: 'Tested', satisfied: false }]],
   ])
 })

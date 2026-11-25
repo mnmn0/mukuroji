@@ -1,6 +1,8 @@
-import type {
-  RecurringCatchUpPolicy,
-  RecurringSchedule,
+import {
+  RECURRING_MAX_BUSINESS_DAY,
+  type RecurringCatchUpPolicy,
+  type RecurringMonthlyDay,
+  type RecurringSchedule,
 } from '@mukuroji/contracts'
 
 /** Recurring schedule builder の入力です。 */
@@ -17,8 +19,10 @@ export type RecurringScheduleInput = {
   catchUpPolicy: RecurringCatchUpPolicy
   /** Weekly cadence で実行する曜日です。0 が Sunday です。 */
   dayOfWeek?: number
-  /** Monthly cadence で実行する日です。 */
+  /** Monthly cadence で実行する日です。With `business-day`, the business day number. */
   dayOfMonth?: number
+  /** How a monthly cadence picks its day; `day-of-month` when omitted. */
+  monthlyDay?: RecurringMonthlyDay
 }
 
 /**
@@ -49,7 +53,16 @@ export function createRecurringSchedule(input: RecurringScheduleInput): Recurrin
   }
 
   if (input.frequency === 'monthly') {
+    if (input.monthlyDay === 'last-day') return { ...schedule, monthlyDay: 'last-day' }
     const dayOfMonth = input.dayOfMonth ?? dayOfMonthFromLocalDate(input.startDate)
+    if (input.monthlyDay === 'business-day') {
+      if (!isRecurringCadenceConfigurationValid(input.frequency, 0, dayOfMonth, 'business-day')) {
+        throw new RangeError(
+          `The recurring business day must be an integer from 1 through ${RECURRING_MAX_BUSINESS_DAY}.`,
+        )
+      }
+      return { ...schedule, dayOfMonth, monthlyDay: 'business-day' }
+    }
     if (!isRecurringCadenceConfigurationValid(input.frequency, 0, dayOfMonth)) {
       throw new RangeError('The recurring day of month must be an integer from 1 through 31.')
     }
@@ -93,14 +106,27 @@ export function dayOfMonthFromLocalDate(startDate: string) {
   return readLocalDateParts(startDate)[2]
 }
 
-/** Cadence 固有の weekday/day-of-month が有効か返します。 */
+/**
+ * Cadence 固有の weekday/day-of-month が有効か返します。
+ *
+ * @param frequency - Cadence.
+ * @param dayOfWeek - Weekly weekday, 0 for Sunday.
+ * @param dayOfMonth - Monthly day, or business day number with `business-day`.
+ * @param monthlyDay - How a monthly cadence picks its day.
+ * @returns Whether the values fit the cadence.
+ */
 export function isRecurringCadenceConfigurationValid(
   frequency: RecurringSchedule['frequency'],
   dayOfWeek: number,
   dayOfMonth: number,
+  monthlyDay: RecurringMonthlyDay = 'day-of-month',
 ) {
   if (frequency === 'weekly') return Number.isInteger(dayOfWeek) && dayOfWeek >= 0 && dayOfWeek <= 6
-  if (frequency === 'monthly') return Number.isInteger(dayOfMonth) && dayOfMonth >= 1 && dayOfMonth <= 31
+  if (frequency === 'monthly') {
+    if (monthlyDay === 'last-day') return true
+    const maximum = monthlyDay === 'business-day' ? RECURRING_MAX_BUSINESS_DAY : 31
+    return Number.isInteger(dayOfMonth) && dayOfMonth >= 1 && dayOfMonth <= maximum
+  }
   return true
 }
 

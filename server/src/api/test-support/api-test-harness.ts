@@ -871,6 +871,7 @@ function createTeamIssuesFake(
     createTriageDuplicateContextTransactionItems: () => {
       throw new Error('Unexpected Team Issues client call.')
     },
+    createSourceRequesterCompletionTransactionItems: unsupported,
     getTeamIssues: unsupported,
     listMemberWorkItemReferences: unsupported,
     getTeamIssuesByReferences: unsupported,

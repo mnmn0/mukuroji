@@ -880,6 +880,45 @@ describe('AutomationManagementPanel', () => {
     }
   })
 
+  test('leaves out unreadable Teams but fails the load on a temporary Team configuration failure', async () => {
+    const originalFetch = globalThis.fetch
+    let flakyStatus = 503
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url
+      if (url.includes('/teams/hidden-team/')) {
+        return new Response(JSON.stringify({ code: 'Forbidden', message: 'Forbidden' }), { status: 403 })
+      }
+      if (url.includes('/teams/flaky-team/')) {
+        return new Response(JSON.stringify({ code: 'Unavailable', message: 'Unavailable' }), { status: flakyStatus })
+      }
+      const body = url.endsWith('/work-item-configuration')
+        ? { configuration: { revision: 1, scopeId: url.includes('/teams/') ? 'core-team' : 'workspace-demo' } }
+        : { endpoints: [], executions: [], recurringWorks: [], rules: [], templates: [] }
+      return new Response(JSON.stringify(body), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    }) as typeof fetch
+    const loadTeams = [
+      { id: 'core-team', name: 'Core team' },
+      { id: 'hidden-team', name: 'Hidden team' },
+      { id: 'flaky-team', name: 'Flaky team' },
+    ]
+
+    try {
+      await expect(loadAutomationManagementData('admin-token', loadTeams, true)).rejects.toThrow('Unavailable')
+      flakyStatus = 404
+      const data = await loadAutomationManagementData('admin-token', loadTeams, true)
+      expect(data.workflowTargets.map((target) => target.scopeId)).toEqual(['workspace-demo', 'core-team'])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   test('renders inbound Webhook URLs and status-specific lifecycle controls', () => {
     const html = renderToStaticMarkup(
       <AutomationManagementPanel
