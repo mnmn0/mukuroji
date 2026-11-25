@@ -58,6 +58,7 @@ import {
   createTeamIssueAutomaticWatcherCandidates,
 } from '../shared/collaboration-access'
 import { createCommentSearchDocument } from '../shared/document-access'
+import { listWorkItemAgentRunQuestions } from './web-agent-run-answer-service'
 import { projectWorkspaceSearchDocumentBestEffort } from '../shared/search-access'
 import { resolveDeveloperCredentialPrincipal } from '../shared/developer-platform-access'
 import {
@@ -511,6 +512,12 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       )
       if (!started) throw new Error('The Agent Run start transaction committed without a run.')
       return { run: toAgentRun(started, startedAt), workItem: projectPublicWorkItem(issue) }
+    },
+
+    /** Lists a Work Item's questions for an agent, with the answers people recorded. */
+    async listWorkItemQuestions(credential, teamId, workItemId) {
+      const principal = await resolveReader(credential, teamId)
+      return listWorkItemAgentRunQuestions(principal, teamId, workItemId)
     },
 
     /** Lists one Work Item's runs after checking that the caller can see it. */

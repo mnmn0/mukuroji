@@ -2,6 +2,8 @@ import {
   AGENT_RUN_ARTIFACT_LABEL_MAX_LENGTH,
   AGENT_RUN_ARTIFACT_TYPES,
   AGENT_RUN_ARTIFACT_URL_MAX_LENGTH,
+  AGENT_RUN_QUESTION_REPORT_KINDS,
+  AGENT_RUN_REPORT_ANSWER_MAX_LENGTH,
   AGENT_RUN_REPORT_KINDS,
   AGENT_RUN_REPORT_MAX_ITEMS,
   AGENT_RUN_REPORT_MESSAGE_MAX_LENGTH,
@@ -271,5 +273,38 @@ export function toAgentRunReport(report: StoredAgentRunReport): AgentRunReport {
     artifacts: report.artifacts.map((artifact) => ({ ...artifact })),
     ...(report.changedFileCount === undefined ? {} : { changedFileCount: report.changedFileCount }),
     createdAt: report.createdAt,
+    ...(report.answer === undefined ? {} : { answer: { ...report.answer } }),
   }
+}
+
+/**
+ * Validates a request that answers a report. Line endings are normalized and surrounding whitespace
+ * is removed; the text keeps its Markdown.
+ *
+ * @param value - Untrusted request body.
+ * @returns The answer text.
+ * @throws AgentRunError when the body is missing, empty, too long, or has unsupported characters.
+ */
+export function readAnswerAgentRunReportRequest(value: unknown): string {
+  if (!isRecord(value)) throw new AgentRunError('validation_failed', 'An answer is required.', { pointer: '' })
+  const unknown = Object.keys(value).find((key) => key !== 'body')
+  if (unknown !== undefined) {
+    throw new AgentRunError('validation_failed', `An answer does not accept field "${unknown}".`, { pointer: `/${unknown}` })
+  }
+  if (typeof value.body !== 'string') throw new AgentRunError('validation_failed', 'body must be text.', { pointer: '/body' })
+  const body = value.body.replace(/\r\n?/gu, '\n').trim()
+  if (body.length === 0 || body.length > AGENT_RUN_REPORT_ANSWER_MAX_LENGTH || hasControlCharacter(body)) {
+    throw new AgentRunError('validation_failed', `body must be 1 to ${AGENT_RUN_REPORT_ANSWER_MAX_LENGTH} characters without control characters.`, { pointer: '/body' })
+  }
+  return body
+}
+
+/**
+ * Tells whether a report asks a person to decide and can be answered.
+ *
+ * @param report - Report.
+ * @returns True for a `blocker` or `handoff` report.
+ */
+export function isAgentRunQuestionReport(report: Pick<AgentRunReport, 'kind'>): boolean {
+  return AGENT_RUN_QUESTION_REPORT_KINDS.some((kind) => kind === report.kind)
 }

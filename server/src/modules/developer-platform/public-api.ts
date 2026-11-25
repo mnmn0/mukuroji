@@ -68,6 +68,7 @@ import {
   type UpdatePublicWorkItemRequest,
   type WorkItemAcceptanceCriterionInput,
   type WorkItemAcceptanceCriterionMark,
+  type WorkItemAgentRunQuestionsResponse,
   type UpdateWebhookSubscriptionInput,
   isWebhookEventType,
   type WorkItemSchedule,
@@ -733,6 +734,18 @@ export interface PublicAgentRunService {
     continuation: string | undefined,
     limit: number,
   ): Promise<PublicAgentRunPage>
+  /**
+   * Lists the newest `blocker` and `handoff` reports of a Work Item with the answers people recorded.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item.
+   * @returns Questions, newest first.
+   */
+  listWorkItemQuestions?(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<WorkItemAgentRunQuestionsResponse>
   /**
    * Lists a Team's runs the caller can see.
    * @param credential - Authenticated developer credential.
@@ -1667,6 +1680,21 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       resource: `/v1/work-items/${encodeURIComponent(workItemId)}/agent-runs`,
       filters: { teamId },
     }, (continuation, limit) => agentRuns.listWorkItemRuns(credential, teamId, workItemId, continuation, limit)))
+  })
+
+  router.get('/v1/work-items/:workItemId/agent-run-questions', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const agentRuns = requireAgentRunService(dependencies)
+    if (!agentRuns.listWorkItemQuestions) {
+      throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Agent Run questions are not configured.', true)
+    }
+    const questions = await agentRuns.listWorkItemQuestions(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    )
+    c.header('Cache-Control', 'private, no-store')
+    return c.json(questions)
   })
 
   router.get('/v1/agent-runs', async (c) => {
