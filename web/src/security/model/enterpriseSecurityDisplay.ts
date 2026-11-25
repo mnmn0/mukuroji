@@ -8,6 +8,8 @@ import type {
 import type { EnterpriseSecurityScopeOption } from './enterpriseSecurityForms'
 
 const securityRoleNameKeys: Readonly<Record<string, MessageKey>> = {
+  'org-unit:manager': 'security.role.name.orgUnitManager',
+  'org-unit:viewer': 'security.role.name.orgUnitViewer',
   'project:manager': 'security.role.name.projectManager',
   'project:member': 'security.role.name.projectMember',
   'project:viewer': 'security.role.name.projectViewer',

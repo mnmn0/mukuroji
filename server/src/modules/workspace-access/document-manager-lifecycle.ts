@@ -95,3 +95,29 @@ export async function requirePrivateDocumentManagerContinuity(
     'Document permissions changed. Reload and try again.',
   )
 }
+
+/**
+ * Reads whether deactivating a member would leave a private Document without a manager,
+ * reporting the blocker instead of failing.
+ *
+ * @param dependencies - Document ACL and Workspace member readers.
+ * @param workspaceId - Workspace of the member.
+ * @param memberKey - Member being deactivated.
+ * @returns Whether a Document blocks it, or the Document ACL generation to fence the deactivation with.
+ * @throws WorkspaceAccessError for other failures, such as a Document ACL change during the read.
+ */
+export async function readPrivateDocumentManagerContinuity(
+  dependencies: DocumentManagerLifecycleDependencies,
+  workspaceId: string,
+  memberKey: string,
+): Promise<{ managesPrivateDocuments: true } | { managesPrivateDocuments: false, authorizationRevision: number }> {
+  try {
+    const authorizationRevision = await requirePrivateDocumentManagerContinuity(dependencies, workspaceId, memberKey)
+    return { managesPrivateDocuments: false, authorizationRevision }
+  } catch (error) {
+    if (error instanceof WorkspaceAccessError && error.code === 'WorkspaceMemberManagesPrivateDocuments') {
+      return { managesPrivateDocuments: true }
+    }
+    throw error
+  }
+}

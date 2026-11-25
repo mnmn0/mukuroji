@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(643)
-  expect(new Set(inventory).size).toBe(639)
+  expect(inventory).toHaveLength(652)
+  expect(new Set(inventory).size).toBe(648)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -27,6 +27,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/planning/entities/:entityId/watch')
   expect(inventory).toContain('DELETE /api/planning/entities/:entityId/watch')
   expect(inventory).toContain('POST /api/documents/:documentId/realtime/tickets')
+  expect(inventory).toContain('GET /api/documents/:documentId/versions/:versionId')
+  expect(inventory).toContain('POST /api/documents/:documentId/versions/:versionId/pin')
+  expect(inventory).toContain('POST /api/documents/:documentId/versions/:versionId/approvals')
+  expect(inventory).toContain('GET /api/documents/:documentId/approvals')
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).toContain('GET /api/my-requests')
@@ -92,6 +96,9 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/workspace/members/sign-in-security')
   expect(inventory).toContain('POST /api/workspace/members/:memberKey/password-reset')
   expect(inventory).toContain('POST /api/workspace/members/:memberKey/mfa-reset')
+  expect(inventory).toContain('GET /api/workspace/members/:memberKey/offboarding')
+  expect(inventory).toContain('PUT /api/workspace/members/:memberKey/access-expiry')
+  expect(inventory).toContain('POST /api/workspace/members/:memberKey/credentials/revoke')
   expect(inventory).toContain('PUT /api/workspace/members/:memberKey/system-administrator')
   expect(inventory).toContain('GET /api/planning/update-feed')
   expect(inventory).toContain('GET /api/planning/archived-entities')
@@ -170,6 +177,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('POST /api/developer/connector-oauth/complete')
   // Team and Project IDs never change, so renaming is a PATCH on the stable resource.
   expect(inventory).toContain('GET /api/teams/directory')
+  expect(inventory).toContain('GET /api/org-structure')
+  expect(inventory).toContain('PUT /api/org-structure')
   expect(inventory).toContain('GET /api/teams/:teamId/archive-impact')
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/archive-impact')
   expect(inventory).toContain('PUT /api/teams/order')
@@ -202,6 +211,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'dda4f71b50706a2618806b307c1b1bbe02f3ef409fb27206b36a43941387fc56',
+    'f495adc865f1d21d1b512dc6ed6a0a15778a5eec34efc2ed044cb57416ff58e8',
   )
 })

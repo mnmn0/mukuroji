@@ -18,6 +18,7 @@ export const enterpriseSecuritySnapshotFixture = {
   ],
   assignableRoleIds: {
     groupMappings: {
+      'org-unit': ['org-unit:manager', 'org-unit:viewer', 'custom:security-reviewer'],
       project: [
         'project:manager',
         'project:member',
@@ -41,6 +42,7 @@ export const enterpriseSecuritySnapshotFixture = {
       'custom:security-reviewer',
     ],
     members: {
+      'org-unit': ['org-unit:manager', 'org-unit:viewer'],
       project: ['project:manager', 'project:member', 'project:viewer'],
       team: ['team:manager', 'team:member'],
       workspace: ['workspace:portfolio-viewer', 'workspace:auditor'],

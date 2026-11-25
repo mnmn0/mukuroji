@@ -1,5 +1,6 @@
 import { useId, useRef, useState } from 'react'
 import { useDocumentBacklinks } from '../../documents/queries/useDocumentQueries'
+import { useTeamAgentSettings } from '../../features/agent-settings/queries/useTeamAgentSettings'
 import { CopyIcon } from '../../shared/ui/icons'
 import { splitAgentRuns } from '../model/agentRunDisplay'
 import {
@@ -10,11 +11,15 @@ import {
   type TaskHandoffLoadState,
 } from '../model/taskHandoff'
 import { useWorkItemAgentRuns } from '../queries/useWorkItemAgentRuns'
+import type { AgentReadySettings } from '../model/agentReadyTransition'
+import { AgentReadyAction } from './AgentReadyAction'
 
 /** Inputs for the saved-task handoff disclosure. */
 export type TaskHandoffPanelProps = Omit<TaskHandoffInput, 'agentRuns' | 'documents'> & {
   /** Session access token used to read Agent Runs and linked Documents; without it the brief says they were not read. */
   accessToken?: string
+  /** Saves a new workflow status for the one-step Ready action; omitted when the viewer cannot edit the task. */
+  onMoveToStatus?: (workflowStatusId: string) => Promise<void>
 }
 
 /**
@@ -42,7 +47,7 @@ function toLoadState<Data, Value>(
  * @param props - Visible saved task, access token, and localized handoff labels.
  * @returns A revision-keyed preview and copy control with manual clipboard fallback.
  */
-export function TaskHandoffPanel({ accessToken, ...props }: TaskHandoffPanelProps) {
+export function TaskHandoffPanel({ accessToken, onMoveToStatus, ...props }: TaskHandoffPanelProps) {
   const { task } = props
   const canRead = Boolean(accessToken && task.teamId)
   const runs = useWorkItemAgentRuns(canRead ? accessToken : undefined, task.teamId, task.id)
@@ -61,6 +66,8 @@ export function TaskHandoffPanel({ accessToken, ...props }: TaskHandoffPanelProp
     items: uniqueDocuments(data.backlinks),
     hasMore: Boolean(data.nextCursor),
   }))
+  const settings = useTeamAgentSettings(canRead ? accessToken : undefined, task.teamId)
+  const readySettings = toLoadState(canRead, settings.data, settings.error, (data): AgentReadySettings => data)
   const brief = createTaskHandoffBrief({ ...props, agentRuns, documents })
   // The disclosure stays outside the keyed snapshot so a background run or Document refresh does not close it.
   return (
@@ -68,6 +75,15 @@ export function TaskHandoffPanel({ accessToken, ...props }: TaskHandoffPanelProp
       <summary className="min-h-[44px] cursor-pointer py-3 text-sm font-semibold text-[var(--workbench-primary-text)]">
         {props.t('agents.handoff.title')}
       </summary>
+      <AgentReadyAction
+        configuration={props.configuration}
+        activeRun={agentRuns.status === 'loaded' ? { status: 'loaded', value: agentRuns.value.active !== undefined } : agentRuns}
+        key={`${task.teamId}:${task.id}`}
+        onMoveToStatus={onMoveToStatus}
+        settings={readySettings}
+        t={props.t}
+        task={task}
+      />
       <TaskHandoffSnapshot brief={brief} key={brief} revision={task.revision} t={props.t} />
     </details>
   )

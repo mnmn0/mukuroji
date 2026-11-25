@@ -26,6 +26,7 @@ import {
   WorkspaceAccessError,
   type WorkspaceMember,
 } from '../../modules/workspace-access/workspace-access'
+import { isActivePlanningEntityOwnedBy } from '../../modules/workspace-access/domain/member-deactivation-blockers'
 import { type NotificationItem } from '../../modules/notifications/notifications'
 import { evaluateEnterpriseAccess } from '../../modules/enterprise-identity'
 import {
@@ -37,6 +38,7 @@ import {
 import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { toCognitoDirectoryErrorResponse } from './enterprise-access'
 import {
+  createOrgStructureAuthorizationConditionChecks,
   type ProjectPrincipal,
   readLegacyProjectScopeAccesses,
   requireAssignedProjectPermission,
@@ -493,7 +495,7 @@ export async function requireWorkspaceMemberHasNoOwnedPlanningEntities(
 ) {
   const authorizationState = await workItemDependencies.planning.getAuthorizationState(directoryId)
   const ownedEntity = authorizationState.entities.find(
-    (entity) => !entity.archivedAt && entity.ownerMemberKey === memberKey,
+    (entity) => isActivePlanningEntityOwnedBy(entity, memberKey),
   )
   if (ownedEntity) {
     throw new WorkspaceAccessError(
@@ -1025,7 +1027,10 @@ export function createPlanningCallerAuthorizationConditionChecks(
   } satisfies PlanningCallerAuthorizationConditionCheck))
   const enterpriseTableName = getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')?.trim()
   const controlRevision = principal.enterpriseIdentityControlRevision
-  if (!enterpriseTableName || controlRevision === undefined) return workspaceMemberChecks
+  const orgStructureChecks = createOrgStructureAuthorizationConditionChecks(principal)
+  if (!enterpriseTableName || controlRevision === undefined) {
+    return [...workspaceMemberChecks, ...orgStructureChecks]
+  }
 
   const expressionAttributeNames: Record<string, string> = {
     '#controlRevision': 'controlRevision',
@@ -1050,5 +1055,5 @@ export function createPlanningCallerAuthorizationConditionChecks(
       },
     },
   } satisfies PlanningCallerAuthorizationConditionCheck
-  return [...workspaceMemberChecks, enterpriseControlCheck]
+  return [...workspaceMemberChecks, enterpriseControlCheck, ...orgStructureChecks]
 }

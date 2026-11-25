@@ -405,6 +405,9 @@ export async function createWorkspaceSearchContext(
               enterpriseControlRevision:
                 principal.enterpriseIdentityControlRevision,
             }),
+        ...(principal.enterpriseOrgStructureRevision === undefined
+          ? {}
+          : { orgStructureRevision: principal.enterpriseOrgStructureRevision }),
       } satisfies DocumentAuthorizationFenceSnapshot],
       ...(enterpriseDocumentScopeAccess ?? {
         projectRoles,
@@ -472,7 +475,10 @@ export async function isWorkspaceSearchAuthorizationCurrent(
   const enterpriseSnapshots = authorizationSnapshots.filter((snapshot) =>
     snapshot.enterpriseControlRevision !== undefined
   )
-  const [planningRevision, documentAuthorizationRevision, enterpriseSnapshot, members] = await Promise.all([
+  const orgStructureSnapshots = authorizationSnapshots.filter((snapshot) =>
+    snapshot.orgStructureRevision !== undefined
+  )
+  const [planningRevision, documentAuthorizationRevision, enterpriseSnapshot, members, orgStructure] = await Promise.all([
     workItemDependencies.planning.getAuthorizationRevision(workspaceId),
     expectedDocumentAuthorizationRevision === undefined
       ? Promise.resolve(undefined)
@@ -488,6 +494,9 @@ export async function isWorkspaceSearchAuthorizationCurrent(
             snapshot.workspaceMemberKey,
           )
     )),
+    orgStructureSnapshots.length === 0
+      ? Promise.resolve(undefined)
+      : workspaceDependencies.projectDirectory.getOrgStructure(workspaceId, true),
   ])
   return authorizationSnapshots.every((snapshot) => snapshot.workspaceId === workspaceId) &&
     planningRevision === expectedPlanningRevision &&
@@ -500,6 +509,9 @@ export async function isWorkspaceSearchAuthorizationCurrent(
     ) &&
     enterpriseSnapshots.every((snapshot) =>
       enterpriseSnapshot?.controlRevision === snapshot.enterpriseControlRevision
+    ) &&
+    orgStructureSnapshots.every((snapshot) =>
+      orgStructure?.revision === snapshot.orgStructureRevision
     )
 }
 

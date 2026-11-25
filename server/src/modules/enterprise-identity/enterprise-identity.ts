@@ -6425,6 +6425,9 @@ function toRoleAssignmentAuditMetadata(
     ...(memberId ? { memberId } : {}),
     roleId: assignment.roleId,
     scopeKind: assignment.scope.kind,
+    ...(assignment.scope.kind === 'org-unit' && assignment.scope.targetId
+      ? { orgUnitId: assignment.scope.targetId }
+      : {}),
     ...(assignment.scope.kind === 'team' && assignment.scope.targetId
       ? { teamId: assignment.scope.targetId }
       : {}),

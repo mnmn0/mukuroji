@@ -6,7 +6,7 @@ import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 /**
  * Resource level that a member role assignment applies to.
  */
-export type EnterpriseMemberRoleAssignmentScope = 'workspace' | 'team' | 'project'
+export type EnterpriseMemberRoleAssignmentScope = 'workspace' | 'org-unit' | 'team' | 'project'
 
 /**
  * Role assigned directly to one Workspace member.
@@ -20,7 +20,7 @@ export type EnterpriseMemberRoleAssignment = {
   roleId: string
   /** Resource level of the assignment. */
   scopeType: EnterpriseMemberRoleAssignmentScope
-  /** Workspace, Team, or Project ID of the assignment. */
+  /** Workspace, OrgUnit, Team, or Project ID of the assignment. */
   scopeId: string
   /** Team that owns the Project of a Project-scoped assignment. */
   scopeParentId?: string
@@ -128,6 +128,7 @@ export function isEnterpriseMemberRoleAssignment(
     typeof value.roleId === 'string' &&
     Boolean(value.roleId) &&
     (value.scopeType === 'workspace' ||
+      value.scopeType === 'org-unit' ||
       value.scopeType === 'team' ||
       value.scopeType === 'project') &&
     typeof value.scopeId === 'string' &&

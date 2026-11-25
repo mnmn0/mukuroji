@@ -37,6 +37,10 @@ export type ChannelDelivery = {
   weeklyReportAuthorMemberKey?: string
   /** First day of the week a weekly report reminder or escalation is about, when this is one. */
   weeklyReportWeekStart?: string
+  /** Member whose access ends, when this is an access expiry notice. */
+  accessExpiryMemberKey?: string
+  /** Access expiry an access expiry notice announces, when this is one. */
+  accessExpiresAt?: string
   /** Unsubmitted time entries a timesheet reminder was scanned for, when this is one. */
   timeEntryIds?: string[]
   /** Instant at or before which a timesheet reminder's entries had to end, when this is one. */

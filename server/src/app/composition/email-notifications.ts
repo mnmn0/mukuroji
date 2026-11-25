@@ -18,6 +18,7 @@ import {
   type EmailRecipientLookup,
 } from '../../modules/notifications'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
+import { isWorkspaceMemberRowActive } from '../../modules/workspace-access'
 import { createMemberNotificationLocaleReader } from './notification-locale'
 import { parseNotificationAppOrigin } from './notification-app-origin'
 import { createProductionNotificationDeliveryAuthorizer } from './notification-delivery-authorization'
@@ -54,7 +55,8 @@ export function createCognitoEmailRecipientReader(
       TableName: workspaceAccessTableName, ConsistentRead: true,
       Key: { workspaceId: delivery.workspaceId, recordKey: `MEMBER#${delivery.memberKey}` },
     }), { abortSignal: signal })).Item
-    if (!member || member.status !== 'active') return { kind: 'missing' }
+    // A member whose access expired gets no mail, even before the scheduled deactivation (ADR 0095).
+    if (!member || !isWorkspaceMemberRowActive(member, new Date())) return { kind: 'missing' }
     const username = [member.username, member.email, delivery.memberKey]
       .find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim()
     if (!username) return { kind: 'missing' }
