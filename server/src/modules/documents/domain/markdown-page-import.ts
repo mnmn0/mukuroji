@@ -67,6 +67,9 @@ const FENCE_OPEN = /^(`{3,}|~{3,})(.*)$/u
 /** Setext heading underline, which makes the paragraph line above it a heading. */
 const SETEXT_UNDERLINE = /^ {0,3}(=+|-+)[ \t]*$/u
 
+/** Thematic break, such as `---` or `* * *`, which is never the text of a Setext heading. */
+const THEMATIC_BREAK = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/u
+
 
 /** Task-list item line at the start of a line. */
 const TASK_ITEM = /^[-*+][ \t]+\[([ xX])\][ \t]+(.*)$/u
@@ -350,9 +353,11 @@ function scanBlocks(
     }
     // A Setext underline makes the paragraph text above it a heading. A single plain line becomes a
     // heading block so its level is normalized with the others; any other text is kept whole with
-    // the body, so the hierarchy does not change.
+    // the body, so the hierarchy does not change. A thematic break above is not paragraph text, so
+    // the line is a thematic break too and stays Markdown.
     const underline = SETEXT_UNDERLINE.exec(line)
-    if (underline && paragraph.length > 0 && index > 0 && (lines[index - 1] ?? '').trim() !== '') {
+    if (underline && paragraph.length > 0 && index > 0 && (lines[index - 1] ?? '').trim() !== ''
+      && !THEMATIC_BREAK.test(paragraph.at(-1) ?? '')) {
       const above = paragraph.at(-1) ?? ''
       const before = paragraph.at(-2)
       const plain = !/^(?: {4}|\t)/u.test(above) && stripContainerMarkers(above) === above.trimStart()
@@ -517,7 +522,7 @@ function linesOutsideFences(text: string): string[] {
   let fence: string | undefined
   let comment = false
   for (const line of text.split('\n')) {
-    const content = stripContainerMarkers(line)
+    const content = fenceContent(line)
     if (!comment && fence !== undefined) {
       if (closesFence(content, fence)) fence = undefined
       continue
@@ -569,6 +574,18 @@ function stripContainerMarkers(line: string): string {
 }
 
 /**
+ * Returns the part of a line that may open or close a fenced code block. A line indented by four
+ * spaces or a tab is indented code, so it is returned as it is and opens no fence.
+ *
+ * @param line - Source line.
+ * @returns The line's content without container markers, or the indented code line.
+ */
+function fenceContent(line: string): string {
+  if (/^(?: {4}|\t)/u.test(line)) return line
+  return stripContainerMarkers(line)
+}
+
+/**
  * Splits paragraph Markdown into sections at blank lines that are outside fenced code, including
  * fences nested in lists or quotes, and that are followed by an unindented line, so no section
  * starts inside a code block or a list item.
@@ -582,7 +599,7 @@ function splitAtBlankLinesOutsideFences(text: string): string[] {
   let fence: string | undefined
   let comment = false
   for (const line of text.split('\n')) {
-    const content = stripContainerMarkers(line)
+    const content = fenceContent(line)
     if (comment) {
       comment = opensHtmlComment(line, true)
     } else if (fence !== undefined) {

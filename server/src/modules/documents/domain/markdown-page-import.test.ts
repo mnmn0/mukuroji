@@ -252,6 +252,18 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
   })
 
+  test('keeps a first heading when indented backticks are code, not a fence', () => {
+    const result = convertMarkdownToPageBlocks('# First\n\n    ```\n\n# Second', (prefix) => prefix)
+    expect(result.ok).toBe(true)
+    expect(result).not.toHaveProperty('leadingTitle')
+  })
+
+  test('keeps two thematic breaks as Markdown rather than a heading', () => {
+    const blocks = convert('---\n---').blocks
+    expect(blocks.some((block) => block.type === 'heading')).toBe(false)
+    expect(blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: '---\n---' }])
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])
