@@ -65,6 +65,7 @@ export type BudgetThresholdAlertCandidate = {
  * @param workspaceId - Workspace of the statuses.
  * @param statuses - Budget use of the Workspace's Projects.
  * @returns One candidate per Project at or past its alert percentage.
+ * @throws RangeError when a Project's figures are not safe integers.
  */
 export function evaluateBudgetThresholdAlerts(
   workspaceId: string,
@@ -99,12 +100,14 @@ export function evaluateBudgetThresholdAlerts(
  *
  * @param status - Cost, budget amount, and alert percentage.
  * @returns True when the cost is at or past the alert percentage of the budget.
+ * @throws RangeError when a figure is not a safe integer.
  */
 function reachesAlertPercent(status: Pick<ScheduledProjectBudgetStatus, 'actualCostMinor' | 'amountMinor' | 'alertPercent'>) {
   const { actualCostMinor, amountMinor, alertPercent } = status
-  if ([actualCostMinor, amountMinor, alertPercent].every(Number.isSafeInteger)) {
-    // Integer products stay exact even past the range a double holds exactly.
-    return BigInt(actualCostMinor) * 100n >= BigInt(alertPercent) * BigInt(amountMinor)
+  if (![actualCostMinor, amountMinor, alertPercent].every(Number.isSafeInteger)) {
+    // A total past the exact integer range cannot be compared reliably, so the check fails loudly.
+    throw new RangeError('Project budget figures must be safe integers to check the alert threshold.')
   }
-  return actualCostMinor * 100 >= alertPercent * amountMinor
+  // Integer products stay exact even past the range a double holds exactly.
+  return BigInt(actualCostMinor) * 100n >= BigInt(alertPercent) * BigInt(amountMinor)
 }

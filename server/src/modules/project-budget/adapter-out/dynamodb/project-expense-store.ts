@@ -211,18 +211,28 @@ export class DynamoDbProjectExpenseStore implements ProjectExpenseStore {
               },
             },
           },
+          {
+            // A removed expense keeps its receipt, so a late retry of its creation does not bring
+            // it back and leave the receipt pointing at a live expense.
+            ConditionCheck: {
+              TableName: this.tableName,
+              Key: { workspaceId: input.workspaceId, recordKey: deletionKey(input, input.expense.id) },
+              ConditionExpression: 'attribute_not_exists(recordKey)',
+            },
+          },
           ...input.callerAuthorization,
           ...(audit ? [audit] : []),
         ],
       }))
     } catch (error) {
       const reasons = readCancellationCodes(error)
-      const transactionSize = 2 + input.callerAuthorization.length + (audit ? 1 : 0)
+      const transactionSize = 3 + input.callerAuthorization.length + (audit ? 1 : 0)
       const callerAuthorizationFailed = reasons
-        ?.slice(2, 2 + input.callerAuthorization.length)
+        ?.slice(3, 3 + input.callerAuthorization.length)
         .includes('ConditionalCheckFailed') ?? false
       // A caller whose access changed gets the same answer as for any other write.
       if (callerAuthorizationFailed) return storageFailure(error, transactionSize)
+      if (reasons?.[2] === 'ConditionalCheckFailed') throw expenseDeleted()
       if (reasons?.[0] === 'ConditionalCheckFailed') {
         // The expense ID comes from the request's idempotency key, so an existing expense means
         // the same request was already applied, unless it carried different content.
@@ -478,6 +488,7 @@ export class InMemoryProjectExpenseStore implements ProjectExpenseStore {
   async create(input: CreateInput): Promise<ProjectExpense> {
     requireCallerAuthorization(input.callerAuthorization)
     const key = memoryKey(input, input.expense.id)
+    if (this.deletions.has(key)) throw expenseDeleted()
     const existing = this.rows.get(key)
     if (existing) {
       if (existing.creationFingerprint === input.creationFingerprint) return structuredClone(existing.expense)
@@ -723,6 +734,15 @@ function readCancellationCodes(error: unknown): (string | undefined)[] | undefin
 
 /** DynamoDB cancellation codes that mean the request may succeed if retried. */
 const TRANSIENT_CANCELLATION_CODES = ['TransactionConflict', 'ProvisionedThroughputExceeded', 'ThrottlingError']
+
+/**
+ * Builds the error of a creation retried after its expense was removed.
+ *
+ * @returns The 409 error.
+ */
+function expenseDeleted() {
+  return new ProjectDataError(409, 'ProjectExpenseDeleted', 'This expense was deleted. Submit it again as a new expense.')
+}
 
 /**
  * Maps a DynamoDB failure to a Project data error.

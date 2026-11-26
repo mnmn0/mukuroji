@@ -143,6 +143,7 @@ test('writes the expense, the counter, the caller fence, and the audit event in 
     TransactItems: [
       { Put: { TableName: 'planning', Item: { workspaceId: 'w', recordKey: 'PROJECT_EXPENSE#t#p#ENTRY#x1', entryType: 'project-expense', creationFingerprint: 'f1' } } },
       { Update: { Key: { workspaceId: 'w', recordKey: 'PROJECT_EXPENSE#t#p' } } },
+      { ConditionCheck: { Key: { recordKey: 'PROJECT_EXPENSE#t#p#DELETED#x1' }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
       callerAuthorization[0],
       { Put: { TableName: 'audit' } },
     ],
@@ -150,19 +151,24 @@ test('writes the expense, the counter, the caller fence, and the audit event in 
   // The amount is confidential, so the audit event records that it changed without its value.
   const input = sent[0]?.input
   const items = typeof input === 'object' && input !== null && 'TransactItems' in input && Array.isArray(input.TransactItems) ? input.TransactItems : []
-  const auditItem = JSON.stringify(items[3])
+  const auditItem = JSON.stringify(items[4])
   expect(auditItem).toContain('amountMinor')
   expect(auditItem).not.toContain(String(expense.amountMinor))
 })
 
 test('returns the stored expense for a retried creation and refuses a reused key with other content', async () => {
-  const writeError = cancellation(['ConditionalCheckFailed', 'None', 'None', 'None'])
+  const writeError = cancellation(['ConditionalCheckFailed', 'None', 'None', 'None', 'None'])
   expect(await createWith(fakeClient({ writeError, row: expenseRow(expense) }))).toEqual(expense)
   expect(await createWith(fakeClient({ writeError, row: expenseRow(expense) }), 'f2')).toMatchObject({ status: 409, code: 'ProjectExpenseIdempotencyConflict' })
 })
 
+test('refuses to bring back a removed expense when its creation is retried', async () => {
+  const writeError = cancellation(['None', 'None', 'ConditionalCheckFailed', 'None', 'None'])
+  expect(await createWith(fakeClient({ writeError }))).toMatchObject({ status: 409, code: 'ProjectExpenseDeleted' })
+})
+
 test('reports a full ledger only for a valid counter at the limit', async () => {
-  const writeError = cancellation(['None', 'ConditionalCheckFailed', 'None', 'None'])
+  const writeError = cancellation(['None', 'ConditionalCheckFailed', 'None', 'None', 'None'])
   const full = { workspaceId: 'w', recordKey: 'PROJECT_EXPENSE#t#p', entryType: 'project-expense-ledger', schemaVersion: 1, teamId: 't', projectId: 'p', entryCount: 2_000 }
   expect(await createWith(fakeClient({ writeError, counter: full }))).toMatchObject({ status: 413, code: 'ProjectExpensesFull' })
   expect(await createWith(fakeClient({ writeError, counter: { ...full, projectId: 'other' } }))).toMatchObject({ status: 502 })

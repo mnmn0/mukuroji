@@ -89,6 +89,7 @@ export type ProjectBudgetConsumption = {
  * @param now - Current instant.
  * @param ports - Project-scoped reads.
  * @returns The consumption, or undefined for a Project without a budget or with a zero budget.
+ * @throws RangeError when the cost passes the exact integer range.
  */
 export async function loadProjectBudgetConsumption(
   scope: {
@@ -133,6 +134,9 @@ export async function loadProjectBudgetConsumption(
         ? Math.round(entry.actualCostMinor * segment.ratio)
         : Math.round((segment.minutes / 60) * entry.hourlyRateMinor)
     }
+  }
+  if (!Number.isSafeInteger(actualCostMinor)) {
+    throw new RangeError(`Project ${projectId} cost exceeds the exact integer range.`)
   }
   return {
     budget,

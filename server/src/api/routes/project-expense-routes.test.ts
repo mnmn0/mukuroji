@@ -170,6 +170,17 @@ test('submits, lists, resubmits, and deletes a Project expense for its manager',
   // A retry of the removal after a lost response succeeds again; another request finds nothing.
   expect((await request(`${path}/${expense.id}`, 'DELETE', { expectedRevision: 2 }, 'expense-1-delete')).status).toBe(204)
   expect((await request(`${path}/${expense.id}`, 'DELETE', { expectedRevision: 2 }, 'expense-1-delete-again')).status).toBe(404)
+  // A late retry of the original creation does not bring the removed expense back.
+  const recreated = await request(path, 'POST', {
+    date: '2026-01-06',
+    category: ' 外注費 ',
+    amountMinor: 50_000,
+    currency: 'JPY',
+    receiptFileIds: ['receipt-1'],
+  }, 'expense-1')
+  expect(recreated.status).toBe(409)
+  expect(await recreated.json()).toMatchObject({ code: 'ProjectExpenseDeleted' })
+  expect((await request(`${path}/${expense.id}`, 'DELETE', { expectedRevision: 2 }, 'expense-1-delete')).status).toBe(204)
   expect((await (await request(path)).json() as ProjectExpenseListResponse).expenses).toEqual([])
 })
 

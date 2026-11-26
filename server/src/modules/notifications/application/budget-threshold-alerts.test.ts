@@ -30,3 +30,10 @@ test('decides the alert on the exact cost, even where the products exceed double
   expect(evaluateBudgetThresholdAlerts('w', [status({ amountMinor, actualCostMinor: 8_106_479_329_266_891 })])).toEqual([])
   expect(evaluateBudgetThresholdAlerts('w', [status({ amountMinor, actualCostMinor: 8_106_479_329_266_892 })])).toHaveLength(1)
 })
+
+test('refuses a cost past the exact integer range instead of guessing', () => {
+  // 110% of the largest safe budget is not a safe integer, so a double product could round up.
+  const amountMinor = Number.MAX_SAFE_INTEGER
+  expect(() => evaluateBudgetThresholdAlerts('w', [status({ amountMinor, alertPercent: 110, actualCostMinor: 9_907_919_180_215_090 })]))
+    .toThrow(RangeError)
+})
