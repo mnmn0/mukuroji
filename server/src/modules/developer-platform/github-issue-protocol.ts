@@ -291,7 +291,8 @@ function isCompletedWrite(
 ) {
   return issue.originMarker === mutation.originMarker &&
     (body.title === undefined || issue.title === body.title) &&
-    issue.description === (mutation.description ?? '') &&
+    // Reading the issue turns CRLF into LF, so the sent description is compared the same way.
+    issue.description === (mutation.description ?? '').replace(/\r\n/gu, '\n') &&
     (body.state === undefined || issue.state === body.state)
 }
 

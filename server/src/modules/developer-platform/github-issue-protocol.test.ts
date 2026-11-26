@@ -246,6 +246,15 @@ describe('GitHub issue protocol', () => {
     })
     expect(replay.requests.map((entry) => entry.method)).toEqual(['GET'])
 
+    // A description with CRLF line endings reads back with LF and still counts as this write.
+    const crlf = createRequester([{
+      status: 200,
+      payload: { ...written, body: 'Line one\r\nLine two\r\n\r\n<!-- mukuroji-origin:v1.payload.signature -->' },
+    }])
+    expect(await protocol.push(crlf.request, { ...mutation, description: 'Line one\r\nLine two' }))
+      .toMatchObject({ description: 'Line one\nLine two' })
+    expect(crlf.requests.map((entry) => entry.method)).toEqual(['GET'])
+
     // An edit that kept the marker but changed the contents is still a change.
     const edited = createRequester([{ status: 200, payload: { ...written, title: 'Fix login on Safari' } }])
     await expect(protocol.push(edited.request, mutation)).rejects.toMatchObject({ code: 'ConnectorExternalVersionChanged' })
