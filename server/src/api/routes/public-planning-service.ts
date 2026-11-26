@@ -147,6 +147,47 @@ function readStoredStatusUpdate(storedBody: unknown): { id: string, version: num
 }
 
 /**
+ * Reads the Milestone ID from a stored creation response.
+ *
+ * @param storedBody - Stored response body.
+ * @returns The Milestone ID.
+ */
+function readStoredMilestone(storedBody: unknown): { id: string } {
+  const item = typeof storedBody === 'object' && storedBody !== null && 'item' in storedBody ? storedBody.item : undefined
+  if (typeof item !== 'object' || item === null || !('id' in item) || typeof item.id !== 'string' || item.id === '') {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Stored idempotency response is invalid.', true)
+  }
+  return { id: item.id }
+}
+
+/**
+ * Reads the Cycle, Milestone, and Goal IDs from a stored Work Item planning response.
+ *
+ * @param storedBody - Stored response body.
+ * @returns The entity IDs it names.
+ */
+function readStoredWorkItemPlanningTargets(storedBody: unknown): string[] {
+  if (typeof storedBody !== 'object' || storedBody === null) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Stored idempotency response is invalid.', true)
+  }
+  const cycleId = 'cycleId' in storedBody ? storedBody.cycleId : undefined
+  const milestoneId = 'milestoneId' in storedBody ? storedBody.milestoneId : undefined
+  const goalIds = 'goalIds' in storedBody ? storedBody.goalIds : []
+  if (
+    (cycleId !== undefined && typeof cycleId !== 'string') ||
+    (milestoneId !== undefined && typeof milestoneId !== 'string') ||
+    !Array.isArray(goalIds) || !goalIds.every((goalId) => typeof goalId === 'string')
+  ) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Stored idempotency response is invalid.', true)
+  }
+  return [
+    ...(cycleId === undefined ? [] : [cycleId]),
+    ...(milestoneId === undefined ? [] : [milestoneId]),
+    ...goalIds.filter((goalId): goalId is string => typeof goalId === 'string'),
+  ]
+}
+
+/**
  * Builds the audit context of a Planning write made through the Public API.
  *
  * The audit idempotency key is namespaced by the credential's stable caller identity, as the
@@ -574,10 +615,15 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
       }
     },
 
-    async authorizeMilestoneCreate(credential, input) {
+    async authorizeMilestoneCreate(credential, input, storedBody) {
       const principal = await resolvePlanningPrincipal(credential, 'planning.write', input)
       requireWorkspaceBusinessWrite(principal)
       await requirePlanningScopePermission(principal, input, 'member')
+      if (storedBody === undefined) return
+      // The Milestone may have moved since; the owner must still see it where it is now.
+      const { id } = readStoredMilestone(storedBody)
+      const reader = await resolvePlanningPrincipal(credential, 'planning.read', await readEntityResource(credential.workspaceId, id))
+      requireVisibleMilestone((await readPlanningSnapshotAsPrincipal(reader)).entities, id)
     },
 
     async createMilestone(credential, input, context) {
@@ -681,7 +727,7 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
       return readWorkItemPlanning(principal, teamId, workItemId)
     },
 
-    async authorizeWorkItemPlanningChange(credential, teamId, workItemId) {
+    async authorizeWorkItemPlanningChange(credential, teamId, workItemId, storedBody) {
       const principal = await resolvePlanningPrincipal(
         credential,
         'planning.write',
@@ -689,6 +735,14 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
       )
       requireWorkspaceBusinessWrite(principal)
       await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+      if (storedBody === undefined) return
+      // The stored response names only what the owner could see then; it must still see each one.
+      const named = readStoredWorkItemPlanningTargets(storedBody)
+      if (named.length === 0) return
+      const visible = await readVisibleEntityIds(principal)
+      if (named.some((entityId) => !visible.has(entityId))) {
+        throw new PublicApiServiceError(404, 'not_found', 'Planning entity was not found.')
+      }
     },
 
     async updateWorkItemPlanning(credential, teamId, workItemId, input, idempotency) {
@@ -719,7 +773,8 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
         // Nothing to remove; still answer only for a Work Item the owner may change.
         requireWorkspaceBusinessWrite(principal)
         await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
-        return readWorkItemPlanning(principal, teamId, workItemId)
+        // Answer from the state the removal was decided on, not from a later read.
+        return toPublicWorkItemPlanning(teamId, workItemId, state.revision, undefined, new Set())
       }
       const visible = await readVisibleEntityIds(principal)
       const receipt = createWorkItemPlanningReceipt(credential.workspaceId, idempotency, visible)
@@ -764,7 +819,11 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
         helpNeeded: input.helpNeeded ?? '',
         nextAction: input.nextAction ?? '',
         evidence: [],
-        expectedRevision: await resolveRevision(principal, expectedRevision),
+        expectedRevision: await resolveReceiptRevision(
+          principal,
+          expectedRevision,
+          (await workItemDependencies.planning.getAuthorizationState(principal.directoryId)).revision,
+        ),
       }, {
         idempotencyKey: deriveInnerPublishKey(credential, context),
         method: 'POST',

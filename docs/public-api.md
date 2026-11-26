@@ -92,7 +92,7 @@ Planning の endpoint は、読み取りに `work-items:read`、書き込みに 
 
 `GET /api/v1/work-items/{workItemId}/planning?teamId={teamId}` は Work Item の Cycle・Milestone・Goal を `{ schemaVersion, revision, teamId, workItemId, cycleId?, milestoneId?, goalIds }` で返します（`PublicWorkItemPlanning`）。読めない entity は含めません。`PUT` は body `{ cycleId?, milestoneId?, expectedRevision? }` で Cycle と Milestone を変え、`null` で外します。送らない項目は今の値のままです。
 
-`GET /api/v1/planning/status-updates?targetType={project|team|initiative}` は健康度の更新を新しい順に `{ schemaVersion, revision, items, hasMore, nextCursor? }` で返します（`PublicPlanningStatusUpdatePage`）。対象は `teamId` と `projectId`（project）、`teamId`（team）、`entityId`（initiative）で指します。`POST /api/v1/planning/status-updates` は body `{ target, health, summary, risk?, riskSummary?, decisionSummary?, helpNeeded?, nextAction?, expectedRevision? }` で更新を公開し、`201` と `{ schemaVersion, revision, item }` を返します。更新の cadence がない対象は `409 conflict` です（cadence は Web の Planning で設定します）。公開した更新は Public API から編集・削除できません。
+`GET /api/v1/planning/status-updates?targetType={project|team|initiative}` は健康度の更新を新しい順に `{ schemaVersion, revision, items, hasMore, nextCursor? }` で返します（`PublicPlanningStatusUpdatePage`）。対象は `teamId` と `projectId`（project）、`teamId`（team）、`entityId`（initiative）で指します。`POST /api/v1/planning/status-updates` は body `{ target, health, summary, risk?, riskSummary?, decisionSummary?, helpNeeded?, nextAction?, expectedRevision? }` で更新を公開し、`201` と `{ schemaVersion, revision, item }` を返します。本文の各項目は 4,096 文字以内かつ UTF-8 で 8,000 バイト以内です。更新の cadence がない対象は `409 conflict` です（cadence は Web の Planning で設定します）。公開した更新は Public API から編集・削除できません。
 
 ## Work Item Type catalog
 

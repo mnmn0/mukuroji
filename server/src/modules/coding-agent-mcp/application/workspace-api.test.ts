@@ -321,13 +321,26 @@ test('save_issue changes only the Milestone without a Work Item revision', async
 })
 
 test('save_issue reports a saved Work Item whose Cycle could not be set, so a retry finishes it', async () => {
-  const { api: base } = apiForPlanning()
+  const { api: base, writes } = apiForPlanning()
+  const { api: issueApi, writes: issueWrites } = apiWithFailingKeyRead()
+  let failures = 1
   const api: WorkspaceApi = {
     ...base,
-    updateWorkItemPlanning: async () => { throw new AgentTaskError('conflict', 'Planning changed.', false) },
+    createIssue: issueApi.createIssue,
+    updateWorkItemPlanning: async (...args) => {
+      if (failures-- > 0) throw new AgentTaskError('conflict', 'Planning changed.', false)
+      return base.updateWorkItemPlanning(...args)
+    },
   }
-  const failure = createWorkspaceIssues(api).saveIssue({ teamId: 'team', title: 'Ship', cycleId: 'cycle-1', idempotencyKey: 'key-8' })
-  await expect(failure).rejects.toThrow('Work Item task was saved, but its Cycle or Milestone was not changed')
+  const issues = createWorkspaceIssues(api)
+  const input = { teamId: 'team', title: 'Ship', cycleId: 'cycle-1', idempotencyKey: 'key-8' }
+  await expect(issues.saveIssue(input)).rejects.toThrow('Work Item task was saved, but its Cycle or Milestone was not changed')
+
+  // The retry sends the same key, which the server replays for the Work Item, and finishes the link.
+  const saved = await issues.saveIssue(input)
+  expect(saved).toMatchObject({ cycleId: 'cycle-1' })
+  expect(issueWrites).toEqual(['create:key-8', 'create:key-8'])
+  expect(writes).toEqual([{ call: 'updateWorkItemPlanning', input: { cycleId: 'cycle-1' }, key: 'key-8.planning' }])
 })
 
 test('save_status_update publishes the update without the idempotency key in the body', async () => {

@@ -761,11 +761,17 @@ export interface PublicPlanningService {
     scope: { teamId?: string, projectId?: string },
   ): Promise<PublicPlanningEntityList>
   /**
-   * Checks that the owner may create a Milestone in the requested scope; replays call it.
+   * Checks that the owner may create a Milestone in the requested scope; replays call it, and
+   * also check that the owner can still see the Milestone the stored response names.
    * @param credential - Authenticated developer credential.
    * @param input - Creation request.
+   * @param storedBody - Stored response body of a replay.
    */
-  authorizeMilestoneCreate(credential: AuthenticatedDeveloperCredential, input: CreatePublicMilestoneRequest): Promise<void>
+  authorizeMilestoneCreate(
+    credential: AuthenticatedDeveloperCredential,
+    input: CreatePublicMilestoneRequest,
+    storedBody?: unknown,
+  ): Promise<void>
   /**
    * Creates a Milestone whose ID derives from the idempotency key.
    * @param credential - Authenticated developer credential.
@@ -814,15 +820,18 @@ export interface PublicPlanningService {
     workItemId: string,
   ): Promise<PublicWorkItemPlanning>
   /**
-   * Checks that the owner may change a Work Item's Planning link; replays call it.
+   * Checks that the owner may change a Work Item's Planning link; replays call it, and also check
+   * that the owner can still see each Cycle, Milestone, and Goal the stored response names.
    * @param credential - Authenticated developer credential.
    * @param teamId - Team of the Work Item.
    * @param workItemId - Work Item ID.
+   * @param storedBody - Stored response body of a replay.
    */
   authorizeWorkItemPlanningChange(
     credential: AuthenticatedDeveloperCredential,
     teamId: string,
     workItemId: string,
+    storedBody?: unknown,
   ): Promise<void>
   /**
    * Puts a Work Item in a Cycle or Milestone, or takes it out, keeping the rest of its link.
@@ -1982,7 +1991,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       status: 201,
       body: await planning.createMilestone(credential, body, context),
     }), {
-      authorizeReplay: () => planning.authorizeMilestoneCreate(credential, body),
+      authorizeReplay: (storedBody) => planning.authorizeMilestoneCreate(credential, body, storedBody),
     })
   })
 
@@ -2019,7 +2028,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       status: 200,
       body: await planning.updateWorkItemPlanning(credential, teamId, workItemId, body, idempotency),
     }), {
-      authorizeReplay: () => planning.authorizeWorkItemPlanningChange(credential, teamId, workItemId),
+      authorizeReplay: (storedBody) => planning.authorizeWorkItemPlanningChange(credential, teamId, workItemId, storedBody),
     })
   })
 
@@ -6276,6 +6285,24 @@ const PLANNING_DESCRIPTION_MAX_BYTES = 20_000
 /** Longest text of one health update field the Public API accepts. */
 const PLANNING_UPDATE_TEXT_MAX_LENGTH = 4_096
 
+/** Longest text of one health update field, in UTF-8 bytes, as the Planning store accepts it. */
+const PLANNING_UPDATE_TEXT_MAX_BYTES = 8_000
+
+/**
+ * Reads one optional health update text, which the Planning store also limits in UTF-8 bytes.
+ *
+ * @param value - Untrusted value.
+ * @param label - Field name used in the error.
+ * @returns The text, or undefined when it is absent.
+ */
+function readPlanningUpdateText(value: unknown, label: string): string | undefined {
+  const text = readOptionalString(value, label, PLANNING_UPDATE_TEXT_MAX_LENGTH)
+  if (text !== undefined && new TextEncoder().encode(text).length > PLANNING_UPDATE_TEXT_MAX_BYTES) {
+    throw new PublicApiServiceError(400, 'validation_failed', `${label} must be at most ${PLANNING_UPDATE_TEXT_MAX_BYTES} bytes of UTF-8.`)
+  }
+  return text
+}
+
 /**
  * Reads an optional value that must be one of a fixed list.
  *
@@ -6475,17 +6502,15 @@ function readUpdatePublicMilestoneRequest(value: unknown): UpdatePublicMilestone
 function readUpdatePublicWorkItemPlanningRequest(value: unknown): UpdatePublicWorkItemPlanningRequest {
   const body = requireRecord(value, 'Work Item Planning body is required.')
   assertAllowedFields(body, ['expectedRevision', 'cycleId', 'milestoneId'], 'Work Item Planning body')
-  if (body.cycleId === undefined && body.milestoneId === undefined) {
-    throw new PublicApiServiceError(400, 'validation_failed', 'Send cycleId, milestoneId, or both.')
-  }
   const expectedRevision = readOptionalPlanningRevision(body.expectedRevision)
-  return {
-    ...(expectedRevision === undefined ? {} : { expectedRevision }),
-    ...(body.cycleId === undefined ? {} : { cycleId: body.cycleId === null ? null : readIdentifier(body.cycleId, 'cycleId') }),
-    ...(body.milestoneId === undefined
-      ? {}
-      : { milestoneId: body.milestoneId === null ? null : readIdentifier(body.milestoneId, 'milestoneId') }),
-  }
+  const revision = expectedRevision === undefined ? {} : { expectedRevision }
+  const cycleId = body.cycleId === undefined || body.cycleId === null ? body.cycleId : readIdentifier(body.cycleId, 'cycleId')
+  const milestoneId = body.milestoneId === undefined || body.milestoneId === null
+    ? body.milestoneId
+    : readIdentifier(body.milestoneId, 'milestoneId')
+  if (cycleId !== undefined) return { ...revision, cycleId, ...(milestoneId === undefined ? {} : { milestoneId }) }
+  if (milestoneId !== undefined) return { ...revision, milestoneId }
+  throw new PublicApiServiceError(400, 'validation_failed', 'Send cycleId, milestoneId, or both.')
 }
 
 /**
@@ -6503,10 +6528,10 @@ function readCreatePublicPlanningStatusUpdateRequest(value: unknown): CreatePubl
   if (health === undefined) throw new PublicApiServiceError(400, 'validation_failed', 'health is required.')
   const risk = readOptionalEnum(body.risk, PLANNING_RISK_VALUES, 'risk')
   const expectedRevision = readOptionalPlanningRevision(body.expectedRevision)
-  const summary = readOptionalString(body.summary, 'summary', PLANNING_UPDATE_TEXT_MAX_LENGTH)
+  const summary = readPlanningUpdateText(body.summary, 'summary')
   if (summary === undefined) throw new PublicApiServiceError(400, 'validation_failed', 'summary is required.')
   const texts = Object.fromEntries((['riskSummary', 'decisionSummary', 'helpNeeded', 'nextAction'] as const)
-    .map((field) => [field, readOptionalString(body[field], field, PLANNING_UPDATE_TEXT_MAX_LENGTH)])
+    .map((field) => [field, readPlanningUpdateText(body[field], field)])
     .filter(([, text]) => text !== undefined))
   return {
     target: readPlanningUpdateTargetValue(body.target),

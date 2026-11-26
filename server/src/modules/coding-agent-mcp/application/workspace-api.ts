@@ -517,12 +517,14 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
     workItemId: string,
     input: Pick<WorkspaceIssueSaveInput, 'cycleId' | 'milestoneId' | 'idempotencyKey'>,
   ): Promise<{ cycleId?: string, milestoneId?: string } | Record<string, never>> {
-    if (input.cycleId === undefined && input.milestoneId === undefined) return {}
+    const change: UpdatePublicWorkItemPlanningRequest | undefined = input.cycleId !== undefined
+      ? { cycleId: input.cycleId, ...(input.milestoneId === undefined ? {} : { milestoneId: input.milestoneId }) }
+      : input.milestoneId !== undefined
+        ? { milestoneId: input.milestoneId }
+        : undefined
+    if (change === undefined) return {}
     try {
-      const link = await api.updateWorkItemPlanning(teamId, workItemId, {
-        ...(input.cycleId === undefined ? {} : { cycleId: input.cycleId }),
-        ...(input.milestoneId === undefined ? {} : { milestoneId: input.milestoneId }),
-      }, `${input.idempotencyKey}.planning`)
+      const link = await api.updateWorkItemPlanning(teamId, workItemId, change, `${input.idempotencyKey}.planning`)
       return {
         ...(link.cycleId === undefined ? {} : { cycleId: link.cycleId }),
         ...(link.milestoneId === undefined ? {} : { milestoneId: link.milestoneId }),

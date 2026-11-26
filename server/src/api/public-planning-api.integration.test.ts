@@ -72,8 +72,10 @@ async function token(idempotencyKey: string): Promise<IdempotencyMutationToken> 
 }
 
 /**
- * Installs an in-memory Planning store for the test Workspace, whose health update publish and
- * entity patch commit their idempotency receipt with the change, as the DynamoDB transaction does.
+ * Installs an in-memory Planning store for the test Workspace that completes the idempotency
+ * receipts a write prepared once the write returns. It checks receipt preparation and replay only:
+ * the two steps are not atomic here, and the DynamoDB adapter tests cover that the receipt goes in
+ * the same transaction as the Planning write.
  *
  * @returns The store.
  */
@@ -161,6 +163,10 @@ describe('Public API Planning', () => {
       context('key-1'),
     ))
     expect(retried.item.id).toBe(created.item.id)
+    // A replay answers only while the owner can still see the Milestone it created.
+    await runWithTestAppDependencies(() => service.authorizeMilestoneCreate(credential, input, created))
+    await expect(runWithTestAppDependencies(() => service.authorizeMilestoneCreate(credential, input, { item: { id: 'missing' } })))
+      .rejects.toMatchObject({ status: 404 })
 
     const listed = await runWithTestAppDependencies(() => service.listEntities(credential, 'milestone', { teamId: 'core-team' }))
     expect(listed.items.map((item) => item.id)).toEqual([created.item.id])
@@ -224,6 +230,13 @@ describe('Public API Planning', () => {
     expect(inCycle).toMatchObject({ teamId: 'core-team', workItemId: 'onboarding-friction', cycleId: 'cycle-1', goalIds: [] })
     // The receipt committed with the link, so a retry after a lost response replays it.
     expect(await reserve('key-8')).toEqual({ replay: { status: 200, body: inCycle } })
+    await runWithTestAppDependencies(() => service.authorizeWorkItemPlanningChange(credential, 'core-team', 'onboarding-friction', inCycle))
+    await expect(runWithTestAppDependencies(() => service.authorizeWorkItemPlanningChange(
+      credential,
+      'core-team',
+      'onboarding-friction',
+      { cycleId: 'unseen', goalIds: [] },
+    ))).rejects.toMatchObject({ status: 404 })
     expect(await runWithTestAppDependencies(() => service.getWorkItemPlanning(credential, 'core-team', 'onboarding-friction')))
       .toMatchObject({ cycleId: 'cycle-1' })
 
@@ -287,6 +300,16 @@ describe('Public API Planning', () => {
 
     const page = await runWithTestAppDependencies(() => service.listStatusUpdates(credential, projectTarget, 10, undefined))
     expect(page).toMatchObject({ schemaVersion: 1, hasMore: false, items: [{ version: 2 }, { id: published.item.id, version: 1 }] })
+
+    // A revision that only a Work Item change moved past is accepted, as Web Planning accepts it.
+    const read = page.revision
+    planning.recordWorkItemRevision(workspaceId)
+    const third = await runWithTestAppDependencies(() => service.publishStatusUpdate(
+      credential,
+      { ...input, summary: 'Third.', expectedRevision: read },
+      context('key-11'),
+    ))
+    expect(third.item.version).toBe(3)
   })
 
   test('refuses a health update for a target without an update cadence', async () => {

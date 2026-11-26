@@ -961,6 +961,8 @@ describe('public API router', () => {
     const badTarget = await read('/v1/planning/status-updates?targetType=portfolio&entityId=p-1')
     const published = await write('/v1/planning/status-updates', 'POST', 'update-key', { target: { type: 'team', teamId: 'team-1' }, health: 'on-track', summary: 'On plan.' })
     const withoutSummary = await write('/v1/planning/status-updates', 'POST', 'summary-key', { target: { type: 'team', teamId: 'team-1' }, health: 'on-track' })
+    // 2,700 three-byte characters fit the character limit but not the 8,000-byte store limit.
+    const tooManyBytes = await write('/v1/planning/status-updates', 'POST', 'bytes-key', { target: { type: 'team', teamId: 'team-1' }, health: 'on-track', summary: '計'.repeat(2700) })
 
     expect(listed.status).toBe(200)
     expect(await listed.json()).toEqual({ schemaVersion: 1, revision: 4, items: [entity] })
@@ -982,6 +984,7 @@ describe('public API router', () => {
     expect(badTarget.status).toBe(400)
     expect(published.status).toBe(201)
     expect(withoutSummary.status).toBe(400)
+    expect(tooManyBytes.status).toBe(400)
     expect(calls).toEqual([
       'list milestone team-1 -',
       'create Beta initiative-1 2026-12-10 milestone-key',

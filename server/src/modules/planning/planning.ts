@@ -1107,7 +1107,6 @@ type PlanningArchiveStep = {
   workItemConditions?: PlanningWorkItemCondition[]
 }
 
-/** Storage 非依存の Planning mutation 実装です。 */
 /**
  * Reads the computed progress, linked Work Item count, and rollup health of one entity from a
  * committed snapshot, for the durable receipt of the change.
@@ -1123,6 +1122,7 @@ function readEntityRollup(planning: PlanningSnapshot, entityId: string): { rollu
     : { rollup: { progress: entity.progress, linkedWorkItemCount: entity.linkedWorkItemCount, rollupHealth: entity.rollupHealth } }
 }
 
+/** Planning mutations independent of the storage backend. */
 abstract class BasePlanningClient implements PlanningClient {
   /** Reads compact source-owned activity; callers must authorize targets before exposing signals. */
   abstract getUpdateActivities(workspaceId: string): Promise<PlanningUpdateActivity[]>
@@ -2681,7 +2681,15 @@ abstract class BasePlanningClient implements PlanningClient {
       if ((link.projectId ?? summary.projectId) !== summary.projectId) {
         throw invalid('PlanningWorkItemProjectMismatch', 'Work Item link Project does not match the Work Item.')
       }
-      validateWorkItemLink(state, link, true)
+      // A target the stored link already has may stay after it closed; only new targets must be open.
+      const retained = new Set(current === undefined || current.projectId !== link.projectId
+        ? []
+        : [
+            ...(current.cycleId === link.cycleId && current.cycleId !== undefined ? [current.cycleId] : []),
+            ...(current.milestoneId === link.milestoneId && current.milestoneId !== undefined ? [current.milestoneId] : []),
+            ...current.goalIds.filter((goalId) => link.goalIds.includes(goalId)),
+          ])
+      validateWorkItemLink(state, link, true, retained)
       const next = {
         ...state,
         workItemLinks: [
@@ -5922,10 +5930,20 @@ function validateWorkItemDependencies(
   for (const key of adjacency.keys()) visit(key)
 }
 
+/**
+ * Checks that a Work Item link names existing targets of the right type and scope.
+ *
+ * @param state - Planning state the link belongs to.
+ * @param link - Work Item link.
+ * @param requireActive - Whether targets must be unarchived and open, as a new link requires.
+ * @param retained - Targets the link already had, which may stay even after they were completed or
+ *   canceled, so that another part of the link can still change.
+ */
 function validateWorkItemLink(
   state: PlanningWorkspaceState,
   link: PlanningWorkItemLink,
   requireActive = false,
+  retained: ReadonlySet<string> = new Set(),
 ) {
   const references = [
     ...(link.cycleId ? [[link.cycleId, 'cycle'] as const] : []),
@@ -5948,6 +5966,7 @@ function validateWorkItemLink(
     }
     if (
       requireActive &&
+      !retained.has(entityId) &&
       (entity.status === 'completed' || entity.status === 'canceled')
     ) {
       throw conflict('PlanningEntityClosed', 'Completed or canceled Planning entities cannot receive links.')

@@ -174,8 +174,8 @@ export type PublicWorkItemPlanning = {
   goalIds: string[]
 }
 
-/** Body of `PUT /api/v1/work-items/{workItemId}/planning`; omitted fields keep their value. */
-export type UpdatePublicWorkItemPlanningRequest = {
+/** Fields of `PUT /api/v1/work-items/{workItemId}/planning` that every body may carry. */
+type PublicWorkItemPlanningChange = {
   /**
    * Planning graph revision the client read. Omitted, the server applies the write to the latest
    * revision.
@@ -186,6 +186,20 @@ export type UpdatePublicWorkItemPlanningRequest = {
   /** Milestone the Work Item contributes to; null removes it. */
   milestoneId?: string | null
 }
+
+/**
+ * Body of `PUT /api/v1/work-items/{workItemId}/planning`; omitted fields keep their value, and
+ * the body names the Cycle, the Milestone, or both.
+ */
+export type UpdatePublicWorkItemPlanningRequest =
+  | (PublicWorkItemPlanningChange & {
+    /** Cycle to put the Work Item in; null takes it out of its Cycle. */
+    cycleId: string | null
+  })
+  | (PublicWorkItemPlanningChange & {
+    /** Milestone the Work Item contributes to; null removes it. */
+    milestoneId: string | null
+  })
 
 /** A health update of a Project, Team, or Initiative, as the Public API returns it. */
 export type PublicPlanningStatusUpdate = {
