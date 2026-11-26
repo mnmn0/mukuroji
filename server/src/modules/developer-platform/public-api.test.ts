@@ -2221,7 +2221,7 @@ describe('public API router', () => {
         body: JSON.stringify({
           installationId: installation.id,
           resourceType: 'issue',
-          externalId: 'GH-29',
+          externalId: 'mnmn0/mukuroji#29',
           externalUrl: 'https://github.com/mnmn0/mukuroji/issues/29',
           displayKey: '#29',
           syncDirection: 'bidirectional',
@@ -2231,6 +2231,24 @@ describe('public API router', () => {
     expect(created.status).toBe(201)
     const link = await created.json() as { id: string }
     expect(link.id).toBeString()
+
+    // `#` is allowed for provider IDs such as a GitHub issue's owner/repository#number, but an ID
+    // still has to start with a letter or digit.
+    const badId = await router.request(
+      'http://localhost/v1/work-items/work-item-1/external-links?teamId=team-1',
+      {
+        method: 'POST',
+        headers: { ...authorization, 'Content-Type': 'application/json', 'Idempotency-Key': 'link-bad-external-id' },
+        body: JSON.stringify({
+          installationId: installation.id,
+          resourceType: 'issue',
+          externalId: '#29',
+          externalUrl: 'https://github.com/mnmn0/mukuroji/issues/29',
+          syncDirection: 'bidirectional',
+        }),
+      },
+    )
+    expect(badId.status).toBe(400)
 
     // A calendar event link is always created by Mukuroji, so an existing event ID is refused.
     const existingEvent = await router.request(

@@ -4513,7 +4513,7 @@ function readExternalLinkFields(body: Record<string, unknown>) {
     ...(createsResource
       ? {}
       : {
-          externalId: readIdentifier(body.externalId, 'externalId'),
+          externalId: readExternalId(body.externalId),
           externalUrl: readHttpsUrl(body.externalUrl, 'externalUrl'),
         }),
     ...(body.displayKey !== undefined
@@ -4938,6 +4938,24 @@ function readIdentifier(value: unknown, label: string) {
     !/^[\p{Letter}\p{Number}][\p{Letter}\p{Number}._:/@+-]*$/u.test(identifier)
   ) {
     throw new PublicApiServiceError(400, 'validation_failed', `${label} is invalid.`)
+  }
+  return identifier
+}
+
+/**
+ * Reads the provider ID of an external resource. It follows the identifier rules and also allows
+ * `#`, which provider IDs such as a GitHub issue's `owner/repository#number` use.
+ *
+ * @param value - Untrusted value.
+ * @returns The external ID.
+ */
+function readExternalId(value: unknown) {
+  const identifier = readRequiredString(value, 'externalId')
+  if (
+    identifier.length > 256 ||
+    !/^[\p{Letter}\p{Number}][\p{Letter}\p{Number}._:/@+#-]*$/u.test(identifier)
+  ) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'externalId is invalid.')
   }
   return identifier
 }

@@ -58,6 +58,7 @@ import {
   createWorkItemCollaborationEntityKey,
 } from '../../modules/collaboration/collaboration'
 import { evaluateEnterpriseAccess } from '../../modules/enterprise-identity'
+import { resolveConnectorStateStatus } from '../shared/connector-state-status'
 import {
   WorkItemCompletionGateError,
   WorkflowRuleError,
@@ -2708,29 +2709,63 @@ export function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGate
         ) {
           throw createWorkItemAuthorizationChangedError()
         }
+        const configuration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+          input.workspaceId,
+          input.teamId,
+        )
+        // A two-state resource (a GitHub issue) carries open / closed, which becomes a status of the
+        // matching category in the Work Item's own workflow.
+        const stateStatus = input.patch.state === undefined || input.patch.status !== undefined
+          ? undefined
+          : resolveConnectorStateStatus(
+              resolveWorkItemTypeWorkflow(configuration.configuration, detail.issue.workItemTypeId, { allowArchived: true }),
+              detail.issue.workflowStatusId,
+              input.patch.state,
+            )
+        if (stateStatus?.kind === 'unavailable') {
+          // The workflow cannot follow the resource from here; the link records a conflict and the
+          // other linked resources keep synchronizing.
+          await developerPlatformDependencies.idempotency.releaseIdempotency(completionRequest)
+          return {
+            kind: 'rejected',
+            workItem: toConnectorWorkItemSnapshot(detail.issue),
+            reason: 'state-status-unavailable',
+          }
+        }
+        const workflowStatusId = input.patch.status ??
+          (stateStatus?.kind === 'status' ? stateStatus.statusId : undefined)
         const body = normalizeTeamIssueInput({
           expectedRevision: input.expectedRevision,
           ...(input.patch.title !== undefined ? { title: input.patch.title } : {}),
           ...(input.patch.description !== undefined
             ? { description: input.patch.description }
             : {}),
-          ...(input.patch.status !== undefined
-            ? { workflowStatusId: input.patch.status }
-            : {}),
+          ...(workflowStatusId !== undefined ? { workflowStatusId } : {}),
           ...(schedule ? { schedule: schedule.schedule } : {}),
         }, permission.team)
-        const configuration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
-          input.workspaceId,
-          input.teamId,
-        )
-        const configuredBody = await prepareConfiguredUpdateWorkItem(
-          input.workspaceId,
-          input.teamId,
-          detail.issue,
-          body,
-          configuration,
-          CREDENTIAL_WORKFLOW_RULE_PRINCIPAL,
-        )
+        let configuredBody: Awaited<ReturnType<typeof prepareConfiguredUpdateWorkItem>>
+        try {
+          configuredBody = await prepareConfiguredUpdateWorkItem(
+            input.workspaceId,
+            input.teamId,
+            detail.issue,
+            body,
+            configuration,
+            CREDENTIAL_WORKFLOW_RULE_PRINCIPAL,
+          )
+        } catch (error) {
+          // A transition rule, completion gate, or configuration validation (such as a required
+          // custom field that quick capture left empty) refuses the change for good; retrying the
+          // poll cannot succeed, so the link records a conflict and polling moves on. Storage and
+          // contention failures still propagate so the poll retries.
+          if (!isPermanentConnectorUpdateRefusal(error)) throw error
+          await developerPlatformDependencies.idempotency.releaseIdempotency(completionRequest)
+          return {
+            kind: 'rejected',
+            workItem: toConnectorWorkItemSnapshot(detail.issue),
+            reason: 'workflow-rule-rejected',
+          }
+        }
         const idempotencyTransaction: WorkItemIdempotencyTransaction | undefined =
           developerPlatformDependencies.transactions.prepareIdempotencyCompletionTransactWrite
             ? {
@@ -2842,6 +2877,7 @@ function toConnectorWorkItemSnapshot(
     title: issue.title,
     ...(issue.description ? { description: issue.description } : {}),
     status: issue.workflowStatusId,
+    statusCategory: issue.statusCategory,
     ...toConnectorEventScheduleField(issue.schedule),
     ...(issue.schedule.mode === 'unscheduled' ? {} : { scheduleMode: issue.schedule.mode }),
   }
@@ -4150,4 +4186,18 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
     }
     routeApp.route('/api', createPublicApiRouter(publicApiDependencies))
   }
+}
+
+/**
+ * Tells whether a Work Item update failure refuses a connector-driven change for good.
+ *
+ * @param error - Error thrown while preparing the configured update.
+ * @returns True for workflow rule and completion Gate refusals and for configuration validation
+ *   errors that are not storage, contention, or rate-limit failures.
+ */
+function isPermanentConnectorUpdateRefusal(error: unknown): boolean {
+  if (error instanceof WorkflowRuleError || error instanceof WorkItemCompletionGateError) return true
+  return error instanceof WorkItemConfigurationError &&
+    error.status >= 400 && error.status < 500 &&
+    error.status !== 408 && error.status !== 409 && error.status !== 429
 }
