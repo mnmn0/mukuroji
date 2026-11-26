@@ -33,8 +33,10 @@ export type DynamoDbBudgetAlertProjectReaderOptions = {
  * Creates a reader that lists a Workspace's active Projects with their charter owner and managers
  * from the Project Directory partition.
  *
- * A Project ID that more than one Team uses is left out, because a membership row names only the
- * Project and could belong to either Team. Archived Teams, Projects, and memberships are left out.
+ * Each active Team/Project pair is kept, even when more than one Team uses the same Project ID.
+ * A membership row names only the Project, so its manager grant is used only when exactly one Team
+ * uses that Project ID; otherwise the pair gets no legacy managers. Archived Teams, Projects, and
+ * memberships are left out.
  *
  * @param options - DocumentClient, table name, and paging bounds.
  * @returns Function that reads one Workspace's Projects, ordered by Team and Project.
@@ -50,8 +52,7 @@ export function createDynamoDbBudgetAlertProjectReader(
   return async (workspaceId) => {
     const activeTeamIds = new Set<string>()
     const projectTeams = new Map<string, Set<string>>()
-    const archivedProjectIds = new Set<string>()
-    const owners = new Map<string, string>()
+    const projectRows = new Map<string, DirectoryProjectRow>()
     const managers = new Map<string, Set<string>>()
     let exclusiveStartKey: Record<string, unknown> | undefined
     let pages = 0
@@ -74,12 +75,17 @@ export function createDynamoDbBudgetAlertProjectReader(
         }
         if (item.entryType === 'project') {
           const projectId = requireText(item.projectId, 'Project directory project ID')
+          const teamId = requireText(item.teamId, 'Project directory team ID')
           const teams = projectTeams.get(projectId) ?? new Set<string>()
-          teams.add(requireText(item.teamId, 'Project directory team ID'))
+          teams.add(teamId)
           projectTeams.set(projectId, teams)
-          if (item.archivedAt !== undefined) archivedProjectIds.add(projectId)
           const ownerMemberKey = readCharterOwner(item.charter)
-          if (ownerMemberKey) owners.set(projectId, ownerMemberKey)
+          projectRows.set(pairKey(teamId, projectId), {
+            teamId,
+            projectId,
+            archived: item.archivedAt !== undefined,
+            ...(ownerMemberKey ? { ownerMemberKey } : {}),
+          })
         }
         if (item.entryType === 'project-member' && item.archivedAt === undefined && item.role === 'manager') {
           const projectId = requireText(item.projectId, 'Project member project ID')
@@ -92,20 +98,42 @@ export function createDynamoDbBudgetAlertProjectReader(
     } while (exclusiveStartKey)
 
     const projects: BudgetAlertProject[] = []
-    for (const [projectId, teams] of projectTeams) {
-      const [teamId] = [...teams]
-      if (teams.size !== 1 || teamId === undefined || archivedProjectIds.has(projectId) || !activeTeamIds.has(teamId)) continue
-      const ownerMemberKey = owners.get(projectId)
+    for (const row of projectRows.values()) {
+      if (row.archived || !activeTeamIds.has(row.teamId)) continue
+      const sharedProjectId = (projectTeams.get(row.projectId)?.size ?? 0) !== 1
       projects.push({
-        teamId,
-        projectId,
-        ...(ownerMemberKey ? { ownerMemberKey } : {}),
-        managerMemberKeys: [...(managers.get(projectId) ?? [])].sort(),
+        teamId: row.teamId,
+        projectId: row.projectId,
+        ...(row.ownerMemberKey ? { ownerMemberKey: row.ownerMemberKey } : {}),
+        managerMemberKeys: sharedProjectId ? [] : [...(managers.get(row.projectId) ?? [])].sort(),
       })
     }
     return projects.sort((left, right) =>
       left.teamId.localeCompare(right.teamId) || left.projectId.localeCompare(right.projectId))
   }
+}
+
+/** One Project row of the directory, qualified by its Team. */
+type DirectoryProjectRow = {
+  /** Team that owns the Project. */
+  teamId: string
+  /** Project ID, unique only within the Team. */
+  projectId: string
+  /** Whether the Project row is archived. */
+  archived: boolean
+  /** Lower-case member key of the charter owner, when the charter names one. */
+  ownerMemberKey?: string
+}
+
+/**
+ * Builds the map key for one Team/Project pair.
+ *
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project ID within the Team.
+ * @returns A key that cannot collide across pairs.
+ */
+function pairKey(teamId: string, projectId: string): string {
+  return JSON.stringify([teamId, projectId])
 }
 
 /**

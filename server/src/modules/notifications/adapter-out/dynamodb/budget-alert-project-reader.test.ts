@@ -22,9 +22,14 @@ test('lists active Projects with their charter owner and current managers', asyn
       { entryType: 'project', teamId: 'core', projectId: 'api', charter: {} },
       { entryType: 'project', teamId: 'core', projectId: 'old', archivedAt: '2026-01-01T00:00:00.000Z' },
       { entryType: 'project', teamId: 'gone', projectId: 'legacy' },
-      // A Project ID two Teams use cannot be told apart by its membership rows.
-      { entryType: 'project', teamId: 'core', projectId: 'shared' },
-      { entryType: 'project', teamId: 'other', projectId: 'shared' },
+      // A Project ID two Teams use stays in the scan for each Team, with its own charter owner,
+      // but its membership rows cannot be told apart, so neither pair gets legacy managers.
+      { entryType: 'project', teamId: 'core', projectId: 'shared', charter: { owner: { userId: 'Core@Example.com' } } },
+      { entryType: 'project', teamId: 'other', projectId: 'shared', charter: { owner: { userId: 'other@example.com' } } },
+      { entryType: 'project-member', projectId: 'shared', memberKey: 'ambiguous@example.com', role: 'manager' },
+      // Archiving one Team's Project leaves the other Team's Project with the same ID in the scan.
+      { entryType: 'project', teamId: 'core', projectId: 'split', archivedAt: '2026-01-01T00:00:00.000Z' },
+      { entryType: 'project', teamId: 'other', projectId: 'split' },
       { entryType: 'project-member', projectId: 'web', memberKey: 'pm@example.com', role: 'manager' },
       { entryType: 'project-member', projectId: 'web', memberKey: 'lead@example.com', role: 'manager' },
       { entryType: 'project-member', projectId: 'web', memberKey: 'dev@example.com', role: 'member' },
@@ -38,6 +43,9 @@ test('lists active Projects with their charter owner and current managers', asyn
 
   expect(await read('workspace-1')).toEqual([
     { teamId: 'core', projectId: 'api', managerMemberKeys: [] },
+    { teamId: 'core', projectId: 'shared', ownerMemberKey: 'core@example.com', managerMemberKeys: [] },
     { teamId: 'core', projectId: 'web', ownerMemberKey: 'lead@example.com', managerMemberKeys: ['lead@example.com', 'pm@example.com'] },
+    { teamId: 'other', projectId: 'shared', ownerMemberKey: 'other@example.com', managerMemberKeys: [] },
+    { teamId: 'other', projectId: 'split', managerMemberKeys: [] },
   ])
 })
