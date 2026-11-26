@@ -104,6 +104,8 @@ async function readReport(c: Context): Promise<ProjectBudgetReport> {
         to: input.to,
         projectIds: new Set([input.projectId]),
       }),
+      listExpenses: (workspaceId, ownerTeamId, ownerProjectId) =>
+        workItemDependencies.projectExpenses.list({ workspaceId, teamId: ownerTeamId, projectId: ownerProjectId }),
       listWorkItems: (workspaceId, ownerTeamId, startAfterIssueId) => workItemDependencies.teamIssues.getTeamIssues(workspaceId, ownerTeamId, {
         limit: WORK_ITEMS_AGGREGATE_READ_PAGE_SIZE,
         includeArchived: true,
@@ -201,7 +203,7 @@ function createProjectBudgetReportCsv(report: ProjectBudgetReport): string {
   const currency = report.budget?.currency ?? ''
   const ev = report.earnedValue
   const rows: Array<Array<string | number>> = [
-    ['From', 'To', 'Time zone', 'As of', 'Budget', 'Currency', 'BAC minutes', 'PV minutes', 'EV minutes', 'AC minutes', 'SPI', 'CPI', 'EAC minutes', 'PV', 'EV', 'AC', 'Cost CPI', 'EAC'],
+    ['From', 'To', 'Time zone', 'As of', 'Budget', 'Currency', 'BAC minutes', 'PV minutes', 'EV minutes', 'AC minutes', 'SPI', 'CPI', 'EAC minutes', 'PV', 'EV', 'AC', 'Cost CPI', 'EAC', 'Approved expenses', 'Pending expenses'],
     [
       report.from,
       report.to,
@@ -221,6 +223,8 @@ function createProjectBudgetReportCsv(report: ProjectBudgetReport): string {
       ev?.money?.actualCostMinor ?? '',
       ev?.money?.costPerformanceIndex ?? '',
       ev?.money?.estimateAtCompletionMinor ?? '',
+      currency === '' ? '' : report.approvedExpenseByCurrency[currency] ?? 0,
+      currency === '' ? '' : report.pendingExpenseByCurrency[currency] ?? 0,
     ],
     [],
     ['Period start', 'Period end', 'Planned value minutes', 'Actual minutes', 'Planned value', 'Actual cost', 'Currency'],

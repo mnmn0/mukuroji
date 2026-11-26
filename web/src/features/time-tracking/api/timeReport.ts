@@ -1,4 +1,4 @@
-import type { TimeBudget, TimeTrackingGroupBy, TimeTrackingSummary } from '@mukuroji/contracts'
+import { isTimeBudgetAlertPercent, type TimeBudget, type TimeTrackingGroupBy, type TimeTrackingSummary } from '@mukuroji/contracts'
 import { isFiniteNumber, isNonnegativeSafeInteger, isNumberRecord, isOptionalString, isRecord } from '../../../shared/api/jsonValidation'
 import {
   createInvalidTimeTrackingResponseError,
@@ -47,6 +47,8 @@ export type SaveTimeBudgetInput = {
   periodTo?: string
   /** Whether this saves the scope's budget for exactly this period instead of its default budget. */
   periodBudget?: boolean
+  /** Use percentage that notifies the Project owner; only a Project's default budget takes it. */
+  alertPercent?: number
   /** Revision being replaced, or 0 for a new budget. */
   expectedRevision: number
   /** Update time of the budget being replaced, which tells it apart from one deleted and saved again. */
@@ -78,9 +80,10 @@ export function createTimeReportQuery(input: TimeReportInput): string {
  */
 export function readTimeBudget(value: unknown): TimeBudget | undefined {
   if (!isRecord(value)) return undefined
-  const { schemaVersion, workspaceId, teamId, scopeType, scopeId, amountMinor, currency, periodFrom, periodTo, periodBudget, revision, updatedAt } = value
+  const { schemaVersion, workspaceId, teamId, scopeType, scopeId, amountMinor, currency, periodFrom, periodTo, periodBudget, alertPercent, revision, updatedAt } = value
   if (
     (periodBudget !== undefined && periodBudget !== true) ||
+    (alertPercent !== undefined && !isTimeBudgetAlertPercent(alertPercent)) ||
     schemaVersion !== 1 || typeof workspaceId !== 'string' || typeof teamId !== 'string' ||
     (scopeType !== 'team' && scopeType !== 'project') ||
     typeof scopeId !== 'string' || !isNonnegativeSafeInteger(amountMinor) || typeof currency !== 'string' ||
@@ -100,6 +103,7 @@ export function readTimeBudget(value: unknown): TimeBudget | undefined {
     ...(periodFrom === undefined ? {} : { periodFrom }),
     ...(periodTo === undefined ? {} : { periodTo }),
     ...(periodBudget === true ? { periodBudget } : {}),
+    ...(isTimeBudgetAlertPercent(alertPercent) ? { alertPercent } : {}),
     revision,
     updatedAt,
   }
@@ -266,6 +270,7 @@ export async function saveTimeBudget(
       ...(input.periodFrom ? { periodFrom: input.periodFrom } : {}),
       ...(input.periodTo ? { periodTo: input.periodTo } : {}),
       ...(input.periodBudget ? { periodBudget: true } : {}),
+      ...(input.alertPercent === undefined ? {} : { alertPercent: input.alertPercent }),
       expectedRevision: input.expectedRevision,
       ...(input.expectedUpdatedAt ? { expectedUpdatedAt: input.expectedUpdatedAt } : {}),
     }),

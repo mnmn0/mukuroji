@@ -1,5 +1,6 @@
 import {
   isPortfolioMonth,
+  toWorkspaceLocalDate,
   PORTFOLIO_DASHBOARD_SCHEMA_VERSION,
   PORTFOLIO_TIME_ENTRY_READ_LIMIT,
   type ProjectRaidEntry,
@@ -17,6 +18,7 @@ import {
   type PortfolioBudgetSource,
 } from '../../modules/portfolio-dashboard'
 import type { PlanningCallerAuthorizationConditionCheck } from '../../modules/planning'
+import { sumApprovedProjectExpenses } from '../../modules/project-budget'
 import { readProjectRaidLogUseCase } from '../../modules/project-raid-log'
 import { TimeTrackingError } from '../../modules/time-tracking'
 import { mapInOrderWithConcurrency } from '../shared/agent-run-access'
@@ -295,7 +297,8 @@ async function readRaidEntries(workspaceId: string, teamId: string, projectIds: 
 }
 
 /**
- * Reads the budget and cost of each Project whose costs the reader may see.
+ * Reads the budget and cost of each Project whose costs the reader may see: billable time cost plus
+ * approved expenses in the budget currency within the budget period up to today.
  *
  * @param workspaceId - Workspace directory ID.
  * @param teamId - Team ID.
@@ -303,7 +306,7 @@ async function readRaidEntries(workspaceId: string, teamId: string, projectIds: 
  * @param timeZone - IANA timezone of the budget periods.
  * @param now - Instant the cost is totalled up to.
  * @returns Budgets keyed by Project ID.
- * @throws ProjectDataError 413 when the budget periods hold too many time entries.
+ * @throws ProjectDataError 413 when the budget periods hold too many time entries, 422 when a total overflows.
  */
 async function readBudgets(
   workspaceId: string,
@@ -313,8 +316,9 @@ async function readBudgets(
   now: Date,
 ): Promise<ReadonlyMap<string, PortfolioBudgetSource>> {
   if (projectIds.length === 0) return new Map()
+  let budgets: Map<string, PortfolioBudgetSource>
   try {
-    return await requireAppDependencies().timeTracking.timeTrackingService.summarizeProjectBudgets({
+    budgets = await requireAppDependencies().timeTracking.timeTrackingService.summarizeProjectBudgets({
       workspaceId,
       teamId,
       projectIds,
@@ -328,6 +332,24 @@ async function readBudgets(
     }
     throw error
   }
+  // Approved expenses are actual cost like billable time (ADR 0104), so they count toward the
+  // consumption the same way as on the Project budget report.
+  const today = toWorkspaceLocalDate(now, timeZone)
+  const withExpenses = await mapInOrderWithConcurrency([...budgets], RAID_LOG_READ_CONCURRENCY, async ([projectId, source]) => {
+    const expenses = await workItemDependencies.projectExpenses.list({ workspaceId, teamId, projectId })
+    const to = source.budget.periodTo !== undefined && source.budget.periodTo < today ? source.budget.periodTo : today
+    const approved = sumApprovedProjectExpenses(expenses, source.budget.currency, source.budget.periodFrom, to)
+    const actualCostMinor = source.actualCostMinor + approved.amountMinor
+    if (!Number.isSafeInteger(actualCostMinor)) {
+      throw new ProjectDataError(422, 'PortfolioCostOverflow', `The cost of Project "${projectId}" is too large to total exactly.`)
+    }
+    return [projectId, {
+      ...source,
+      actualCostMinor,
+      hasOtherCurrencyCost: source.hasOtherCurrencyCost || approved.hasOtherCurrency,
+    }] as const
+  })
+  return new Map<string, PortfolioBudgetSource>(withExpenses)
 }
 
 /**

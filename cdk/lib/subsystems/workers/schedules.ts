@@ -104,6 +104,7 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
     analyticsTable,
     auditEventsTable,
     customersTable,
+    enterpriseIdentityTable,
     notificationsTable,
     planningTable,
     projectDirectoryTable,
@@ -122,6 +123,8 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
       AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
       AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
       CUSTOMERS_TABLE_NAME: customersTable.tableName,
+      // Enterprise roles can make a member a Project manager who gets budget alerts (ADR 0105).
+      ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
       // The same parameter feeds the API, which shows these defaults in the Team settings.
       NOTIFICATION_REMINDER_DEFAULT_DAYS: notificationReminderDefaultDays.valueAsString,
       NOTIFICATION_SCHEDULE_MAX_PAGES: '1000',
@@ -139,6 +142,11 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
     },
     grant: (grantee) => {
       workspaceAuditPseudonymSecret.grantRead(grantee);
+      // Read-only Enterprise snapshot for the managers of a Project's budget alert.
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+        resources: [enterpriseIdentityTable.tableArn],
+      }));
       // Planning update targets, and the weekly report rows that decide who is reminded.
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['dynamodb:GetItem', 'dynamodb:BatchGetItem'],
@@ -204,10 +212,20 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
         actions: ['dynamodb:Query', 'dynamodb:Scan'],
         resources: [workspaceAccessTable.tableArn],
       }));
-      // Unsubmitted time entries for timesheet reminders.
+      // Unsubmitted time entries for timesheet reminders, and the Project time cost a budget
+      // threshold alert measures (ADR 0105).
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['dynamodb:Query'],
         resources: [`${analyticsTable.tableArn}/index/TimeEntryTeamDateIndex`],
+      }));
+      // Project budgets and Project expenses for budget threshold alerts (ADR 0105).
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem'],
+        resources: [analyticsTable.tableArn],
+      }));
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [planningTable.tableArn],
       }));
     },
   };

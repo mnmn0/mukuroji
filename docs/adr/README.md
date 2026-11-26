@@ -124,6 +124,8 @@
 | [0101](0101-ai-assistance-monthly-usage-and-deployment-switch.md) | AI の月次利用量を AI table の月ごとの counter row で数え、全体停止を runtime control の任意 field で持つ | 提案 |
 | [0102](0102-retire-mail-and-storage-connector-providers.md) | Gmail・Outlook・Google Drive・OneDrive・Dropbox を connector の選択肢から外す | 提案 |
 | [0103](0103-verify-reported-pull-requests.md) | agent が報告した pull request を Workspace の connector で照会し、状態を保存する | 提案 |
+| [0104](0104-project-expense-entries.md) | Project の経費を Planning table に1件1行で保存し、申請者以外の Project manager の承認で予算の実績に入れる | 提案 |
+| [0105](0105-project-budget-threshold-alerts.md) | Project 予算の消化率を毎日1回調べ、通知の閾値に達した予算ごとに1回だけ通知と Automation trigger を出す | 提案 |
 | [0106](0106-public-workspace-documents-markdown.md) | Workspace の Document を Public API と MCP で Markdown として一覧・作成・更新し、scope は既存の `work-items:read` / `work-items:write` を使う | 提案 |
 | [0107](0107-planning-public-api.md) | Planning の Public API は `work-items:read` / `work-items:write` で受け、権限判定は Web の `planning.read` / `planning.write` と同じにする | 提案 |
 | [0108](0108-analytics-agent-usage-metrics.md) | Analytics の `agent-tokens` / `agent-cost` は query のたびに終了済み Run と usage 行を読み、費用を見られる Team を snapshot の scope に固定する | 提案 |

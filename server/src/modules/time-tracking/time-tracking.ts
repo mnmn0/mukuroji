@@ -10,6 +10,9 @@ import {
 import {
   DEFAULT_TEAM_TIME_ENTRY_POLICY,
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  TIME_BUDGET_ALERT_PERCENT_MAX,
+  TIME_BUDGET_ALERT_PERCENT_MIN,
+  isTimeBudgetAlertPercent,
   DEFAULT_WORKSPACE_TIME_ZONE,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   readTeamTimeEntryPolicy,
@@ -501,6 +504,11 @@ export type SaveTimeBudgetInput = {
    * than its default budget. Both dates are then required.
    */
   periodBudget?: boolean
+  /**
+   * Consumption percentage that notifies the Project owner (ADR 0105); omitted keeps the stored
+   * one, or the default for a new budget. Only a Project budget takes it.
+   */
+  alertPercent?: number
   /** Expected budget revision, or zero for a new budget. */
   expectedRevision: number
   /**
@@ -1633,6 +1641,16 @@ export class TimeTrackingService {
     if (input.periodFrom && input.periodTo && input.periodFrom > input.periodTo) {
       throw new TimeTrackingError(400, 'InvalidBudgetPeriod', 'Budget period start must not be after its end.')
     }
+    if (
+      input.alertPercent !== undefined &&
+      (input.scopeType !== 'project' || input.periodBudget === true || !isTimeBudgetAlertPercent(input.alertPercent))
+    ) {
+      throw new TimeTrackingError(
+        400,
+        'InvalidBudgetAlertPercent',
+        `Budget alert percent must be a whole number from ${TIME_BUDGET_ALERT_PERCENT_MIN} to ${TIME_BUDGET_ALERT_PERCENT_MAX} on a Project's default budget.`,
+      )
+    }
     const period = input.periodBudget ? readBudgetPeriod(input.periodFrom, input.periodTo) : undefined
     if (period) {
       // Overlap is checked against the periods read now; two concurrent saves of overlapping
@@ -1653,6 +1671,8 @@ export class TimeTrackingService {
     if (!current && expectedRevision !== 0) {
       throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget does not exist at the requested revision.')
     }
+    // An omitted alert percentage keeps the stored one, so a client that edits only the amount keeps it.
+    const alertPercent = input.alertPercent ?? current?.alertPercent
     const budget: TimeBudget = {
       schemaVersion: 1,
       workspaceId,
@@ -1664,6 +1684,7 @@ export class TimeTrackingService {
       ...(input.periodFrom ? { periodFrom: input.periodFrom } : {}),
       ...(input.periodTo ? { periodTo: input.periodTo } : {}),
       ...(period ? { periodBudget: true } : {}),
+      ...(alertPercent === undefined ? {} : { alertPercent }),
       revision: expectedRevision + 1,
       updatedAt: readNow(this.now).toISOString(),
     }
@@ -1685,7 +1706,7 @@ export class TimeTrackingService {
       },
       before: current ? toAuditBudgetSnapshot(current) : undefined,
       after: toAuditBudgetSnapshot(budget),
-      includeFields: ['scopeType', 'scopeId', 'amountMinor', 'currency', 'periodFrom', 'periodTo', 'periodBudget', 'revision'],
+      includeFields: ['scopeType', 'scopeId', 'amountMinor', 'currency', 'periodFrom', 'periodTo', 'periodBudget', 'alertPercent', 'revision'],
       redactFields: ['amountMinor'],
       metadata: {
         scopeType: input.scopeType,
@@ -1747,7 +1768,7 @@ export class TimeTrackingService {
       },
       before: toAuditBudgetSnapshot(current),
       after: undefined,
-      includeFields: ['scopeType', 'scopeId', 'amountMinor', 'currency', 'periodFrom', 'periodTo', 'periodBudget', 'revision'],
+      includeFields: ['scopeType', 'scopeId', 'amountMinor', 'currency', 'periodFrom', 'periodTo', 'periodBudget', 'alertPercent', 'revision'],
       redactFields: ['amountMinor'],
       metadata: {
         scopeType: input.scopeType,
@@ -4214,6 +4235,7 @@ function toAuditBudgetSnapshot(budget: TimeBudget): Record<string, unknown> {
     ...(budget.periodFrom ? { periodFrom: budget.periodFrom } : {}),
     ...(budget.periodTo ? { periodTo: budget.periodTo } : {}),
     ...(budget.periodBudget ? { periodBudget: true } : {}),
+    ...(budget.alertPercent === undefined ? {} : { alertPercent: budget.alertPercent }),
     revision: budget.revision,
   }
 }
@@ -4809,6 +4831,7 @@ function readStoredBudget(value: unknown): TimeBudget {
     ...(readOptionalString(record.periodFrom) ? { periodFrom: readOptionalString(record.periodFrom) } : {}),
     ...(readOptionalString(record.periodTo) ? { periodTo: readOptionalString(record.periodTo) } : {}),
     ...readStoredBudgetPeriodFlag(record),
+    ...readStoredBudgetAlertPercent(record),
     revision: readNumber(record.revision, 'Stored budget revision'),
     updatedAt: readString(record.updatedAt, 'Stored budget timestamp'),
   }
@@ -4827,6 +4850,21 @@ function readStoredBudgetPeriodFlag(record: Record<string, unknown>): { periodBu
     throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored budget period is invalid.')
   }
   return { periodBudget: true }
+}
+
+/**
+ * Reads the alert percentage of a stored budget (ADR 0105).
+ *
+ * @param record - Stored budget record.
+ * @returns The alert percentage to spread into the budget.
+ * @throws TimeTrackingError with `InvalidStoredTimeTrackingRecord` for an invalid value.
+ */
+function readStoredBudgetAlertPercent(record: Record<string, unknown>): { alertPercent?: number } {
+  if (record.alertPercent === undefined) return {}
+  if (!isTimeBudgetAlertPercent(record.alertPercent)) {
+    throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored budget alert percent is invalid.')
+  }
+  return { alertPercent: record.alertPercent }
 }
 
 /**

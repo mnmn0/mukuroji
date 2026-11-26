@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(680)
-  expect(new Set(inventory).size).toBe(676)
+  expect(inventory).toHaveLength(685)
+  expect(new Set(inventory).size).toBe(681)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -81,6 +81,11 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/schedule-baseline/active')
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/budget-report')
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/budget-report/export')
+  expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/expenses')
+  expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/expenses')
+  expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/expenses/:expenseId')
+  expect(inventory).toContain('DELETE /api/teams/:teamId/projects/:projectId/expenses/:expenseId')
+  expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/expenses/:expenseId/decision')
   expect(inventory).toContain('GET /api/planning/cycles/:cycleId/schedule-baselines')
   expect(inventory).toContain('POST /api/planning/cycles/:cycleId/schedule-baselines')
   // A Work Item may be named `hierarchy`, so the Team hierarchy must not sit under `/issues/`.
@@ -236,6 +241,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'd3515b4b56a67232407000aa0869b0868b29c9cab1358da0996762bf6d7276ef',
+    '61054e779412a0abb864133e6fda89eae6cca6fa243fc5a413a47f2146f93419',
   )
 })

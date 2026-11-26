@@ -30,6 +30,11 @@ export {
   type EvaluateEnterpriseAccessInput,
 } from './domain/enterprise-authorization'
 export {
+  evaluateEnterpriseProjectManager,
+  listEnterpriseProjectManagerKeys,
+  type EnterpriseProjectManagerStatus,
+} from './domain/enterprise-project-managers'
+export {
   ENTERPRISE_SCIM_ACTIVE_CREDENTIAL_LIMIT_PER_PROVIDER,
   ENTERPRISE_SCIM_ACTIVE_CREDENTIAL_LIMIT_PER_WORKSPACE,
   ENTERPRISE_SCIM_DISPLAY_NAME_MAX_BYTES,

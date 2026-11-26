@@ -71,6 +71,7 @@ import type { TriageClient } from '../../modules/triage'
 import type { ProjectScheduleBaselineStore, TeamIssuesClient } from '../../modules/work-items'
 import type { TeamPortfolioSnapshotStore } from '../../modules/portfolio-dashboard'
 import type { ProjectRaidLogStore } from '../../modules/project-raid-log'
+import type { ProjectExpenseStore } from '../../modules/project-budget'
 import type { CalendarFeedStore } from '../../modules/calendar-feeds'
 import type { MutationAuditContext } from '../../modules/audit'
 import type { ProjectStatusShareStore } from '../../modules/project-status-shares'
@@ -233,6 +234,8 @@ export interface WorkItemDependencies {
   savedUpdateFeeds: SavedUpdateFeedsPersistence
   /** Provides each Project's risk, issue, and change request log. */
   projectRaidLogs: ProjectRaidLogStore
+  /** Provides each Project's expenses other than people's time (ADR 0104). */
+  projectExpenses: ProjectExpenseStore
   /** Provides members' signed calendar feeds and their token lookup rows. */
   calendarFeeds: CalendarFeedStore<MutationAuditContext, AutomationCompositionTransactionItem>
   /** Provides each Project's read-only status report share links. */

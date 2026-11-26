@@ -1,4 +1,4 @@
-import type { ProjectBudgetReport, TimeTrackingSummary } from '@mukuroji/contracts'
+import type { ProjectBudgetReport, ProjectExpense, TimeTrackingSummary } from '@mukuroji/contracts'
 
 /** Report period of the report fixtures: the fixture week. */
 export const timeReportFixtureRange = { from: '2026-11-09', to: '2026-11-15' } as const
@@ -152,6 +152,8 @@ export const projectBudgetReportFixture: ProjectBudgetReport = {
   actualMinutes: 4_800,
   uncostedMinutes: 120,
   actualCostByCurrency: { JPY: 468_000 },
+  approvedExpenseByCurrency: {},
+  pendingExpenseByCurrency: {},
   budgetConsumedPercent: 39,
   effortConsumedPercent: 40,
   earnedValue: {
@@ -192,3 +194,58 @@ export const projectBudgetReportFixture: ProjectBudgetReport = {
     }
   }),
 }
+
+/** Expenses of the Atlas Project used by stories: approved, waiting on another manager, and rejected. */
+export const projectExpensesFixture: ProjectExpense[] = [
+  {
+    id: 'expense-3',
+    teamId: 'core-team',
+    projectId: 'atlas',
+    date: '2026-11-20',
+    category: 'ライセンス',
+    amountMinor: 24_000,
+    currency: 'JPY',
+    description: 'デザインツール 3 席',
+    receiptFileIds: ['file-3'],
+    status: 'submitted',
+    submittedByMemberId: 'aoi@example.com',
+    submittedAt: '2026-11-20T01:00:00.000Z',
+    revision: 1,
+    createdAt: '2026-11-20T01:00:00.000Z',
+    updatedAt: '2026-11-20T01:00:00.000Z',
+  },
+  {
+    id: 'expense-2',
+    teamId: 'core-team',
+    projectId: 'atlas',
+    date: '2026-11-12',
+    category: '外注費',
+    amountMinor: 300_000,
+    currency: 'JPY',
+    receiptFileIds: ['file-1', 'file-2'],
+    status: 'approved',
+    submittedByMemberId: 'ren@example.com',
+    submittedAt: '2026-11-12T01:00:00.000Z',
+    decision: { outcome: 'approved', decidedByMemberId: 'aoi@example.com', decidedAt: '2026-11-13T01:00:00.000Z' },
+    revision: 2,
+    createdAt: '2026-11-12T01:00:00.000Z',
+    updatedAt: '2026-11-13T01:00:00.000Z',
+  },
+  {
+    id: 'expense-1',
+    teamId: 'core-team',
+    projectId: 'atlas',
+    date: '2026-11-05',
+    category: '交通費',
+    amountMinor: 8_400,
+    currency: 'JPY',
+    receiptFileIds: [],
+    status: 'rejected',
+    submittedByMemberId: 'ren@example.com',
+    submittedAt: '2026-11-05T01:00:00.000Z',
+    decision: { outcome: 'rejected', decidedByMemberId: 'aoi@example.com', decidedAt: '2026-11-06T01:00:00.000Z', note: '証憑を添付してください' },
+    revision: 2,
+    createdAt: '2026-11-05T01:00:00.000Z',
+    updatedAt: '2026-11-06T01:00:00.000Z',
+  },
+]

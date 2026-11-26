@@ -2574,3 +2574,69 @@ test.each([
     })
   },
 )
+
+test.each([
+  ['project:member', 403],
+  ['project:manager', 200],
+] as const)(
+  'authorizes the Team-qualified Project expenses for a %s grant with status %p',
+  async (roleId, expectedStatus) => {
+    await withTestEnvironment({
+      COGNITO_CLIENT_ID: 'mukuroji-main-client',
+      COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+      COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+      COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+      COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+      ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+    }, async () => {
+      configureFakeProjectClients(true, {
+        workspaceRole: 'member',
+        projectAccesses: [],
+        teamProjects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+        additionalTeams: [{
+          id: 'design-team',
+          name: 'Design Team',
+          projects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+        }],
+      })
+      const workspaceId = 'user#demo@example.com'
+      const identity = new InMemoryEnterpriseIdentityClient()
+      const readSnapshot = identity.getSnapshot.bind(identity)
+      identity.getSnapshot = async (currentWorkspaceId) => {
+        const snapshot = await readSnapshot(currentWorkspaceId)
+        return {
+          ...snapshot,
+          roleAssignments: [{
+            workspaceId,
+            assignmentId: 'shared-project-grant',
+            principalKind: 'member',
+            principalId: 'demo@example.com',
+            roleId,
+            scope: {
+              workspaceId,
+              kind: 'project',
+              targetId: 'shared-launch',
+              parentTeamId: 'core-team',
+            },
+            source: 'direct',
+          }],
+        }
+      }
+      setTestAppDependencies({ enterpriseIdentity: identity })
+      const authorization = `Bearer ${createAccessToken([], {
+        client_id: 'mukuroji-main-client',
+        token_use: 'access',
+      })}`
+      const read = (teamId: string) => app.request(
+        `/api/teams/${teamId}/projects/shared-launch/expenses`,
+        { headers: { Authorization: authorization } },
+      )
+
+      const granted = await read('core-team')
+      const otherTeam = await read('design-team')
+
+      expect(granted.status).toBe(expectedStatus)
+      expect(otherTeam.status).toBe(403)
+    })
+  },
+)
