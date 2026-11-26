@@ -327,6 +327,13 @@ async function createChildren(
   const backlogStatus = resolveCreateWorkflowStatuses(configuration, input.childWorkItemTypeId)
     .find((status) => status.category === 'backlog')
   const childWorkItemIds: Record<string, string> = {}
+  // Children this session created for the generation stay part of the adoption even when the
+  // reviewer deselected their rows after a failure, so each still gets its parent link below and
+  // its row is reported as created.
+  const generationPrefix = `${input.generationId}:`
+  for (const [createdKey, childWorkItemId] of createdChildren) {
+    if (createdKey.startsWith(generationPrefix)) childWorkItemIds[createdKey.slice(generationPrefix.length)] = childWorkItemId
+  }
   for (const child of input.children) {
     const createdKey = `${input.generationId}:${child.rowId}`
     const created = createdChildren.get(createdKey)

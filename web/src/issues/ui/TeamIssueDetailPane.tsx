@@ -383,6 +383,23 @@ function IssueDetailContent({
   })
   const workItemKeyPrefixes = useWorkItemKeyPrefixes()
   const commentDraftDirtyRef = useRef(false)
+  // Each assistant of this Work Item reports its own pending state; the shared save guard stays on
+  // while any of them is in flight, so one finishing cannot release another's guard.
+  const aiOperationPendingRef = useRef(new Set<string>())
+  /**
+   * Records one assistant's pending state and reports whether any assistant is still in flight.
+   *
+   * @param operation - Assistant that changed state.
+   * @param pending - Whether that assistant is in flight.
+   */
+  const reportAiOperationPending = (operation: 'brief' | 'collaboration' | 'planning', pending: boolean) => {
+    if (pending) aiOperationPendingRef.current.add(operation)
+    else aiOperationPendingRef.current.delete(operation)
+    onAiSummaryOperationPendingChange?.(
+      createTaskViewItemKey(issue.teamId, issue.id),
+      aiOperationPendingRef.current.size > 0,
+    )
+  }
   const [isCommentDraftDirty, setIsCommentDraftDirty] = useState(false)
   /** Reports this Team Issue's comment dirtiness to the owning screen. */
   const handleCommentDraftDirtyChange = useCallback((isDirty: boolean) => {
@@ -420,10 +437,7 @@ function IssueDetailContent({
             onAdopt={onAdopt}
             onAuthenticatedApiError={onAuthenticatedApiError}
             onOperationPendingChange={(pending) => {
-              onAiSummaryOperationPendingChange?.(
-                createTaskViewItemKey(issue.teamId, issue.id),
-                pending,
-              )
+              reportAiOperationPending('brief', pending)
               onOperationPendingChange?.(createAiAssistantSessionKey(aiSummarySource), pending)
             }}
             sources={[aiSummarySource]}
@@ -1225,12 +1239,7 @@ function IssueDetailContent({
             focusedRootCommentId={focusedRootCommentId}
             locale={locale}
             members={workspaceMembers}
-            onAiSummaryOperationPendingChange={(pending) => {
-              onAiSummaryOperationPendingChange?.(
-                createTaskViewItemKey(issue.teamId, issue.id),
-                pending,
-              )
-            }}
+            onAiSummaryOperationPendingChange={(pending) => reportAiOperationPending('collaboration', pending)}
             onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
             onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
             readOnlyMessage={collaborationReadOnlyMessage}
@@ -1311,12 +1320,7 @@ function IssueDetailContent({
             onAuthenticatedApiError={onAuthenticatedApiError}
             // Decisions and structure adoption hold the same save guard as the Summary assistant,
             // so a save cannot change the source revision and remount this assistant mid-way.
-            onOperationPendingChange={(pending) => {
-              onAiSummaryOperationPendingChange?.(
-                createTaskViewItemKey(issue.teamId, issue.id),
-                pending,
-              )
-            }}
+            onOperationPendingChange={(pending) => reportAiOperationPending('planning', pending)}
             resolveWorkItemLabel={(endpoint) => planningSnapshot?.workItems.find(
               (workItem) => workItem.teamId === endpoint.teamId && workItem.id === endpoint.workItemId,
             )?.title ?? `${endpoint.teamId} / ${endpoint.workItemId}`}

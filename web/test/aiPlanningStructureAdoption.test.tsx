@@ -231,6 +231,27 @@ describe('AI planning structure adoption', () => {
     expect(fake.parents.get('child-2')).toBe('story-1')
   })
 
+  test('a retry after deselecting a created row still links that child to the parent', async () => {
+    const fake = createFakeApi()
+    const createTeamIssue = fake.api.createTeamIssue
+    let createCalls = 0
+    fake.api.createTeamIssue = async (...args) => {
+      createCalls += 1
+      if (createCalls === 2) throw new Error('network')
+      return createTeamIssue(...args)
+    }
+    const session = createAiPlanningStructureAdoptionSession(fake.api)
+    await expect(adoptAiPlanningStructure(session, 'token', parent, input)).rejects.toThrow('network')
+    expect(fake.parents.get('child-1')).toBeUndefined()
+
+    // The reviewer deselects the first row, which was already created, before retrying.
+    const result = await adoptAiPlanningStructure(session, 'token', parent, { ...input, children: [input.children[1]] })
+
+    expect(result.childWorkItemIds).toEqual({ 'row-1': 'child-1', 'row-2': 'child-2' })
+    expect(fake.parents.get('child-1')).toBe('story-1')
+    expect(fake.parents.get('child-2')).toBe('story-1')
+  })
+
   test('a retry after a lost create response reuses the first request even when the row was edited', async () => {
     const fake = createFakeApi({ loseCreateResponseOnce: true })
     const session = createAiPlanningStructureAdoptionSession(fake.api)
