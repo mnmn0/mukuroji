@@ -516,6 +516,48 @@ describe('ConnectorSyncEngine', () => {
     )).toBe('synced')
   })
 
+  test('matches a GitHub issue to its link whatever the case of the owner and repository', async () => {
+    const fixture = await createRuntimeFixture(createAdapter({
+      async pull() {
+        return { items: [{ ...externalRecord('10'), externalId: 'Acme/App#12', externalUrl: 'https://github.com/Acme/App/issues/12' }] }
+      },
+    }))
+    expect(fixture.installation.provider).toBe('github')
+    const link = await fixture.platform.createExternalWorkItemLink({
+      workspaceId: 'workspace-1',
+      input: {
+        teamId: 'team-1',
+        workItemId: 'work-item-1',
+        installationId: fixture.installation.id,
+        resourceType: 'issue',
+        externalId: 'acme/app#12',
+        externalUrl: 'https://github.com/acme/app/issues/12',
+        displayKey: 'acme/app#12',
+        syncDirection: 'bidirectional',
+      },
+    })
+    const result = await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'issue',
+    })
+    expect(result.results).toEqual([expect.objectContaining({ kind: 'synced', linkId: link.id })])
+    // The same issue named with other letter cases is already claimed by that link.
+    await expect(fixture.platform.createExternalWorkItemLink({
+      workspaceId: 'workspace-1',
+      input: {
+        teamId: 'team-1',
+        workItemId: 'work-item-1',
+        installationId: fixture.installation.id,
+        resourceType: 'issue',
+        externalId: 'Acme/App#12',
+        externalUrl: 'https://github.com/Acme/App/issues/12',
+        displayKey: 'Acme/App#12',
+        syncDirection: 'bidirectional',
+      },
+    })).rejects.toMatchObject({ code: 'ExternalWorkItemLinkConflict' })
+  })
+
   test('does not acknowledge a pending generation from an older provider replica', async () => {
     const fixture = await createRuntimeFixture(createAdapter({
       async pull() {
@@ -1150,6 +1192,33 @@ describe('ConnectorSyncEngine', () => {
       title: 'Merged title',
       workItemRevision: 6,
     })
+  })
+
+  test('accepts an open or closed state in a merge and rejects any other value', async () => {
+    const fixture = await createRuntimeFixture(createAdapter({
+      async push(_credential, mutation) {
+        return {
+          ...externalRecord('11'),
+          title: mutation.title,
+          description: mutation.description,
+          status: mutation.status,
+          originMarker: mutation.originMarker,
+        }
+      },
+    }))
+    const conflict = await createConflictFixture(fixture)
+    await expect(fixture.engine.resolveConflict(
+      { workspaceId: 'workspace-1', userId: 'resolver-1' },
+      conflict.id,
+      { resolution: 'merge', mergedValues: { title: 'Merged title', state: 'maybe' } },
+    )).rejects.toMatchObject({ code: 'ConnectorSyncResolutionInvalid' })
+    const merged = await fixture.engine.resolveConflict(
+      { workspaceId: 'workspace-1', userId: 'resolver-1' },
+      conflict.id,
+      { resolution: 'merge', mergedValues: { title: 'Merged title', state: 'closed' } },
+    )
+    expect(merged.status).toBe('resolved')
+    expect(fixture.getWorkItem()).toMatchObject({ title: 'Merged title' })
   })
 
   test('replays an idempotent merge after local apply succeeds and provider push fails', async () => {

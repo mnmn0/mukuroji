@@ -416,7 +416,7 @@ Phase / Milestone を持つテンプレートを適用するときは、Phase �
   Work Item の作成・更新・削除に加えて、親の変更、子の追加・削除、blocker の追加・解除、関連の追加・削除、
   並び順の変更も選べます。これらは相手の Work Item を含まず、変更された側の Work Item だけを送ります。
   Work Item を削除して消えた関係は、残った相手の Work Item の解除・削除として送ります。
-- **Connector**: GitHub、Slack、Gmail、Google Calendar、Google Drive との連携。
+- **Connector**: GitHub、GitLab、Slack、Microsoft Teams、Google Calendar、Outlook Calendar との連携（mail と cloud storage は連携の予定がないため一覧から外しました）。
   一覧には、運用者がこの環境で設定した provider だけが出ます（設定は [`cdk/README.md`](../../cdk/README.md) の
   connector secret）。設定がなければ「利用できる connector はありません」と表示されます。
   設定から外した provider に接続済みの account は一覧に残り、切断はできますが新しい接続はできません。
@@ -424,6 +424,18 @@ Phase / Milestone を持つテンプレートを適用するときは、Phase �
   Mukuroji に戻ると完了します。許可の URL を別の人に送ったり、ログインが切れた状態で戻ったり、
   期限（約10分）が切れたりした場合は完了できないので、この画面からもう一度接続してください。
   **再接続** も同じで、押した本人が完了します。
+  GitHub を接続すると、Work Item の **外部リンク** に issue を `owner/repository#番号` で登録でき、タイトル・説明・
+  open / closed が同期されます。closed の issue は Work Item を workflow で今の状態から移れる完了 category の status
+  へ、reopen された issue は今の状態から移れる未着手（なければ backlog、作業中）の status へ動かします。
+  workflow に今の状態から移れるそうした status がない場合や、必須項目・ロール・完了条件などの workflow の条件で
+  移せない場合は、Work Item を動かさずにその link を同期競合として残し、
+  ほかの issue の同期は続けます。両方が双方向に同期していて、Mukuroji が最後に読んだあとに GitHub 側で
+  issue が編集されていたら、上書きせずに次の取り込みで同期競合として出します（GitHub には条件付きの更新がないため、
+  Mukuroji が書き込む直前のごく短い間に入った編集だけは上書きされます。その編集は GitHub の issue の履歴に残ります）。
+  逆に Work Item が完了・中止になると issue を close し、それ以外に戻ると reopen します。pull request・commit・deploy の
+  link は手入力のまま同期しません。issue の本文の末尾には、Mukuroji が書き込んだことを示す見えないコメントが付きます。
+  説明が 60,000 文字を超える Work Item は、短くして書き込まずに同期の失敗として残します。接続を解除すると、GitHub の
+  保存していたアクセストークンを取り消します（同じ GitHub アカウントの別の接続には影響しません）。
   Google Calendar と Outlook Calendar を接続すると、Work Item の **外部リンク** で「カレンダーの予定」を追加できます。
   接続した account の既定カレンダーに、Work Item の日付で終日の予定を作り、日付を双方向に同期します。
   カレンダーで予定を動かすと Work Item の期限や期間が動き、Work Item の日付を変えると予定が動きます。
