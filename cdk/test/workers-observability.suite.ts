@@ -2349,6 +2349,20 @@ test('AI observability consumes only terminal AI rows with bounded stream retrie
     TreatMissingData: 'notBreaching',
   });
 
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects AI attempts missing from the monthly usage counters that enforce monthly caps.',
+    Dimensions: [{
+      Name: 'Service',
+      Value: 'mukuroji-ai-assistance',
+    }],
+    MetricName: 'UsageAccountingFailureCount',
+    Namespace: 'Mukuroji/AIAssistance',
+    Statistic: 'Sum',
+    Threshold: 1,
+    TreatMissingData: 'notBreaching',
+  });
+
   for (const alarm of [
     {
       description:

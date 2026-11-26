@@ -45,6 +45,7 @@ function createRouter(canManagePolicy = true) {
       }
     },
     updatePolicy: async () => { throw new Error('unused') },
+    getUsage: async () => { throw new Error('unused') },
     getPreference: async () => { throw new Error('unused') },
     updatePreference: async () => { throw new Error('unused') },
     generate: async () => { throw new Error('unused') },

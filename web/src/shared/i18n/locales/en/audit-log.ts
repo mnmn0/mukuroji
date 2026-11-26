@@ -85,6 +85,7 @@ export const auditLogMessages = {
   'auditLog.eventType.labelAfterLatin': '{resource} {action}',
   'auditLog.eventType.unknownAction': '{resource}: {action}',
   'auditLog.resource.agent-run': 'Agent Run',
+  'auditLog.resource.agent-defaults': 'Workspace agent defaults',
   'auditLog.resource.agent-settings': 'Agent settings',
   'auditLog.resource.ai-assistance.policy': 'AI assistance policy',
   'auditLog.resource.ai-assistance.provider-credential': 'AI provider key',

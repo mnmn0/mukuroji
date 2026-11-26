@@ -179,6 +179,32 @@ export function buildAiAssistanceObservabilityWorker(
     },
   ), input.aiAssistanceConfigured);
 
+  // The API emits this when a finished attempt could not be added to the monthly usage counters,
+  // which makes the monthly caps undercount (ADR 0101).
+  deployOnlyWhen(new cloudwatch.Alarm(
+    scope,
+    'AiAssistanceUsageAccountingFailureAlarm',
+    {
+      alarmDescription:
+        'Detects AI attempts missing from the monthly usage counters that enforce monthly caps.',
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: new cloudwatch.Metric({
+        namespace: 'Mukuroji/AIAssistance',
+        metricName: 'UsageAccountingFailureCount',
+        dimensionsMap: {
+          Service: 'mukuroji-ai-assistance',
+        },
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+  ), input.aiAssistanceConfigured);
+
   deployOnlyWhen(new cloudwatch.Alarm(
     scope,
     'AiAssistanceObservabilityFunctionErrorAlarm',

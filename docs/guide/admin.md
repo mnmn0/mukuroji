@@ -477,6 +477,18 @@ model は、運用者が設定した Amazon Bedrock の model に加えて、Cla
   社外に出したくない Workspace では、許可する model を Bedrock の model だけにしてください。
 - この欄が出ないときは、運用者が外部 provider を無効にしています（[`cdk/README.md`](../../cdk/README.md) の `AiExternalProviders`）。
 
+### AI の今月の利用量と月の上限
+
+同じ **AI assistance** の画面の **今月の AI 利用量** で、owner / admin は今月（UTC の暦月）の生成数、token 数、
+推定費用を、workflow 別とメンバー別に見られます。
+
+- 推定費用は、運用者が設定した単価から計算した目安で、提供元の請求額とは一致しません。
+- Workspace policy の **月の token 上限** と **月の費用上限（USD）** は、どちらも空欄なら上限なしです。
+  どちらかに届くと、その月の新しい生成は断られます。AI 以外の機能はそのまま使えます。
+  すでに走っている生成の分だけ、上限を少し超えることがあります。
+- 上限の 80% に届くと、この画面に注意が出ます（通知は届きません）。
+- 運用者が AI を全体で止めているときは、その旨が表示され、新しい生成はできません。
+
 ## エージェント設定（Software factory）
 
 coding agent に任せる作業の範囲を Team ごとに決めます。**設定** → **Team** → **エージェント設定**
@@ -503,7 +515,13 @@ coding agent に任せる作業の範囲を Team ごとに決めます。**設�
 - 失敗・停滞した Run を Triage に自動で起票するかどうか。
 - 「通知」: Run が blocker や引き継ぎを報告したとき、失敗したとき、停滞したときに担当者へ通知するかどうか（既定は通知しない）。
   通知は担当者の Inbox と、本人が有効にしている email・push・Slack に届きます。停滞の通知は Run ごとに 1 回です。
-- 「エージェント向けブリーフ」: Team と Project ごとに agent へ渡す前提知識（各 16 KiB まで）。
+- 「エージェント向けブリーフ」: Team と Project ごとに agent へ渡す前提知識（各 16 KiB まで、Project は 20 件まで）。
+  Team のブリーフが空のときは、下の Workspace の既定ブリーフが agent に渡り、その内容が欄の下に表示されます。
+
+Workspace 管理者には、同じ画面に **Workspace の既定値** が表示されます。ここで決めたリース時間・引き継ぎの許可・
+受け入れ条件の必須化は、エージェント設定をまだ保存していない Team に使われます。一度保存した Team は自分の値を使い続けるので、
+既定値を変えても反映されません。**Workspace の既定ブリーフ** は、自分のブリーフがないすべての Team で agent に渡ります。
+ブリーフに秘密情報は書かないでください。変更は監査ログに「Workspace のエージェント既定値」として残ります。
 
 保存は **エージェント設定を保存**。agent の稼働状況は Team の **Factory board** で確認します
 （[coding agent 利用者ガイド](coding-agent.md#factory-board)）。Team の管理者には、Factory board とタスクの Run 欄に、

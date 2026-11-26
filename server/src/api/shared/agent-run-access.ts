@@ -481,11 +481,13 @@ export async function createAgentRunDeletionFences(
 export function withVisibleProjectBriefs(
   principal: WorkspacePrincipal,
   permission: TeamPermissionContext,
-  settings: AgentSettings,
+  settings: AgentSettings & { workspaceDefaultsRevision?: number },
 ): AgentSettings {
-  const projectBriefs = Object.fromEntries(Object.entries(settings.projectBriefs)
+  // The Workspace defaults revision only fences runs on the server and is not part of the response.
+  const { workspaceDefaultsRevision: _workspaceDefaultsRevision, ...response } = settings
+  const projectBriefs = Object.fromEntries(Object.entries(response.projectBriefs)
     .filter(([projectId]) => canAccessAssignedProject(principal, permission, projectId, 'viewer')))
-  return { ...settings, projectBriefs }
+  return { ...response, projectBriefs }
 }
 
 /**
