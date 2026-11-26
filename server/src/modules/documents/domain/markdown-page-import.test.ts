@@ -124,6 +124,14 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
   })
 
+  test('keeps HTML comments and task items with continuations as paragraph Markdown', () => {
+    const comment = 'Intro\n<!--\n## Internal note\n\n```\ncode\n```\n-->'
+    expect(convert(comment).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: comment }])
+    const continued = '- [ ] task\n\n  continuation'
+    expect(convert(continued).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: continued }])
+    expect(convert('<!-- note -->\n\n## Real').blocks.map(({ type }) => type)).toEqual(['paragraph', 'heading'])
+  })
+
   test('reads a task item run only as a whole block', () => {
     expect(convert('Text\n- [ ] not a checklist').blocks.map(({ type }) => type)).toEqual(['paragraph'])
     expect(convert('- [ ] task\n- plain').blocks.map(({ type }) => type)).toEqual(['paragraph'])

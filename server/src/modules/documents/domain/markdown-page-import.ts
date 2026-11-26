@@ -245,9 +245,19 @@ function scanBlocks(
    */
   const atBlockStart = (index: number) => index === 0 || lines[index - 1]?.trim() === '' || paragraph.length === 0
 
+  /** Whether an HTML comment in the open paragraph is still open. */
+  let paragraphComment = false
+
   let index = 0
   while (index < lines.length) {
     const line = lines[index] ?? ''
+    // Nothing inside an HTML comment is shown, so its lines stay in the paragraph Markdown.
+    if (paragraphComment) {
+      paragraph.push(line)
+      paragraphComment = opensHtmlComment(line, true)
+      index += 1
+      continue
+    }
     // An indented fence belongs to the list or quote around it, in the paragraph Markdown.
     if (paragraphFence !== undefined) {
       paragraph.push(line)
@@ -311,11 +321,31 @@ function scanBlocks(
     }
     const nestedFence = /^[ \t>*+\-\d.)]+?(`{3,}|~{3,})/u.exec(line)
     if (nestedFence?.[1] !== undefined) paragraphFence = nestedFence[1]
+    paragraphComment = opensHtmlComment(line, false)
     paragraph.push(line)
     index += 1
   }
   flushParagraph()
   return tooLong ? { ok: false, code: 'block-too-long' } : { ok: true, blocks }
+}
+
+/**
+ * Tells whether an HTML comment is still open after a line.
+ *
+ * @param line - Source line.
+ * @param open - Whether a comment was open before the line.
+ * @returns Whether a comment is open after the line.
+ */
+function opensHtmlComment(line: string, open: boolean): boolean {
+  let inside = open
+  let position = 0
+  while (position < line.length) {
+    const next = inside ? line.indexOf('-->', position) : line.indexOf('<!--', position)
+    if (next < 0) break
+    position = next + (inside ? 3 : 4)
+    inside = !inside
+  }
+  return inside
 }
 
 /**
@@ -403,9 +433,12 @@ function splitAtBlankLinesOutsideFences(text: string): string[] {
   const sections: string[] = []
   let lines: string[] = []
   let fence: string | undefined
+  let comment = false
   for (const line of text.split('\n')) {
     const content = stripContainerMarkers(line)
-    if (fence !== undefined) {
+    if (comment) {
+      comment = opensHtmlComment(line, true)
+    } else if (fence !== undefined) {
       if (closesFence(content, fence)) fence = undefined
     } else if (line.trim() === '') {
       if (lines.length > 0) sections.push(lines.join('\n'))
@@ -414,6 +447,7 @@ function splitAtBlankLinesOutsideFences(text: string): string[] {
     } else {
       const open = /^(`{3,}|~{3,})/u.exec(content)
       if (open?.[1] !== undefined) fence = open[1]
+      else comment = opensHtmlComment(line, false)
     }
     lines.push(line)
   }
@@ -451,6 +485,10 @@ function readChecklist(
     index += 1
   }
   if (items.length === 0) return undefined
+  // An indented line after the run continues its last item, which a checklist cannot hold.
+  let after = index
+  while (after < lines.length && (lines[after] ?? '').trim() === '') after += 1
+  if (/^[ \t]/u.test(lines[after] ?? '')) return undefined
   return { block: { id: createId('checklist'), type: 'checklist', items }, next: index }
 }
 
