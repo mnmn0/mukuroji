@@ -173,7 +173,7 @@ function shareReferenceDefinitions(blocks: DocumentBlock[]): boolean {
   for (const block of blocks) {
     if (block.type !== 'paragraph') continue
     const labels = new Set<string>()
-    for (const line of block.text.split('\n')) {
+    for (const line of linesOutsideFences(block.text)) {
       const label = REFERENCE_DEFINITION.exec(line)?.[1]
       if (label === undefined) continue
       const key = normalizeReferenceLabel(label)
@@ -187,7 +187,7 @@ function shareReferenceDefinitions(blocks: DocumentBlock[]): boolean {
   for (const block of blocks) {
     if (block.type !== 'paragraph') continue
     const own = ownLabels.get(block) ?? new Set<string>()
-    const used = [...block.text.matchAll(/\[([^\]]+)\]/gu)].map((match) => normalizeReferenceLabel(match[1] ?? ''))
+    const used = [...linesOutsideFences(block.text).join('\n').matchAll(/\[([^\]]+)\]/gu)].map((match) => normalizeReferenceLabel(match[1] ?? ''))
     const missing = [...new Set(used)].filter((label) => !own.has(label) && definitions.has(label))
     if (missing.length === 0) continue
     block.text = `${block.text}\n\n${missing.map((label) => definitions.get(label) ?? '').join('\n')}`
@@ -356,6 +356,42 @@ function splitLongParagraph(text: string): string[] {
 }
 
 /**
+ * Returns the lines of paragraph Markdown that are outside fenced code, including fences nested
+ * in lists or quotes, so code that looks like Markdown is never read as Markdown.
+ *
+ * @param text - Paragraph Markdown.
+ * @returns Lines outside fenced code, in order.
+ */
+function linesOutsideFences(text: string): string[] {
+  const lines: string[] = []
+  let fence: string | undefined
+  for (const line of text.split('\n')) {
+    const content = stripContainerMarkers(line)
+    if (fence !== undefined) {
+      if (closesFence(content, fence)) fence = undefined
+      continue
+    }
+    const open = /^(`{3,}|~{3,})/u.exec(content)
+    if (open?.[1] !== undefined) {
+      fence = open[1]
+      continue
+    }
+    lines.push(line)
+  }
+  return lines
+}
+
+/**
+ * Removes the indentation, quote markers, and list marker in front of a line's content.
+ *
+ * @param line - Source line.
+ * @returns The line's content.
+ */
+function stripContainerMarkers(line: string): string {
+  return line.replace(/^[ \t>]*(?:(?:[*+-]|\d+[.)])[ \t]+)?/u, '')
+}
+
+/**
  * Splits paragraph Markdown into sections at blank lines that are outside fenced code, including
  * fences nested in lists or quotes, so no section starts or ends inside a code block.
  *
@@ -367,7 +403,7 @@ function splitAtBlankLinesOutsideFences(text: string): string[] {
   let lines: string[] = []
   let fence: string | undefined
   for (const line of text.split('\n')) {
-    const content = line.replace(/^[ \t>]*(?:(?:[*+-]|\d+[.)])[ \t]+)?/u, '')
+    const content = stripContainerMarkers(line)
     if (fence !== undefined) {
       if (closesFence(content, fence)) fence = undefined
     } else if (line.trim() === '') {

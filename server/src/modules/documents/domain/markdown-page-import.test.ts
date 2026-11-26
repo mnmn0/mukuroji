@@ -78,6 +78,8 @@ describe('convertMarkdownToPageBlocks', () => {
       'heading',
       'Again [ref].\n\n[ref]: https://example.com',
     ])
+    const inCode = convert('See [ref].\n\n## Example\n\n- item\n\n  ```text\n  [ref]: https://example.com\n  ```').blocks
+    expect(inCode[0]).toMatchObject({ type: 'paragraph', text: 'See [ref].' })
     const again = convert(blocks.map((block) => block.type === 'paragraph' ? block.text : '## Details').join('\n\n')).blocks
     expect(again.map((block) => block.type === 'paragraph' ? block.text : block.type))
       .toEqual(blocks.map((block) => block.type === 'paragraph' ? block.text : block.type))
