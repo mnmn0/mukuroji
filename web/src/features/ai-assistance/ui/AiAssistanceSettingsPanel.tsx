@@ -871,7 +871,8 @@ function withMonthlyLimit(
   field: 'monthlyTokenLimit' | 'monthlyCostLimitUsd',
   text: string,
 ): AiAssistancePolicy {
-  const { [field]: _removed, ...rest } = policy
+  const rest: AiAssistancePolicy = { ...policy }
+  delete rest[field]
   if (text.trim() === '') return rest
   return { ...rest, [field]: Number(text) }
 }
