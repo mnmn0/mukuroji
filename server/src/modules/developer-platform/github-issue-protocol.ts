@@ -117,9 +117,13 @@ export class GitHubIssueProtocol implements ConnectorResourceProtocol {
    * canceled Work Item closes the issue; any other status category reopens it.
    *
    * Every write first reads the target and refuses a pull request, which the issues endpoint would
-   * also write. GitHub has no conditional issue update, so a write with an expected version also
-   * refuses when someone edited the issue since Mukuroji last read it. The next poll then reads
-   * the edit and records a conflict instead of the write overwriting it.
+   * also write. A write with an expected version also refuses when the issue changed since
+   * Mukuroji last read it; the next poll then reads that edit and records a conflict.
+   *
+   * GitHub has no conditional issue update, so this check is not atomic: an edit that lands
+   * between this read and the PATCH is overwritten, and no conflict is recorded for it. That window
+   * is one request long and is accepted rather than serialized, because the edit stays in the
+   * issue's history on GitHub.
    *
    * @param request - Authenticated provider requester.
    * @param mutation - Work Item contents and the origin marker.

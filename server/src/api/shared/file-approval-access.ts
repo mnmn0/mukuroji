@@ -577,6 +577,9 @@ export function hasApprovalSummaryContent(summary: ApprovalSummary) {
  *   completion Gate condition is unmet.
  * @throws WorkflowRuleError when the actor may not make the status change, or a field the target
  *   status requires is empty.
+ * @throws WorkItemConfigurationError with a 4xx status when the update fails validation, such as a
+ *   required custom field left empty, and with a 409 or 5xx status for a revision conflict or a
+ *   configuration that cannot be read.
  */
 export async function prepareConfiguredUpdateWorkItem(
   directoryId: string,

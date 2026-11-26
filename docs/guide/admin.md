@@ -429,7 +429,8 @@ Phase / Milestone を持つテンプレートを適用するときは、Phase �
   workflow に今の状態から移れるそうした status がない場合や、必須項目・ロール・完了条件などの workflow の条件で
   移せない場合は、Work Item を動かさずにその link を同期競合として残し、
   ほかの issue の同期は続けます。両方が双方向に同期していて、Mukuroji が最後に読んだあとに GitHub 側で
-  issue が編集されていたら、上書きせずに次の取り込みで同期競合として出します。
+  issue が編集されていたら、上書きせずに次の取り込みで同期競合として出します（GitHub には条件付きの更新がないため、
+  Mukuroji が書き込む直前のごく短い間に入った編集だけは上書きされます。その編集は GitHub の issue の履歴に残ります）。
   逆に Work Item が完了・中止になると issue を close し、それ以外に戻ると reopen します。pull request・commit・deploy の
   link は手入力のまま同期しません。issue の本文の末尾には、Mukuroji が書き込んだことを示す見えないコメントが付きます。
   説明が 60,000 文字を超える Work Item は、短くして書き込まずに同期の失敗として残します。接続を解除すると、GitHub の
