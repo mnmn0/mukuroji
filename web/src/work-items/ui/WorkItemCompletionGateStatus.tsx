@@ -119,8 +119,10 @@ export function WorkItemCompletionGateStatus({
         ))}
       </ul>
       {overrideFormId !== undefined && blocksCompletion ? (
-        <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]" htmlFor={`${headingId}-override`}>
-          {t('workItems.completionGate.override.label')}
+        <div className="grid min-w-0 gap-1.5">
+          <label className="text-sm font-semibold text-[var(--workbench-text)]" htmlFor={`${headingId}-override`}>
+            {t('workItems.completionGate.override.label')}
+          </label>
           <textarea
             aria-describedby={`${headingId}-override-help`}
             className="workbench-input min-h-16 w-full min-w-0 px-3 py-2 font-normal"
@@ -132,7 +134,7 @@ export function WorkItemCompletionGateStatus({
           <span className="text-xs font-medium text-[var(--workbench-muted)]" id={`${headingId}-override-help`}>
             {t('workItems.completionGate.override.help')}
           </span>
-        </label>
+        </div>
       ) : null}
     </section>
   )
