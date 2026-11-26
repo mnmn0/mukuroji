@@ -9,11 +9,12 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(670)
-  expect(new Set(inventory).size).toBe(666)
+  expect(inventory).toHaveLength(680)
+  expect(new Set(inventory).size).toBe(676)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
+  expect(inventory).toContain('PATCH /api/v1/documents/:documentId')
   expect(inventory).toContain('POST /api/notifications/bulk')
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
   expect(inventory).toContain('POST /api/automation/templates/:templateId/application-previews')
@@ -41,6 +42,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/ai-assistance/provider-credentials')
   expect(inventory).toContain('PUT /api/ai-assistance/provider-credentials/:provider')
   expect(inventory).toContain('DELETE /api/ai-assistance/provider-credentials/:provider')
+  // Monthly AI usage for Workspace administrators (#414).
+  expect(inventory).toContain('GET /api/ai-assistance/usage')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
   expect(inventory).toContain('GET /api/planning/updates/template')
   expect(inventory).toContain('PATCH /api/teams/:teamId/workload/profiles/:memberId/time-off/:timeOffId')
@@ -169,6 +172,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('POST /api/teams/:teamId/agent-runs/:runId/release')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-settings')
   expect(inventory).toContain('PUT /api/teams/:teamId/agent-settings')
+  expect(inventory).toContain('GET /api/workspace/agent-defaults')
+  expect(inventory).toContain('PUT /api/workspace/agent-defaults')
   expect(inventory).toContain('GET /api/developer/me/agent-connection')
   expect(inventory).toContain('POST /api/developer/me/api-keys')
   expect(inventory).toContain('POST /api/developer/me/api-keys/:apiKeyId/rotate')
@@ -218,6 +223,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/v1/agent-runs/*')
   expect(inventory).toContain('ALL /api/v1/agent-telemetry/*')
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
+  expect(inventory).toContain('ALL /api/workspace/agent-defaults')
+  // Reported pull request status (#353, ADR 0103) is part of Software factory.
+  expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/artifact-statuses')
+  expect(inventory).toContain('ALL /api/teams/:teamId/work-items/:workItemId/artifact-statuses')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   // Slack destinations (#399): the caller's own, a Team channel, and a Project channel.
   expect(inventory).toContain('PUT /api/notification-preferences/slack-destination')
@@ -227,6 +236,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'f0b5a033c665ee8ea9a3a8b1202b6c5ece781a282c3dbec7fd3070be74dc8ecd',
+    'd3515b4b56a67232407000aa0869b0868b29c9cab1358da0996762bf6d7276ef',
   )
 })

@@ -1899,7 +1899,7 @@ function renderMarkdownParagraph(
  * as two lists. A definition shows nothing and ends every list, quote, and footnote before it, so
  * each block keeps the structure it has in the app; import drops it with the other definitions.
  */
-const MARKDOWN_BLOCK_BOUNDARY = '[mukuroji-block-boundary]: #'
+export const MARKDOWN_BLOCK_BOUNDARY = '[mukuroji-block-boundary]: #'
 
 /** One part of the joined file, or a boundary written between two parts. */
 type JoinedMarkdownPart = {

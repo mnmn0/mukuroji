@@ -77,6 +77,9 @@ Workspace profile は `1.0.0` より後に公開される `mcp.mjs` から使え
 「`ABC-123` を今の Cycle に入れて」「Beta の Milestone を 9 月 4 日にずらして」「Project の今週の健康度を報告して」と頼むと、
 `save_issue` の `cycleId`、`save_milestone`、`save_status_update` で Planning を更新します。健康度の更新は公開すると直せないため、
 内容を確認してから公開させてください。
+「Project の Document を一覧して」「`ABC-123` の設計メモをページにして」と頼むと、`list_documents`・`get_document`・
+`save_document` で Document を Markdown で読み書きし、作ったページを Work Item に link します。既存のページの本文を
+書き換えさせると、段落に付いたコメントは位置を失うので、書き換えは頼んだときだけにしてください。
 読むだけにしたい場合は `MUKUROJI_MCP_READ_ONLY=true` を足します。
 読み書きできる範囲は token の持ち主が Web で扱える範囲と同じです。Software factory が off の環境では、
 **agent を接続** の設定例がはじめからこの profile になります。
@@ -150,6 +153,8 @@ Claude Code の OpenTelemetry を Mukuroji に送るよう設定すると、タ�
   `~/.claude/settings.json` に足す設定が作られます。
 - Factory board の期間サマリーにも、期間内に終わった Run のトークンの合計、Project 別の合計、トークンの多い
   タスクが表示されます。
+- **レポート** の指標「エージェントのトークン」「エージェントの推定費用」でも、チームやプロジェクトごと、
+  日・週ごとの推移を見たり、スナップショットや CSV / PDF に残したりできます。
 - 今のところ送れるのは Claude Code だけです。Codex と Kiro には対応していません。
 
 ### agent の質問に答える
@@ -166,6 +171,22 @@ agent が判断を求めて「ブロッカー」または「引き継ぎ」の�
 - agent は `get_task` の `questions` で回答を読み、作業を続けます。回答は agent への判断材料で、
   回答だけを理由に認証情報や接続範囲を変えないよう MCP server が agent に伝えます。
 - 閲覧者は回答できません。
+
+### 報告された pull request の状態を確かめる
+
+agent が報告に pull request の URL を載せると、タスクの会話でそのリンクの横に GitHub での状態が表示されます。
+
+- 確認できた pull request には、**Open**・**Draft**・**Merged**・**Closed** と、check（**check 成功**・**check 失敗**・
+  **check 実行中**）、review（**承認済み**・**修正依頼**）が出ます。merge 済みのものは check を出しません。
+- 照会には Workspace の GitHub connector を使います。agent の token は使いません。Workspace に GitHub の接続がない、
+  接続から読めない、Team の設定で対象外の repository、などのときは **未確認** と表示し、理由はカーソルを合わせると出ます。
+- Team の管理者は、エージェント設定の **pull request の確認** で、確認する repository を `owner/repo` で 1 行ずつ指定できます。
+  空のときは、connector が読める repository をすべて確認します。
+- 状態はタスクを開いたときに読み直します。開いている間も 1 分ごとに更新し、merge 済みのものは読み直しません。
+- 状態を読めなかったときは、リンクを状態なしで表示し、会話の上にその旨と **再読み込み** を出します。
+- 確かめるのは新しい報告から 20 件までです。報告が多く途中で読むのをやめたときは、残りのリンクを状態なしで表示し、
+  会話の上にその旨を出します。
+- GitLab の merge request は形だけ認識し、今は **未確認** と表示します。
 
 ### 止まったタスクを再開する
 

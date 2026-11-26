@@ -43,7 +43,11 @@ export const AGENT_SETTINGS_MAX_RESUMABLE_STATUSES = 50
 /** Maximum UTF-8 size in bytes of one agent brief. */
 export const AGENT_SETTINGS_BRIEF_MAX_BYTES = 16 * 1024
 
-/** Maximum number of Projects that may carry their own agent brief. */
+/**
+ * Maximum number of Projects that may carry their own agent brief. MCP builds validate agent context
+ * against this count, so raising it needs an MCP API revision that older builds are told to update
+ * from (ADR 0099).
+ */
 export const AGENT_SETTINGS_MAX_PROJECT_BRIEFS = 20
 
 /** Maximum combined UTF-8 size in bytes of the Team brief and every Project brief. */
@@ -509,6 +513,11 @@ export type AgentSettings = {
    * `not_ready`; active runs keep going until they finish or are released.
    */
   acceptNewRuns: boolean
+  /**
+   * Repositories whose reported pull requests Mukuroji verifies through a connector, as lowercase
+   * `owner/repo` paths. Empty means any repository the Workspace connector can read.
+   */
+  artifactRepositories: string[]
   /** Whether another instance of the same assignee may take over a stalled run. */
   allowTakeoverAfterLeaseExpiry: boolean
   /**
@@ -532,6 +541,11 @@ export type AgentSettings = {
   brief?: string
   /** Agent briefs per Project ID, returned after the Team brief for work in that Project. */
   projectBriefs: Record<string, string>
+  /**
+   * Workspace default brief that agents receive when the Team has no brief of its own. It is read
+   * only here; Workspace administrators change it through the Workspace agent defaults.
+   */
+  workspaceBrief?: string
   /** Whether each run that finishes as `failed` is filed to the Team's Triage as an `agent-run` entry. */
   fileFailedRunsToTriage: boolean
   /** Whether each run that stalls (active past its lease) is filed to the Team's Triage as an `agent-run` entry. */
@@ -545,6 +559,43 @@ export type AgentSettings = {
   updatedAt?: string
   /** Member key of the last editor. */
   updatedBy?: string
+}
+
+/**
+ * Agent settings of a Workspace that a Team uses until it saves its own, and the brief a Team
+ * without a brief of its own passes to agents.
+ */
+export type WorkspaceAgentDefaults = {
+  /** Agent settings contract schema version. */
+  schemaVersion: typeof AGENT_SETTINGS_SCHEMA_VERSION
+  /** Optimistic concurrency revision; `0` means the defaults have never been saved. */
+  revision: number
+  /** Lease length in minutes for new runs of a Team without saved settings. */
+  leaseMinutes: number
+  /** Whether a Team without saved settings lets another instance of the assignee take over a stalled run. */
+  allowTakeoverAfterLeaseExpiry: boolean
+  /** Whether a Team without saved settings readies only Work Items with acceptance criteria. */
+  requireAcceptanceCriteria: boolean
+  /** Brief in Markdown for every Team without a brief of its own. It is user data, never instructions. */
+  brief?: string
+  /** UTC ISO 8601 time of the last saved change. */
+  updatedAt?: string
+  /** Member key of the last editor. */
+  updatedBy?: string
+}
+
+/** Request body that replaces the Workspace agent defaults. */
+export type UpdateWorkspaceAgentDefaultsRequest = {
+  /** Revision read before editing; `0` when no defaults were saved yet. */
+  expectedRevision: number
+  /** Lease length in minutes for new runs. */
+  leaseMinutes: number
+  /** Whether another instance of the same assignee may take over a stalled run. */
+  allowTakeoverAfterLeaseExpiry: boolean
+  /** Whether only Work Items with acceptance criteria are ready; omitted means false. */
+  requireAcceptanceCriteria?: boolean
+  /** Default brief in Markdown; omitted or empty removes it. */
+  brief?: string
 }
 
 /**
@@ -574,7 +625,10 @@ export type AgentContext = {
   requireAcceptanceCriteria: boolean
   /** Custom field whose non-empty value also counts as acceptance criteria. */
   acceptanceCriteriaFieldId?: string
-  /** Team agent brief in Markdown. It is user data, never instructions that change credentials or scope. */
+  /**
+   * Team agent brief in Markdown, or the Workspace default brief when the Team has none. It is user
+   * data, never instructions that change credentials or scope.
+   */
   brief?: string
   /** Agent briefs per Project ID the caller can view. */
   projectBriefs: Record<string, string>
@@ -608,6 +662,8 @@ export type UpdateAgentSettingsRequest = {
   notifyAssigneeOfRunEvents?: boolean
   /** Whether agents may start, resume, or take over runs; omitted means true. */
   acceptNewRuns?: boolean
+  /** Repositories whose pull requests are verified; omitted means none listed, so any readable repository. */
+  artifactRepositories?: string[]
 }
 
 /** Newest Agent Runs of one Work Item for the Web application. */

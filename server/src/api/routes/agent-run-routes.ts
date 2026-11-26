@@ -13,14 +13,17 @@ import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
 import {
   getWebAgentSettings,
+  getWebWorkspaceAgentDefaults,
   listWebTeamAgentRunBoard,
   readFactoryBoardContinuation,
   listWebWorkItemAgentRunReports,
   listWebWorkItemAgentRuns,
   releaseWebAgentRun,
   updateWebAgentSettings,
+  updateWebWorkspaceAgentDefaults,
 } from './web-agent-run-service'
 import { answerWebAgentRunReport } from './web-agent-run-answer-service'
+import { readWebWorkItemArtifactStatuses } from './web-agent-run-artifact-service'
 import { getWebTeamFactoryAnalytics, readFactoryAnalyticsPeriod } from './web-agent-run-analytics-service'
 import { getWebTeamAgentRunHistory, readAgentRunHistoryRequest } from './web-agent-run-history-service'
 
@@ -104,6 +107,17 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
         c.req.param('workItemId'),
         readHistoryLimit(c.req.query('limit'), defaultReportPageSize),
       ))
+    } catch (error) {
+      return toAgentRunErrorResponse(c, error)
+    }
+  })
+
+  routeApp.get('/api/teams/:teamId/work-items/:workItemId/artifact-statuses', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      return c.json(await readWebWorkItemArtifactStatuses(principal, c.req.param('teamId'), c.req.param('workItemId')))
     } catch (error) {
       return toAgentRunErrorResponse(c, error)
     }
@@ -207,6 +221,33 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       return c.json(await getWebAgentSettings(principal, c.req.param('teamId')))
+    } catch (error) {
+      return toAgentRunErrorResponse(c, error)
+    }
+  })
+
+  routeApp.get('/api/workspace/agent-defaults', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      return c.json(await getWebWorkspaceAgentDefaults(principal))
+    } catch (error) {
+      return toAgentRunErrorResponse(c, error)
+    }
+  })
+
+  routeApp.put('/api/workspace/agent-defaults', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const body = await readJson(c.req)
+      return c.json(await updateWebWorkspaceAgentDefaults(
+        principal,
+        body,
+        createRequestMutationContext(c, principal.directoryId, principal.actorId, principal.userKey, body),
+      ))
     } catch (error) {
       return toAgentRunErrorResponse(c, error)
     }

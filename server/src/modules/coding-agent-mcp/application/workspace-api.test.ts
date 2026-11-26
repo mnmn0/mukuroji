@@ -46,6 +46,11 @@ function apiWithFailingKeyRead() {
     updateWorkItemPlanning: unexpected,
     statusUpdates: unexpected,
     publishStatusUpdate: unexpected,
+    listDocuments: unexpected,
+    workItemDocuments: unexpected,
+    getDocument: unexpected,
+    createDocument: unexpected,
+    updateDocument: unexpected,
   }
   return { api, writes }
 }
@@ -331,4 +336,47 @@ test('save_status_update publishes the update without the idempotency key in the
   const saved = await createWorkspaceIssues(api).saveStatusUpdate({ target, health: 'on-track', summary: 'On plan.', idempotencyKey: 'key-9' })
   expect(saved.item.target).toEqual(target)
   expect(writes).toEqual([{ call: 'publishStatusUpdate', input: { target, health: 'on-track', summary: 'On plan.' }, key: 'key-9' }])
+})
+
+test('save_document creates a page linked to a Work Item by key and updates it with the expected revision', async () => {
+  const calls: string[] = []
+  const { api: base } = apiWithFailingKeyRead()
+  const issues = createWorkspaceIssues({
+    ...base,
+    createDocument: async (input, key) => { calls.push(`create:${key}:${JSON.stringify(input)}`); return { id: 'doc-1', kind: 'page', title: 'Plan', scope: { type: 'workspace' }, revision: 1 } },
+    updateDocument: async (documentId, input, key) => { calls.push(`update:${key}:${documentId}:${JSON.stringify(input)}`); return { id: documentId, kind: 'page', title: 'Plan', scope: { type: 'workspace' }, revision: 2 } },
+  })
+
+  expect(await issues.saveDocument({ title: 'Plan', content: '# Plan', projectId: 'web', issueId: 'ABC-1', idempotencyKey: 'k1' }))
+    .toMatchObject({ id: 'doc-1', revision: 1 })
+  expect(await issues.saveDocument({ id: 'doc-1', content: 'New', expectedRevision: 1, idempotencyKey: 'k2' }))
+    .toMatchObject({ id: 'doc-1', revision: 2 })
+  expect(calls).toEqual([
+    `create:k1:${JSON.stringify({ title: 'Plan', content: '# Plan', projectId: 'web', workItem: { teamId: 'team', workItemId: 'task' } })}`,
+    `update:k2:doc-1:${JSON.stringify({ expectedRevision: 1, content: 'New' })}`,
+  ])
+  await expect(issues.saveDocument({ title: 'Plan', idempotencyKey: 'k3' })).rejects.toMatchObject({ code: 'invalid_request' })
+  await expect(issues.saveDocument({ id: 'doc-1', title: 'Plan', idempotencyKey: 'k4' })).rejects.toMatchObject({ code: 'invalid_request' })
+  await expect(issues.saveDocument({ id: 'doc-1', expectedRevision: 2, idempotencyKey: 'k5' })).rejects.toMatchObject({ code: 'invalid_request' })
+  await expect(issues.saveDocument({ id: 'doc-1', expectedRevision: 2, title: 'Plan', projectId: 'web', idempotencyKey: 'k6' }))
+    .rejects.toMatchObject({ code: 'invalid_request' })
+  expect(calls).toHaveLength(2)
+})
+
+test('list_documents lists the Workspace with filters, or the Documents linked to a Work Item', async () => {
+  const calls: string[] = []
+  const { api: base } = apiWithFailingKeyRead()
+  const issues = createWorkspaceIssues({
+    ...base,
+    listDocuments: async (filters, cursor, limit) => { calls.push(`workspace:${JSON.stringify(filters)}:${cursor}:${limit}`); return { items: [], hasMore: false } },
+    workItemDocuments: async (teamId, workItemId) => { calls.push(`linked:${teamId}/${workItemId}`); return { items: [{ id: 'doc-1', title: 'Spec' }], hasMore: false } },
+  })
+
+  await issues.listDocuments({ projectId: 'web', cursor: 'c', limit: 10 })
+  expect(await issues.listDocuments({ issueId: 'ABC-1' })).toEqual({
+    teamId: 'team', workItemId: 'task', items: [{ id: 'doc-1', title: 'Spec' }], hasMore: false,
+  })
+  await expect(issues.listDocuments({ issueId: 'ABC-1', projectId: 'web' })).rejects.toMatchObject({ code: 'invalid_request' })
+  await expect(issues.listDocuments({ teamId: 'team' })).rejects.toMatchObject({ code: 'invalid_request' })
+  expect(calls).toEqual(['workspace:{"projectId":"web"}:c:10', 'linked:team/task'])
 })

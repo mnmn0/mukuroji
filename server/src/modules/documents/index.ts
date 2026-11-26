@@ -13,6 +13,12 @@ export {
   validateDocumentPayload,
 } from './domain/document-content'
 export * from './domain/document-limits'
+export {
+  convertMarkdownToPageBlocks,
+  MARKDOWN_PAGE_IMPORT_MAX_LENGTH,
+  type MarkdownPageImportErrorCode,
+  type MarkdownPageImportResult,
+} from './domain/markdown-page-import'
 /** Backfill of the comment thread participant index (ADR 0092). */
 export { documentCommentParticipantIndexMigration } from './document-comment-participant-index-migration'
 export * from './errors'

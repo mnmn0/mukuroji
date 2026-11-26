@@ -2344,4 +2344,151 @@ describe('DynamoDbAiAssistanceStore', () => {
       harness.restore()
     }
   })
+  describe('monthly AI usage (#414)', () => {
+    test('checks the monthly Workspace caps with the reservation and refuses a full month', async () => {
+      const accepted = createHarness([{}])
+      try {
+        await accepted.store.reserveGeneration(createReservation({
+          monthlyBudget: { month: '2026-08', tokenLimit: 50_000, costLimitUsd: 12.5 },
+        }))
+        const items = accepted.commands[0]?.input.TransactItems
+        if (!Array.isArray(items)) throw new TypeError('Expected transaction items.')
+        expect(items).toHaveLength(4)
+        expect(items[3]).toEqual({
+          ConditionCheck: {
+            TableName: 'WorkspaceSearchTable',
+            Key: { workspaceId: 'workspace-1', recordKey: 'AI_USAGE#MONTH#2026-08#WORKSPACE' },
+            ConditionExpression:
+              'attribute_not_exists(#recordKey) OR ' +
+              '(#totalTokens < :tokenLimit AND #costMicroUsd < :costLimitMicroUsd)',
+            ExpressionAttributeNames: {
+              '#totalTokens': 'totalTokens',
+              '#costMicroUsd': 'costMicroUsd',
+              '#recordKey': 'recordKey',
+            },
+            ExpressionAttributeValues: { ':tokenLimit': 50_000, ':costLimitMicroUsd': 12_500_000 },
+          },
+        })
+      } finally {
+        accepted.restore()
+      }
+
+      const refused = createHarness([
+        transactionCancellation([undefined, undefined, undefined, 'ConditionalCheckFailed']),
+      ])
+      try {
+        await expect(refused.store.reserveGeneration(createReservation({
+          monthlyBudget: { month: '2026-08', tokenLimit: 50_000 },
+        }))).rejects.toMatchObject({ category: 'rate-limit', code: 'AiAssistanceMonthlyBudgetExceeded' })
+      } finally {
+        refused.restore()
+      }
+    })
+
+    test('keeps the reservation unchanged when the policy sets no monthly cap', async () => {
+      const harness = createHarness([{}])
+      try {
+        await harness.store.reserveGeneration(createReservation())
+        expect(harness.commands[0]?.input.TransactItems).toHaveLength(3)
+      } finally {
+        harness.restore()
+      }
+    })
+
+    test('counts one attempt into the Workspace, task, and member rows once', async () => {
+      const harness = createHarness([{}, transactionCancellation(['ConditionalCheckFailed', undefined, undefined, undefined])])
+      const input = {
+        workspaceId: 'workspace-1',
+        memberId: 'member-1',
+        idempotencyKey: 'client-secret-key',
+        generationId: 'generation-2',
+        task: 'planning' as const,
+        month: '2026-08',
+        usage: { inputTokens: 1_200, outputTokens: 300, latencyMs: 900, costUsd: 0.0123 },
+      }
+      try {
+        await harness.store.recordGenerationUsage(input)
+        // A repeated call finds the marker row and adds nothing.
+        await harness.store.recordGenerationUsage(input)
+        const items = harness.commands[0]?.input.TransactItems
+        if (!Array.isArray(items)) throw new TypeError('Expected transaction items.')
+        expect(items).toHaveLength(4)
+        expect(readRecord(readRecord(items[0]).Put).Item).toMatchObject({
+          recordKey: 'AI_USAGE_RECORDED#generation-2',
+          recordType: 'ai-assistance-usage-recorded',
+        })
+        expect(items.slice(1).map((item) => readRecord(readRecord(readRecord(item).Update).Key).recordKey))
+          .toEqual([
+            'AI_USAGE#MONTH#2026-08#WORKSPACE',
+            'AI_USAGE#MONTH#2026-08#TASK#planning',
+            'AI_USAGE#MONTH#2026-08#MEMBER#member-1',
+          ])
+        expect(readRecord(readRecord(items[1]).Update).ExpressionAttributeValues).toMatchObject({
+          ':inputTokens': 1_200,
+          ':outputTokens': 300,
+          ':totalTokens': 1_500,
+          ':costMicroUsd': 12_300,
+          ':costUnavailable': 0,
+        })
+        expect(harness.commands).toHaveLength(2)
+      } finally {
+        harness.restore()
+      }
+    })
+
+    test('reads the month rows back as totals and breakdowns', async () => {
+      const row = (recordKey: string, scope: string, extra: Record<string, unknown>) => ({
+        workspaceId: 'workspace-1',
+        recordKey,
+        recordType: 'ai-assistance-monthly-usage',
+        scope,
+        month: '2026-08',
+        generationCount: 2,
+        inputTokens: 100,
+        outputTokens: 50,
+        totalTokens: 150,
+        costMicroUsd: 2_500_000,
+        costUnavailableCount: 1,
+        expiresAt: 1,
+        ...extra,
+      })
+      const harness = createHarness([
+        {
+          Items: [row('AI_USAGE#MONTH#2026-08#WORKSPACE', 'workspace', {})],
+          LastEvaluatedKey: { workspaceId: 'workspace-1', recordKey: 'AI_USAGE#MONTH#2026-08#WORKSPACE' },
+        },
+        {
+          Items: [
+            row('AI_USAGE#MONTH#2026-08#TASK#summary', 'task', { task: 'summary' }),
+            row('AI_USAGE#MONTH#2026-08#MEMBER#member-1', 'member', { memberId: 'member-1' }),
+          ],
+        },
+      ])
+      try {
+        const totals = { generations: 2, inputTokens: 100, outputTokens: 50, costUsd: 2.5, costUnavailableGenerations: 1 }
+        expect(await harness.store.readMonthlyUsage('workspace-1', '2026-08')).toEqual({
+          totals,
+          tasks: [{ ...totals, task: 'summary' }],
+          members: [{ ...totals, memberId: 'member-1' }],
+        })
+        expect(harness.commands.map((command) => command.name)).toEqual(['QueryCommand', 'QueryCommand'])
+        expect(harness.commands[0]?.input).toMatchObject({
+          ExpressionAttributeValues: { ':workspaceId': 'workspace-1', ':prefix': 'AI_USAGE#MONTH#2026-08#' },
+          ConsistentRead: true,
+        })
+      } finally {
+        harness.restore()
+      }
+    })
+
+    test('fails closed on a malformed usage row', async () => {
+      const harness = createHarness([{ Items: [{ workspaceId: 'workspace-1', recordKey: 'AI_USAGE#MONTH#2026-08#WORKSPACE' }] }])
+      try {
+        await expect(harness.store.readMonthlyUsage('workspace-1', '2026-08'))
+          .rejects.toMatchObject({ code: 'InvalidAiAssistanceRecord' })
+      } finally {
+        harness.restore()
+      }
+    })
+  })
 })

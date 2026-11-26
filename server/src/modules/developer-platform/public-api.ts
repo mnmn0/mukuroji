@@ -50,6 +50,12 @@ import {
   type PublicTeamList,
   type PublicWorkItemKeyLookup,
   type PublicWorkItemDocument,
+  type CreatePublicDocumentRequest,
+  type PublicDocumentSummary,
+  type UpdatePublicDocumentRequest,
+  PUBLIC_DOCUMENT_CONTENT_MAX_LENGTH,
+  PUBLIC_DOCUMENT_PAGE_MAX_LIMIT,
+  PUBLIC_DOCUMENT_TITLE_MAX_LENGTH,
   PUBLIC_WORK_ITEM_DOCUMENT_PAGE_MAX_LIMIT,
   type ApiProblem,
   type ApiProblemCode,
@@ -914,6 +920,72 @@ export interface PublicDocumentService {
     workItemId: string,
     documentId: string,
   ): Promise<PublicDocumentContent>
+  /**
+   * Lists one page of the Workspace's Documents that the credential owner can view.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param filters - Optional Project and folder restrictions.
+   * @param continuation - Internal continuation from the previous page.
+   * @param limit - Maximum number of Documents evaluated in this page.
+   * @returns Visible Documents and any remaining internal continuation.
+   */
+  listDocuments(
+    credential: AuthenticatedDeveloperCredential,
+    filters: {
+      /** Only Documents of this Project; omitted lists every scope. */
+      projectId?: string
+      /** Only Documents directly in this folder. */
+      parentId?: string
+    },
+    continuation: string | undefined,
+    limit: number,
+  ): Promise<{
+    /** Visible Documents in this page. */
+    items: PublicDocumentSummary[]
+    /** Whether another page exists. */
+    hasMore: boolean
+    /** Internal continuation wrapped by the public API's signed cursor. */
+    nextContinuation?: string
+  }>
+  /**
+   * Reads a page or template the credential owner can view and renders it as Markdown.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param documentId - Document ID.
+   * @returns The Document content.
+   */
+  getDocument(credential: AuthenticatedDeveloperCredential, documentId: string): Promise<PublicDocumentContent>
+  /**
+   * Checks that the credential owner may still write Documents, so a replayed write is not
+   * returned to an owner who lost the permission.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @returns A promise that resolves when the owner may write Documents.
+   */
+  authorizeDocumentWrite(credential: AuthenticatedDeveloperCredential): Promise<void>
+  /**
+   * Creates a page from Markdown as the credential owner, optionally linked to a Work Item.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param input - Title, Markdown body, destination, and Work Item link.
+   * @param context - Request, correlation, and idempotency identifiers for the audit events.
+   * @returns Summary of the created page; its body is read with `getDocument`.
+   */
+  createDocument(
+    credential: AuthenticatedDeveloperCredential,
+    input: CreatePublicDocumentRequest,
+    context: PublicMutationContext,
+  ): Promise<PublicDocumentSummary>
+  /**
+   * Changes the title or replaces the Markdown body of a page or template as the credential owner.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param documentId - Document ID.
+   * @param input - Expected revision and the new title or body.
+   * @param context - Request, correlation, and idempotency identifiers for the audit events.
+   * @returns Summary of the changed Document; its body is read with `getDocument`.
+   */
+  updateDocument(
+    credential: AuthenticatedDeveloperCredential,
+    documentId: string,
+    input: UpdatePublicDocumentRequest,
+    context: PublicMutationContext,
+  ): Promise<PublicDocumentSummary>
 }
 
 /** Result of one accepted OTLP logs export. */
@@ -1719,6 +1791,62 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     )
     c.header('Cache-Control', 'private, no-store')
     return c.json(document)
+  })
+
+  router.get('/v1/documents', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const documents = requireDocumentService(dependencies)
+    const projectId = readOptionalQueryId(c.req.query('projectId'), 'projectId')
+    const parentId = readOptionalQueryId(c.req.query('parentId'), 'parentId')
+    c.header('Cache-Control', 'private, no-store')
+    return c.json(await createOrderedSignedContinuationPage(c, dependencies, {
+      workspaceId: credential.workspaceId,
+      actorId: `credential:${credential.credentialId}`,
+      resource: '/v1/documents',
+      filters: { projectId, parentId },
+    }, (continuation, limit) => documents.listDocuments(
+      credential,
+      { ...(projectId === undefined ? {} : { projectId }), ...(parentId === undefined ? {} : { parentId }) },
+      continuation,
+      Math.min(limit, PUBLIC_DOCUMENT_PAGE_MAX_LIMIT),
+    )))
+  })
+
+  router.post('/v1/documents', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const documents = requireDocumentService(dependencies)
+    const body = readCreatePublicDocumentRequest(await readJson(c))
+    c.header('Cache-Control', 'private, no-store')
+    return executeIdempotentJson(c, dependencies, credential, body, async (context) => ({
+      status: 201,
+      body: await documents.createDocument(credential, body, context),
+    }), {
+      authorizeReplay: () => documents.authorizeDocumentWrite(credential),
+    })
+  })
+
+  router.get('/v1/documents/:documentId', async (c) => {
+    c.header('Cache-Control', 'private, no-store')
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const documents = requireDocumentService(dependencies)
+    return c.json(await documents.getDocument(credential, readRouteId(c.req.param('documentId'), 'Document ID')))
+  })
+
+  router.patch('/v1/documents/:documentId', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const documents = requireDocumentService(dependencies)
+    const documentId = readRouteId(c.req.param('documentId'), 'Document ID')
+    const body = readUpdatePublicDocumentRequest(await readJson(c))
+    c.header('Cache-Control', 'private, no-store')
+    return executeIdempotentJson(c, dependencies, credential, { documentId, ...body }, async (context) => ({
+      status: 200,
+      body: await documents.updateDocument(credential, documentId, body, context),
+    }), {
+      authorizeReplay: async () => {
+        await documents.authorizeDocumentWrite(credential)
+        await documents.getDocument(credential, documentId)
+      },
+    })
   })
 
   router.get('/v1/work-items/:workItemId/attachments', async (c) => {
@@ -5627,7 +5755,7 @@ function assertAllowedFields(
 ) {
   const allowedFields = new Set(allowed)
   const unknownField = Object.keys(value).find((field) => !allowedFields.has(field))
-  if (unknownField) {
+  if (unknownField !== undefined) {
     throw new PublicApiServiceError(
       400,
       'validation_failed',
@@ -6430,6 +6558,112 @@ function readCreatePublicWorkItemRelationRequest(value: unknown): CreatePublicWo
   return {
     type: readPublicWorkItemRelationType(body.type),
     targetWorkItemId: readIdentifier(body.targetWorkItemId, 'targetWorkItemId'),
+  }
+}
+
+/**
+ * Reads an optional identifier query parameter.
+ *
+ * @param value - Raw query value.
+ * @param label - Parameter name used in the error.
+ * @returns The identifier, or undefined when the parameter is absent.
+ * @throws PublicApiServiceError 400 when the value is not a valid identifier.
+ */
+function readOptionalQueryId(value: string | undefined, label: string): string | undefined {
+  return value === undefined ? undefined : readRouteId(value, label)
+}
+
+/**
+ * Reads a Document title from a request body.
+ *
+ * @param value - Raw title.
+ * @returns The trimmed title.
+ * @throws PublicApiServiceError 400 when the title is empty, too long, or has control characters.
+ */
+function readPublicDocumentTitle(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    !value.trim() ||
+    value.length > PUBLIC_DOCUMENT_TITLE_MAX_LENGTH ||
+    /[\u2028\u2029]/u.test(value) ||
+    containsAsciiControl(value, false)
+  ) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      `title is required and must be at most ${PUBLIC_DOCUMENT_TITLE_MAX_LENGTH} characters on one line.`,
+    )
+  }
+  return value.trim()
+}
+
+/**
+ * Reads a Markdown Document body from a request body.
+ *
+ * @param value - Raw Markdown.
+ * @returns The Markdown.
+ * @throws PublicApiServiceError 400 when it is not text, is too long, or has control characters.
+ */
+function readPublicDocumentContent(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    value.length > PUBLIC_DOCUMENT_CONTENT_MAX_LENGTH ||
+    containsAsciiControl(value, true)
+  ) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      `content must be Markdown text of at most ${PUBLIC_DOCUMENT_CONTENT_MAX_LENGTH} characters.`,
+    )
+  }
+  return value
+}
+
+/**
+ * Reads the body of `POST /api/v1/documents`.
+ *
+ * @param value - Parsed JSON body.
+ * @returns The page to create.
+ * @throws PublicApiServiceError 400 when a field is missing, unknown, or invalid.
+ */
+function readCreatePublicDocumentRequest(value: unknown): CreatePublicDocumentRequest {
+  const body = requireRecord(value, 'Document body is required.')
+  assertAllowedFields(body, ['title', 'content', 'projectId', 'parentId', 'workItem'], 'Document body')
+  let workItem: CreatePublicDocumentRequest['workItem']
+  if (body.workItem !== undefined) {
+    const link = requireRecord(body.workItem, 'workItem must be an object.')
+    assertAllowedFields(link, ['teamId', 'workItemId'], 'workItem')
+    workItem = {
+      teamId: readIdentifier(link.teamId, 'workItem.teamId'),
+      workItemId: readIdentifier(link.workItemId, 'workItem.workItemId'),
+    }
+  }
+  return {
+    title: readPublicDocumentTitle(body.title),
+    content: readPublicDocumentContent(body.content),
+    ...(body.projectId === undefined ? {} : { projectId: readIdentifier(body.projectId, 'projectId') }),
+    ...(body.parentId === undefined ? {} : { parentId: readIdentifier(body.parentId, 'parentId') }),
+    ...(workItem === undefined ? {} : { workItem }),
+  }
+}
+
+/**
+ * Reads the body of `PATCH /api/v1/documents/{documentId}`.
+ *
+ * @param value - Parsed JSON body.
+ * @returns The expected revision and the changes.
+ * @throws PublicApiServiceError 400 when a field is unknown or invalid, or nothing changes.
+ */
+function readUpdatePublicDocumentRequest(value: unknown): UpdatePublicDocumentRequest {
+  const body = requireRecord(value, 'Document patch is required.')
+  assertAllowedFields(body, ['expectedRevision', 'title', 'content'], 'Document patch')
+  if (body.title === undefined && body.content === undefined) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'Pass title, content, or both.')
+  }
+  return {
+    expectedRevision: readPositiveInteger(body.expectedRevision, 'expectedRevision'),
+    ...(body.title === undefined ? {} : { title: readPublicDocumentTitle(body.title) }),
+    ...(body.content === undefined ? {} : { content: readPublicDocumentContent(body.content) }),
   }
 }
 

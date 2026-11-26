@@ -159,7 +159,7 @@ test('creates the AI alarms only when Bedrock or an external AI provider is enab
   const aiAlarms = Object.entries(synthesizedTemplate.findResources('AWS::CloudWatch::Alarm'))
     .filter(([logicalId]) => logicalId.startsWith('AiAssistance'));
 
-  expect(aiAlarms).toHaveLength(10);
+  expect(aiAlarms).toHaveLength(11);
   for (const [, alarm] of aiAlarms) {
     expect(alarm.Condition).toBe('AiAssistanceAnyProviderConfigured');
   }

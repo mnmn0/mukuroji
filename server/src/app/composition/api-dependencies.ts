@@ -96,7 +96,10 @@ import { createXrayApiAccessRecorder } from '../../infrastructure/observability/
 import { createDynamoDbReadinessProbe } from '../../infrastructure/observability/readiness'
 import {
   createStaticRuntimeControlProvider,
+  runtimeControlAllowsAiAssistance,
+  type RuntimeControlProvider,
 } from '../../infrastructure/runtime/runtime-control'
+import { getSafeRuntimeControlSnapshot } from './runtime-control-safety'
 import {
   createProductionRuntimeControlProvider,
   createProductionRuntimeControlObservationRecorder,
@@ -151,8 +154,10 @@ import { SecretsManagerSlackDestinationSecretStore } from '../../modules/notific
 import { createSlackTestMessageSender } from '../../modules/notifications/adapter-out/slack/slack-channel-post-sender'
 import { getConfiguredNotificationsTableName } from '../../modules/notifications/notifications'
 import {
+  DynamoDbAgentRunArtifactStatusStore,
   DynamoDbAgentRunStore,
   DynamoDbAgentRunUsageStore,
+  InMemoryAgentRunArtifactStatusStore,
   InMemoryAgentRunStore,
   InMemoryAgentRunUsageStore,
 } from '../../modules/agent-runs'
@@ -703,6 +708,10 @@ export function createProductionWorkItemDependencies(
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
     ),
+    agentRunArtifactStatuses: new DynamoDbAgentRunArtifactStatusStore(
+      createDynamoDbDocumentClient(),
+      loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
+    ),
     focusState: createFocusStateClient(),
     workspaceSearch: new DynamoDbWorkspaceSearchClient(),
     documents: new DynamoDbDocumentsClient(),
@@ -826,6 +835,7 @@ function createLazyAiAssistanceService(
     getPolicy: (actor) => resolveService().getPolicy(actor),
     updatePolicy: (actor, request, authorization) =>
       resolveService().updatePolicy(actor, request, authorization),
+    getUsage: (actor, month) => resolveService().getUsage(actor, month),
     getPreference: (actor) => resolveService().getPreference(actor),
     updatePreference: (actor, request, authorization) =>
       resolveService().updatePreference(actor, request, authorization),
@@ -1038,10 +1048,12 @@ type ProductionAiAssistanceRuntime = {
  * of Workspace API keys in production.
  *
  * @param auditEvents - Existing Workspace audit persistence boundary.
+ * @param runtimeControl - Runtime control whose AI switch pauses generation; always on when omitted.
  * @returns Service, provider key service, and model list backed by the existing Workspace Search table.
  */
 function createProductionAiAssistanceRuntime(
   auditEvents: AuditEventsClient,
+  runtimeControl?: RuntimeControlProvider,
 ): ProductionAiAssistanceRuntime {
   if (!auditEvents) {
     throw new TypeError('AI assistance audit events dependency is required.')
@@ -1221,6 +1233,12 @@ function createProductionAiAssistanceRuntime(
     workspaceTokenLimitPerMinute,
     memberTokenLimitPerMinute,
     worstCaseTokensPerGeneration,
+    ...(runtimeControl === undefined
+      ? {}
+      : {
+          isDeploymentAiAssistanceEnabled: async () =>
+            runtimeControlAllowsAiAssistance(await getSafeRuntimeControlSnapshot(runtimeControl)),
+        }),
   })
   return {
     service,
@@ -1310,15 +1328,17 @@ function createAiProviderCredentialAuditEvent(
  * Creates the production AI assistance dependency bundle lazily.
  *
  * @param auditEvents - Existing audit event client used for policy-transition persistence.
+ * @param runtimeControl - Runtime control whose AI switch pauses generation; always on when omitted.
  * @returns AI assistance dependencies that defer provider configuration until use.
  */
 export function createProductionAiAssistanceDependencies(
   auditEvents: AuditEventsClient,
+  runtimeControl?: RuntimeControlProvider,
 ): AiAssistanceDependencies {
   let runtime: ProductionAiAssistanceRuntime | undefined
   /** Resolves the runtime once for this dependency graph. */
   const resolveRuntime = () => {
-    runtime ??= createProductionAiAssistanceRuntime(auditEvents)
+    runtime ??= createProductionAiAssistanceRuntime(auditEvents, runtimeControl)
     return runtime
   }
   return {
@@ -1877,8 +1897,9 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
     createTimeTrackingIdempotencyPort(adapters.idempotency, adapters.transactions),
   )
   const workspace = createProductionWorkspaceDependencies()
+  const operational = createProductionOperationalDependencies()
   return {
-    operational: createProductionOperationalDependencies(),
+    operational,
     authentication: createProductionAuthenticationDependencies(),
     workspace,
     workItems: createProductionWorkItemDependencies(
@@ -1889,7 +1910,10 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
     capacityPlanning: {
       capacityPlanningService: createCapacityPlanningService(timeTrackingService),
     },
-    aiAssistance: createProductionAiAssistanceDependencies(workspace.auditEvents),
+    aiAssistance: createProductionAiAssistanceDependencies(
+      workspace.auditEvents,
+      operational.runtimeControl,
+    ),
     developerPlatform: {
       ...adapters,
       publicWorkItems: createCanonicalPublicWorkItemService(),
@@ -1928,8 +1952,9 @@ export function createProductionAppDependencies(): AppDependencies {
           DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
     },
   )
+  const operational = createProductionOperationalDependencies()
   return {
-    operational: createProductionOperationalDependencies(),
+    operational,
     authentication: createProductionAuthenticationDependencies(),
     workspace,
     workItems: createProductionWorkItemDependencies(
@@ -1940,7 +1965,10 @@ export function createProductionAppDependencies(): AppDependencies {
     capacityPlanning: {
       capacityPlanningService: createCapacityPlanningService(timeTrackingService),
     },
-    aiAssistance: createProductionAiAssistanceDependencies(workspace.auditEvents),
+    aiAssistance: createProductionAiAssistanceDependencies(
+      workspace.auditEvents,
+      operational.runtimeControl,
+    ),
     developerPlatform,
   }
 }
@@ -2046,6 +2074,7 @@ export function createTestAppDependencies(): AppDependencies {
       analytics: new InMemoryAnalyticsRepository(),
       agentRuns: new InMemoryAgentRunStore(),
       agentRunUsage: new InMemoryAgentRunUsageStore(),
+      agentRunArtifactStatuses: new InMemoryAgentRunArtifactStatusStore(),
       requestIntake,
     },
     automation,
@@ -2159,6 +2188,7 @@ export function overrideAppDependencies(
         : {}),
       ...(overrides.agentRuns ? { agentRuns: overrides.agentRuns } : {}),
       ...(overrides.agentRunUsage ? { agentRunUsage: overrides.agentRunUsage } : {}),
+      ...(overrides.agentRunArtifactStatuses ? { agentRunArtifactStatuses: overrides.agentRunArtifactStatuses } : {}),
       ...(overrides.focusState ? { focusState: overrides.focusState } : {}),
       ...(overrides.workspaceSearch
         ? { workspaceSearch: overrides.workspaceSearch }

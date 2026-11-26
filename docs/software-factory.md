@@ -158,6 +158,8 @@ finished(paused|completed など) + Work Item が started --resume(同じ assign
 | table | `directoryTeamId` | `agent-run-latest#<workItemId>` | Work Item で最後に始まった Run の `runId`。start、take over、resume の transaction で書き、resume と Run 履歴の先頭ページが強整合で読む。index にまだない最新 Run は先頭ページの先頭に足す |
 | table | `directoryTeamId` | `agent-run-revoked#<workItemId>#<member と instance の hash>` | 人が解放した、または別 instance が引き継いだ Run の member と instance。fence が強整合で読む |
 | table | `directoryTeamId` | `agent-settings-mutation#<key hash>` | Agent settings の保存ごとの receipt。同じ key の再送を判定する |
+| table | `<directoryId>#workspace` | `agent-defaults` | Workspace の Agent 既定値（ADR 0099）。Team 設定の読み取り時に重ねる |
+| table | `<directoryId>#workspace` | `agent-defaults-mutation#<key hash>` | Workspace の Agent 既定値の保存ごとの receipt |
 | `WorkItemRunIndex` | `directoryTeamId#<workItemId>` | `<startedAt>#<runId>` | Work Item 詳細の Run 履歴 |
 | `ActiveRunIndex`（sparse） | `directoryTeamId` | `<leaseExpiresAt>#<runId>` | board の処理中・停滞一覧。`finished` で key を外す |
 | `FinishedRunIndex`（sparse） | `directoryTeamId#failed-run` または `directoryTeamId#finished-run` | `<finishedAt>#<runId>` | board の完了・失敗 lane。Run を閉じる transaction で key を書く。`failed` は別 partition。projection は `runId`・`workItemId`・`outcome`・`finishedAt` |
@@ -198,6 +200,9 @@ Run は Work Item の archive / delete に従う。Work Item を削除または 
   時刻以下であることも条件にし、report より新しい heartbeat の lease を巻き戻さない。comment 本文は Run に記録した agent 名の
   label（`[agentName]`）と `message` で server が組み立て、構造化 field は本文へ埋め込まず row に
   保存する。Web は comment の横に検証結果と成果物を chip として表示する（Slice 2 の Web 変更）。
+- 成果物のうち GitHub の pull request は、Workspace の connector で実在と状態（open / closed / merged、draft、
+  check、review）を照会し、Work Item の partition に保存する（ADR 0103）。Team の Agent settings の
+  `artifactRepositories` で照会する repository を絞れる。照会できないものは理由付きで未確認として表示する。
 - 同じ transaction で Run row の `reportCount` を読み取り時の値で条件付き更新し（report の
   `sequence` になる）、lease を延長し、最新 report の kind と時刻（`lastReportKind`、
   `lastReportAt`）を Run row に残す。後者は Factory board 用で、Public API の Run には返さない。
@@ -390,7 +395,8 @@ Factory board の上部に、期間内に終わった Run の集計を出す。d
 - token / 費用は agent の自己申告ではなく OpenTelemetry で受け取る（[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)、
   #729）。Run と Work Item の合計は Web の Run 一覧で返す。期間サマリーは `usage` に、期間内に終わった Run
   （新しい順に最大 300 件、超えたら `runsHasMore`）の合計、Project 別の合計、トークンの多い Work Item 上位 10 件を
-  返す。推定費用は Team manager にだけ入れる。Analytics engine の metric・widget・snapshot への統合は後続とする。
+  返す。推定費用は Team manager にだけ入れる。Analytics の report では `agent-tokens` / `agent-cost` metric として
+  widget・snapshot・export に使える（[ADR 0108](adr/0108-analytics-agent-usage-metrics.md)、[docs/analytics.md](analytics.md)）。
 
 ## Triage への自動起票
 
@@ -504,6 +510,7 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 | `GET /api/teams/{teamId}/work-items/{workItemId}/agent-runs?limit=` | Work Item 詳細に出す新しい順の Run（既定 20 件）と `hasMore`。table key を含む store cursor は返さない。各 Run に閲覧者が解放できるかどうか（`canRelease`）を付ける。 |
 | `POST /api/teams/{teamId}/agent-runs/{runId}/release` | `active` Run の解放。Run を開始した member、Work Item の現在の assignee、または Team manager に限る。解放済みへの再送は現在の Run を返す。 |
 | `GET /api/teams/{teamId}/agent-settings` / `PUT ...` | Agent settings の取得と、Team manager による `revision` CAS 付き更新。保存ごとに `Idempotency-Key` 由来の key の receipt row（`agent-settings-mutation#<key hash>`）を同じ transaction で書き、応答を失った同じ key と同じ値の再送は revision 不一致でも receipt の設定を返す。一度確定した key は、後で別の key の保存があっても、別の値や別の revision で再利用すると `409` にする。 |
+| `GET /api/workspace/agent-defaults` / `PUT ...` | Workspace 管理者（`workspace.manage`）だけが読み書きする Workspace の Agent 既定値（ADR 0099）。`revision` の CAS と receipt は Team 設定と同じ。まだ保存していない Team（revision 0）は lease、take over、受け入れ条件の必須化をここから取り、brief のない Team は既定 brief を agent に渡す。Team 設定の応答は既定 brief を `workspaceBrief` として返す。 |
 
 `ApiProblem.code` の enum は Public API の後方互換性（response enum を広げない）のため変えない。
 Run 固有の理由は既存の `conflict` / `forbidden` に対応する problem の `errors[].code` で返し、
@@ -715,7 +722,7 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
 Slice 3 は 3 つの変更に分けて入れ、すべて実装済み。
 
 - 実装済み（Agent settings、Ready、brief）: Agent settings に `readyStatusIds`（最大 50 件、重複不可）、
-  Team の `brief`、`projectBriefs`（最大 20 Project）を追加した。brief はそれぞれ UTF-8 で 16 KiB まで、
+  Team の `brief`、`projectBriefs`（最大 20 Project。古い MCP build がこの件数で検証するため、ADR 0099 で据え置いた）を追加した。brief はそれぞれ UTF-8 で 16 KiB まで、
   合計 128 KiB までとし、空白だけの brief は保存しない。保存は全体の置き換えで、省略した field は
   消える。保存前の row は新しい field を持たず、既定値（空の一覧と map）として読む。audit には
   `readyStatusIds` の変更と、brief の本文ではなく byte 数の変化を残す。Project brief は Team の Project に

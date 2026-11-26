@@ -24,6 +24,8 @@ export type AiAssistanceErrorKind =
   | 'permission'
   | 'conflict'
   | 'rate-limit'
+  | 'monthly-budget'
+  | 'deployment-paused'
   | 'provider'
   | 'provider-key'
   | 'validation'
@@ -941,6 +943,12 @@ export function useAiAssistanceController({
  */
 export function classifyAiAssistanceError(error: unknown): AiAssistanceControllerError {
   if (!(error instanceof AiAssistanceApiError)) return { kind: 'generic' }
+  if (error.code === 'AiAssistanceMonthlyBudgetExceeded') {
+    return { code: error.code, kind: 'monthly-budget' }
+  }
+  if (error.code === 'AiAssistanceDeploymentPaused') {
+    return { code: error.code, kind: 'deployment-paused' }
+  }
   if (error.status === 401) return { code: error.code, kind: 'permission' }
   if (error.status === 403) return { code: error.code, kind: 'permission' }
   if (error.status === 409) return { code: error.code, kind: 'conflict' }

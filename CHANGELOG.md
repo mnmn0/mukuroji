@@ -24,6 +24,13 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Added
 
+- Workspace profile に `list_documents`（Workspace の Document の一覧。`issueId` でその Work Item に link された Document）、
+  `get_document`（ページ・テンプレートを Markdown で読む）、`save_document`（Markdown からページを作って Work Item に link する、
+  または title・本文を置き換える）を追加しました。`save_document` は `MUKUROJI_MCP_READ_ONLY=true` では出ません（#708）。
+- server API: `GET /api/v1/documents` と `GET /api/v1/documents/{documentId}`（scope `work-items:read`）、
+  `POST /api/v1/documents` と `PATCH /api/v1/documents/{documentId}`（scope `work-items:write`、`Idempotency-Key` 必須）を
+  追加しました。作成・更新の応答は Document の要約です。権限は Web の Documents と同じで、閲覧できない Document は `404` です（ADR 0106、#708）。
+- MCP API revision を 6 に上げました。Document のツールは revision 6 以上の server が要ります（#708）。
 - Workspace profile に `list_relations`（親・子・WBS 番号と blocks / blockedBy / related / duplicate の link）、
   `save_relation`（同じ Team の Work Item を link、`remove: true` で解除）、`create_subtasks`（親の下に親の Project で最大 20 件の
   子を作る。途中で失敗したら同じ引数と `idempotencyKey` の再試行で残りだけを作る）を追加しました（#360）。
@@ -108,6 +115,9 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Changed
 
+- server API: `GET /api/v1/agent-context` の `brief` は、Team に自分の brief がないとき Workspace の既定 brief を返します。
+  Team が Agent settings を保存していないときの `requireAcceptanceCriteria` と、`GET /api/v1/agent-settings` の
+  `leaseMinutes`・`allowTakeoverAfterLeaseExpiry` は Workspace の既定値です。MCP と応答の形は変わりません（#412）。
 - MCP API revision を 2 に上げました。server は revision 1〜2 を受け付けます。revision 1 の server に
   接続した新しい MCP は server が古いと警告し、Document を読むツールは使えません。
 - `create_task` が `schedule` を送らず、Workspace の稼働カレンダーで Work Item を作るようにしました。
@@ -117,7 +127,7 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   server が古いと警告し、Workspace profile のツールは使えません。
 - MCP API revision を 5 に上げました。server は revision 1〜5 を受け付けます。revision 4 以前の server に接続した新しい MCP は
   server が古いと警告し、`list_relations`・`save_relation`・`create_subtasks` は使えません（#360）。
-- MCP API revision を 6 に上げました。server は revision 1〜6 を受け付けます。revision 5 以前の server に接続した新しい MCP は
+- MCP API revision を 7 に上げました。server は revision 1〜7 を受け付けます。revision 6 以前の server に接続した新しい MCP は
   server が古いと警告し、Planning のツールと `save_issue` の `cycleId`・`milestoneId` は使えません（#706）。
 - server API: Software factory が off の deploy でも、本人用 token の確認・発行・再発行
   （`/api/developer/me/agent-connection`、`POST /api/developer/me/api-keys`、`.../rotate`）と、管理者による本人用 token の

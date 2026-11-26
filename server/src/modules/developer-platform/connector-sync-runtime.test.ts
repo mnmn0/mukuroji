@@ -1071,6 +1071,34 @@ describe('ConnectorSyncEngine', () => {
     ])
   })
 
+  test('reads a pull request through a degraded installation but not a disconnected one', async () => {
+    const pullRequest = {
+      state: 'open' as const, draft: false, headSha: 'a'.repeat(40), checks: 'success' as const, review: 'none' as const,
+    }
+    const fixture = await createRuntimeFixture(createAdapter({
+      async readPullRequest() {
+        return pullRequest
+      },
+    }))
+    const reference = { repository: 'org/repo', number: 7 }
+    await fixture.platform.updateConnectorStatus({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      status: 'degraded',
+    })
+    // A retryable failure leaves the installation degraded; reading again must notice the recovery.
+    await expect(fixture.engine.readPullRequest('workspace-1', fixture.installation.id, reference))
+      .resolves.toEqual(pullRequest)
+
+    await fixture.platform.updateConnectorStatus({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      status: 'disconnected',
+    })
+    await expect(fixture.engine.readPullRequest('workspace-1', fixture.installation.id, reference))
+      .rejects.toMatchObject({ code: 'ConnectorNotConnected' })
+  })
+
   test('polls bounded provider pages and syncs only already-linked resources', async () => {
     let pulls = 0
     const fixture = await createRuntimeFixture(createAdapter({

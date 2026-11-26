@@ -245,6 +245,35 @@ function createFocusedTestPlatform(
   }
 }
 
+/** Workspace Document methods a linked Document test does not call. */
+const unusedWorkspaceDocumentMethods: Omit<PublicDocumentService, 'listWorkItemDocuments' | 'getWorkItemDocument'> = {
+  async listDocuments() {
+    throw new Error('not used')
+  },
+  async getDocument() {
+    throw new Error('not used')
+  },
+  async authorizeDocumentWrite() {
+    throw new Error('not used')
+  },
+  async createDocument() {
+    throw new Error('not used')
+  },
+  async updateDocument() {
+    throw new Error('not used')
+  },
+}
+
+/** Linked Document methods a Workspace Document test does not call. */
+const unusedLinkedDocumentMethods: Pick<PublicDocumentService, 'listWorkItemDocuments' | 'getWorkItemDocument'> = {
+  async listWorkItemDocuments() {
+    throw new Error('not used')
+  },
+  async getWorkItemDocument() {
+    throw new Error('not used')
+  },
+}
+
 function createTestRouter(input: {
   workItems?: PublicWorkItemService
   /** Agent Run service used by Agent Run route tests. */
@@ -1025,6 +1054,7 @@ describe('public API router', () => {
         async getWorkItemDocument() {
           throw new Error('not used')
         },
+        ...unusedWorkspaceDocumentMethods,
       },
     })
     const reader = await createApiKey(platform, ['work-items:read'])
@@ -1081,6 +1111,7 @@ describe('public API router', () => {
             updatedAt: NOW.toISOString(), format: 'markdown', content: '# Spec\n',
           }
         },
+        ...unusedWorkspaceDocumentMethods,
       },
     })
     const reader = await createApiKey(platform, ['work-items:read'])
@@ -1105,6 +1136,134 @@ describe('public API router', () => {
     expect(hidden.status).toBe(404)
     expect(denied.status).toBe(403)
     expect(reads).toEqual(['team-1/work-item-1/document-1', 'team-1/work-item-1/document-2'])
+  })
+
+  test('lists Workspace Documents with the read scope, filtered and with a signed continuation', async () => {
+    const calls: unknown[] = []
+    const { platform, router } = createTestRouter({
+      documents: {
+        ...unusedLinkedDocumentMethods,
+        ...unusedWorkspaceDocumentMethods,
+        async listDocuments(credential, filters, continuation, limit) {
+          expect(credential.workspaceId).toBe('workspace-1')
+          calls.push({ filters, continuation, limit })
+          return continuation === undefined
+            ? {
+                items: [{ id: 'document-1', kind: 'page', title: 'Spec', scope: { type: 'project', projectId: 'project-1' }, revision: 2 }],
+                hasMore: true,
+                nextContinuation: 'tree-cursor',
+              }
+            : { items: [], hasMore: false }
+        },
+      },
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+
+    const first = await router.request('http://localhost/v1/documents?projectId=project-1&limit=100', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const firstBody = await first.json() as { items: unknown[]; hasMore: boolean; nextCursor?: string }
+    const second = await router.request(
+      `http://localhost/v1/documents?projectId=project-1&limit=100&cursor=${encodeURIComponent(firstBody.nextCursor ?? '')}`,
+      { headers: { Authorization: `Bearer ${reader.secret}` } },
+    )
+    const otherFilter = await router.request(
+      `http://localhost/v1/documents?projectId=project-2&limit=100&cursor=${encodeURIComponent(firstBody.nextCursor ?? '')}`,
+      { headers: { Authorization: `Bearer ${reader.secret}` } },
+    )
+    const denied = await router.request('http://localhost/v1/documents', {
+      headers: { Authorization: `Bearer ${writer.secret}` },
+    })
+
+    expect(first.status).toBe(200)
+    expect(first.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(firstBody.items).toEqual([{ id: 'document-1', kind: 'page', title: 'Spec', scope: { type: 'project', projectId: 'project-1' }, revision: 2 }])
+    expect(firstBody.nextCursor).not.toContain('tree-cursor')
+    expect(second.status).toBe(200)
+    expect(otherFilter.status).toBe(400)
+    expect(denied.status).toBe(403)
+    expect(calls).toEqual([
+      { filters: { projectId: 'project-1' }, continuation: undefined, limit: 100 },
+      { filters: { projectId: 'project-1' }, continuation: 'tree-cursor', limit: 100 },
+    ])
+  })
+
+  test('creates and updates a Document from Markdown with the write scope and replays a retry', async () => {
+    const calls: string[] = []
+    const content = (id: string, revision: number) => ({
+      schemaVersion: 1 as const, id, kind: 'page' as const, title: 'Plan', revision,
+      updatedAt: NOW.toISOString(), format: 'markdown' as const, content: '# Plan\n\nBody\n',
+    })
+    const { platform, router } = createTestRouter({
+      documents: {
+        ...unusedLinkedDocumentMethods,
+        ...unusedWorkspaceDocumentMethods,
+        async authorizeDocumentWrite() {
+          calls.push('authorize')
+        },
+        async getDocument(_credential, documentId) {
+          calls.push(`get ${documentId}`)
+          return content(documentId, 2)
+        },
+        async createDocument(_credential, input, context) {
+          calls.push(`create ${JSON.stringify(input)} ${context.idempotencyKey}`)
+          return {
+            id: 'document-1',
+            kind: 'page',
+            title: input.title,
+            scope: input.projectId === undefined ? { type: 'workspace' } : { type: 'project', projectId: input.projectId },
+            revision: 1,
+          }
+        },
+        async updateDocument(_credential, documentId, input) {
+          calls.push(`update ${documentId} ${JSON.stringify(input)}`)
+          return { id: documentId, kind: 'page', title: 'Plan', scope: { type: 'workspace' }, revision: input.expectedRevision + 1 }
+        },
+      },
+    })
+    const writer = await createApiKey(platform, ['work-items:write'])
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const post = (body: unknown, key: string, secret = writer.secret) => router.request('http://localhost/v1/documents', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
+      body: JSON.stringify(body),
+    })
+    const body = { title: ' Plan ', content: 'Body', projectId: 'project-1', workItem: { teamId: 'team-1', workItemId: 'task-1' } }
+
+    const created = await post(body, 'create-1')
+    const replayed = await post(body, 'create-1')
+    const readOnly = await post(body, 'create-2', reader.secret)
+    const unknownField = await post({ ...body, blocks: [] }, 'create-3')
+    const noTitle = await post({ content: 'Body' }, 'create-4')
+    const updated = await router.request('http://localhost/v1/documents/document-1', {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${writer.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'update-1' },
+      body: JSON.stringify({ expectedRevision: 1, content: 'New body' }),
+    })
+    const emptyPatch = await router.request('http://localhost/v1/documents/document-1', {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${writer.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'update-2' },
+      body: JSON.stringify({ expectedRevision: 1 }),
+    })
+
+    expect(created.status).toBe(201)
+    expect(await created.json()).toEqual({
+      id: 'document-1', kind: 'page', title: 'Plan', scope: { type: 'project', projectId: 'project-1' }, revision: 1,
+    })
+    expect(replayed.status).toBe(201)
+    expect(replayed.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(readOnly.status).toBe(403)
+    expect(unknownField.status).toBe(400)
+    expect(noTitle.status).toBe(400)
+    expect(updated.status).toBe(200)
+    expect((await updated.json() as { revision: number }).revision).toBe(2)
+    expect(emptyPatch.status).toBe(400)
+    expect(calls).toEqual([
+      `create ${JSON.stringify({ title: 'Plan', content: 'Body', projectId: 'project-1', workItem: { teamId: 'team-1', workItemId: 'task-1' } })} create-1`,
+      'authorize',
+      `update document-1 ${JSON.stringify({ expectedRevision: 1, content: 'New body' })}`,
+    ])
   })
 
   test('lists attachments and issues download URLs with the read scope and never caches them', async () => {

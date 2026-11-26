@@ -4,6 +4,7 @@ import {
   PUBLIC_PLANNING_ENTITY_TYPES,
   PUBLIC_WORK_ITEM_RELATION_TYPES,
   type PublicCredentialOwner,
+  type PublicDocumentSummary,
   type PublicWorkItemHierarchy,
   type PublicWorkItemRelationList,
   type PublicWorkItemRelationMutation,
@@ -23,7 +24,7 @@ import {
 import { AgentTaskError, type AgentTask } from '../../application/work-item-api'
 import type { WorkspaceApi } from '../../application/workspace-api'
 import { createPublicApiRequest, pageSchema } from './public-api-request'
-import { catalogSchema, commentSchema, identifier, keySchema, taskSchema } from './work-item-api'
+import { catalogSchema, commentSchema, documentSchema, identifier, keySchema, linkedDocumentSchema, taskSchema } from './work-item-api'
 
 const ownerSchema: z.ZodType<PublicCredentialOwner> = z.object({
   schemaVersion: z.literal(1), workspaceId: identifier, memberId: identifier,
@@ -128,6 +129,15 @@ function sameTarget(left: PlanningUpdateTarget, right: PlanningUpdateTarget): bo
   if (left.type === 'team') return right.type === 'team' && left.teamId === right.teamId
   return right.type === 'initiative' && left.entityId === right.entityId
 }
+
+const documentScopeSchema = z.union([
+  z.object({ type: z.literal('workspace') }),
+  z.object({ type: z.literal('project'), projectId: identifier }),
+])
+const documentSummarySchema: z.ZodType<PublicDocumentSummary> = z.object({
+  id: identifier, kind: z.enum(['folder', 'page', 'template', 'whiteboard']), title: z.string(),
+  scope: documentScopeSchema, parentId: identifier.optional(), revision: z.number().int().positive(),
+})
 
 /** Trusted operator configuration of a Workspace connection, which fixes no Team. */
 export type WorkspaceApiConfiguration = {
@@ -354,6 +364,47 @@ export function createWorkspaceApi(
         throw new AgentTaskError('invalid_response', 'The API published the update for another target.')
       }
       return published
+    },
+    /** Lists one page of the Workspace's Documents; see {@link WorkspaceApi.listDocuments}. */
+    async listDocuments(filters, cursor, limit = 50) {
+      const page = await request('documents', pageSchema(documentSummarySchema), 'GET', undefined, undefined, {
+        ...(filters.projectId === undefined ? {} : { projectId: id(filters.projectId, 'projectId') }),
+        ...(filters.parentId === undefined ? {} : { parentId: id(filters.parentId, 'parentId') }),
+        cursor, limit,
+      })
+      if (filters.projectId !== undefined && page.items.some((item) => item.scope.type !== 'project' || item.scope.projectId !== filters.projectId)) {
+        throw new AgentTaskError('invalid_response', 'The API returned a Document of another Project.')
+      }
+      return page
+    },
+    /** Lists one page of a Work Item's linked Documents; see {@link WorkspaceApi.workItemDocuments}. */
+    workItemDocuments(teamId, workItemId, cursor, limit = 50) {
+      return request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}/documents`, pageSchema(linkedDocumentSchema), 'GET', undefined, undefined, {
+        teamId: id(teamId, 'teamId'), cursor, limit,
+      })
+    },
+    /** Reads a Document as Markdown and checks its ID; see {@link WorkspaceApi.getDocument}. */
+    async getDocument(documentId) {
+      const found = await request(`documents/${encodeURIComponent(id(documentId, 'id'))}`, documentSchema)
+      if (found.id !== documentId) throw new AgentTaskError('invalid_response', 'The API returned another Document.')
+      return found
+    },
+    /** Creates a page with `POST documents`; see {@link WorkspaceApi.createDocument}. */
+    createDocument(input, key) {
+      return request('documents', documentSummarySchema, 'POST', {
+        ...input,
+        ...(input.projectId === undefined ? {} : { projectId: id(input.projectId, 'projectId') }),
+        ...(input.parentId === undefined ? {} : { parentId: id(input.parentId, 'parentId') }),
+        ...(input.workItem === undefined
+          ? {}
+          : { workItem: { teamId: id(input.workItem.teamId, 'teamId'), workItemId: id(input.workItem.workItemId, 'issueId') } }),
+      }, key)
+    },
+    /** Changes a Document with `PATCH documents/{id}` and checks its ID; see {@link WorkspaceApi.updateDocument}. */
+    async updateDocument(documentId, input, key) {
+      const saved = await request(`documents/${encodeURIComponent(id(documentId, 'id'))}`, documentSummarySchema, 'PATCH', input, key)
+      if (saved.id !== documentId) throw new AgentTaskError('invalid_response', 'The API returned another Document.')
+      return saved
     },
     /** Adds a comment to a Work Item; see {@link WorkspaceApi.addComment}. */
     addComment(teamId, workItemId, body, key) {

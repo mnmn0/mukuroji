@@ -1,6 +1,7 @@
 import {
   AGENT_RUN_MAX_LEASE_MINUTES,
   AGENT_RUN_MIN_LEASE_MINUTES,
+  AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX,
   AGENT_SETTINGS_BRIEF_MAX_BYTES,
   AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES,
   AGENT_SETTINGS_MAX_PROJECT_BRIEFS,
@@ -122,6 +123,10 @@ export function AgentSettingsPanel({
   const disabled = readOnly || isSaving
   const leaseHelpId = `${idPrefix}-lease-help`
   const intakeHelpId = `${idPrefix}-intake-help`
+  const repositoriesHelpId = `${idPrefix}-artifact-repositories-help`
+  const repositoriesErrorId = `${idPrefix}-artifact-repositories-error`
+  const repositoriesInvalid = validation !== undefined &&
+    (validation.invalidArtifactRepositories.length > 0 || validation.tooManyArtifactRepositories)
   const leaseErrorId = `${idPrefix}-lease-error`
 
   /**
@@ -226,6 +231,33 @@ export function AgentSettingsPanel({
             <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]" id={intakeHelpId}>
               {t('agentSettings.intake.help')}
             </p>
+          </fieldset>
+
+          <fieldset className="grid gap-3 border-t border-[var(--workbench-border)] px-5 py-6 sm:px-7" disabled={disabled}>
+            <legend className="text-base font-semibold text-[var(--workbench-text)]">{t('agentSettings.artifactRepositories.title')}</legend>
+            <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]" htmlFor={`${idPrefix}-artifact-repositories`}>
+              {t('agentSettings.artifactRepositories.label')}
+            </label>
+            <textarea
+              aria-describedby={repositoriesInvalid ? `${repositoriesHelpId} ${repositoriesErrorId}` : repositoriesHelpId}
+              aria-invalid={repositoriesInvalid || undefined}
+              className="workbench-input min-h-24 px-3 py-2 font-mono text-sm"
+              id={`${idPrefix}-artifact-repositories`}
+              placeholder="owner/repo"
+              spellCheck={false}
+              value={draft.artifactRepositories}
+              onChange={(event) => onDraftChange({ ...draft, artifactRepositories: event.target.value })}
+            />
+            <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]" id={repositoriesHelpId}>
+              {t('agentSettings.artifactRepositories.help')}
+            </p>
+            {repositoriesInvalid ? (
+              <p className="text-xs font-semibold text-[var(--workbench-danger)]" id={repositoriesErrorId}>
+                {validation.tooManyArtifactRepositories
+                  ? format('agentSettings.artifactRepositories.tooMany', { max: AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX })
+                  : format('agentSettings.artifactRepositories.invalid', { repositories: validation.invalidArtifactRepositories.join(', ') })}
+              </p>
+            ) : null}
           </fieldset>
 
           <fieldset className="grid gap-4 border-t border-[var(--workbench-border)] px-5 py-6 sm:px-7" disabled={disabled}>
@@ -456,6 +488,14 @@ export function AgentSettingsPanel({
               value={draft.brief}
               onChange={(brief) => onDraftChange({ ...draft, brief })}
             />
+            {settings.workspaceBrief && draft.brief.trim() === '' ? (
+              <div className="grid gap-1" data-testid="agent-settings-workspace-brief">
+                <p className="text-xs font-semibold text-[var(--workbench-muted)]">{t('agentSettings.briefs.inherited')}</p>
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded border border-[var(--workbench-border)] px-3 py-2 font-mono text-xs text-[var(--workbench-muted)]">
+                  {settings.workspaceBrief}
+                </pre>
+              </div>
+            ) : null}
             {projectBriefTargets.length === 0 ? (
               <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('agentSettings.briefs.noProjects')}</p>
             ) : projectBriefTargets.map((target, index) => {

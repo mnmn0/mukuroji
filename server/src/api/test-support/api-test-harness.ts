@@ -774,6 +774,7 @@ function createDocumentFake(
     applyOperations: unsupported,
     listVersions: unsupported,
     restoreVersion: unsupported,
+    replaceContent: unsupported,
     getVersion: unsupported,
     pinVersion: unsupported,
     async prepareVersionApprovalTransactWrite() {

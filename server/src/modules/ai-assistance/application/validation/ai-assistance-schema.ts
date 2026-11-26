@@ -11,7 +11,11 @@ import type {
   UpdateAiAssistancePolicyRequest,
   UpdateAiAssistancePreferenceRequest,
 } from '@mukuroji/contracts'
-import { AI_ASSISTANCE_SCHEMA_VERSION } from '@mukuroji/contracts'
+import {
+  AI_ASSISTANCE_MAX_MONTHLY_COST_LIMIT_USD,
+  AI_ASSISTANCE_MAX_MONTHLY_TOKEN_LIMIT,
+  AI_ASSISTANCE_SCHEMA_VERSION,
+} from '@mukuroji/contracts'
 import { z } from 'zod'
 import { AiAssistanceError } from '../../errors'
 
@@ -704,9 +708,23 @@ const policySchema = z.object({
   defaultModelId: identifierSchema,
   enabledTasks: uniqueTasksSchema,
   retentionDays: z.number().int().min(1).max(365),
+  monthlyTokenLimit: z.number().int().min(1).max(AI_ASSISTANCE_MAX_MONTHLY_TOKEN_LIMIT).optional(),
+  monthlyCostLimitUsd: z.number().finite().min(0.01).max(AI_ASSISTANCE_MAX_MONTHLY_COST_LIMIT_USD)
+    .refine(hasCentPrecision, 'The monthly cost cap is limited to cents.')
+    .optional(),
   revision: revisionSchema,
   updatedAt: z.string().datetime(),
 }).strict()
+
+/**
+ * Checks that a USD amount has at most two decimal places.
+ *
+ * @param value - Amount in USD.
+ * @returns Whether the amount is a whole number of cents.
+ */
+function hasCentPrecision(value: number): boolean {
+  return Math.abs(Math.round(value * 100) - value * 100) < 1e-6
+}
 
 const preferenceSchema = z.object({
   schemaVersion: z.literal(AI_ASSISTANCE_SCHEMA_VERSION),
