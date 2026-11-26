@@ -140,7 +140,8 @@ export async function listWorkItemAgentRunReports(
 
 /**
  * Reads whether the pull requests that a Work Item's agents reported exist, with their state,
- * checks, and review (ADR 0103). A malformed item fails the whole response.
+ * checks, and review (ADR 0103). A malformed item fails the whole response, and `incomplete`
+ * is kept so the conversation can say that some links were not checked.
  *
  * @param accessToken - Session access token.
  * @param teamId - Team that owns the Work Item.
@@ -159,10 +160,11 @@ export async function listWorkItemArtifactStatuses(
   const items = isRecord(data) && Array.isArray(data.items) ? data.items.map(readAgentRunArtifactStatus) : undefined
   const statuses = items?.filter((item): item is AgentRunArtifactStatus => item !== undefined)
   if (!isRecord(data) || data.teamId !== teamId || data.workItemId !== workItemId || !items || !statuses ||
-      statuses.length !== items.length) {
+      statuses.length !== items.length || (data.incomplete !== undefined && data.incomplete !== true)) {
     throw new WorkItemConfigurationApiError(502, 'Artifact statuses returned an unexpected response.')
   }
-  return { teamId, workItemId, items: statuses }
+  // The server sets incomplete when it stopped reading older reports, so some links have no status.
+  return data.incomplete === true ? { teamId, workItemId, items: statuses, incomplete: true } : { teamId, workItemId, items: statuses }
 }
 
 /**

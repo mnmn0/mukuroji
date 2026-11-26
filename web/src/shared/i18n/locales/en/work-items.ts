@@ -883,6 +883,7 @@ export const workItemsMessages = {
   'workItems.agentRunReports.answer.cancel': 'Cancel',
   'workItems.agentRunReports.answer.answered': 'Answered',
   'workItems.agentRunReports.artifactStatus.loadError': 'Pull request status could not be checked. Links are shown without it.',
+  'workItems.agentRunReports.artifactStatus.incomplete': 'Some pull requests were not checked because this Work Item has many reports. Their links are shown without status.',
   'workItems.agentRunReports.artifactStatus.state.open': 'Open',
   'workItems.agentRunReports.artifactStatus.state.closed': 'Closed',
   'workItems.agentRunReports.artifactStatus.state.merged': 'Merged',

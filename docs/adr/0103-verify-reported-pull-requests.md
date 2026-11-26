@@ -24,7 +24,7 @@ credential の復号・更新と、失敗時の degraded / needs-reauth の扱�
   最大 20 件。GitLab は形だけ認識し、`unsupported-provider` として未確認にする。
   report は新しい順に 100 件ずつ、20 件そろうか report が尽きるまで、最大 20 ページ（2,000 件）読む。
   そこで打ち切ったときは応答に `incomplete: true` を付け、古い report の pull request が抜けている
-  ことを「pull request がない」と区別できるようにする。
+  ことを「pull request がない」と区別できるようにする。Web はこの flag を保ち、会話の上に一部を確かめていない旨を出す。
 - Team の Agent settings に `artifactRepositories`（`owner/repo` の一覧、最大 50）を足す。
   空なら connector が読める repository をすべて照会し、指定があればそれ以外は照会せず
   `repository-not-allowed` とする。一覧は閲覧のたびに当てるので、外した repository は保存済みの

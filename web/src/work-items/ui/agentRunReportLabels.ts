@@ -171,3 +171,18 @@ export function createAgentRunArtifactStatusNoticeLabels(locale: Locale): AgentR
     retry: t('workItems.agentRunReports.retry'),
   }
 }
+
+/**
+ * Builds the text of the notice shown when the status read stopped before every reported pull
+ * request was checked.
+ *
+ * @param locale - Display locale.
+ * @returns Notice text.
+ */
+export function createAgentRunArtifactStatusIncompleteNoticeLabels(locale: Locale): AgentRunReportsNoticeLabels {
+  const t = createTranslator(locale)
+  return {
+    loadError: t('workItems.agentRunReports.artifactStatus.incomplete'),
+    retry: t('workItems.agentRunReports.retry'),
+  }
+}

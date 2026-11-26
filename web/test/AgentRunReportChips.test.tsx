@@ -11,6 +11,7 @@ import {
 } from '../src/work-items/model/agentRunReportDisplay'
 import { AgentRunReportChips, AgentRunReportsLoadNotice } from '../src/work-items/ui/AgentRunReportChips'
 import {
+  createAgentRunArtifactStatusIncompleteNoticeLabels,
   createAgentRunArtifactStatusNoticeLabels,
   createAgentRunReportChipsLabels,
   createAgentRunReportsNoticeLabels,
@@ -83,6 +84,12 @@ describe('Reported pull request statuses', () => {
       await expect(listWorkItemArtifactStatuses('token', 'core', 'task-1')).rejects.toMatchObject({ status: 502 })
     }
     answerWith({ teamId: 'core', workItemId: 'other', items: [] })
+    await expect(listWorkItemArtifactStatuses('token', 'core', 'task-1')).rejects.toMatchObject({ status: 502 })
+    // A read that stopped early keeps the flag, and any other value is rejected.
+    answerWith({ teamId: 'core', workItemId: 'task-1', items: [verified], incomplete: true })
+    expect(await listWorkItemArtifactStatuses('token', 'core', 'task-1'))
+      .toEqual({ teamId: 'core', workItemId: 'task-1', items: [verified], incomplete: true })
+    answerWith({ teamId: 'core', workItemId: 'task-1', items: [verified], incomplete: false })
     await expect(listWorkItemArtifactStatuses('token', 'core', 'task-1')).rejects.toMatchObject({ status: 502 })
   })
 
@@ -267,5 +274,19 @@ describe('AgentRunReportsLoadNotice', () => {
     expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: true, hasPullRequests: true })).toBe('artifact-statuses')
     expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: true, hasPullRequests: false })).toBeUndefined()
     expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: false, hasPullRequests: true })).toBeUndefined()
+  })
+
+  test('tells the viewer when only some pull requests were checked', () => {
+    const incompleteLabels = createAgentRunArtifactStatusIncompleteNoticeLabels('en')
+    expect(incompleteLabels.loadError).toBe(createTranslator('en')('workItems.agentRunReports.artifactStatus.incomplete'))
+    expect(createAgentRunArtifactStatusIncompleteNoticeLabels('ja').loadError)
+      .toBe(createTranslator('ja')('workItems.agentRunReports.artifactStatus.incomplete'))
+    expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: false, hasPullRequests: true, statusesIncomplete: true }))
+      .toBe('artifact-statuses-incomplete')
+    // A failed read wins over an incomplete one, and nothing is said without a pull request.
+    expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: true, hasPullRequests: true, statusesIncomplete: true }))
+      .toBe('artifact-statuses')
+    expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: false, hasPullRequests: false, statusesIncomplete: true }))
+      .toBeUndefined()
   })
 })

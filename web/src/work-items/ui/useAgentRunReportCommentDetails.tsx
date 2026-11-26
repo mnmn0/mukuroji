@@ -10,6 +10,7 @@ import { useWorkItemAgentRunReports } from '../queries/useWorkItemAgentRunReport
 import { useWorkItemArtifactStatuses } from '../queries/useWorkItemArtifactStatuses'
 import { AgentRunReportChips, AgentRunReportsLoadNotice } from './AgentRunReportChips'
 import {
+  createAgentRunArtifactStatusIncompleteNoticeLabels,
   createAgentRunArtifactStatusNoticeLabels,
   createAgentRunReportChipsLabels,
   createAgentRunReportsNoticeLabels,
@@ -64,6 +65,7 @@ export function useAgentRunReportCommentDetails({
   const labels = useMemo(() => createAgentRunReportChipsLabels(locale), [locale])
   const noticeLabels = useMemo(() => createAgentRunReportsNoticeLabels(locale), [locale])
   const statusNoticeLabels = useMemo(() => createAgentRunArtifactStatusNoticeLabels(locale), [locale])
+  const statusIncompleteLabels = useMemo(() => createAgentRunArtifactStatusIncompleteNoticeLabels(locale), [locale])
   const { data, error, mutate } = useWorkItemAgentRunReports(accessToken, teamId, workItemId, commentCount)
   // SWR keeps the last successful reports after a failed read; while the load notice says the
   // comments are shown without report details, no chips may claim otherwise.
@@ -93,7 +95,12 @@ export function useAgentRunReportCommentDetails({
     )
   }, [accessToken, answer, byComment, canAnswer, labels, statusByUrl, teamId])
   const failure = accessToken && teamId
-    ? selectAgentRunReportLoadFailure({ reportsFailed: Boolean(error), statusesFailed: Boolean(statusError), hasPullRequests })
+    ? selectAgentRunReportLoadFailure({
+      reportsFailed: Boolean(error),
+      statusesFailed: Boolean(statusError),
+      hasPullRequests,
+      statusesIncomplete: statuses !== undefined && statusData?.incomplete === true,
+    })
     : undefined
   let loadNotice: ReactNode = null
   if (failure === 'reports') {
@@ -105,6 +112,15 @@ export function useAgentRunReportCommentDetails({
         labels={statusNoticeLabels}
         onRetry={() => { void refreshStatuses() }}
         testId="agent-run-artifact-status-load-notice"
+      />
+    )
+  } else if (failure === 'artifact-statuses-incomplete') {
+    // The statuses that were read stay; the viewer is told some links were not checked.
+    loadNotice = (
+      <AgentRunReportsLoadNotice
+        labels={statusIncompleteLabels}
+        onRetry={() => { void refreshStatuses() }}
+        testId="agent-run-artifact-status-incomplete-notice"
       />
     )
   }

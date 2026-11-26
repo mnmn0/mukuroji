@@ -65,12 +65,15 @@ export function readAgentRunArtifactText(artifact: AgentRunArtifact): string {
   return text.length > maximumArtifactTextLength ? `${text.slice(0, maximumArtifactTextLength - 1)}…` : text
 }
 
-/** Which read failed, so the conversation says why details are missing. */
-export type AgentRunReportLoadFailure = 'reports' | 'artifact-statuses'
+/**
+ * Which read failed, so the conversation says why details are missing. `artifact-statuses-incomplete`
+ * means the status read succeeded but stopped before every reported pull request was listed.
+ */
+export type AgentRunReportLoadFailure = 'reports' | 'artifact-statuses' | 'artifact-statuses-incomplete'
 
 /**
  * Chooses the load notice of a Work Item's conversation. A failed report read hides every chip,
- * so it wins; a failed status read only matters when a report lists a pull request.
+ * so it wins; a failed or incomplete status read only matters when a report lists a pull request.
  *
  * @param state - Which reads failed, and whether a report lists a pull request.
  * @returns The failure to show, or undefined when nothing failed.
@@ -82,8 +85,12 @@ export function selectAgentRunReportLoadFailure(state: {
   statusesFailed: boolean
   /** A shown report lists a pull request. */
   hasPullRequests: boolean
+  /** The status read stopped before every reported pull request was listed. */
+  statusesIncomplete?: boolean
 }): AgentRunReportLoadFailure | undefined {
   if (state.reportsFailed) return 'reports'
-  if (state.statusesFailed && state.hasPullRequests) return 'artifact-statuses'
+  if (!state.hasPullRequests) return undefined
+  if (state.statusesFailed) return 'artifact-statuses'
+  if (state.statusesIncomplete) return 'artifact-statuses-incomplete'
   return undefined
 }
