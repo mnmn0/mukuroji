@@ -200,6 +200,9 @@ Run は Work Item の archive / delete に従う。Work Item を削除または 
   時刻以下であることも条件にし、report より新しい heartbeat の lease を巻き戻さない。comment 本文は Run に記録した agent 名の
   label（`[agentName]`）と `message` で server が組み立て、構造化 field は本文へ埋め込まず row に
   保存する。Web は comment の横に検証結果と成果物を chip として表示する（Slice 2 の Web 変更）。
+- 成果物のうち GitHub の pull request は、Workspace の connector で実在と状態（open / closed / merged、draft、
+  check、review）を照会し、Work Item の partition に保存する（ADR 0103）。Team の Agent settings の
+  `artifactRepositories` で照会する repository を絞れる。照会できないものは理由付きで未確認として表示する。
 - 同じ transaction で Run row の `reportCount` を読み取り時の値で条件付き更新し（report の
   `sequence` になる）、lease を延長し、最新 report の kind と時刻（`lastReportKind`、
   `lastReportAt`）を Run row に残す。後者は Factory board 用で、Public API の Run には返さない。
@@ -392,7 +395,8 @@ Factory board の上部に、期間内に終わった Run の集計を出す。d
 - token / 費用は agent の自己申告ではなく OpenTelemetry で受け取る（[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)、
   #729）。Run と Work Item の合計は Web の Run 一覧で返す。期間サマリーは `usage` に、期間内に終わった Run
   （新しい順に最大 300 件、超えたら `runsHasMore`）の合計、Project 別の合計、トークンの多い Work Item 上位 10 件を
-  返す。推定費用は Team manager にだけ入れる。Analytics engine の metric・widget・snapshot への統合は後続とする。
+  返す。推定費用は Team manager にだけ入れる。Analytics の report では `agent-tokens` / `agent-cost` metric として
+  widget・snapshot・export に使える（[ADR 0108](adr/0108-analytics-agent-usage-metrics.md)、[docs/analytics.md](analytics.md)）。
 
 ## Triage への自動起票
 

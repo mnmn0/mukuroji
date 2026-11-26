@@ -112,6 +112,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get agentRunUsage() {
     return requireAppDependencies().workItems.agentRunUsage
   },
+  get agentRunArtifactStatuses() {
+    return requireAppDependencies().workItems.agentRunArtifactStatuses
+  },
   get focusState() {
     return requireAppDependencies().workItems.focusState
   },

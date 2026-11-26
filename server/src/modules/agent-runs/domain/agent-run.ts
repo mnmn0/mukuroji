@@ -11,9 +11,11 @@ import {
   AGENT_SETTINGS_BRIEF_MAX_BYTES,
   AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES,
   AGENT_SETTINGS_MAX_PROJECT_BRIEFS,
+  AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX,
   AGENT_SETTINGS_MAX_READY_STATUSES,
   AGENT_SETTINGS_MAX_RESUMABLE_STATUSES,
   AGENT_SETTINGS_SCHEMA_VERSION,
+  isArtifactRepositoryPath,
   type AgentRun,
   type AgentRunFinishOutcome,
   type AgentRunOutcome,
@@ -588,6 +590,7 @@ export function createDefaultAgentSettings(teamId: string): AgentSettings {
     revision: 0,
     leaseMinutes: AGENT_RUN_DEFAULT_LEASE_MINUTES,
     acceptNewRuns: true,
+    artifactRepositories: [],
     allowTakeoverAfterLeaseExpiry: false,
     readyStatusIds: [],
     resumableStatusIds: [],
@@ -736,7 +739,7 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
     [
       'expectedRevision', 'leaseMinutes', 'allowTakeoverAfterLeaseExpiry', 'readyStatusIds', 'resumableStatusIds',
       'requireAcceptanceCriteria', 'acceptanceCriteriaFieldId', 'brief', 'projectBriefs',
-      'fileFailedRunsToTriage', 'fileStalledRunsToTriage', 'notifyAssigneeOfRunEvents', 'acceptNewRuns',
+      'fileFailedRunsToTriage', 'fileStalledRunsToTriage', 'notifyAssigneeOfRunEvents', 'acceptNewRuns', 'artifactRepositories',
     ],
     'Agent settings',
   )
@@ -766,7 +769,37 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
     fileStalledRunsToTriage: value.fileStalledRunsToTriage === true,
     notifyAssigneeOfRunEvents: value.notifyAssigneeOfRunEvents === true,
     acceptNewRuns: value.acceptNewRuns !== false,
+    artifactRepositories: readArtifactRepositories(value.artifactRepositories),
   }
+}
+
+/**
+ * Reads the Team's artifact repository allowlist.
+ *
+ * @param value - Untrusted value; undefined means none.
+ * @returns Lowercase repository paths without duplicates, in the given order.
+ */
+function readArtifactRepositories(value: unknown): string[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX) {
+    throw new AgentRunError(
+      'validation_failed',
+      `artifactRepositories must be a list of at most ${AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX} repositories.`,
+      { pointer: '/artifactRepositories' },
+    )
+  }
+  const repositories = value.map((entry, index) => {
+    const repository = typeof entry === 'string' ? entry.trim().toLowerCase() : ''
+    if (!isArtifactRepositoryPath(repository)) {
+      throw new AgentRunError(
+        'validation_failed',
+        'Each artifact repository must be an owner/repo path.',
+        { pointer: `/artifactRepositories/${index}` },
+      )
+    }
+    return repository
+  })
+  return [...new Set(repositories)]
 }
 
 /**
@@ -819,6 +852,8 @@ export type ValidatedAgentSettingsUpdate = UpdateAgentSettingsRequest & {
   notifyAssigneeOfRunEvents: boolean
   /** Whether agents may start, resume, or take over runs. */
   acceptNewRuns: boolean
+  /** Lowercase repository paths whose pull requests are verified. */
+  artifactRepositories: string[]
   /**
    * Projects whose briefs were kept from the saved settings because the editor cannot see them;
    * a retry is not compared on these briefs.
@@ -847,6 +882,7 @@ export function createSavedAgentSettings(
     revision: update.expectedRevision + 1,
     leaseMinutes: update.leaseMinutes,
     acceptNewRuns: update.acceptNewRuns,
+    artifactRepositories: [...update.artifactRepositories],
     allowTakeoverAfterLeaseExpiry: update.allowTakeoverAfterLeaseExpiry,
     readyStatusIds: [...update.readyStatusIds],
     resumableStatusIds: [...update.resumableStatusIds],

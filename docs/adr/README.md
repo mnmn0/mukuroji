@@ -123,4 +123,6 @@
 | [0100](0100-completion-gate-manager-override.md) | 完了 Gate の override は Work Item の manager だけが Web の更新で理由付きで行い、更新の監査と活動履歴に残す | 提案 |
 | [0101](0101-ai-assistance-monthly-usage-and-deployment-switch.md) | AI の月次利用量を AI table の月ごとの counter row で数え、全体停止を runtime control の任意 field で持つ | 提案 |
 | [0102](0102-retire-mail-and-storage-connector-providers.md) | Gmail・Outlook・Google Drive・OneDrive・Dropbox を connector の選択肢から外す | 提案 |
+| [0103](0103-verify-reported-pull-requests.md) | agent が報告した pull request を Workspace の connector で照会し、状態を保存する | 提案 |
 | [0106](0106-public-workspace-documents-markdown.md) | Workspace の Document を Public API と MCP で Markdown として一覧・作成・更新し、scope は既存の `work-items:read` / `work-items:write` を使う | 提案 |
+| [0108](0108-analytics-agent-usage-metrics.md) | Analytics の `agent-tokens` / `agent-cost` は query のたびに終了済み Run と usage 行を読み、費用を見られる Team を snapshot の scope に固定する | 提案 |

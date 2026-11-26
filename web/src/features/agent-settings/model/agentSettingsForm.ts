@@ -1,11 +1,13 @@
 import {
   AGENT_RUN_MAX_LEASE_MINUTES,
   AGENT_RUN_MIN_LEASE_MINUTES,
+  AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX,
   AGENT_SETTINGS_BRIEF_MAX_BYTES,
   AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES,
   AGENT_SETTINGS_MAX_PROJECT_BRIEFS,
   AGENT_SETTINGS_MAX_READY_STATUSES,
   AGENT_SETTINGS_MAX_RESUMABLE_STATUSES,
+  isArtifactRepositoryPath,
   type AgentSettings,
   type CustomFieldType,
   type UpdateAgentSettingsRequest,
@@ -49,6 +51,8 @@ export type AgentSettingsDraft = {
   notifyAssigneeOfRunEvents: boolean
   /** Whether agents may start, resume, or take over runs. */
   acceptNewRuns: boolean
+  /** Repositories whose reported pull requests are verified, one `owner/repo` per line; blank means any. */
+  artifactRepositories: string
 }
 
 /** Result of checking a draft against the limits the server enforces. */
@@ -73,6 +77,10 @@ export type AgentSettingsDraftValidation = {
   tooManyReadyStatuses: boolean
   /** Whether more resumable statuses are selected than allowed. */
   tooManyResumableStatuses: boolean
+  /** Lines of the repository list that are not an `owner/repo` path. */
+  invalidArtifactRepositories: string[]
+  /** Whether more repositories are listed than allowed. */
+  tooManyArtifactRepositories: boolean
   /** Whether the draft may be saved. */
   valid: boolean
 }
@@ -135,7 +143,19 @@ export function createAgentSettingsDraft(settings: AgentSettings): AgentSettings
     fileStalledRunsToTriage: settings.fileStalledRunsToTriage,
     notifyAssigneeOfRunEvents: settings.notifyAssigneeOfRunEvents,
     acceptNewRuns: settings.acceptNewRuns,
+    artifactRepositories: settings.artifactRepositories.join('\n'),
   }
+}
+
+/**
+ * Reads the repository list of a draft the way the server stores it: one path per line or comma,
+ * trimmed, lowercase, and without duplicates.
+ *
+ * @param text - Form value.
+ * @returns Repository paths in their first order.
+ */
+export function readArtifactRepositoryLines(text: string): string[] {
+  return [...new Set(text.split(/[\n,]/).map((line) => line.trim().toLowerCase()).filter((line) => line !== ''))]
 }
 
 /**
@@ -172,6 +192,10 @@ export function validateAgentSettingsDraft(draft: AgentSettingsDraft): AgentSett
   const tooManyReadyStatuses = draft.readyStatusIds.length > AGENT_SETTINGS_MAX_READY_STATUSES
   const tooManyResumableStatuses = draft.resumableStatusIds.length > AGENT_SETTINGS_MAX_RESUMABLE_STATUSES
   const leaseMinutesValid = leaseMinutes !== undefined
+  const artifactRepositories = readArtifactRepositoryLines(draft.artifactRepositories)
+  const invalidArtifactRepositories = artifactRepositories.filter((repository) =>
+    !isArtifactRepositoryPath(repository))
+  const tooManyArtifactRepositories = artifactRepositories.length > AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX
   return {
     leaseMinutesValid,
     briefBytes,
@@ -183,8 +207,11 @@ export function validateAgentSettingsDraft(draft: AgentSettingsDraft): AgentSett
     totalOverLimit,
     tooManyReadyStatuses,
     tooManyResumableStatuses,
+    invalidArtifactRepositories,
+    tooManyArtifactRepositories,
     valid: leaseMinutesValid && !briefOverLimit && overLimitProjectIds.length === 0 &&
-      !tooManyProjectBriefs && !totalOverLimit && !tooManyReadyStatuses && !tooManyResumableStatuses,
+      !tooManyProjectBriefs && !totalOverLimit && !tooManyReadyStatuses && !tooManyResumableStatuses &&
+      invalidArtifactRepositories.length === 0 && !tooManyArtifactRepositories,
   }
 }
 
@@ -219,6 +246,7 @@ export function createUpdateAgentSettingsRequest(
     fileStalledRunsToTriage: draft.fileStalledRunsToTriage,
     notifyAssigneeOfRunEvents: draft.notifyAssigneeOfRunEvents,
     acceptNewRuns: draft.acceptNewRuns,
+    artifactRepositories: readArtifactRepositoryLines(draft.artifactRepositories),
   }
 }
 
@@ -513,6 +541,7 @@ function createDraftComparisonKey(draft: AgentSettingsDraft): string {
     draft.fileStalledRunsToTriage,
     draft.notifyAssigneeOfRunEvents,
     draft.acceptNewRuns,
+    readArtifactRepositoryLines(draft.artifactRepositories),
     draft.acceptanceCriteriaFieldId,
     isBlank(draft.brief) ? '' : draft.brief,
     Object.entries(draft.projectBriefs)
