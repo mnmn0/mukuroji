@@ -82,6 +82,12 @@ const planningEntitySchema: z.ZodType<PublicPlanningEntity> = z.object({
   createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(),
 })
 const revision = z.number().int().min(0)
+/**
+ * Largest Planning entity list the MCP reads. The list is one unpaged read of the Planning graph,
+ * which the server bounds at 4,000,000 bytes, so it can exceed the default response limit.
+ */
+const PLANNING_ENTITY_LIST_MAX_BYTES = 5 * 1024 * 1024
+
 const planningEntityListSchema: z.ZodType<PublicPlanningEntityList> = z.object({
   schemaVersion: z.literal(1), revision, items: z.array(planningEntitySchema).max(10000),
 })
@@ -294,7 +300,7 @@ export function createWorkspaceApi(
         type,
         ...(scope.teamId === undefined ? {} : { teamId: id(scope.teamId, 'teamId') }),
         ...(scope.projectId === undefined ? {} : { projectId: id(scope.projectId, 'projectId') }),
-      })
+      }, PLANNING_ENTITY_LIST_MAX_BYTES)
       if (list.items.some((item) => item.type !== type ||
           (scope.teamId !== undefined && item.teamId !== scope.teamId) ||
           (scope.projectId !== undefined && item.projectId !== scope.projectId))) {

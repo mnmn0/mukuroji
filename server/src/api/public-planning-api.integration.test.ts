@@ -2,7 +2,11 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { createApiTestHarness } from './test-support/api-test-harness'
 import { createCanonicalPublicPlanningService } from './routes/public-planning-service'
 import { InMemoryPlanningClient } from '../modules/planning/planning'
-import type { AuthenticatedDeveloperCredential, CompleteIdempotencyRequest } from '../modules/developer-platform/application/ports'
+import type {
+  AuthenticatedDeveloperCredential,
+  CompleteIdempotencyRequest,
+  IdempotencyMutationToken,
+} from '../modules/developer-platform/application/ports'
 import { createInMemoryDeveloperPlatformAdapters } from '../modules/developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { PublicMutationContext } from '../modules/developer-platform/public-api'
 
@@ -38,21 +42,55 @@ function context(idempotencyKey: string): PublicMutationContext {
   return { requestId: `request-${idempotencyKey}`, idempotencyKey }
 }
 
+/** In-memory idempotency store of the current test. */
+let platform = createInMemoryDeveloperPlatformAdapters()
+
 /**
- * Installs an in-memory Planning store for the test Workspace, whose health update publish commits
- * its idempotency receipt with the update, as the DynamoDB transaction does.
+ * Reserves a Public API idempotency key, as the router does before it calls the service.
+ *
+ * @param idempotencyKey - Idempotency key.
+ * @returns The reservation token, or the stored response when the key already completed.
+ */
+async function reserve(idempotencyKey: string): Promise<IdempotencyMutationToken | { replay: unknown }> {
+  const request = { workspaceId, credentialId: credential.credentialId, idempotencyKey, requestFingerprint: `fingerprint-${idempotencyKey}` }
+  const reservation = await platform.idempotency.reserveIdempotency(request)
+  if (reservation.status === 'replay') return { replay: reservation.response }
+  if (reservation.status !== 'reserved') throw new Error('The key is still in progress.')
+  return { ...request, reservationId: reservation.reservationId }
+}
+
+/**
+ * Reserves a key that has not been used yet.
+ *
+ * @param idempotencyKey - Idempotency key.
+ * @returns The reservation token.
+ */
+async function token(idempotencyKey: string): Promise<IdempotencyMutationToken> {
+  const reserved = await reserve(idempotencyKey)
+  if ('replay' in reserved) throw new Error('The key was already used.')
+  return reserved
+}
+
+/**
+ * Installs an in-memory Planning store for the test Workspace, whose health update publish and
+ * entity patch commit their idempotency receipt with the change, as the DynamoDB transaction does.
  *
  * @returns The store.
  */
 function usePlanning(): InMemoryPlanningClient {
   const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
-  const platform = createInMemoryDeveloperPlatformAdapters()
+  platform = createInMemoryDeveloperPlatformAdapters()
   const prepared: CompleteIdempotencyRequest[] = []
-  const publishUpdate = planning.publishUpdate.bind(planning)
-  planning.publishUpdate = async (...input) => {
+  /**
+   * Completes the receipts a write prepared once the write commits.
+   *
+   * @param write - The write.
+   * @returns The write's result.
+   */
+  async function completePrepared<Result>(write: () => Promise<Result>): Promise<Result> {
     const first = prepared.length
     try {
-      const result = await publishUpdate(...input)
+      const result = await write()
       for (const completion of prepared.splice(first)) await platform.idempotency.completeIdempotency(completion)
       return result
     } catch (error) {
@@ -60,6 +98,10 @@ function usePlanning(): InMemoryPlanningClient {
       throw error
     }
   }
+  const publishUpdate = planning.publishUpdate.bind(planning)
+  planning.publishUpdate = (...input) => completePrepared(() => publishUpdate(...input))
+  const update = planning.update.bind(planning)
+  planning.update = (...input) => completePrepared(() => update(...input))
   setTestAppDependencies({
     planning,
     idempotency: platform.idempotency,
@@ -122,16 +164,20 @@ describe('Public API Planning', () => {
       .toMatchObject([{ id: 'initiative-1', type: 'initiative' }])
     expect(await runWithTestAppDependencies(() => service.listEntities(credential, 'cycle', {}))).toMatchObject({ items: [] })
 
+    const reservation = await token('key-2')
     const updated = await runWithTestAppDependencies(() => service.updateMilestone(
       credential,
       created.item.id,
       { health: 'at-risk', targetDate: '2026-09-04' },
       context('key-2'),
+      reservation,
     ))
     expect(updated.item).toMatchObject({
       id: created.item.id, health: 'at-risk', forecast: { startDate: '2026-09-04', endDate: '2026-09-04' }, baseline: { endDate: '2026-08-31' },
     })
     expect(updated.revision).toBeGreaterThan(created.revision)
+    // The receipt committed with the patch, so a retry after a lost response replays it.
+    expect(await reserve('key-2')).toEqual({ replay: { status: 200, body: updated } })
   })
 
   test('refuses a Milestone to a Project viewer, as the Web Planning routes do', async () => {
@@ -146,11 +192,13 @@ describe('Public API Planning', () => {
     await expect(runWithTestAppDependencies(() => service.createMilestone(credential, {
       title: 'Beta', parentId: 'initiative-1', teamId: 'core-team', projectId: 'refero', targetDate: '2026-08-31',
     }, context('key-3')))).rejects.toMatchObject({ status: 403 })
+    const missing = await token('key-4')
     await expect(runWithTestAppDependencies(() => service.updateMilestone(
       credential,
       'missing',
       { title: 'Renamed' },
       context('key-4'),
+      missing,
     ))).rejects.toMatchObject({ status: 404 })
   })
 

@@ -784,6 +784,8 @@ export interface PublicPlanningService {
    * @param milestoneId - Milestone ID.
    * @param input - Changed fields.
    * @param context - Request, correlation, and idempotency identifiers.
+   * @param idempotency - Reservation whose receipt commits with the change, so a retry after a
+   *   lost response replays it instead of applying the patch again.
    * @returns The updated Milestone.
    */
   updateMilestone(
@@ -791,6 +793,7 @@ export interface PublicPlanningService {
     milestoneId: string,
     input: UpdatePublicMilestoneRequest,
     context: PublicMutationContext,
+    idempotency: IdempotencyMutationToken,
   ): Promise<PublicPlanningEntityMutation>
   /**
    * Reads the Cycle, Milestone, and Goals a Work Item is linked to.
@@ -1857,9 +1860,9 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const planning = requirePlanningService(dependencies)
     const milestoneId = readRouteId(c.req.param('milestoneId'), 'Milestone ID')
     const body = readUpdatePublicMilestoneRequest(await readJson(c))
-    return executeIdempotentJson(c, dependencies, credential, { milestoneId, ...body }, async (context) => ({
+    return executeIdempotentJson(c, dependencies, credential, { milestoneId, ...body }, async (context, idempotency) => ({
       status: 200,
-      body: await planning.updateMilestone(credential, milestoneId, body, context),
+      body: await planning.updateMilestone(credential, milestoneId, body, context, idempotency),
     }), {
       authorizeReplay: () => planning.authorizeMilestoneUpdate(credential, milestoneId),
     })

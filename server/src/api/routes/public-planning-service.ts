@@ -16,14 +16,21 @@ import type {
   PublicWorkItemPlanning,
 } from '@mukuroji/contracts'
 import { createMutationAuditContext, type MutationAuditContext } from '../../modules/audit/audit'
-import type { AuthenticatedDeveloperCredential } from '../../modules/developer-platform/application/ports'
+import type {
+  AuthenticatedDeveloperCredential,
+  IdempotencyMutationToken,
+} from '../../modules/developer-platform/application/ports'
 import { readCredentialPrincipalKey } from '../../modules/developer-platform/credential-principal'
 import {
   PublicApiServiceError,
   type PublicMutationContext,
   type PublicPlanningService,
 } from '../../modules/developer-platform/public-api'
-import { PlanningError } from '../../modules/planning'
+import {
+  PlanningError,
+  type PlanningEntityTransactionResult,
+  type PlanningMutationTransaction,
+} from '../../modules/planning'
 import { workItemDependencies } from '../shared/app-dependencies'
 import { resolveDeveloperCredentialPrincipal } from '../shared/developer-platform-access'
 import {
@@ -34,7 +41,7 @@ import {
 import { requirePlanningEntityPermission, requirePlanningScopePermission } from '../shared/planning-scope-access'
 import { requireWorkspaceBusinessWrite, type WorkspacePrincipal } from '../shared/project-access'
 import { isRecord } from '../shared/value-guards'
-import { loadAuthorizedTeamIssue } from '../shared/work-item-access'
+import { createWorkItemIdempotencyTransaction, loadAuthorizedTeamIssue } from '../shared/work-item-access'
 import {
   authorizePlanningUpdateReplayAsPrincipal,
   createPlanningEntityAsPrincipal,
@@ -294,13 +301,65 @@ function requireVisibleMilestone(entities: readonly PlanningEntity[], milestoneI
  * @param principal - Credential owner.
  * @param milestoneId - Milestone ID.
  */
-async function requireChangeableMilestone(principal: WorkspacePrincipal, milestoneId: string): Promise<void> {
+async function requireChangeableMilestone(principal: WorkspacePrincipal, milestoneId: string): Promise<PlanningEntity> {
   const { entities } = await readUnfilteredSnapshot(principal)
   const entity = entities.find((candidate) => candidate.id === milestoneId)
   if (!entity || entity.type !== 'milestone' || entity.archivedAt !== undefined) {
     throw new PublicApiServiceError(404, 'not_found', 'Milestone was not found.')
   }
   await requirePlanningEntityPermission(principal, entities, milestoneId, 'member')
+  return entity
+}
+
+/**
+ * Creates the transaction that stores a Milestone update's Public API response with the change,
+ * so a retry after a lost response replays it instead of applying the patch to a newer revision.
+ *
+ * The stored Milestone is the committed entity; its computed progress and linked Work Item count
+ * are the ones read before the patch, which a field patch does not change.
+ *
+ * @param workspaceId - Workspace ID of the credential.
+ * @param token - Public API idempotency reservation.
+ * @param before - The Milestone as read before the patch.
+ * @returns The receipt transaction, or undefined without a transactional idempotency store.
+ */
+function createMilestoneUpdateReceipt(
+  workspaceId: string,
+  token: IdempotencyMutationToken,
+  before: PlanningEntity,
+): PlanningMutationTransaction<PlanningEntityTransactionResult> | undefined {
+  const transaction = createWorkItemIdempotencyTransaction(workspaceId, token)
+  if (!transaction) return undefined
+  return {
+    prepare: (result) => {
+      const body: PublicPlanningEntityMutation = {
+        schemaVersion: 1,
+        revision: result.revision,
+        item: toPublicPlanningEntity({
+          ...result.entity,
+          progress: before.progress,
+          linkedWorkItemCount: before.linkedWorkItemCount,
+          rollupHealth: before.rollupHealth,
+        }),
+      }
+      return transaction.prepare({ status: 200, body })
+    },
+  }
+}
+
+/**
+ * Names the Web publish receipt of one Public API idempotency key, inside the same caller identity
+ * as the outer Public API reservation, so two credentials of one member keep separate keys.
+ *
+ * @param credential - Authenticated developer credential.
+ * @param context - Mutation context carrying the idempotency key.
+ * @returns The key the shared publish reserves.
+ */
+function deriveInnerPublishKey(credential: AuthenticatedDeveloperCredential, context: PublicMutationContext): string {
+  const digest = createHash('sha256')
+    .update(`public-planning-update-v1\n${readCredentialPrincipalKey(credential)}\n${context.idempotencyKey}`)
+    .digest('hex')
+  return `public-api-${digest}`
 }
 
 /**
@@ -465,13 +524,13 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
       await requireChangeableMilestone(principal, milestoneId)
     },
 
-    async updateMilestone(credential, milestoneId, input, context) {
+    async updateMilestone(credential, milestoneId, input, context, idempotency) {
       const principal = await resolvePlanningPrincipal(
         credential,
         'planning.write',
         await readEntityResource(credential.workspaceId, milestoneId),
       )
-      await requireChangeableMilestone(principal, milestoneId)
+      const before = await requireChangeableMilestone(principal, milestoneId)
       const patch: PlanningEntityPatch = {
         ...(input.title === undefined ? {} : { title: input.title }),
         ...(input.description === undefined ? {} : { description: input.description }),
@@ -488,6 +547,7 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
         milestoneId,
         { expectedRevision, patch },
         createAuditContext(principal, context, 'PATCH', `${MILESTONES_ROUTE}/{milestoneId}`, { entityId: milestoneId, expectedRevision, patch }),
+        createMilestoneUpdateReceipt(credential.workspaceId, idempotency, before),
       )
       const visible = filterPlanningSnapshotForPrincipal(principal, response.planning)
       return { schemaVersion: 1, revision: visible.revision, item: requireVisibleMilestone(visible.entities, milestoneId) }
@@ -577,7 +637,7 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
         evidence: [],
         expectedRevision: await resolveRevision(principal, expectedRevision),
       }, {
-        idempotencyKey: context.idempotencyKey,
+        idempotencyKey: deriveInnerPublishKey(credential, context),
         method: 'POST',
         path: STATUS_UPDATES_ROUTE,
         fingerprint: input,

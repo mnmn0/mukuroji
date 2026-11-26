@@ -78,6 +78,7 @@ import {
   type PlanningEntityCreation,
   type PlanningEntityCreationWithAssignedIdOutcome,
   type PlanningEntityDuplication,
+  type PlanningEntityTransactionResult,
   type PlanningUpdateCadenceTransactionResult,
   type PlanningMutationTransaction,
   type PlanningUpdateAnnotationTransactionResult,
@@ -3471,6 +3472,7 @@ export async function createPlanningEntityAsPrincipal(
  * @param entityId - Entity to change.
  * @param input - Patch and the Planning revision the caller read.
  * @param auditContext - Audit context of the change.
+ * @param receipt - Idempotency receipt to commit in the same transaction as the change.
  * @returns The mutation response with the unfiltered snapshot.
  */
 export async function updatePlanningEntityAsPrincipal(
@@ -3478,6 +3480,7 @@ export async function updatePlanningEntityAsPrincipal(
   entityId: string,
   input: UpdatePlanningEntityInput,
   auditContext: MutationAuditContext,
+  receipt?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
 ) {
   requireWorkspaceBusinessWrite(principal)
   const workItemState = await readPlanningWorkItemState(principal)
@@ -3495,7 +3498,7 @@ export async function updatePlanningEntityAsPrincipal(
     entityId,
     input,
     workItemState,
-    createPlanningEntityAuditTransaction(principal.directoryId, auditContext, principal.userKey),
+    createPlanningEntityAuditTransaction(principal.directoryId, auditContext, principal.userKey, receipt),
   )
 }
 
