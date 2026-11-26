@@ -248,7 +248,7 @@ async function listWorkspaceTeamIds(workspaceId: string): Promise<string[]> {
  * @param context - Team permission context of the principal.
  * @returns Whether every Project of the Team is managed.
  */
-function managesEveryTeamProject(context: TeamPermissionContext): boolean {
+export function managesEveryTeamProject(context: TeamPermissionContext): boolean {
   const managedProjectIds = new Set(
     context.projectAccesses
       ?.filter((access) => projectAccessAllows(access, 'manager'))

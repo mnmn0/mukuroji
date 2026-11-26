@@ -575,6 +575,8 @@ describe('Analytics metric engine', () => {
       'remaining-scope': 1,
       'cumulative-flow': 2,
       'milestone-trend': null,
+      'agent-tokens': null,
+      'agent-cost': null,
     })
     expect(snapshot.generatedAt).toBe(period.to)
     expect(snapshot.queryHash).toHaveLength(64)

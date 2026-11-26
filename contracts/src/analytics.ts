@@ -17,6 +17,8 @@ export type AnalyticsMetricKey =
   | 'remaining-scope'
   | 'cumulative-flow'
   | 'milestone-trend'
+  | 'agent-tokens'
+  | 'agent-cost'
 
 /**
  * How throughput, velocity, and forecast count completed and remaining work.
@@ -305,7 +307,7 @@ export type AnalyticsMetricDefinition = {
   /** Metric の表示名です。 */
   label: string
   /** Metric value の単位です。 */
-  unit: 'count' | 'hours' | 'items-per-week' | 'hours-per-week' | 'percent'
+  unit: 'count' | 'hours' | 'items-per-week' | 'hours-per-week' | 'percent' | 'tokens' | 'usd'
   /** Metric 算出規則の短い説明です。 */
   description: string
 }
