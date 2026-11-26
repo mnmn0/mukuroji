@@ -3,6 +3,7 @@ import type {
   AiAssistancePolicy,
   AiAssistancePreference,
   AiAssistanceProviderCredentials,
+  AiAssistanceUsageSummary,
 } from '@mukuroji/contracts'
 
 /**
@@ -329,6 +330,26 @@ export const aiAssistancePolicyFixture = {
   revision: 4,
   updatedAt: '2026-08-25T02:20:00.000Z',
 } satisfies AiAssistancePolicy
+
+/** Monthly usage near its cost cap, with one generation that had no cost estimate. */
+export const aiAssistanceUsageFixture = {
+  schemaVersion: 1,
+  month: '2026-11',
+  totals: { generations: 42, inputTokens: 812_400, outputTokens: 96_300, costUsd: 41.27, costUnavailableGenerations: 1 },
+  tasks: [
+    { task: 'planning', generations: 18, inputTokens: 402_000, outputTokens: 51_200, costUsd: 22.4, costUnavailableGenerations: 0 },
+    { task: 'summary', generations: 16, inputTokens: 301_400, outputTokens: 32_100, costUsd: 13.87, costUnavailableGenerations: 1 },
+    { task: 'triage', generations: 8, inputTokens: 109_000, outputTokens: 13_000, costUsd: 5, costUnavailableGenerations: 0 },
+  ],
+  members: [
+    { memberId: 'member-aiko', generations: 25, inputTokens: 501_000, outputTokens: 60_000, costUsd: 26.1, costUnavailableGenerations: 0 },
+    { memberId: 'member-ren', generations: 17, inputTokens: 311_400, outputTokens: 36_300, costUsd: 15.17, costUnavailableGenerations: 1 },
+  ],
+  monthlyCostLimitUsd: 50,
+  warning: true,
+  exhausted: false,
+  deploymentPaused: false,
+} satisfies AiAssistanceUsageSummary
 
 /** Key-free provider status with a registered Claude API key and no OpenAI key. */
 export const aiProviderCredentialsFixture = {

@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import {
   createRuntimeControlProvider,
   parseRuntimeControlDocument,
+  runtimeControlAllowsAiAssistance,
   runtimeControlAllowsExecution,
   runtimeControlAllowsReads,
   runtimeControlIsReady,
@@ -88,6 +89,52 @@ test('parses only the exact version-one document contract', () => {
     }),
     5,
   )).toThrow('Runtime control configuration is invalid.')
+})
+
+test('accepts the optional deployment-wide AI assistance switch', () => {
+  expect(parseRuntimeControlDocument(encodeJson({
+    schemaVersion: 1,
+    revision: 7,
+    mode: 'enabled',
+    aiAssistance: 'disabled',
+  }))).toEqual({ schemaVersion: 1, revision: 7, mode: 'enabled', aiAssistance: 'disabled' })
+  expect(parseRuntimeControlDocument(encodeJson({
+    schemaVersion: 1,
+    revision: 8,
+    mode: 'enabled',
+    aiAssistance: 'enabled',
+  })).aiAssistance).toBe('enabled')
+  for (const aiAssistance of ['paused', null, true, 0]) {
+    expect(() => parseRuntimeControlDocument(encodeJson({
+      schemaVersion: 1,
+      revision: 9,
+      mode: 'enabled',
+      aiAssistance,
+    }))).toThrow('Runtime control configuration is invalid.')
+  }
+})
+
+test('pauses AI assistance when the switch is off or execution is blocked', async () => {
+  const provider = createRuntimeControlProvider({
+    source: {
+      async poll() {
+        return {
+          kind: 'configuration',
+          configuration: encodeJson({ schemaVersion: 1, revision: 3, mode: 'enabled', aiAssistance: 'disabled' }),
+          nextPollIntervalMilliseconds: 15_000,
+        }
+      },
+    },
+    now: () => 0,
+  })
+  const snapshot = await provider.getSnapshot()
+
+  expect(snapshot.aiAssistance).toBe('disabled')
+  expect(runtimeControlAllowsExecution(snapshot)).toBeTrue()
+  expect(runtimeControlAllowsAiAssistance(snapshot)).toBeFalse()
+  expect(runtimeControlAllowsAiAssistance({ mode: 'enabled', status: 'current' })).toBeTrue()
+  expect(runtimeControlAllowsAiAssistance({ mode: 'read-only', status: 'current' })).toBeFalse()
+  expect(runtimeControlAllowsAiAssistance({ mode: 'disabled', status: 'unavailable' })).toBeFalse()
 })
 
 test('fails closed on a cold-start provider failure', async () => {

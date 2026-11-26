@@ -151,6 +151,8 @@ const aiAssistanceService: AiAssistanceService = {
       request,
       authorization,
     ),
+  getUsage: (actor, month) =>
+    requireAppDependencies().aiAssistance.aiAssistanceService.getUsage(actor, month),
   getPreference: (actor) =>
     requireAppDependencies().aiAssistance.aiAssistanceService.getPreference(actor),
   updatePreference: (actor, request, authorization) =>
