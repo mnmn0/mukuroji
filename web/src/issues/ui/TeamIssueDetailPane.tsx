@@ -1208,6 +1208,8 @@ function IssueDetailContent({
             ) : null}
             {accessToken && hasWorkItemDetailPanel('team', 'web-links') ? (
               <WorkItemWebLinksPanelContainer
+                // Remounts per Work Item so a typed URL never carries over to another one.
+                key={`${issue.teamId}:${issue.id}:web-links`}
                 accessToken={accessToken}
                 canManage={!isIssueReadOnly && !isAiSummaryOperationPending}
                 locale={locale}

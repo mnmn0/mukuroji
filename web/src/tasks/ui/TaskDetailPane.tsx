@@ -1512,6 +1512,8 @@ export function TaskDetailPane({
             ) : null}
             {accessToken && hasWorkItemDetailPanel('project', 'web-links') ? (
               <WorkItemWebLinksPanelContainer
+                // Remounts per Work Item so a typed URL never carries over to another one.
+                key={`${task.teamId}:${task.id}:web-links`}
                 accessToken={accessToken}
                 canManage={!isReadOnly && !isWorkItemMutationPending}
                 locale={locale}
