@@ -1,6 +1,7 @@
 import { ProjectDataError } from '../../modules/directory'
 import {
   canAccessAssignedProject,
+  principalManagesTeamWorkItem,
   requireTeamPermission,
   type ProjectPrincipal,
 } from './project-access'
@@ -12,6 +13,8 @@ import type { TeamPermissionContext } from './workspace-access'
  * A manager role on another Project of the same Team is not enough for an assigned Work Item:
  * only that Project's managers, a direct Team manager grant, or a system administrator may act.
  * An unassigned Work Item belongs to the Team alone, so any Team manager may.
+ * An enterprise principal's context carries the roles of the permission that granted the route,
+ * such as `work-items.write`, so its manager roles are read from its role assignments instead.
  *
  * @param principal - Authenticated Workspace principal.
  * @param teamId - Team that owns the Work Item.
@@ -29,6 +32,12 @@ export async function requireWorkItemManagerPermission(
   deniedMessage: string,
 ): Promise<void> {
   if (principal.isSystemAdmin) return
+  if (
+    principal.enterpriseAuthorizationEvaluation !== undefined &&
+    principalManagesTeamWorkItem(principal, context, assignedProjectId)
+  ) {
+    return
+  }
   if (!assignedProjectId) {
     await requireTeamPermission(principal, teamId, 'manager')
     return

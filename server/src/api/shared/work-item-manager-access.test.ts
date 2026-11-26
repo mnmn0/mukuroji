@@ -1,0 +1,115 @@
+import { expect, test } from 'bun:test'
+import type { EnterpriseIdentitySnapshot } from '@mukuroji/contracts'
+import type { ProjectDirectoryTeamResponse } from '../../modules/directory'
+import type { EnterpriseAuthorizationEvaluationSnapshot } from './enterprise-access'
+import type { WorkspacePrincipal } from './project-access'
+import { requireWorkItemManagerPermission } from './work-item-manager-access'
+import type { TeamPermissionContext } from './workspace-access'
+
+const team: ProjectDirectoryTeamResponse = {
+  id: 'team-1',
+  name: 'Core',
+  expanded: true,
+  projects: [
+    { id: 'project-1', name: 'Alpha', lifecycleState: 'active' },
+    { id: 'project-2', name: 'Beta', lifecycleState: 'active' },
+  ],
+}
+
+/**
+ * Builds a Team context whose Project roles came from a `work-items.write` route grant.
+ *
+ * @returns A context that lists both Projects with the member role only.
+ */
+function memberRouteContext(): TeamPermissionContext {
+  return {
+    team,
+    directory: { teams: [team] },
+    projectAccesses: team.projects.map((project) => ({ teamId: team.id, projectId: project.id, role: 'member' })),
+  }
+}
+
+/**
+ * Builds an enterprise evaluation in which the member holds `project:manager` on one Project.
+ *
+ * @param projectId - Project the member manages.
+ * @returns Evaluation snapshot with one direct Project role assignment.
+ */
+function projectManagerEvaluation(projectId: string): EnterpriseAuthorizationEvaluationSnapshot {
+  const assignments: EnterpriseIdentitySnapshot['roleAssignments'] = [{
+    workspaceId: 'workspace-1',
+    assignmentId: 'assignment-1',
+    principalKind: 'member',
+    principalId: 'member-1',
+    roleId: 'project:manager',
+    scope: { kind: 'project', workspaceId: 'workspace-1', targetId: projectId, parentTeamId: team.id },
+    source: 'direct',
+  }]
+  return {
+    principal: { kind: 'member', principalId: 'member-1', directoryGroupIds: [], workspaceRole: 'member' },
+    snapshot: {
+      workspaceId: 'workspace-1',
+      identityProviders: [],
+      domains: [],
+      customRoles: [],
+      groupMappings: [],
+      roleAssignments: assignments,
+      scimUsers: [],
+      scimGroups: [],
+      scimCredentials: [],
+      serviceAccounts: [],
+      breakGlassAccounts: [],
+      provisioningRuns: [],
+      provisioningLogs: [],
+    },
+    assignments,
+    groupMappings: [],
+  }
+}
+
+/**
+ * Builds a signed-in enterprise member whose manager role comes only from a role assignment.
+ *
+ * @returns The principal.
+ */
+function enterpriseProjectManager(): WorkspacePrincipal {
+  return {
+    directoryId: 'workspace-1',
+    userKey: 'member@example.com',
+    actorId: 'member-1',
+    isSystemAdmin: false,
+    groups: [],
+    principalKind: 'member',
+    workspaceMember: {
+      id: 'member-1',
+      memberKey: 'member@example.com',
+      email: 'member@example.com',
+      role: 'member',
+      status: 'active',
+      version: 3,
+      createdAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-01T00:00:00.000Z',
+    },
+    workspaceRole: 'member',
+    workspaceMemberStatus: 'active',
+    enterpriseAuthorizationEvaluation: projectManagerEvaluation('project-1'),
+  }
+}
+
+test('accepts an enterprise Project manager whose route context only carries member roles', async () => {
+  await expect(requireWorkItemManagerPermission(
+    enterpriseProjectManager(),
+    team.id,
+    memberRouteContext(),
+    'project-1',
+    'denied',
+  )).resolves.toBeUndefined()
+  // A Work Item without a Project needs a Team manager, which a manager of any Project of the Team is.
+  await expect(requireWorkItemManagerPermission(
+    enterpriseProjectManager(),
+    team.id,
+    memberRouteContext(),
+    undefined,
+    'denied',
+  )).resolves.toBeUndefined()
+})
