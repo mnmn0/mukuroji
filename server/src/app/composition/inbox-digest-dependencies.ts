@@ -37,7 +37,7 @@ export function createInboxDigestAppDependencies(planningTable: string, enterpri
       savedUpdateFeeds: new DynamoDbSavedUpdateFeedsStore(planningTable, client),
       teamIssues: unavailable(), realtimeTickets: unavailable(), fileProofing: unavailable(), notifications: unavailable(), pushSubscriptions: unavailable(), teamReminderSettings: unavailable(), channelDestinations: unavailable(), notificationDestinationSecrets: unavailable(), notificationDestinationTestSender: unavailable(), agentRuns: unavailable(), agentRunUsage: unavailable(),
       focusState: unavailable(), workspaceSearch: unavailable(), documents: unavailable(), workspaceSearchProjectionEnabled: false,
-      workItemConfigurations: unavailable(), projectRaidLogs: unavailable(), projectStatusShares: unavailable(), calendarFeeds: unavailable(), weeklyReports: unavailable(), scheduleBaselines: unavailable(), cycleScheduleBaselines: unavailable(), portfolioSnapshots: unavailable(), updateFeedDigest: unavailable(), inboxDigestSettings: unavailable(),
+      workItemConfigurations: unavailable(), projectRaidLogs: unavailable(), projectStatusShares: unavailable(), calendarFeeds: unavailable(), weeklyReports: unavailable(), scheduleBaselines: unavailable(), workItemWebLinks: unavailable(), cycleScheduleBaselines: unavailable(), portfolioSnapshots: unavailable(), updateFeedDigest: unavailable(), inboxDigestSettings: unavailable(),
       requestIntake: unavailable(), triage: unavailable(), analytics: unavailable(), collections: unavailable(),
     },
     operational: { recordRuntimeControl: unsupported, readiness: unavailable(), runtimeControl: unavailable(), recordAccess: unsupported, recordError: unsupported, recordClientError: unsupported },

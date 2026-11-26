@@ -12,6 +12,7 @@ export type WorkItemDetailPanel =
   | 'collaboration'
   | 'files'
   | 'external-links'
+  | 'web-links'
   | 'related-documents'
   | 'relations'
   | 'dependencies'
@@ -40,6 +41,7 @@ const SHARED_WORK_ITEM_DETAIL_PANELS: readonly WorkItemDetailPanel[] = [
   'collaboration',
   'files',
   'external-links',
+  'web-links',
   'related-documents',
   'relations',
   'dependencies',

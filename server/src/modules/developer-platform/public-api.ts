@@ -25,6 +25,11 @@ import {
   isPublicWorkItemRelationType,
   type PublicWorkItemRelationList,
   type PublicWorkItemRelationMutation,
+  type CreatePublicWorkItemWebLinkRequest,
+  type PublicWorkItemWebLinkList,
+  type PublicWorkItemWebLinkMutation,
+  parseWorkItemWebLinkTitle,
+  parseWorkItemWebLinkUrl,
   type PublicWorkItemRelationType,
   type PublicWorkItemCompletionGate,
   type PublicDocumentContent,
@@ -724,6 +729,70 @@ export interface PublicWorkItemRelationService {
   ): Promise<PublicWorkItemRelationMutation>
 }
 
+/** Public API adapter of the web links (URLs) attached to Work Items (ADR 0109). */
+export interface PublicWorkItemWebLinkService {
+  /**
+   * Lists the links of a Work Item the credential owner can view.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The links, oldest first.
+   */
+  listWebLinks(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<PublicWorkItemWebLinkList>
+  /**
+   * Checks that the owner may change the links of a Work Item, without changing anything. An
+   * idempotent replay calls it before returning the stored response.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   */
+  authorizeWebLinkChange(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<void>
+  /**
+   * Adds a link to a Work Item.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param input - Validated URL and title.
+   * @param context - Request, correlation, and idempotency identifiers for the audit event.
+   * @param idempotency - Replay receipt committed with the link, when the request carries one.
+   * @returns The added link.
+   */
+  createWebLink(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    input: CreatePublicWorkItemWebLinkRequest,
+    context: PublicMutationContext,
+    idempotency?: IdempotencyMutationToken,
+  ): Promise<PublicWorkItemWebLinkMutation>
+  /**
+   * Removes a link from a Work Item.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param linkId - Link to remove.
+   * @param context - Request, correlation, and idempotency identifiers for the audit event.
+   * @param idempotency - Replay receipt committed with the removal, when the request carries one.
+   * @returns The removed link.
+   */
+  deleteWebLink(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    linkId: string,
+    context: PublicMutationContext,
+    idempotency?: IdempotencyMutationToken,
+  ): Promise<PublicWorkItemWebLinkMutation>
+}
+
 export interface PublicDocumentService {
   /**
    * Lists one page of Documents linked to a Work Item that the credential owner can view.
@@ -1171,6 +1240,8 @@ export type PublicApiDependencies = {
   documents?: PublicDocumentService
   /** Work Item relation adapter; relation routes report unavailable when it is not configured. */
   workItemRelations?: PublicWorkItemRelationService
+  /** Web link adapter; web link routes report unavailable when it is not configured. */
+  workItemWebLinks?: PublicWorkItemWebLinkService
   /** Read-only attachment adapter; attachment routes report unavailable when it is not configured. */
   attachments?: PublicAttachmentService
   /** Read-only directory adapter; directory routes report unavailable when it is not configured. */
@@ -1645,6 +1716,44 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       body: await relations.createRelation(credential, teamId, workItemId, body, context, idempotency),
     }), {
       authorizeReplay: () => relations.authorizeRelationChange(credential, teamId, workItemId, body.targetWorkItemId),
+    })
+  })
+
+  router.get('/v1/work-items/:workItemId/web-links', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    c.header('Cache-Control', 'private, no-store')
+    return c.json(await requireWebLinkService(dependencies).listWebLinks(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    ))
+  })
+
+  router.post('/v1/work-items/:workItemId/web-links', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const webLinks = requireWebLinkService(dependencies)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const body = readCreatePublicWorkItemWebLinkRequest(await readJson(c))
+    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, ...body }, async (context, idempotency) => ({
+      status: 201,
+      body: await webLinks.createWebLink(credential, teamId, workItemId, body, context, idempotency),
+    }), {
+      authorizeReplay: () => webLinks.authorizeWebLinkChange(credential, teamId, workItemId),
+    })
+  })
+
+  router.delete('/v1/work-items/:workItemId/web-links/:linkId', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const webLinks = requireWebLinkService(dependencies)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const linkId = readWebLinkId(c.req.param('linkId'))
+    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, linkId }, async (context, idempotency) => ({
+      status: 200,
+      body: await webLinks.deleteWebLink(credential, teamId, workItemId, linkId, context, idempotency),
+    }), {
+      authorizeReplay: () => webLinks.authorizeWebLinkChange(credential, teamId, workItemId),
     })
   })
 
@@ -5932,6 +6041,56 @@ function readCreatePublicWorkItemRelationRequest(value: unknown): CreatePublicWo
     type: readPublicWorkItemRelationType(body.type),
     targetWorkItemId: readIdentifier(body.targetWorkItemId, 'targetWorkItemId'),
   }
+}
+
+/**
+ * Returns the configured web link adapter.
+ *
+ * @param dependencies - Public API dependencies.
+ * @returns The adapter.
+ * @throws PublicApiServiceError 503 when the adapter is not configured.
+ */
+function requireWebLinkService(dependencies: PublicApiDependencies): PublicWorkItemWebLinkService {
+  if (!dependencies.workItemWebLinks) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Work Item web links are not configured.', true)
+  }
+  return dependencies.workItemWebLinks
+}
+
+/**
+ * Reads the body of `POST /api/v1/work-items/{workItemId}/web-links`.
+ *
+ * @param value - Parsed JSON body.
+ * @returns The normalized URL and title.
+ * @throws PublicApiServiceError 400 when the URL is not an `http` or `https` URL without
+ *   credentials, or the title is too long.
+ */
+function readCreatePublicWorkItemWebLinkRequest(value: unknown): CreatePublicWorkItemWebLinkRequest {
+  const body = requireRecord(value, 'Web link body is required.')
+  assertAllowedFields(body, ['url', 'title'], 'Web link body')
+  const url = parseWorkItemWebLinkUrl(body.url)
+  if (url === undefined) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'url must be an http or https URL of up to 2048 characters without a user name or password.')
+  }
+  const title = parseWorkItemWebLinkTitle(body.title)
+  if (title === undefined) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'title must be text of up to 256 characters without control characters.')
+  }
+  return { url, ...(title === null ? {} : { title }) }
+}
+
+/**
+ * Reads a web link ID from the path.
+ *
+ * @param value - Untrusted path segment.
+ * @returns The link ID.
+ * @throws PublicApiServiceError 400 when it is not a link ID.
+ */
+function readWebLinkId(value: string | undefined): string {
+  if (value === undefined || !/^[0-9a-f]{32}$/u.test(value)) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'linkId is invalid.')
+  }
+  return value
 }
 
 /** Fields of one subtask in a batch body. */

@@ -151,6 +151,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get scheduleBaselines() {
     return requireAppDependencies().workItems.scheduleBaselines
   },
+  get workItemWebLinks() {
+    return requireAppDependencies().workItems.workItemWebLinks
+  },
   get portfolioSnapshots() {
     return requireAppDependencies().workItems.portfolioSnapshots
   },

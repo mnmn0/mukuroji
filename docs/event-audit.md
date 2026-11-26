@@ -104,6 +104,14 @@ Work Item relation の追加・削除と親の付け替えは、relation row と
 
 これらの event type は Automation の `relation` trigger（[Automation](./automation.md#rule-model)）と webhook の event type（[Public API の Signed webhook](./public-api.md#signed-webhook)）でも使う。判断の経緯は [ADR 0045](./adr/0045-relation-events-for-automation-and-webhooks.md)。
 
+### Work Item の URL リンクの event
+
+Work Item に URL リンクを付けると `work-item.web-link-added`、外すと `work-item.web-link-removed` を、リンクの row を書く
+transaction に Put する（[ADR 0109](./adr/0109-work-item-web-links-in-planning-table.md)）。`entityId` は relation と同じ
+`team/{teamId}/issue/{workItemId}`、`target` は `{ type: 'work-item-web-link', id: linkId }`。`metadata` は
+`adapter=work-item-web-link`、`teamId`、`workItemId`、`linkId`、URL の `host`、変更後の `linkCount` を持つ。URL 全体とタイトルは
+path や query に共有 token が入ることがあるため残さない。リンクの変更は Work Item の `revision` を変えず、webhook の event type にもしない。
+
 ### 監査ログに残る操作
 
 #430 で、監査ログに出ていなかった次の操作を記録するようにした。sign-in と `document.exported` 以外は変更と同じ DynamoDB transaction で書く。どの event も secret、token、Webhook の URL、Document の本文を含まない。

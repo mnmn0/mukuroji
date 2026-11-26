@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(664)
-  expect(new Set(inventory).size).toBe(660)
+  expect(inventory).toHaveLength(670)
+  expect(new Set(inventory).size).toBe(666)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -89,6 +89,12 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/relations')
   expect(inventory).toContain('POST /api/v1/work-items/:workItemId/relations')
   expect(inventory).toContain('POST /api/v1/work-items/:workItemId/subtask-batches')
+  expect(inventory).toContain('GET /api/v1/work-items/:workItemId/web-links')
+  expect(inventory).toContain('POST /api/v1/work-items/:workItemId/web-links')
+  expect(inventory).toContain('DELETE /api/v1/work-items/:workItemId/web-links/:linkId')
+  expect(inventory).toContain('GET /api/teams/:teamId/issues/:issueId/web-links')
+  expect(inventory).toContain('POST /api/teams/:teamId/issues/:issueId/web-links')
+  expect(inventory).toContain('DELETE /api/teams/:teamId/issues/:issueId/web-links/:linkId')
   expect(inventory).toContain('DELETE /api/v1/work-items/:workItemId/relations/:targetWorkItemId/:relationType')
   expect(inventory).toContain('POST /api/auth/refresh')
   expect(inventory).toContain('POST /api/auth/logout')
@@ -222,6 +228,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '299a14743c5577a36292b051ec63a0126697be0a523abafcc401fd49d0c9cce9',
+    'f9e71a8a7d3d899ea6371278228da5994789a480114fe3db6c1e27bf1ecc4e24',
   )
 })

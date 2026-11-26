@@ -10,6 +10,11 @@ import {
   type PublicSubtaskBatch,
   type PublicTeamList,
   type PublicWorkItemKeyLookup,
+  type PublicWorkItemWebLinkList,
+  type PublicWorkItemWebLinkMutation,
+  WORK_ITEM_WEB_LINK_LIMIT,
+  WORK_ITEM_WEB_LINK_TITLE_MAX_LENGTH,
+  WORK_ITEM_WEB_LINK_URL_MAX_LENGTH,
 } from '@mukuroji/contracts'
 import { AgentTaskError, type AgentTask } from '../../application/work-item-api'
 import type { WorkspaceApi } from '../../application/workspace-api'
@@ -50,6 +55,16 @@ const relationListSchema: z.ZodType<PublicWorkItemRelationList> = z.object({
 })
 const relationMutationSchema: z.ZodType<PublicWorkItemRelationMutation> = z.object({
   schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, relation: relationSchema,
+})
+const webLinkSchema = z.object({
+  id: z.string().regex(/^[0-9a-f]{32}$/u), url: z.url({ protocol: /^https?$/u }).max(WORK_ITEM_WEB_LINK_URL_MAX_LENGTH),
+  title: z.string().max(WORK_ITEM_WEB_LINK_TITLE_MAX_LENGTH * 2).optional(), createdByMemberId: identifier, createdAt: z.iso.datetime(),
+})
+const webLinkListSchema: z.ZodType<PublicWorkItemWebLinkList> = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, items: z.array(webLinkSchema).max(WORK_ITEM_WEB_LINK_LIMIT),
+})
+const webLinkMutationSchema: z.ZodType<PublicWorkItemWebLinkMutation> = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, link: webLinkSchema,
 })
 const subtaskBatchSchema: z.ZodType<PublicSubtaskBatch> = z.object({
   schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, subtaskCount: z.number().int().min(1),
@@ -106,15 +121,15 @@ export function createWorkspaceApi(
   }
 
   /**
-   * Checks that a relation response belongs to the Work Item that was asked for.
-   * @param response - Relation list, mutation, or hierarchy from the response.
+   * Checks that a relation, hierarchy, or web link response belongs to the Work Item that was asked for.
+   * @param response - Relation, hierarchy, or web link response.
    * @param teamId - Requested Team.
    * @param workItemId - Requested Work Item.
    * @returns The response.
    */
   function scopedRelations<T extends { teamId: string, workItemId: string }>(response: T, teamId: string, workItemId: string): T {
     if (response.teamId !== teamId || response.workItemId !== workItemId) {
-      throw new AgentTaskError('invalid_response', 'The API returned the relations of another Work Item.')
+      throw new AgentTaskError('invalid_response', 'The API returned the data of another Work Item.')
     }
     return response
   }
@@ -224,6 +239,26 @@ export function createWorkspaceApi(
       return scopedRelations(await request(
         `work-items/${encodeURIComponent(id(workItemId, 'id'))}/relations/${encodeURIComponent(id(targetWorkItemId, 'relatedIssueId'))}/${type}`,
         relationMutationSchema, 'DELETE', undefined, key, { teamId: id(teamId, 'teamId') },
+      ), teamId, workItemId)
+    },
+    /** Lists a Work Item's web links; see {@link WorkspaceApi.webLinks}. */
+    async webLinks(teamId, workItemId) {
+      return scopedRelations(await request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}/web-links`, webLinkListSchema, 'GET', undefined, undefined, {
+        teamId: id(teamId, 'teamId'),
+      }), teamId, workItemId)
+    },
+    /** Adds a web link with `POST web-links`; see {@link WorkspaceApi.createWebLink}. */
+    async createWebLink(teamId, workItemId, input, key) {
+      return scopedRelations(await request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}/web-links`, webLinkMutationSchema, 'POST', {
+        url: input.url, ...(input.title === undefined ? {} : { title: input.title }),
+      }, key, { teamId: id(teamId, 'teamId') }), teamId, workItemId)
+    },
+    /** Removes a web link with `DELETE web-links/{linkId}`; see {@link WorkspaceApi.deleteWebLink}. */
+    async deleteWebLink(teamId, workItemId, linkId, key) {
+      if (!/^[0-9a-f]{32}$/u.test(linkId)) throw new AgentTaskError('invalid_request', 'attachmentId is invalid.')
+      return scopedRelations(await request(
+        `work-items/${encodeURIComponent(id(workItemId, 'id'))}/web-links/${linkId}`,
+        webLinkMutationSchema, 'DELETE', undefined, key, { teamId: id(teamId, 'teamId') },
       ), teamId, workItemId)
     },
     /** Reserves a subtask batch with `POST subtask-batches`; see {@link WorkspaceApi.reserveSubtaskBatch}. */

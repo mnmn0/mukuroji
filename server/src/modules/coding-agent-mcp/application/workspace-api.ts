@@ -13,6 +13,9 @@ import {
   type PublicWorkItemRelationList,
   type PublicWorkItemRelationMutation,
   type PublicWorkItemRelationType,
+  type PublicWorkItemWebLink,
+  type PublicWorkItemWebLinkList,
+  type PublicWorkItemWebLinkMutation,
   type TeamIssueCommentResponseItem,
   type CustomFieldValue,
   type UpdatePublicWorkItemRequest,
@@ -180,6 +183,36 @@ export interface WorkspaceApi {
     key: string,
   ): Promise<PublicWorkItemRelationMutation>
   /**
+   * Lists the web links of a Work Item.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The links, oldest first.
+   */
+  webLinks(teamId: string, workItemId: string): Promise<PublicWorkItemWebLinkList>
+  /**
+   * Adds a web link to a Work Item.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param input - URL and optional title.
+   * @param key - Idempotency key of the logical write.
+   * @returns The added link.
+   */
+  createWebLink(
+    teamId: string,
+    workItemId: string,
+    input: { url: string, title?: string },
+    key: string,
+  ): Promise<PublicWorkItemWebLinkMutation>
+  /**
+   * Removes a web link from a Work Item.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param linkId - Link ID.
+   * @param key - Idempotency key of the logical write.
+   * @returns The removed link.
+   */
+  deleteWebLink(teamId: string, workItemId: string, linkId: string, key: string): Promise<PublicWorkItemWebLinkMutation>
+  /**
    * Binds an idempotency key to a parent and the whole list of subtasks before any is created, so
    * that the same key with another list is refused instead of adding the difference.
    * @param teamId - Team of the parent.
@@ -314,6 +347,21 @@ function decodeCrossTeamCursor(cursor: string): CrossTeamCursor {
     throw invalid()
   }
   return { teamId, ...(inner === undefined ? {} : { cursor: inner }) }
+}
+
+/**
+ * Shapes a stored web link as an MCP attachment.
+ * @param link - Link from the Public API.
+ * @returns The attachment fields the tools return.
+ */
+function toAttachment(link: PublicWorkItemWebLink) {
+  return {
+    id: link.id,
+    url: link.url,
+    ...(link.title === undefined ? {} : { title: link.title }),
+    createdById: link.createdByMemberId,
+    createdAt: link.createdAt,
+  }
 }
 
 /**
@@ -671,6 +719,54 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
         removed: input.remove === true,
         relation: { type: result.relation.type, relatedIssueId: result.relation.targetWorkItemId },
       }
+    },
+    /**
+     * Lists the web links (attachments) of a Work Item by key or ID.
+     * @param reference - Key or Work Item ID.
+     * @param teamId - Team of a Work Item ID.
+     * @returns The Work Item reference and its links, oldest first.
+     */
+    async listAttachments(reference: string, teamId?: string) {
+      const resolved = await resolveIssue(reference, teamId)
+      const list = await api.webLinks(resolved.teamId, resolved.workItemId)
+      return { ...resolved, attachments: list.items.map(toAttachment) }
+    },
+    /**
+     * Links a URL to a Work Item by key or ID.
+     * @param input - Work Item, URL, optional title, and the idempotency key.
+     * @returns The Work Item reference and the saved link.
+     */
+    async saveAttachment(input: {
+      /** Work Item to link the URL to. */
+      issueId: string
+      /** Team of a Work Item ID. */
+      teamId?: string
+      /** `http` or `https` URL. */
+      url: string
+      /** Display title. */
+      title?: string
+      /** Idempotency key of the logical write. */
+      idempotencyKey: string
+    }) {
+      const resolved = await resolveIssue(input.issueId, input.teamId)
+      const saved = await api.createWebLink(resolved.teamId, resolved.workItemId, {
+        url: input.url,
+        ...(input.title === undefined ? {} : { title: input.title }),
+      }, input.idempotencyKey)
+      return { ...resolved, attachment: toAttachment(saved.link) }
+    },
+    /**
+     * Removes a linked URL from a Work Item by key or ID.
+     * @param reference - Key or Work Item ID.
+     * @param teamId - Team of a Work Item ID.
+     * @param attachmentId - Link ID from list_attachments.
+     * @param idempotencyKey - Idempotency key of the logical write.
+     * @returns The Work Item reference and the removed link.
+     */
+    async deleteAttachment(reference: string, teamId: string | undefined, attachmentId: string, idempotencyKey: string) {
+      const resolved = await resolveIssue(reference, teamId)
+      const removed = await api.deleteWebLink(resolved.teamId, resolved.workItemId, attachmentId, idempotencyKey)
+      return { ...resolved, removed: true, attachment: toAttachment(removed.link) }
     },
     /**
      * Creates Work Items under a parent, one by one, each with a key derived from the call's key, so

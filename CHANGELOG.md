@@ -34,6 +34,11 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   `hasMore: true` になることがあります（#705）。
 - MCP API revision を 6 に上げました。`query` を知らない server は語を無視して全件を返すため、新しい MCP は revision 6 未満の
   server を古いと判定します（#705）。
+- Workspace profile に `list_attachments`（Work Item に付けた URL）、`save_attachment`（http / https の URL とタイトルを付ける。
+  1 件の Work Item に 50 件まで、同じ URL は 1 回）、`delete_attachment`（ID で外す）を追加しました（#705）。
+- server API: `GET /api/v1/work-items/{workItemId}/web-links`（scope `work-items:read`）、
+  `POST /api/v1/work-items/{workItemId}/web-links` と `DELETE /api/v1/work-items/{workItemId}/web-links/{linkId}`
+  （scope `work-items:write`、`Idempotency-Key` 必須）を追加しました。同じ URL と 51 件目は `409` です（#705、ADR 0109）。
 - Workspace profile に `list_relations`（親・子・WBS 番号と blocks / blockedBy / related / duplicate の link）、
   `save_relation`（同じ Team の Work Item を link、`remove: true` で解除）、`create_subtasks`（親の下に親の Project で最大 20 件の
   子を作る。途中で失敗したら同じ引数と `idempotencyKey` の再試行で残りだけを作る）を追加しました（#360）。

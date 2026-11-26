@@ -20,6 +20,7 @@ Issue #27 の Planning domain は、短期の Cycle と中長期の Portfolio / 
 - `UPDATE_ACK#<target>#<version>`: 確認者の「確認済み」を update version ごとに1つに限る marker（確認のコメントと同じ transaction で書く。ADR 0073）
 - `COLLECTION#<collectionId>`: Work Item を参照する整理用 Collection（[Collections](./collections.md)）。Planning graph の revision fence には含めません
 - `COLLECTION_COUNT`: Workspace の Collection 数。作成・削除と同じ transaction で更新し、上限を強制します
+- `WORK_ITEM_WEB_LINKS#<teamId>#<workItemId>`: Work Item に付けた URL リンク（最大 50 件）の配列。row 自身の revision で CAS し、Planning graph の revision fence には含めません（[ADR 0109](./adr/0109-work-item-web-links-in-planning-table.md)）
 
 Planning API snapshot は `schemaVersion: 2` を返し、Web は現在の schema version の snapshot だけを受け付けます。DynamoDB の storage schema version 1 は API contract から独立しています。Revision の正本は、graph row の `<workspaceId>` partition から分離した `FENCE#<workspaceId>` partition の `META` row だけです。
 

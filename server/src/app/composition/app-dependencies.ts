@@ -68,7 +68,7 @@ import type { CapacityPlanningService } from '../../modules/capacity-planning'
 import type { RealtimeTicketsClient } from '../../modules/realtime/realtime-ticket'
 import type { RequestIntakeClient } from '../../modules/request-intake/request-intake'
 import type { TriageClient } from '../../modules/triage'
-import type { ProjectScheduleBaselineStore, TeamIssuesClient } from '../../modules/work-items'
+import type { ProjectScheduleBaselineStore, TeamIssuesClient, WorkItemWebLinkStore } from '../../modules/work-items'
 import type { TeamPortfolioSnapshotStore } from '../../modules/portfolio-dashboard'
 import type { ProjectRaidLogStore } from '../../modules/project-raid-log'
 import type { CalendarFeedStore } from '../../modules/calendar-feeds'
@@ -239,6 +239,8 @@ export interface WorkItemDependencies {
   weeklyReports: WeeklyReportStore
   /** Provides the latest schedule baseline of each Project. */
   scheduleBaselines: ProjectScheduleBaselineStore
+  /** Provides the web links (URLs) attached to each Work Item. */
+  workItemWebLinks: WorkItemWebLinkStore
   /** Provides each Team's monthly portfolio snapshots. */
   portfolioSnapshots: TeamPortfolioSnapshotStore
   /** Provides the named schedule baselines of each Cycle. */

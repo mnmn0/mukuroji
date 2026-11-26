@@ -560,6 +560,9 @@ function startFakeWorkspaceApi() {
       if (request.method === 'POST' && url.pathname === '/api/v1/work-items/task/relations' && teamId === 'team') {
         return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', relation: { type: 'blockedBy', targetWorkItemId: 'other-task' } }, { status: 201 })
       }
+      if (request.method === 'POST' && url.pathname === '/api/v1/work-items/task/web-links' && teamId === 'team') {
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', link: { id: 'dddddddddddddddddddddddddddddddd', url: 'https://github.com/o/r/pull/7', title: 'PR 7', createdByMemberId: 'owner', createdAt: '2026-09-01T00:00:00.000Z' } }, { status: 201 })
+      }
       if (request.method === 'POST' && url.pathname === '/api/v1/work-items/task/subtask-batches' && teamId === 'team') {
         return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', subtaskCount: 1 }, { status: 201 })
       }
@@ -584,6 +587,8 @@ function startFakeWorkspaceApi() {
         return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', parentWorkItemId: null, childWorkItemIds: ['created'], wbsNumber: '3' })
       case '/api/v1/work-items/task/relations':
         return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', relations: [{ type: 'blockedBy', targetWorkItemId: 'other-task' }] })
+      case '/api/v1/work-items/task/web-links':
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', items: [{ id: 'dddddddddddddddddddddddddddddddd', url: 'https://github.com/o/r/pull/7', title: 'PR 7', createdByMemberId: 'owner', createdAt: '2026-09-01T00:00:00.000Z' }] })
       case '/api/v1/work-items/created/key':
         return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'created', createdAt: issue.createdAt, key: 'ABC-9' })
       case '/api/v1/work-items/task':
@@ -625,8 +630,8 @@ test('the workspace profile reads Teams, members, statuses, and Work Items by ke
     }))
     const tools = (await client.listTools()).tools.map((tool) => tool.name).sort()
     expect(tools).toEqual([
-      'create_subtasks', 'get_issue', 'get_project', 'list_comments', 'list_issue_statuses', 'list_issues', 'list_projects', 'list_relations', 'list_teams',
-      'list_users', 'save_comment', 'save_issue', 'save_relation', 'whoami',
+      'create_subtasks', 'delete_attachment', 'get_issue', 'get_project', 'list_attachments', 'list_comments', 'list_issue_statuses', 'list_issues', 'list_projects',
+      'list_relations', 'list_teams', 'list_users', 'save_attachment', 'save_comment', 'save_issue', 'save_relation', 'whoami',
     ])
 
     expect((await call(client, 'list_projects', { teamId: 'team' })).content).toEqual({
@@ -725,7 +730,7 @@ test('the workspace profile creates and updates Work Items and adds comments by 
 test('the workspace profile breaks a Work Item down into subtasks and links Work Items by key', async () => {
   const fake = startFakeWorkspaceApi()
   const client = new Client({ name: 'mukuroji-integration-test', version: '1.0.0' })
-  const keys = ['00000000-0000-4000-8000-000000000011', '00000000-0000-4000-8000-000000000012']
+  const keys = ['00000000-0000-4000-8000-000000000011', '00000000-0000-4000-8000-000000000012', '00000000-0000-4000-8000-000000000013']
   try {
     await client.connect(new StdioClientTransport({
       command: process.execPath,
@@ -744,6 +749,15 @@ test('the workspace profile breaks a Work Item down into subtasks and links Work
       teamId: 'team', workItemId: 'task', parentId: null, childIds: ['created'], wbsNumber: '3',
       relations: [{ type: 'blockedBy', relatedIssueId: 'other-task' }],
     } })
+    expect((await call(client, 'save_attachment', {
+      issueId: 'ABC-7', url: 'https://github.com/o/r/pull/7', title: 'PR 7', idempotencyKey: keys[2],
+    })).content).toMatchObject({ data: { teamId: 'team', workItemId: 'task', attachment: { url: 'https://github.com/o/r/pull/7', title: 'PR 7', createdById: 'owner' } } })
+    expect((await call(client, 'list_attachments', { issueId: 'ABC-7' })).content).toMatchObject({ data: {
+      attachments: [{ id: 'dddddddddddddddddddddddddddddddd', url: 'https://github.com/o/r/pull/7' }],
+    } })
+    expect((await call(client, 'save_attachment', {
+      issueId: 'ABC-7', url: 'javascript:alert(1)', idempotencyKey: keys[2],
+    })).isError).toBe(true)
     const tooMany = await call(client, 'create_subtasks', {
       parentId: 'ABC-7', subtasks: Array.from({ length: 21 }, (_, index) => ({ title: `Part ${index}` })), idempotencyKey: keys[0],
     })
@@ -761,6 +775,9 @@ test('the workspace profile breaks a Work Item down into subtasks and links Work
       } },
       { method: 'POST', path: '/api/v1/work-items/task/relations?teamId=team', key: keys[1], body: {
         type: 'blockedBy', targetWorkItemId: 'other-task',
+      } },
+      { method: 'POST', path: '/api/v1/work-items/task/web-links?teamId=team', key: keys[2], body: {
+        url: 'https://github.com/o/r/pull/7', title: 'PR 7',
       } },
     ])
   } finally {
@@ -787,6 +804,9 @@ test('the read-only workspace profile leaves out the write tools', async () => {
     expect(tools).not.toContain('save_comment')
     expect(tools).not.toContain('save_relation')
     expect(tools).not.toContain('create_subtasks')
+    expect(tools).not.toContain('save_attachment')
+    expect(tools).not.toContain('delete_attachment')
+    expect(tools).toContain('list_attachments')
     expect(tools).toContain('get_issue')
     expect(tools).toContain('list_relations')
   } finally {

@@ -110,6 +110,9 @@ Software factory が無効な環境でも使えます（Agent Run の API を呼
 | `save_comment` | Work Item にコメント（4096 文字まで）を追加。key だけでも指せる |
 | `list_relations` | Work Item の親・子（兄弟の順）・WBS 番号と、blocks / blockedBy / related / duplicate の link を読む。読めない相手の link は返さない |
 | `save_relation` | 同じ Team の 2 つの Work Item を link する。`type` は 1 つ目から見た向き（`parent` は相手が親になる、`blockedBy` は相手に止められる）。`remove: true` で解除。親は 1 つだけで、親の Work Item Type が子の Type を許さない link と循環する link は競合で失敗する |
+| `list_attachments` | Work Item に付けた URL リンク（pull request、デザインファイル、議事録など）を古い順に読む。URL とタイトルは利用者のデータ |
+| `save_attachment` | Work Item に `http` / `https` の URL とタイトル（任意）を付ける。1 件の Work Item に 50 件まで、同じ URL は 1 回だけ。ユーザー名やパスワードを含む URL は拒否する |
+| `delete_attachment` | `list_attachments` の ID で URL リンクを外す。リンク先のページは変えない |
 | `create_subtasks` | 親の下に、親と同じ Project で最大 20 件の子を作る（担当者の既定は `me`）。1 件ずつ作って親に付け、途中で失敗したら同じ引数と `idempotencyKey` で再試行すると、済んだ子を作り直さずに残りを作る。親の Type が許さない Type の子は作られた後で link に失敗し、エラーがその子の ID を示すので、`save_issue` で Type を変えてから同じ引数で再試行する。同じ `idempotencyKey` で親か子の一覧を変えると、子を作る前に再試行不可の `idempotency_conflict` で止まる（一覧を変えるなら新しい key を使う）。途中で親の Project が変わると、作り済みの子の再生が `idempotency_conflict` になるので、親を元の Project に戻して同じ引数で再試行するか、`list_relations` で子を確かめてから新しい `idempotencyKey` で残りを作る |
 
 書き込みのツールは、毎回新しい UUID の `idempotencyKey` を要求します。応答が不確かなときは、同じ引数と key で再試行します。

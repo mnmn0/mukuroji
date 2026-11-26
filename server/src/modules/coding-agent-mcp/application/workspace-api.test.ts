@@ -40,6 +40,9 @@ function apiWithFailingKeyRead() {
     createRelation: unexpected,
     deleteRelation: unexpected,
     reserveSubtaskBatch: unexpected,
+    webLinks: unexpected,
+    createWebLink: unexpected,
+    deleteWebLink: unexpected,
   }
   return { api, writes }
 }
@@ -333,4 +336,37 @@ test('the title matcher needs every word regardless of case, width, and order', 
   expect(matches('失敗した LOGIN を再試行する')).toBe(true)
   expect(matches('Login 画面の文言')).toBe(false)
   expect(createWorkItemTitleMatcher('board')(' Onboarding を改善する')).toBe(true)
+})
+
+test('attachments resolve the key and shape the stored web links', async () => {
+  const link = {
+    id: 'a'.repeat(32), url: 'https://github.com/o/r/pull/1', title: 'PR', createdByMemberId: 'owner', createdAt: '2026-11-26T00:00:00.000Z',
+  }
+  const writes: string[] = []
+  const { api: base } = apiWithFailingKeyRead()
+  const issues = createWorkspaceIssues({
+    ...base,
+    webLinks: async (teamId, workItemId) => ({ schemaVersion: 1, teamId, workItemId, items: [link] }),
+    createWebLink: async (teamId, workItemId, input, key) => {
+      writes.push(`create:${teamId}:${workItemId}:${input.url}:${input.title ?? ''}:${key}`)
+      return { schemaVersion: 1, teamId, workItemId, link: { ...link, url: input.url } }
+    },
+    deleteWebLink: async (teamId, workItemId, linkId, key) => {
+      writes.push(`delete:${teamId}:${workItemId}:${linkId}:${key}`)
+      return { schemaVersion: 1, teamId, workItemId, link }
+    },
+  })
+
+  expect(await issues.listAttachments('ABC-1')).toEqual({
+    teamId: 'team', workItemId: 'task',
+    attachments: [{ id: link.id, url: link.url, title: 'PR', createdById: 'owner', createdAt: link.createdAt }],
+  })
+  const saved = await issues.saveAttachment({ issueId: 'ABC-1', url: 'https://example.com/doc', idempotencyKey: 'k1' })
+  expect(saved.attachment.url).toBe('https://example.com/doc')
+  const removed = await issues.deleteAttachment('ABC-1', undefined, link.id, 'k2')
+  expect(removed.removed).toBe(true)
+  expect(writes).toEqual([
+    'create:team:task:https://example.com/doc::k1',
+    `delete:team:task:${link.id}:k2`,
+  ])
 })
