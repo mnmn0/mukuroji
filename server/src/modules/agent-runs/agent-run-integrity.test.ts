@@ -1,4 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import {
+  AGENT_RUN_ARTIFACT_STATUS_SCHEMA_VERSION,
+  artifactRefreshRecordKey,
+  artifactStatusRecordKey,
+} from './adapter-out/dynamodb/agent-run-artifact-status-store'
 import { GetCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb'
 import {
   checkAgentRunPartition,
@@ -196,6 +201,7 @@ describe('checkAgentRunPartition', () => {
       reports: 1,
       watermarks: 1,
       settings: 2,
+      artifactStatuses: 0,
     })
   })
 
@@ -309,6 +315,27 @@ describe('checkAgentRunPartition', () => {
     const malformed = replaceRow(healthyRows(), revocationKey, (row) => ({ ...row, assigneeUserId: 'someone-else' }))
     expect(codes(malformed)).toEqual(['AGENT_RUN_ROW_MALFORMED'])
     expect(codes([...healthyRows(), { directoryTeamId: partition, recordKey: 'something-else' }])).toEqual(['AGENT_RUN_ROW_UNRECOGNIZED'])
+  })
+
+  test('accepts pull request artifact status and refresh rows, and checks them against their keys', () => {
+    const url = 'https://github.com/org/repo/pull/1'
+    const status = {
+      url, provider: 'github', repository: 'org/repo', number: 1, verification: 'unverified',
+      unverifiedReason: 'no-connector', checkedAt: '2026-11-26T00:00:00.000Z',
+    }
+    const statusRow = {
+      directoryTeamId: partition, recordKey: artifactStatusRecordKey('task-1', url), schemaVersion: AGENT_RUN_ARTIFACT_STATUS_SCHEMA_VERSION,
+      workspaceId: team.directoryId, workItemId: 'task-1', artifactStatus: status, checkedAt: status.checkedAt,
+    }
+    const refreshRow = {
+      directoryTeamId: partition, recordKey: artifactRefreshRecordKey('task-1'), workspaceId: team.directoryId,
+      workItemId: 'task-1', refreshedAt: '2026-11-26T00:00:00.000Z',
+    }
+    const result = checkAgentRunPartition(team, [...healthyRows(), statusRow, refreshRow])
+    expect(result.findings).toEqual([])
+    expect(result.counts.artifactStatuses).toBe(2)
+    expect(codes([...healthyRows(), { ...statusRow, workItemId: 'task-2' }])).toEqual(['AGENT_RUN_ROW_MALFORMED'])
+    expect(codes([...healthyRows(), { ...refreshRow, refreshedAt: 'soon' }])).toEqual(['AGENT_RUN_ROW_MALFORMED'])
   })
 
   test('never reports a member ID or an instance hash', () => {

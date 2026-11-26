@@ -64,3 +64,26 @@ export function readAgentRunArtifactText(artifact: AgentRunArtifact): string {
   const text = artifact.label ?? artifact.url.replace(/^https:\/\//, '')
   return text.length > maximumArtifactTextLength ? `${text.slice(0, maximumArtifactTextLength - 1)}…` : text
 }
+
+/** Which read failed, so the conversation says why details are missing. */
+export type AgentRunReportLoadFailure = 'reports' | 'artifact-statuses'
+
+/**
+ * Chooses the load notice of a Work Item's conversation. A failed report read hides every chip,
+ * so it wins; a failed status read only matters when a report lists a pull request.
+ *
+ * @param state - Which reads failed, and whether a report lists a pull request.
+ * @returns The failure to show, or undefined when nothing failed.
+ */
+export function selectAgentRunReportLoadFailure(state: {
+  /** The reports could not be read. */
+  reportsFailed: boolean
+  /** The pull request statuses could not be read. */
+  statusesFailed: boolean
+  /** A shown report lists a pull request. */
+  hasPullRequests: boolean
+}): AgentRunReportLoadFailure | undefined {
+  if (state.reportsFailed) return 'reports'
+  if (state.statusesFailed && state.hasPullRequests) return 'artifact-statuses'
+  return undefined
+}

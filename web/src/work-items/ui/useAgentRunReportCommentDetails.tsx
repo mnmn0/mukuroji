@@ -1,11 +1,19 @@
 import { useCallback, useMemo, type ReactNode } from 'react'
 import type { Locale } from '../../shared/i18n/i18n'
-import { indexAgentRunReportsByComment, selectAgentRunReportsForWorkItem } from '../model/agentRunReportDisplay'
+import {
+  indexAgentRunReportsByComment,
+  selectAgentRunReportLoadFailure,
+  selectAgentRunReportsForWorkItem,
+} from '../model/agentRunReportDisplay'
 import { useAnswerAgentRunReport } from '../mutations/useAnswerAgentRunReport'
 import { useWorkItemAgentRunReports } from '../queries/useWorkItemAgentRunReports'
 import { useWorkItemArtifactStatuses } from '../queries/useWorkItemArtifactStatuses'
 import { AgentRunReportChips, AgentRunReportsLoadNotice } from './AgentRunReportChips'
-import { createAgentRunReportChipsLabels, createAgentRunReportsNoticeLabels } from './agentRunReportLabels'
+import {
+  createAgentRunArtifactStatusNoticeLabels,
+  createAgentRunReportChipsLabels,
+  createAgentRunReportsNoticeLabels,
+} from './agentRunReportLabels'
 
 /** Inputs of the hook that adds report chips to a Work Item's comments. */
 export type AgentRunReportCommentDetailsInput = {
@@ -29,7 +37,10 @@ export type AgentRunReportCommentDetailsInput = {
 export type AgentRunReportCommentDetails = {
   /** Renders the chips of the report saved with a comment, or nothing. */
   renderCommentDetails: (comment: { id: string }) => ReactNode
-  /** Notice with a retry action while the reports cannot be read, shown above the conversation. */
+  /**
+   * Notice with a retry action while the reports, or the status of their pull requests, cannot be
+   * read, shown above the conversation.
+   */
   loadNotice: ReactNode
 }
 
@@ -52,6 +63,7 @@ export function useAgentRunReportCommentDetails({
 }: AgentRunReportCommentDetailsInput): AgentRunReportCommentDetails {
   const labels = useMemo(() => createAgentRunReportChipsLabels(locale), [locale])
   const noticeLabels = useMemo(() => createAgentRunReportsNoticeLabels(locale), [locale])
+  const statusNoticeLabels = useMemo(() => createAgentRunArtifactStatusNoticeLabels(locale), [locale])
   const { data, error, mutate } = useWorkItemAgentRunReports(accessToken, teamId, workItemId, commentCount)
   // SWR keeps the last successful reports after a failed read; while the load notice says the
   // comments are shown without report details, no chips may claim otherwise.
@@ -61,7 +73,7 @@ export function useAgentRunReportCommentDetails({
     [accessToken, reports, teamId, workItemId],
   )
   const hasPullRequests = reports?.some((report) => report.artifacts.some((artifact) => artifact.type === 'pull-request')) === true
-  const { data: statusData, error: statusError } = useWorkItemArtifactStatuses(
+  const { data: statusData, error: statusError, mutate: refreshStatuses } = useWorkItemArtifactStatuses(
     accessToken, teamId, workItemId, hasPullRequests ? reports?.length ?? 0 : 0,
   )
   // A failed status read shows the plain links again rather than statuses that may be stale.
@@ -80,8 +92,21 @@ export function useAgentRunReportCommentDetails({
       />
     )
   }, [accessToken, answer, byComment, canAnswer, labels, statusByUrl, teamId])
-  return {
-    renderCommentDetails,
-    loadNotice: error && accessToken && teamId ? <AgentRunReportsLoadNotice labels={noticeLabels} onRetry={() => { void mutate() }} /> : null,
+  const failure = accessToken && teamId
+    ? selectAgentRunReportLoadFailure({ reportsFailed: Boolean(error), statusesFailed: Boolean(statusError), hasPullRequests })
+    : undefined
+  let loadNotice: ReactNode = null
+  if (failure === 'reports') {
+    loadNotice = <AgentRunReportsLoadNotice labels={noticeLabels} onRetry={() => { void mutate() }} />
+  } else if (failure === 'artifact-statuses') {
+    // The links stay as plain links, and the viewer is told why and may check again.
+    loadNotice = (
+      <AgentRunReportsLoadNotice
+        labels={statusNoticeLabels}
+        onRetry={() => { void refreshStatuses() }}
+        testId="agent-run-artifact-status-load-notice"
+      />
+    )
   }
+  return { renderCommentDetails, loadNotice }
 }

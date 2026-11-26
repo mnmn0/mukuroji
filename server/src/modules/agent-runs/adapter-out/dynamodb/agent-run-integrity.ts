@@ -13,6 +13,7 @@ import {
   triageSweepResumeKey,
   workItemRunSortKey,
 } from './agent-run-store'
+import { artifactRefreshRecordKey, parseArtifactStatus } from './agent-run-artifact-status-store'
 import { isAgentUsagePartition } from './agent-run-usage-store'
 
 /** Version of the Agent Run integrity evidence shape. */
@@ -80,6 +81,8 @@ export type AgentRunIntegrityRecordKind =
   | 'watermark'
   | 'settings'
   | 'settings-mutation'
+  | 'artifact-status'
+  | 'artifact-refresh'
   | 'unknown'
 
 /** One observed violation of an Agent Run invariant. */
@@ -120,6 +123,8 @@ export type AgentRunIntegrityCounts = {
   watermarks: number
   /** Settings and settings receipt rows; counted, not checked. */
   settings: number
+  /** Pull request artifact status and refresh claim rows (ADR 0103). */
+  artifactStatuses: number
   /** Active runs whose Work Item was read from the Work Items table; 0 when that check is off. */
   workItemsChecked: number
 }
@@ -313,6 +318,7 @@ const partitionCountNames = [
   'reports',
   'watermarks',
   'settings',
+  'artifactStatuses',
 ] as const satisfies readonly (keyof AgentRunPartitionCheck['counts'])[]
 
 /** Partition separator between the Workspace ID and the Team ID. */
@@ -354,7 +360,30 @@ function classifyRecordKey(recordKey: unknown): AgentRunIntegrityRecordKind {
   if (recordKey === stallWatermarkRecordKey) return 'watermark'
   if (recordKey === 'agent-settings') return 'settings'
   if (recordKey.startsWith('agent-settings-mutation#')) return 'settings-mutation'
+  if (recordKey.startsWith('agent-run-artifact-refresh#')) return 'artifact-refresh'
+  if (recordKey.startsWith('agent-run-artifact#')) return 'artifact-status'
   return 'unknown'
+}
+
+/**
+ * Checks a pull request artifact status row or refresh claim row (ADR 0103) against its key.
+ *
+ * @param item - Stored row.
+ * @param kind - Kind the sort key names.
+ * @returns True when the row matches its key and holds a valid value.
+ */
+function isArtifactRowValid(item: Record<string, unknown>, kind: 'artifact-status' | 'artifact-refresh'): boolean {
+  const { workItemId } = item
+  if (!isNonEmptyString(workItemId)) return false
+  if (kind === 'artifact-refresh') {
+    return item.recordKey === artifactRefreshRecordKey(workItemId) && isTimestamp(item.refreshedAt)
+  }
+  try {
+    parseArtifactStatus(item, workItemId)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -528,6 +557,7 @@ export function checkAgentRunPartition(team: AgentRunIntegrityTeam, rows: readon
     reports: 0,
     watermarks: 0,
     settings: 0,
+    artifactStatuses: 0,
   }
   const runs = new Map<string, StoredAgentRun>()
   const claims = new Map<string, ParsedClaim>()
@@ -593,6 +623,11 @@ export function checkAgentRunPartition(team: AgentRunIntegrityTeam, rows: readon
       case 'settings':
       case 'settings-mutation':
         counts.settings += 1
+        break
+      case 'artifact-status':
+      case 'artifact-refresh':
+        counts.artifactStatuses += 1
+        if (!isArtifactRowValid(item, kind)) findings.push({ code: 'AGENT_RUN_ROW_MALFORMED', sample: at({ recordKind: kind }) })
         break
       case 'unknown':
         findings.push({ code: 'AGENT_RUN_ROW_UNRECOGNIZED', sample: at({ recordKind: kind }) })
@@ -1036,6 +1071,7 @@ export async function runAgentRunsIntegrityCheck(input: AgentRunsIntegrityCheckI
     reports: 0,
     watermarks: 0,
     settings: 0,
+    artifactStatuses: 0,
     workItemsChecked: 0,
   }
   const teams = input.teams === undefined

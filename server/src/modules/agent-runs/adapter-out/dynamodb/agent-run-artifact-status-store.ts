@@ -135,17 +135,20 @@ export class DynamoDbAgentRunArtifactStatusStore implements AgentRunArtifactStat
             directoryTeamId: createAgentRunPartition(directoryId, teamId),
             recordKey: artifactStatusRecordKey(workItemId, status.url),
           },
-          UpdateExpression: 'SET #schemaVersion = :schemaVersion, #workItemId = :workItemId, #status = :status, #checkedAt = :checkedAt',
+          // The Workspace ID lets the tenant export and deletion find the row (ADR 0103).
+          UpdateExpression: 'SET #schemaVersion = :schemaVersion, #workspaceId = :workspaceId, #workItemId = :workItemId, #status = :status, #checkedAt = :checkedAt',
           ConditionExpression: 'attribute_not_exists(#recordKey) OR #checkedAt < :checkedAt',
           ExpressionAttributeNames: {
             '#recordKey': 'recordKey',
             '#schemaVersion': 'schemaVersion',
+            '#workspaceId': 'workspaceId',
             '#workItemId': 'workItemId',
             '#status': 'artifactStatus',
             '#checkedAt': 'checkedAt',
           },
           ExpressionAttributeValues: {
             ':schemaVersion': AGENT_RUN_ARTIFACT_STATUS_SCHEMA_VERSION,
+            ':workspaceId': directoryId,
             ':workItemId': workItemId,
             ':status': status,
             ':checkedAt': status.checkedAt,
@@ -167,12 +170,15 @@ export class DynamoDbAgentRunArtifactStatusStore implements AgentRunArtifactStat
           directoryTeamId: createAgentRunPartition(directoryId, teamId),
           recordKey: artifactRefreshRecordKey(workItemId),
         },
-        UpdateExpression: 'SET #refreshedAt = :now, #workItemId = :workItemId',
+        UpdateExpression: 'SET #refreshedAt = :now, #workspaceId = :workspaceId, #workItemId = :workItemId',
         ConditionExpression: 'attribute_not_exists(#recordKey) OR #refreshedAt <= :threshold',
-        ExpressionAttributeNames: { '#recordKey': 'recordKey', '#refreshedAt': 'refreshedAt', '#workItemId': 'workItemId' },
+        ExpressionAttributeNames: {
+          '#recordKey': 'recordKey', '#refreshedAt': 'refreshedAt', '#workspaceId': 'workspaceId', '#workItemId': 'workItemId',
+        },
         ExpressionAttributeValues: {
           ':now': now.toISOString(),
           ':threshold': new Date(now.getTime() - minimumIntervalMs).toISOString(),
+          ':workspaceId': directoryId,
           ':workItemId': workItemId,
         },
       }))

@@ -87,7 +87,7 @@ export async function readWorkItemArtifactStatuses(
   if (stale.length > 0 &&
       await dependencies.statuses.claimRefresh(target.directoryId, target.teamId, target.workItemId, now, ARTIFACT_STATUS_REFRESH_INTERVAL_MS)) {
     const refreshed = await refreshWithinBudget(
-      stale,
+      rotateForRefresh(stale, now),
       (reference) => checkReference(target.directoryId, reference, stored.get(reference.url), dependencies.reader, now),
       dependencies.refreshBudgetMs ?? ARTIFACT_STATUS_REFRESH_BUDGET_MS,
     )
@@ -104,6 +104,22 @@ export async function readWorkItemArtifactStatuses(
       return stored.get(reference.url) ?? createUnverifiedArtifactStatus(reference, 'unavailable', now)
     }),
   }
+}
+
+/**
+ * Starts each refresh at a different reference, moving on once per refresh interval, so slow
+ * references at the front cannot use up every budget and keep the ones behind them unchecked.
+ *
+ * @param references - Stale references, newest report first.
+ * @param now - Read time.
+ * @returns The same references, starting at this interval's position.
+ */
+function rotateForRefresh(
+  references: readonly PullRequestArtifactReference[],
+  now: Date,
+): PullRequestArtifactReference[] {
+  const start = Math.floor(now.getTime() / ARTIFACT_STATUS_REFRESH_INTERVAL_MS) % references.length
+  return [...references.slice(start), ...references.slice(0, start)]
 }
 
 /**

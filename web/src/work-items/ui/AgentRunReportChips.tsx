@@ -145,6 +145,8 @@ export type AgentRunReportsLoadNoticeProps = {
   labels: AgentRunReportsNoticeLabels
   /** Reads the reports again. */
   onRetry: () => void
+  /** Test ID of the notice; the report notice's when omitted. */
+  testId?: string
 }
 
 /**
@@ -154,11 +156,11 @@ export type AgentRunReportsLoadNoticeProps = {
  * @param props - Text and retry action.
  * @returns Notice with a retry button.
  */
-export function AgentRunReportsLoadNotice({ labels, onRetry }: AgentRunReportsLoadNoticeProps) {
+export function AgentRunReportsLoadNotice({ labels, onRetry, testId = 'agent-run-reports-load-notice' }: AgentRunReportsLoadNoticeProps) {
   return (
     <div
       className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2 text-sm text-[var(--workbench-muted)]"
-      data-testid="agent-run-reports-load-notice"
+      data-testid={testId}
       role="status"
     >
       <span>{labels.loadError}</span>

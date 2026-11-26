@@ -157,3 +157,17 @@ export function createAgentRunReportsNoticeLabels(locale: Locale): AgentRunRepor
     retry: t('workItems.agentRunReports.retry'),
   }
 }
+
+/**
+ * Builds the text of the notice shown when the pull request statuses could not be read.
+ *
+ * @param locale - Display locale.
+ * @returns Notice text.
+ */
+export function createAgentRunArtifactStatusNoticeLabels(locale: Locale): AgentRunReportsNoticeLabels {
+  const t = createTranslator(locale)
+  return {
+    loadError: t('workItems.agentRunReports.artifactStatus.loadError'),
+    retry: t('workItems.agentRunReports.retry'),
+  }
+}

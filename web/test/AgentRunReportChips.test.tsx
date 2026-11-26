@@ -6,10 +6,15 @@ import {
   indexAgentRunReportsByComment,
   isAgentRunReportAwaitingDecision,
   readAgentRunArtifactText,
+  selectAgentRunReportLoadFailure,
   selectAgentRunReportsForWorkItem,
 } from '../src/work-items/model/agentRunReportDisplay'
 import { AgentRunReportChips, AgentRunReportsLoadNotice } from '../src/work-items/ui/AgentRunReportChips'
-import { createAgentRunReportChipsLabels, createAgentRunReportsNoticeLabels } from '../src/work-items/ui/agentRunReportLabels'
+import {
+  createAgentRunArtifactStatusNoticeLabels,
+  createAgentRunReportChipsLabels,
+  createAgentRunReportsNoticeLabels,
+} from '../src/work-items/ui/agentRunReportLabels'
 import { IssueCollaborationPanel } from '../src/issues/ui/IssueCollaborationPanel'
 import { collaborationWorkspaceMemberFixtures, issueCollaborationControllerFixture } from '../src/issues/fixtures'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -248,5 +253,19 @@ describe('AgentRunReportsLoadNotice', () => {
     expect(html).toContain(noticeLabels.loadError)
     expect(html).toContain(`>${noticeLabels.retry}</button>`)
     expect(createAgentRunReportsNoticeLabels('ja').retry).toBe(createTranslator('ja')('workItems.agentRunReports.retry'))
+  })
+
+  test('tells the viewer when pull request statuses could not be checked, with its own retry', () => {
+    const statusLabels = createAgentRunArtifactStatusNoticeLabels('en')
+    const html = renderToStaticMarkup(
+      <AgentRunReportsLoadNotice labels={statusLabels} onRetry={() => undefined} testId="agent-run-artifact-status-load-notice" />,
+    )
+    expect(html).toContain('data-testid="agent-run-artifact-status-load-notice"')
+    expect(html).toContain(statusLabels.loadError)
+    // A failed report read wins; a failed status read matters only when a report lists a pull request.
+    expect(selectAgentRunReportLoadFailure({ reportsFailed: true, statusesFailed: true, hasPullRequests: true })).toBe('reports')
+    expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: true, hasPullRequests: true })).toBe('artifact-statuses')
+    expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: true, hasPullRequests: false })).toBeUndefined()
+    expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: false, hasPullRequests: true })).toBeUndefined()
   })
 })

@@ -880,6 +880,7 @@ export const workItemsMessages = {
   'workItems.agentRunReports.answer.submit': '回答を送る',
   'workItems.agentRunReports.answer.cancel': 'キャンセル',
   'workItems.agentRunReports.answer.answered': '回答済み',
+  'workItems.agentRunReports.artifactStatus.loadError': 'pull request の状態を確かめられませんでした。リンクは状態なしで表示しています。',
   'workItems.agentRunReports.artifactStatus.state.open': 'Open',
   'workItems.agentRunReports.artifactStatus.state.closed': 'Closed',
   'workItems.agentRunReports.artifactStatus.state.merged': 'Merged',

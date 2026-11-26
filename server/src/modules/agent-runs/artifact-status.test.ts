@@ -76,8 +76,13 @@ test('status rows are keyed under the Work Item, saved only when newer, and pars
     { Key: { recordKey: artifactStatusRecordKey('item', 'https://github.com/org/repo/pull/2') } },
   ])
   await store.saveStatuses('workspace', 'team', 'item', [status])
-  expect(sent[2]?.input).toMatchObject({ ConditionExpression: 'attribute_not_exists(#recordKey) OR #checkedAt < :checkedAt' })
+  // Both rows carry the Workspace ID, which the tenant export and deletion select rows by.
+  expect(sent[2]?.input).toMatchObject({
+    ConditionExpression: 'attribute_not_exists(#recordKey) OR #checkedAt < :checkedAt',
+    ExpressionAttributeValues: { ':workspaceId': 'workspace' },
+  })
   expect(await store.claimRefresh('workspace', 'team', 'item', new Date('2026-11-26T00:00:00.000Z'), 60_000)).toBeTrue()
+  expect(sent[3]?.input).toMatchObject({ ExpressionAttributeValues: { ':workspaceId': 'workspace' } })
   conflict = true
   await store.saveStatuses('workspace', 'team', 'item', [status])
   expect(await store.claimRefresh('workspace', 'team', 'item', new Date('2026-11-26T00:00:30.000Z'), 60_000)).toBeFalse()

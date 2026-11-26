@@ -136,6 +136,24 @@ test('saves the reads that finish within the time budget and leaves the rest for
   expect([...(deps.statuses.statuses.values().next().value?.keys() ?? [])]).toEqual(['https://github.com/org/fast/pull/1'])
 })
 
+test('starts each refresh at a different reference, so slow ones at the front cannot starve the rest', async () => {
+  const urls = Array.from({ length: 6 }, (_, index) => `https://github.com/org/r${index}/pull/1`)
+  const deps = {
+    ...dependencies([report(1, urls)], (_workspaceId, reference) =>
+      reference.repository === 'org/r5'
+        ? Promise.resolve({ kind: 'verified' as const, pullRequest: openPullRequest })
+        : new Promise<never>(() => {})),
+    refreshBudgetMs: 10,
+  }
+  const start = new Date('2026-11-26T01:00:00.000Z').getTime()
+  let verified = false
+  for (let refresh = 0; refresh < urls.length && !verified; refresh += 1) {
+    const result = await readWorkItemArtifactStatuses(target, deps, new Date(start + refresh * ARTIFACT_STATUS_REFRESH_INTERVAL_MS))
+    verified = result.items.some((item) => item.repository === 'org/r5' && item.verification === 'verified')
+  }
+  expect(verified).toBeTrue()
+})
+
 test('keeps a verified status through a short provider outage', async () => {
   let available = true
   const deps = dependencies([report(1, ['https://github.com/org/repo/pull/1'])], async () => available

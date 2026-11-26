@@ -26,7 +26,9 @@ credential の復号・更新と、失敗時の degraded / needs-reauth の扱�
   空なら connector が読める repository をすべて照会し、指定があればそれ以外は照会せず
   `repository-not-allowed` とする。一覧は閲覧のたびに当てるので、外した repository は保存済みの
   状態（merge 済みも含む）があっても、すぐに `repository-not-allowed` になる。既存の設定は空として読むので、移行は要らない。
-- 照会結果は Agent Runs table の Work Item の partition に保存する。
+- 照会結果は Agent Runs table の Team の partition に保存する。どちらの row にも `workspaceId` を持たせ、
+  Workspace の export と削除が他の Agent Run の row と同じく見つけられるようにする。Agent Run の整合性検査も
+  この 2 種類の row を認識し、key と中身が合うかを確かめる。
   - 状態の row: `recordKey = agent-run-artifact#<sha256(workItemId)>#<sha256(url)>`。
     `checkedAt` が新しいときだけ上書きする条件付き書き込みにする。読むときは、今の report にある URL の row
     だけを key で読む（最大 20 件）。報告されなくなった URL の row は残るが、読み取りの件数には入らない。
@@ -37,7 +39,8 @@ credential の復号・更新と、失敗時の degraded / needs-reauth の扱�
   merge 済みは読み直さない。provider が一時的に読めないときは、前回確認できた状態を残す。
   一時的な失敗で degraded になった installation も読むので、provider が戻れば次の照会で確かめ直せる。
   1 回の閲覧で照会に使う時間は 8 秒までにし（API の Lambda は 20 秒で止まる）、間に合ったものだけを保存して、
-  残りは保存済みの状態か未確認のまま返す。review の履歴は最後まで読み、1,000 件を超えて読み切れないときは
+  残りは保存済みの状態か未確認のまま返す。照会を始める位置は照会の間隔ごとにずらし、遅い pull request が
+  先頭にあっても後ろのものがいつまでも確かめられないことはないようにする。review の履歴は最後まで読み、1,000 件を超えて読み切れないときは
   途中までの判定を出さずに `unavailable` にする。
 - 未確認の理由は `repository-not-allowed`、`no-connector`、`not-accessible`、`unsupported-provider`、
   `unavailable` の 5 つ。Web は未確認の pull request に「未確認」と理由を出し、確認済みのものと区別する。
