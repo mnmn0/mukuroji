@@ -120,8 +120,10 @@ test('reads a stored row and rejects one with an unsafe link URL or a broken cre
   expect(await empty.get('w', 't', 'i')).toBeNull()
   await expect(corrupt.get('w', 't', 'i')).rejects.toMatchObject({ status: 502 })
   // A broken creation time would read as a recreated Work Item and hide the links, so it fails closed.
-  const brokenCreatedAt = new DynamoDbWorkItemWebLinkStore('planning', fakeClient(() => ({
-    Item: { ...row, workItemCreatedAt: 'broken' },
-  })).client)
-  await expect(brokenCreatedAt.get('w', 't', 'i')).rejects.toMatchObject({ status: 502 })
+  for (const workItemCreatedAt of ['broken', '2026-02-30T00:00:00.000Z', '2026-11-01']) {
+    const brokenCreatedAt = new DynamoDbWorkItemWebLinkStore('planning', fakeClient(() => ({
+      Item: { ...row, workItemCreatedAt },
+    })).client)
+    await expect(brokenCreatedAt.get('w', 't', 'i')).rejects.toMatchObject({ status: 502 })
+  }
 })

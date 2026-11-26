@@ -270,14 +270,25 @@ function parseStoredLinks(row: Record<string, unknown>, workspaceId: string, key
     !Number.isSafeInteger(revision) ||
     revision < 1 ||
     typeof workItemCreatedAt !== 'string' ||
-    workItemCreatedAt.length === 0 ||
-    Number.isNaN(Date.parse(workItemCreatedAt)) ||
+    !isCanonicalTimestamp(workItemCreatedAt) ||
     !Array.isArray(links) ||
     links.length > WORK_ITEM_WEB_LINK_LIMIT
   ) {
     throw corruptLinks()
   }
   return { revision, workItemCreatedAt, links: links.map(parseStoredLink) }
+}
+
+/**
+ * Checks that a stored time is a UTC ISO 8601 timestamp as `toISOString` writes it, as the
+ * canonical Work Item requires; an impossible date such as February 30 does not pass.
+ *
+ * @param value - Stored time.
+ * @returns Whether it is canonical.
+ */
+function isCanonicalTimestamp(value: string) {
+  const timestamp = new Date(value)
+  return Number.isFinite(timestamp.getTime()) && timestamp.toISOString() === value
 }
 
 /**
