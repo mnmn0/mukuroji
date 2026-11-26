@@ -37,6 +37,7 @@ import { type IssueCollaborationRoute } from '../model/collaborationTabs'
 import { type ProjectDirectoryTeam, type ProjectMember } from '../../projects/api'
 import type { WorkspaceMember } from '../../workspace/api'
 import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkItemExternalLinksPanel'
+import { WorkItemWebLinksPanelContainer } from '../../work-items/ui/WorkItemWebLinksPanel'
 import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
 import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
 import { TaskHandoffPanel } from '../../work-items/ui/TaskHandoffPanel'
@@ -1200,6 +1201,17 @@ function IssueDetailContent({
               <WorkItemExternalLinksPanelContainer
                 accessToken={externalLinksAccessToken}
                 canManage={canManageExternalLinks && !isAiSummaryOperationPending}
+                locale={locale}
+                teamId={issue.teamId}
+                workItemId={issue.id}
+              />
+            ) : null}
+            {accessToken && hasWorkItemDetailPanel('team', 'web-links') ? (
+              <WorkItemWebLinksPanelContainer
+                // Remounts per Work Item so a typed URL never carries over to another one.
+                key={`${issue.teamId}:${issue.id}:web-links`}
+                accessToken={accessToken}
+                canManage={!isIssueReadOnly && !isAiSummaryOperationPending}
                 locale={locale}
                 teamId={issue.teamId}
                 workItemId={issue.id}

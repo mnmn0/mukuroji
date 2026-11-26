@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(685)
-  expect(new Set(inventory).size).toBe(681)
+  expect(inventory).toHaveLength(691)
+  expect(new Set(inventory).size).toBe(687)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -95,6 +95,12 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/relations')
   expect(inventory).toContain('POST /api/v1/work-items/:workItemId/relations')
   expect(inventory).toContain('POST /api/v1/work-items/:workItemId/subtask-batches')
+  expect(inventory).toContain('GET /api/v1/work-items/:workItemId/web-links')
+  expect(inventory).toContain('POST /api/v1/work-items/:workItemId/web-links')
+  expect(inventory).toContain('DELETE /api/v1/work-items/:workItemId/web-links/:linkId')
+  expect(inventory).toContain('GET /api/teams/:teamId/issues/:issueId/web-links')
+  expect(inventory).toContain('POST /api/teams/:teamId/issues/:issueId/web-links')
+  expect(inventory).toContain('DELETE /api/teams/:teamId/issues/:issueId/web-links/:linkId')
   expect(inventory).toContain('DELETE /api/v1/work-items/:workItemId/relations/:targetWorkItemId/:relationType')
   expect(inventory).toContain('GET /api/v1/planning/entities')
   expect(inventory).toContain('POST /api/v1/planning/milestones')
@@ -241,6 +247,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '61054e779412a0abb864133e6fda89eae6cca6fa243fc5a413a47f2146f93419',
+    'ccfa50380b28c7f91436aab436ff8651a16a60a29a626f2df9f8070feb6b0430',
   )
 })

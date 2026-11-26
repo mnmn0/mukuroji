@@ -221,6 +221,18 @@ export {
   type WriteProjectScheduleBaselineInput,
 } from './adapter-out/dynamodb/schedule-baseline-store'
 export {
+  DynamoDbWorkItemWebLinkStore,
+  InMemoryWorkItemWebLinkStore,
+  type WorkItemWebLinkConditionCheck,
+  type WorkItemWebLinkStore,
+} from './adapter-out/dynamodb/work-item-web-link-store'
+export {
+  addWorkItemWebLink,
+  currentWorkItemWebLinks,
+  removeWorkItemWebLink,
+  type WorkItemWebLinkState,
+} from './application/use-cases/work-item-web-links'
+export {
   activateProjectScheduleBaselineUseCase,
   captureProjectScheduleBaselineUseCase,
   readProjectScheduleBaselineUseCase,

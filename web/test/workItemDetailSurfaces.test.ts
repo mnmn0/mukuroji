@@ -11,6 +11,7 @@ describe('Work Item detail surface capabilities', () => {
     }
     expect(hasWorkItemDetailPanel('team', 'key-actions')).toBe(true)
     expect(hasWorkItemDetailPanel('team', 'external-links')).toBe(true)
+    expect(hasWorkItemDetailPanel('team', 'web-links')).toBe(true)
     expect(hasWorkItemDetailPanel('team', 'actual-dates')).toBe(true)
   })
 

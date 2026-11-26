@@ -23,6 +23,7 @@ import {
   type UpdatePublicWorkItemRequest,
   type WorkItemSchedule,
   type WorkItemScheduleCalendarPolicy,
+  createWorkItemTitleMatcher,
   haveSameWorkCalendarRules,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
@@ -219,6 +220,7 @@ import {
 import { createCanonicalPublicAttachmentService } from '../shared/public-attachment-access'
 import { createCanonicalPublicDocumentService } from '../shared/public-document-access'
 import { createCanonicalPublicRelationService } from '../shared/public-relation-access'
+import { createCanonicalPublicWebLinkService } from '../shared/public-web-link-access'
 import { createCanonicalPublicPlanningService } from './public-planning-service'
 import { createCanonicalPublicAgentTelemetryService } from './public-agent-telemetry-service'
 import { createCanonicalPublicDirectoryService } from '../shared/public-directory-access'
@@ -1632,8 +1634,15 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           ...(accessibleProjectIds ? { accessibleProjectIds } : {}),
         },
       )
+      // A title keyword narrows each stored page after current RBAC, so a page can be empty while
+      // hasMore stays true, as with the other filters.
+      const matchesTitle = typeof filters.query === 'string'
+        ? createWorkItemTitleMatcher(filters.query)
+        : undefined
       return {
-        items: page.issues.map(projectPublicWorkItem),
+        items: page.issues
+          .filter((issue) => matchesTitle === undefined || matchesTitle(issue.title))
+          .map(projectPublicWorkItem),
         hasMore: page.nextCursor !== undefined,
         ...(page.nextCursor ? { nextContinuation: page.nextCursor } : {}),
       }
@@ -4173,6 +4182,7 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       agentTelemetry: createCanonicalPublicAgentTelemetryService(),
       documents: createCanonicalPublicDocumentService(),
       workItemRelations: createCanonicalPublicRelationService(),
+      workItemWebLinks: createCanonicalPublicWebLinkService(),
       planning: createCanonicalPublicPlanningService(),
       attachments: createCanonicalPublicAttachmentService(),
       directory: createCanonicalPublicDirectoryService(),

@@ -24,6 +24,19 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Added
 
+- Workspace profile の `list_issues` で `teamId` を省くと、読める Team を順に 1 Team ずつ読みます。`nextCursor` が次の Team へ進み、
+  Project・status・Type の絞り込みは `teamId` と一緒に渡します（#705）。
+- Workspace profile の `list_issues` に `query`（タイトルの語。すべてを含む Work Item だけ、大文字小文字と全角半角を区別しない）を追加しました（#705）。
+- Workspace profile に `get_project`（Project と charter。charter を読めない場合は `charterReadable: false`）を追加しました（#705）。
+- Workspace profile の `save_issue` に `customFields`（field ID ごとの値、更新では `null` で消す）を、`list_issue_statuses` の各 Type に
+  custom field の定義を追加しました（#705）。
+- server API: `GET /api/v1/work-items` に `query`（1〜200 文字のタイトルの語）を追加しました。page ごとに絞るため、空の page でも
+  `hasMore: true` になることがあります（#705）。
+- Workspace profile に `list_attachments`（Work Item に付けた URL）、`save_attachment`（http / https の URL とタイトルを付ける。
+  1 件の Work Item に 50 件まで、同じ URL は 1 回）、`delete_attachment`（ID で外す）を追加しました（#705）。
+- server API: `GET /api/v1/work-items/{workItemId}/web-links`（scope `work-items:read`）、
+  `POST /api/v1/work-items/{workItemId}/web-links` と `DELETE /api/v1/work-items/{workItemId}/web-links/{linkId}`
+  （scope `work-items:write`、`Idempotency-Key` 必須）を追加しました。同じ URL と 51 件目は `409` です（#705、ADR 0109）。
 - Workspace profile に `list_documents`（Workspace の Document の一覧。`issueId` でその Work Item に link された Document）、
   `get_document`（ページ・テンプレートを Markdown で読む）、`save_document`（Markdown からページを作って Work Item に link する、
   または title・本文を置き換える）を追加しました。`save_document` は `MUKUROJI_MCP_READ_ONLY=true` では出ません（#708）。
@@ -129,6 +142,9 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   server が古いと警告し、`list_relations`・`save_relation`・`create_subtasks` は使えません（#360）。
 - MCP API revision を 7 に上げました。server は revision 1〜7 を受け付けます。revision 6 以前の server に接続した新しい MCP は
   server が古いと警告し、Planning のツールと `save_issue` の `cycleId`・`milestoneId` は使えません（#706）。
+- MCP API revision を 8 に上げました。server は revision 1〜8 を受け付けます。revision 7 以前の server に接続した新しい MCP は
+  server が古いと警告し、`list_issues` の `query`・`teamId` の省略、`get_project`、`save_issue` の `customFields`、
+  `list_attachments`・`save_attachment`・`delete_attachment` は使えません。`query` を知らない server は語を無視して全件を返すためです（#705）。
 - server API: Software factory が off の deploy でも、本人用 token の確認・発行・再発行
   （`/api/developer/me/agent-connection`、`POST /api/developer/me/api-keys`、`.../rotate`）と、管理者による本人用 token の
   rotate を `503` で断らないようにしました。Web の「agent を接続」は off では Workspace profile の設定例を出します。

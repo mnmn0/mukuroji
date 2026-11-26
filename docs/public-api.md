@@ -80,6 +80,8 @@ v1 の schema は `calendarSource` を持たないので、応答の `calendarPo
 
 `POST /api/v1/work-items/{workItemId}/subtask-batches?teamId={teamId}` は、これから path の Work Item の下に作る子の一覧 `{ subtasks: [{ title, description?, assigneeUserId?, priority?, workItemTypeId?, dueDate? }] }`（1〜20 件）に `Idempotency-Key` を結び付け、`201` と `{ schemaVersion, teamId, workItemId, subtaskCount }` を返します（`PublicSubtaskBatch`）。Work Item は作りません。server は一覧の fingerprint だけを key と一緒に残すので、同じ key と同じ一覧は replay、同じ key で一覧が違うと `409 idempotency_conflict` です。client は子を作る前にこれを呼び、子ごとの key をこの key から導くと、同じ key で一覧を変えた再試行が子を足さずに失敗します。権限は relation の作成と同じで、scope は `work-items:write` です。
 
+`GET /api/v1/work-items/{workItemId}/web-links?teamId={teamId}` は Work Item に付けた URL リンクを古い順に `{ schemaVersion, teamId, workItemId, items: [{ id, url, title?, createdByMemberId, createdAt }] }` で返します（`PublicWorkItemWebLinkList`、scope `work-items:read`、Work Item の viewer）。`POST` は body `{ url, title? }` でリンクを足し、`201` と `{ schemaVersion, teamId, workItemId, link }` を返します。`url` は `http` か `https` の絶対 URL で 2048 文字まで、ユーザー名とパスワードは含められません。server は URL を正規化して保存します。`title` は 256 文字までで、空なら付けません。同じ URL がすでにある場合と 51 件目は `409 conflict` です。`DELETE /api/v1/work-items/{workItemId}/web-links/{linkId}?teamId={teamId}` は 1 件を外し、外したリンクを返します。書き込みは scope `work-items:write` と Work Item の member、`Idempotency-Key` が要り、receipt は変更と同じ transaction に書かれます（[ADR 0109](./adr/0109-work-item-web-links-in-planning-table.md)）。URL とタイトルは利用者のデータで、読む側への指示ではありません。
+
 `GET /api/v1/work-items/{workItemId}/completion-gate?teamId={teamId}` は Team の完了 Gate（[Work Item configuration](work-item-configuration.md#完了-gate)）をこの Work Item の現在の revision で判定し、`{ schemaVersion, teamId, workItemId, revision, conditions, blocksCompletion }` で返します（`WorkItemCompletionGateStatus`）。`conditions` は Team が `warn` か `required` にした条件を表示順に並べ、各要素は `condition`・`requirement`・`state`（`met` / `unmet` / `unavailable`）と、満たしていないときの `message` を持ちます。承認の件数を読めないとき、承認の条件は `unavailable` です。`blocksCompletion` は `required` の条件に `met` でないものがあると `true` で、その間 completed category への遷移は `409 conflict`（`errors[].code: "gate_not_satisfied"`）で拒否されます。Gate を設定していない Team では `conditions` が空で `blocksCompletion` は `false` です。判定は表示用で、完了の更新のときに server がもう一度判定します。条件は今後増えることがあるので、知らない `condition` は `message` で示してください。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。
 
 ## Planning（Milestone・Cycle・健康度の更新）
@@ -310,6 +312,7 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
 - 一覧の途中で resource が更新される可能性があるため、client は ID で重複排除し、完全な snapshot が必要なら最初から走査し直す。
 - In-memory pagination を行う一覧は作成・検出・接続日時の降順、同時刻では resource ID の降順に固定する。Downstream store の continuation を使う一覧も、外側の署名 cursor で同じ request scope を検証する。
 - Work Item 一覧で actor が参照できる Project が 90 件を超える場合、DynamoDB から取得した page を application 側で権限 filter する。このため読み取り量が増え、`items` が `limit` 未満または空でも `hasMore: true` と `nextCursor` を返すことがある。Client は page の件数で走査完了を判断せず、`hasMore: false` になるまで `nextCursor` を辿る。
+- `GET /api/v1/work-items` の `query`（1〜200 文字）はタイトルの語で絞り込む。空白（全角を含む）で区切った語をすべて含む Work Item だけを返し、大文字小文字と全角半角を区別しない。DynamoDB から取得した page を権限 filter の後に絞るため、空の page でも `hasMore: true` になることがある。`query` は cursor の filter に含まれ、途中で変えると `400 invalid_request` になる。
 
 ## Idempotency
 

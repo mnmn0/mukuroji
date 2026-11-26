@@ -110,6 +110,7 @@ import {
 import { TaskPriorityBadge } from './TaskViewPrimitives'
 import { TaskHandoffPanel } from '../../work-items/ui/TaskHandoffPanel'
 import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkItemExternalLinksPanel'
+import { WorkItemWebLinksPanelContainer } from '../../work-items/ui/WorkItemWebLinksPanel'
 import { WorkItemKeyActions } from '../../issues/ui/WorkItemKeyActions'
 import { TaskActualDatesPanel } from './TaskActualDatesPanel'
 import { TaskScheduleBaselinePanel } from './TaskScheduleBaselinePanel'
@@ -1504,6 +1505,17 @@ export function TaskDetailPane({
               <WorkItemExternalLinksPanelContainer
                 accessToken={accessToken}
                 canManage={canManageExternalLinks && !isReadOnly && !isWorkItemMutationPending}
+                locale={locale}
+                teamId={task.teamId}
+                workItemId={task.id}
+              />
+            ) : null}
+            {accessToken && hasWorkItemDetailPanel('project', 'web-links') ? (
+              <WorkItemWebLinksPanelContainer
+                // Remounts per Work Item so a typed URL never carries over to another one.
+                key={`${task.teamId}:${task.id}:web-links`}
+                accessToken={accessToken}
+                canManage={!isReadOnly && !isWorkItemMutationPending}
                 locale={locale}
                 teamId={task.teamId}
                 workItemId={task.id}

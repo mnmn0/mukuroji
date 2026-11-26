@@ -32,6 +32,29 @@ test('rejects Work Items, members, and keys of another scope than the one asked 
     schemaVersion: 1, key: 'ABC-2', teamId: 'team', workItemId: 'task',
   }))
   await expect(otherKey.lookupKey('ABC-1')).rejects.toMatchObject({ code: 'invalid_response' })
+
+  const otherCharter = createWorkspaceApi(config, async () => Response.json({
+    schemaVersion: 1, teamId: 'other', projectId: 'project', lifecycleState: 'active', revision: 1, tags: [], repositoryUrls: [],
+  }))
+  await expect(otherCharter.projectCharter('team', 'project')).rejects.toMatchObject({ code: 'invalid_response' })
+})
+
+test('reads a Project charter of the named Team and lists Work Items by title words', async () => {
+  const seen: string[] = []
+  const api = createWorkspaceApi(config, async (url) => {
+    seen.push(`${url.pathname}${url.search}`)
+    return url.pathname.endsWith('/charter')
+      ? Response.json({ schemaVersion: 1, teamId: 'team', projectId: 'project', lifecycleState: 'active', revision: 1, tags: [], repositoryUrls: [] })
+      : Response.json({ items: [], hasMore: false })
+  })
+
+  expect(await api.projectCharter('team', 'project')).toMatchObject({ projectId: 'project', revision: 1 })
+  await api.listIssues('team', { query: 'ログイン 失敗' })
+
+  expect(seen).toEqual([
+    '/api/v1/projects/project/charter?teamId=team',
+    `/api/v1/work-items?teamId=team&query=${encodeURIComponent('ログイン 失敗').replaceAll('%20', '+')}&limit=50`,
+  ])
 })
 
 test('reports a missing key endpoint as no key and keeps other failures', async () => {
@@ -108,4 +131,39 @@ test('reserves a subtask batch for the named parent and rejects a batch of anoth
   expect(seen[0]).toEqual({
     url: 'https://mukuroji.example.test/api/v1/work-items/parent/subtask-batches?teamId=team', method: 'POST', key: 'batch-key', body: input,
   })
+})
+
+test('sends web link reads and writes to the named Work Item and rejects links of another Work Item', async () => {
+  const link = { id: 'b'.repeat(32), url: 'https://example.com/a', createdByMemberId: 'owner', createdAt: '2026-11-26T00:00:00.000Z' }
+  const seen: { url: string, method: string | undefined, key: string | null, body: unknown }[] = []
+  const api = createWorkspaceApi(config, async (url, init) => {
+    seen.push({
+      url: url.href, method: init.method, key: new Headers(init.headers).get('Idempotency-Key'),
+      body: typeof init.body === 'string' ? JSON.parse(init.body) : undefined,
+    })
+    return init.method === 'GET' || init.method === undefined
+      ? Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', items: [link] })
+      : Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', link })
+  })
+
+  expect((await api.webLinks('team', 'task')).items).toEqual([link])
+  await api.createWebLink('team', 'task', { url: 'https://example.com/a', title: 'A' }, 'add-key')
+  await api.deleteWebLink('team', 'task', link.id, 'remove-key')
+  await expect(api.createWebLink('team', 'another-task', { url: 'https://example.com/a' }, 'add-key'))
+    .rejects.toMatchObject({ code: 'invalid_response' })
+  await expect(api.deleteWebLink('team', 'task', '../x', 'remove-key')).rejects.toMatchObject({ code: 'invalid_request' })
+
+  expect(seen.slice(0, 3)).toEqual([
+    { url: 'https://mukuroji.example.test/api/v1/work-items/task/web-links?teamId=team', method: 'GET', key: null, body: undefined },
+    { url: 'https://mukuroji.example.test/api/v1/work-items/task/web-links?teamId=team', method: 'POST', key: 'add-key', body: { url: 'https://example.com/a', title: 'A' } },
+    { url: `https://mukuroji.example.test/api/v1/work-items/task/web-links/${link.id}?teamId=team`, method: 'DELETE', key: 'remove-key', body: undefined },
+  ])
+})
+
+test('rejects a web link list whose link is not an http URL', async () => {
+  const api = createWorkspaceApi(config, async () => Response.json({
+    schemaVersion: 1, teamId: 'team', workItemId: 'task',
+    items: [{ id: 'c'.repeat(32), url: 'javascript:alert(1)', createdByMemberId: 'owner', createdAt: '2026-11-26T00:00:00.000Z' }],
+  }))
+  await expect(api.webLinks('team', 'task')).rejects.toMatchObject({ code: 'invalid_response' })
 })

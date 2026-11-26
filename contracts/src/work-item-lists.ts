@@ -213,3 +213,33 @@ export function matchesScopedWorkItemScheduleFilter(
     ? schedule.mode === 'unscheduled'
     : workItemScheduleOverlapsWindow(schedule, filter.from, filter.to)
 }
+
+/** Longest title keyword `GET /api/v1/work-items` accepts as `query`. */
+export const WORK_ITEM_TITLE_QUERY_MAX_LENGTH = 200
+
+/**
+ * Folds text so that a keyword matches regardless of letter case and of full-width or
+ * half-width forms, as people type Japanese and English titles both ways.
+ *
+ * @param text - Title or keyword.
+ * @returns The folded text.
+ */
+function foldForTitleMatch(text: string): string {
+  return text.normalize('NFKC').toLowerCase()
+}
+
+/**
+ * Creates a predicate that keeps the Work Items whose title contains every word of a keyword.
+ * Words are separated by whitespace, including the full-width space, so `ログイン 失敗` keeps
+ * titles that contain both words in any order.
+ *
+ * @param query - Keyword the caller typed; it must have at least one word.
+ * @returns A predicate over Work Item titles.
+ */
+export function createWorkItemTitleMatcher(query: string): (title: string) => boolean {
+  const words = foldForTitleMatch(query).split(/\s+/u).filter((word) => word.length > 0)
+  return (title) => {
+    const folded = foldForTitleMatch(title)
+    return words.every((word) => folded.includes(word))
+  }
+}

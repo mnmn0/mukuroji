@@ -56,7 +56,7 @@ function startFakeApi() {
     // Liveness is public, so the MCP must read it without the API credential.
     if (new URL(request.url).pathname === '/api/health') {
       if (request.headers.get('Authorization') !== null) return Response.json({}, { status: 400 })
-      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 7, minimumApiRevision: 1 } })
+      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 8, minimumApiRevision: 1 } })
     }
     if (request.headers.get('Authorization') !== 'Bearer isolated-test-token') return Response.json({}, { status: 401 })
     const url = new URL(request.url)
@@ -263,7 +263,7 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     expect((await client.listTools()).tools).toHaveLength(22)
     expect((await call(client, 'get_configuration')).content).toMatchObject({ data: {
       runtime: 'claude-code', agentSettings: { leaseMinutes: 30, readyStatusIds: [] }, brief: 'Run bun test.',
-      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 7, serverCompatibility: { status: 'compatible', server: { apiRevision: 7, minimumApiRevision: 1 } } },
+      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 8, serverCompatibility: { status: 'compatible', server: { apiRevision: 8, minimumApiRevision: 1 } } },
     } })
     expect(client.getServerVersion()).toMatchObject({ name: 'mukuroji-tasks', version: CODING_AGENT_MCP_VERSION })
     expect((await call(client, 'get_next_task')).content).toMatchObject({ data: { action: 'start', task: { id: 'task' }, ownRuns: [] } })
@@ -478,7 +478,7 @@ test('reuses a known server compatibility and retries an unknown one', async () 
     healthRequests += 1
     // The first read fails as a transient outage would; later reads report the range.
     return healthRequests === 1 ? Response.json({}, { status: 503 })
-      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 7, minimumApiRevision: 1 } })
+      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 8, minimumApiRevision: 1 } })
   } })
   try {
     const factory = composeCodingAgentMcp({ MUKUROJI_MCP_URL: `http://127.0.0.1:${api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token',
@@ -551,7 +551,7 @@ function startFakeWorkspaceApi() {
     updatedAt: '2026-09-01T00:00:00.000Z', format: 'markdown', content: '# Spec\n\nShip it.\n' }
   const api = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
     const url = new URL(request.url)
-    if (url.pathname === '/api/health') return Response.json({ ok: true, codingAgentMcp: { apiRevision: 7, minimumApiRevision: 1 } })
+    if (url.pathname === '/api/health') return Response.json({ ok: true, codingAgentMcp: { apiRevision: 8, minimumApiRevision: 1 } })
     if (request.headers.get('Authorization') !== 'Bearer isolated-test-token') return Response.json({}, { status: 401 })
     requests.push(`${url.pathname}${url.search}`)
     const teamId = url.searchParams.get('teamId')
@@ -569,6 +569,9 @@ function startFakeWorkspaceApi() {
       }
       if (request.method === 'POST' && url.pathname === '/api/v1/work-items/task/relations' && teamId === 'team') {
         return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', relation: { type: 'blockedBy', targetWorkItemId: 'other-task' } }, { status: 201 })
+      }
+      if (request.method === 'POST' && url.pathname === '/api/v1/work-items/task/web-links' && teamId === 'team') {
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', link: { id: 'dddddddddddddddddddddddddddddddd', url: 'https://github.com/o/r/pull/7', title: 'PR 7', createdByMemberId: 'owner', createdAt: '2026-09-01T00:00:00.000Z' } }, { status: 201 })
       }
       if (request.method === 'POST' && url.pathname === '/api/v1/work-items/task/subtask-batches' && teamId === 'team') {
         return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', subtaskCount: 1 }, { status: 201 })
@@ -621,6 +624,8 @@ function startFakeWorkspaceApi() {
         return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', parentWorkItemId: null, childWorkItemIds: ['created'], wbsNumber: '3' })
       case '/api/v1/work-items/task/relations':
         return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', relations: [{ type: 'blockedBy', targetWorkItemId: 'other-task' }] })
+      case '/api/v1/work-items/task/web-links':
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', items: [{ id: 'dddddddddddddddddddddddddddddddd', url: 'https://github.com/o/r/pull/7', title: 'PR 7', createdByMemberId: 'owner', createdAt: '2026-09-01T00:00:00.000Z' }] })
       case '/api/v1/work-items/created/key':
         return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'created', createdAt: issue.createdAt, key: 'ABC-9' })
       case '/api/v1/work-items/task':
@@ -631,6 +636,10 @@ function startFakeWorkspaceApi() {
         return Response.json({ items: [{ id: 'comment', actorUserId: 'owner', body: 'Imported', createdAt: issue.createdAt }], hasMore: false })
       case '/api/v1/work-items':
         return Response.json({ items: teamId === 'team' ? [issue] : [], hasMore: false })
+      case '/api/v1/projects/project/charter':
+        return teamId === 'team'
+          ? Response.json({ schemaVersion: 1, teamId: 'team', projectId: 'project', lifecycleState: 'active', revision: 2, code: 'WBS', purpose: 'Plan work', tags: [], repositoryUrls: [] })
+          : Response.json({}, { status: 404 })
       case '/api/v1/projects/project/members':
         return Response.json({ schemaVersion: 1, teamId: 'team', projectId: 'project', items: [{ id: 'owner', email: 'owner@example.com', role: 'manager' }] })
       case '/api/v1/work-item-types':
@@ -658,9 +667,9 @@ test('the workspace profile reads Teams, members, statuses, and Work Items by ke
     }))
     const tools = (await client.listTools()).tools.map((tool) => tool.name).sort()
     expect(tools).toEqual([
-      'create_subtasks', 'get_document', 'get_issue', 'get_status_updates', 'list_comments', 'list_cycles', 'list_documents', 'list_issue_statuses', 'list_issues',
-      'list_milestones', 'list_planning_entities', 'list_projects', 'list_relations', 'list_teams', 'list_users', 'save_comment', 'save_document', 'save_issue', 'save_milestone',
-      'save_relation', 'save_status_update', 'whoami',
+      'create_subtasks', 'delete_attachment', 'get_document', 'get_issue', 'get_project', 'get_status_updates', 'list_attachments', 'list_comments', 'list_cycles',
+      'list_documents', 'list_issue_statuses', 'list_issues', 'list_milestones', 'list_planning_entities', 'list_projects', 'list_relations', 'list_teams', 'list_users',
+      'save_attachment', 'save_comment', 'save_document', 'save_issue', 'save_milestone', 'save_relation', 'save_status_update', 'whoami',
     ])
 
     expect((await call(client, 'list_projects', { teamId: 'team' })).content).toEqual({
@@ -671,9 +680,19 @@ test('the workspace profile reads Teams, members, statuses, and Work Items by ke
       data: { teamId: 'team', workItemId: 'task', items: [{ id: 'comment', body: 'Imported' }], hasMore: false },
     })
     expect((await call(client, 'list_issues', { teamId: 'team', assigneeId: 'me' })).content).toMatchObject({ data: { items: [{ id: 'task' }] } })
+    expect((await call(client, 'get_project', { projectId: 'project' })).content).toMatchObject({
+      data: { id: 'project', teamId: 'team', teamName: 'Platform', charterReadable: true, purpose: 'Plan work', revision: 2 },
+    })
+    // Without a Team the list reads one Team per page and hands back a cursor for the next Team.
+    const firstTeam = await call(client, 'list_issues', { query: 'github  IMPORT' })
+    expect(firstTeam.content).toMatchObject({ data: { items: [{ id: 'task' }], hasMore: true } })
+    const firstData: unknown = typeof firstTeam.content !== 'object' || firstTeam.content === null ? undefined : Reflect.get(firstTeam.content, 'data')
+    const nextCursor: unknown = typeof firstData === 'object' && firstData !== null ? Reflect.get(firstData, 'nextCursor') : undefined
+    expect(typeof nextCursor).toBe('string')
+    expect((await call(client, 'list_issues', { query: 'github  IMPORT', cursor: nextCursor })).content).toEqual({ data: { items: [], hasMore: false } })
     expect((await call(client, 'list_users', { teamId: 'team', projectId: 'project' })).content).toMatchObject({ data: { items: [{ id: 'owner' }] } })
     expect((await call(client, 'list_issue_statuses', { teamId: 'team' })).content).toEqual({ data: { teamId: 'team', workItemTypes: [{
-      id: 'task-type', name: 'Task', statuses: [
+      id: 'task-type', name: 'Task', customFields: [], statuses: [
         { id: 'todo', name: 'To do', category: 'unstarted', initial: true },
         { id: 'done', name: 'Done', category: 'completed', initial: false },
       ],
@@ -687,6 +706,8 @@ test('the workspace profile reads Teams, members, statuses, and Work Items by ke
     expect(withoutTeam.content).toMatchObject({ error: { code: 'invalid_request' } })
 
     expect(fake.requests).toContain('/api/v1/work-items?teamId=team&assigneeUserId=owner&limit=50')
+    expect(fake.requests).toContain('/api/v1/work-items?teamId=team&query=github++IMPORT&limit=50')
+    expect(fake.requests).toContain('/api/v1/work-items?teamId=other&query=github++IMPORT&limit=50')
     expect(fake.requests.some((path) => path.startsWith('/api/v1/agent-'))).toBe(false)
   } finally {
     await client.close()
@@ -747,7 +768,7 @@ test('the workspace profile creates and updates Work Items and adds comments by 
 test('the workspace profile breaks a Work Item down into subtasks and links Work Items by key', async () => {
   const fake = startFakeWorkspaceApi()
   const client = new Client({ name: 'mukuroji-integration-test', version: '1.0.0' })
-  const keys = ['00000000-0000-4000-8000-000000000011', '00000000-0000-4000-8000-000000000012']
+  const keys = ['00000000-0000-4000-8000-000000000011', '00000000-0000-4000-8000-000000000012', '00000000-0000-4000-8000-000000000013']
   try {
     await client.connect(new StdioClientTransport({
       command: process.execPath,
@@ -766,6 +787,15 @@ test('the workspace profile breaks a Work Item down into subtasks and links Work
       teamId: 'team', workItemId: 'task', parentId: null, childIds: ['created'], wbsNumber: '3',
       relations: [{ type: 'blockedBy', relatedIssueId: 'other-task' }],
     } })
+    expect((await call(client, 'save_attachment', {
+      issueId: 'ABC-7', url: 'https://github.com/o/r/pull/7', title: 'PR 7', idempotencyKey: keys[2],
+    })).content).toMatchObject({ data: { teamId: 'team', workItemId: 'task', attachment: { url: 'https://github.com/o/r/pull/7', title: 'PR 7', createdById: 'owner' } } })
+    expect((await call(client, 'list_attachments', { issueId: 'ABC-7' })).content).toMatchObject({ data: {
+      attachments: [{ id: 'dddddddddddddddddddddddddddddddd', url: 'https://github.com/o/r/pull/7' }],
+    } })
+    expect((await call(client, 'save_attachment', {
+      issueId: 'ABC-7', url: 'javascript:alert(1)', idempotencyKey: keys[2],
+    })).isError).toBe(true)
     const tooMany = await call(client, 'create_subtasks', {
       parentId: 'ABC-7', subtasks: Array.from({ length: 21 }, (_, index) => ({ title: `Part ${index}` })), idempotencyKey: keys[0],
     })
@@ -783,6 +813,9 @@ test('the workspace profile breaks a Work Item down into subtasks and links Work
       } },
       { method: 'POST', path: '/api/v1/work-items/task/relations?teamId=team', key: keys[1], body: {
         type: 'blockedBy', targetWorkItemId: 'other-task',
+      } },
+      { method: 'POST', path: '/api/v1/work-items/task/web-links?teamId=team', key: keys[2], body: {
+        url: 'https://github.com/o/r/pull/7', title: 'PR 7',
       } },
     ])
   } finally {
@@ -892,6 +925,9 @@ test('the read-only workspace profile leaves out the write tools', async () => {
     expect(tools).not.toContain('save_comment')
     expect(tools).not.toContain('save_relation')
     expect(tools).not.toContain('create_subtasks')
+    expect(tools).not.toContain('save_attachment')
+    expect(tools).not.toContain('delete_attachment')
+    expect(tools).toContain('list_attachments')
     expect(tools).not.toContain('save_milestone')
     expect(tools).not.toContain('save_status_update')
     expect(tools).not.toContain('save_document')

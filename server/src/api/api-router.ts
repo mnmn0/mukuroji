@@ -19,6 +19,7 @@ import { registerAutomationRoutes } from './routes/automation-routes'
 import { registerWorkItemKeyPrefixRoutes } from './routes/work-item-key-prefix-routes'
 import { registerWorkItemsRoutes } from './routes/work-items-routes'
 import { registerProjectCharterRoutes } from './routes/project-charter-routes'
+import { registerWorkItemWebLinkRoutes } from './routes/work-item-web-link-routes'
 import { registerProjectRaidLogRoutes } from './routes/project-raid-log-routes'
 import { registerPortfolioRoutes } from './routes/portfolio-routes'
 import { registerProjectStatusReportRoutes } from './routes/project-status-report-routes'
@@ -188,6 +189,7 @@ registerNotificationDestinationRoutes(routeApp)
 registerAutomationRoutes(routeApp)
 registerWorkItemsRoutes(routeApp)
 registerWorkItemKeyPrefixRoutes(routeApp)
+registerWorkItemWebLinkRoutes(routeApp)
 registerProjectCharterRoutes(routeApp)
 registerProjectRaidLogRoutes(routeApp)
 registerPortfolioRoutes(routeApp)

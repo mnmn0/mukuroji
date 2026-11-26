@@ -50,6 +50,7 @@ import {
   type PublicAttachmentService,
   type PublicDocumentService,
   type PublicWorkItemRelationService,
+  type PublicWorkItemWebLinkService,
   type PublicPlanningService,
   type PublicDirectoryService,
   type PublicWorkItemService,
@@ -284,6 +285,8 @@ function createTestRouter(input: {
   documents?: PublicDocumentService
   /** Relation service used by relation route tests. */
   workItemRelations?: PublicWorkItemRelationService
+  /** Web link service used by web link route tests. */
+  workItemWebLinks?: PublicWorkItemWebLinkService
   /** Planning service used by Planning route tests. */
   planning?: PublicPlanningService
   /** Attachment service used by attachment route tests. */
@@ -326,6 +329,7 @@ function createTestRouter(input: {
     ...(input.agentTelemetry ? { agentTelemetry: input.agentTelemetry } : {}),
     ...(input.documents ? { documents: input.documents } : {}),
     ...(input.workItemRelations ? { workItemRelations: input.workItemRelations } : {}),
+    ...(input.workItemWebLinks ? { workItemWebLinks: input.workItemWebLinks } : {}),
     ...(input.planning ? { planning: input.planning } : {}),
     ...(input.attachments ? { attachments: input.attachments } : {}),
     ...(input.directory ? { directory: input.directory } : {}),
@@ -993,6 +997,79 @@ describe('public API router', () => {
       'planning team-1/task-1 {"cycleId":"cycle-1","milestoneId":null}',
       'updates {"type":"team","teamId":"team-1"} 5',
       'publish {"target":{"type":"team","teamId":"team-1"},"health":"on-track","summary":"On plan."}',
+    ])
+  })
+
+  test('reads and changes Work Item web links with the matching scopes and validates the URL', async () => {
+    const calls: string[] = []
+    const linkId = 'e'.repeat(32)
+    const link = { id: linkId, url: 'https://example.com/a', createdByMemberId: 'owner', createdAt: '2026-11-26T00:00:00.000Z' }
+    const { platform, router } = createTestRouter({
+      workItemWebLinks: {
+        async listWebLinks(_credential, teamId, workItemId) {
+          calls.push(`list ${teamId}/${workItemId}`)
+          return { schemaVersion: 1, teamId, workItemId, items: [link] }
+        },
+        async authorizeWebLinkChange(_credential, teamId, workItemId) {
+          calls.push(`authorize ${teamId}/${workItemId}`)
+        },
+        async createWebLink(_credential, teamId, workItemId, input, context, idempotency) {
+          calls.push(`create ${teamId}/${workItemId} ${input.url} ${input.title ?? '-'} ${context.idempotencyKey} ${idempotency?.idempotencyKey}`)
+          return { schemaVersion: 1, teamId, workItemId, link: { ...link, url: input.url } }
+        },
+        async deleteWebLink(_credential, teamId, workItemId, removedId, _context, idempotency) {
+          calls.push(`delete ${teamId}/${workItemId} ${removedId} ${idempotency?.idempotencyKey}`)
+          return { schemaVersion: 1, teamId, workItemId, link }
+        },
+      },
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+    const write = (path: string, method: string, key: string, body?: unknown) => router.request(`http://localhost${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${writer.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+
+    const listed = await router.request('http://localhost/v1/work-items/task-1/web-links?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const listDenied = await router.request('http://localhost/v1/work-items/task-1/web-links?teamId=team-1', {
+      headers: { Authorization: `Bearer ${writer.secret}` },
+    })
+    const created = await write('/v1/work-items/task-1/web-links?teamId=team-1', 'POST', 'link-key', { url: '  https://EXAMPLE.com/b  ', title: '  Spec ' })
+    const replayed = await write('/v1/work-items/task-1/web-links?teamId=team-1', 'POST', 'link-key', { url: '  https://EXAMPLE.com/b  ', title: '  Spec ' })
+    const script = await write('/v1/work-items/task-1/web-links?teamId=team-1', 'POST', 'script-key', { url: 'javascript:alert(1)' })
+    const credentialUrl = await write('/v1/work-items/task-1/web-links?teamId=team-1', 'POST', 'userinfo-key', { url: 'https://user:pass@example.com/' })
+    const longTitle = await write('/v1/work-items/task-1/web-links?teamId=team-1', 'POST', 'title-key', { url: 'https://example.com/', title: 'x'.repeat(257) })
+    const extraField = await write('/v1/work-items/task-1/web-links?teamId=team-1', 'POST', 'extra-key', { url: 'https://example.com/', kind: 'pr' })
+    const createDenied = await router.request('http://localhost/v1/work-items/task-1/web-links?teamId=team-1', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${reader.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'reader-key' },
+      body: JSON.stringify({ url: 'https://example.com/' }),
+    })
+    const deleted = await write(`/v1/work-items/task-1/web-links/${linkId}?teamId=team-1`, 'DELETE', 'delete-key')
+    const deleteInvalid = await write('/v1/work-items/task-1/web-links/not-a-link?teamId=team-1', 'DELETE', 'delete-invalid-key')
+
+    expect(listed.status).toBe(200)
+    expect(listed.headers.get('Cache-Control')).toContain('no-store')
+    expect(await listed.json()).toEqual({ schemaVersion: 1, teamId: 'team-1', workItemId: 'task-1', items: [link] })
+    expect(listDenied.status).toBe(403)
+    expect(created.status).toBe(201)
+    expect(replayed.status).toBe(201)
+    expect(replayed.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(script.status).toBe(400)
+    expect(credentialUrl.status).toBe(400)
+    expect(longTitle.status).toBe(400)
+    expect(extraField.status).toBe(400)
+    expect(createDenied.status).toBe(403)
+    expect(deleted.status).toBe(200)
+    expect(deleteInvalid.status).toBe(400)
+    expect(calls).toEqual([
+      'list team-1/task-1',
+      'create team-1/task-1 https://example.com/b Spec link-key link-key',
+      'authorize team-1/task-1',
+      'delete team-1/task-1 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee delete-key',
     ])
   })
 
@@ -1908,6 +1985,31 @@ describe('public API router', () => {
     expect(firstBody.items.map((item) => item.id)).toEqual(['work-item-a', 'work-item-b'])
     expect(secondBody.items.map((item) => item.id)).toEqual(['work-item-c', 'work-item-d'])
     expect(secondBody.hasMore).toBe(false)
+  })
+
+  test('passes a trimmed title keyword to the Work Item list and rejects blank or overlong ones', async () => {
+    const receivedFilters: Array<Record<string, string | number | undefined>> = []
+    const workItems = createDefaultWorkItemService({
+      async list(_credential, filters) {
+        receivedFilters.push(filters)
+        return { items: [], hasMore: false }
+      },
+    })
+    const { platform, router } = createTestRouter({ workItems })
+    const apiKey = await createApiKey(platform, ['work-items:read'])
+    const list = (query: string) => router.request(
+      `http://localhost/v1/work-items?teamId=team-1&query=${encodeURIComponent(query)}`,
+      { headers: { Authorization: `Bearer ${apiKey.secret}` } },
+    )
+
+    expect((await list('  login 失敗 ')).status).toBe(200)
+    expect(receivedFilters).toEqual([{ teamId: 'team-1', query: 'login 失敗' }])
+    for (const invalid of ['   ', 'a'.repeat(201), 'line\nbreak']) {
+      const response = await list(invalid)
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ type: 'https://docs.mukuroji.app/problems/validation_failed' })
+    }
+    expect(receivedFilters).toHaveLength(1)
   })
 
   test('rejects impossible schedule dates while accepting leap and month-end dates', async () => {

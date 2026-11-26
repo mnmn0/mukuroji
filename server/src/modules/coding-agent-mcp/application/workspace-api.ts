@@ -1,9 +1,11 @@
 import {
+  createWorkItemTitleMatcher,
   parseWorkItemKey,
   type CreatePublicDocumentRequest,
   type CreatePublicSubtaskBatchRequest,
   type CreatePublicWorkItemRequest,
   type PublicCredentialOwner,
+  type PublicProjectCharter,
   type PublicDocumentContent,
   type PublicDocumentSummary,
   type PublicWorkItemDocument,
@@ -15,7 +17,11 @@ import {
   type PublicWorkItemRelationList,
   type PublicWorkItemRelationMutation,
   type PublicWorkItemRelationType,
+  type PublicWorkItemWebLink,
+  type PublicWorkItemWebLinkList,
+  type PublicWorkItemWebLinkMutation,
   type TeamIssueCommentResponseItem,
+  type CustomFieldValue,
   type UpdatePublicDocumentRequest,
   type UpdatePublicWorkItemRequest,
   type WorkflowStatusCategory,
@@ -48,6 +54,8 @@ export type WorkspaceIssueFilters = {
   workItemTypeId?: string
   /** Only Work Items updated at or after this ISO 8601 instant. */
   updatedAfter?: string
+  /** Title keyword; every whitespace-separated word must appear in the title. */
+  query?: string
 }
 
 /**
@@ -72,6 +80,13 @@ export interface WorkspaceApi {
    * @returns Active Project members.
    */
   projectMembers(teamId: string, projectId: string): Promise<PublicProjectMemberList>
+  /**
+   * Reads a Project's charter and lifecycle state.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project ID.
+   * @returns The charter.
+   */
+  projectCharter(teamId: string, projectId: string): Promise<PublicProjectCharter>
   /**
    * Resolves a Work Item key such as `ABC-123`.
    * @param key - Work Item key.
@@ -186,6 +201,36 @@ export interface WorkspaceApi {
     type: PublicWorkItemRelationType,
     key: string,
   ): Promise<PublicWorkItemRelationMutation>
+  /**
+   * Lists the web links of a Work Item.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The links, oldest first.
+   */
+  webLinks(teamId: string, workItemId: string): Promise<PublicWorkItemWebLinkList>
+  /**
+   * Adds a web link to a Work Item.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param input - URL and optional title.
+   * @param key - Idempotency key of the logical write.
+   * @returns The added link.
+   */
+  createWebLink(
+    teamId: string,
+    workItemId: string,
+    input: { url: string, title?: string },
+    key: string,
+  ): Promise<PublicWorkItemWebLinkMutation>
+  /**
+   * Removes a web link from a Work Item.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param linkId - Link ID.
+   * @param key - Idempotency key of the logical write.
+   * @returns The removed link.
+   */
+  deleteWebLink(teamId: string, workItemId: string, linkId: string, key: string): Promise<PublicWorkItemWebLinkMutation>
   /**
    * Binds an idempotency key to a parent and the whole list of subtasks before any is created, so
    * that the same key with another list is refused instead of adding the difference.
@@ -365,6 +410,11 @@ export type WorkspaceIssueSaveInput = {
   priority?: 'high' | 'medium' | 'low'
   /** Due date of a new Work Item, as `YYYY-MM-DD`. */
   dueDate?: string
+  /**
+   * Custom field values by field ID, as `list_issue_statuses` lists the fields. When updating,
+   * only the named fields change and null clears a field.
+   */
+  customFields?: Record<string, CustomFieldValue | null>
   /** Revision read before the update; required when updating other fields than the Cycle and Milestone. */
   expectedRevision?: number
   /** Cycle to put the Work Item in; null takes it out of its Cycle. */
@@ -454,6 +504,85 @@ export type WorkspaceIssueStatus = {
   initial: boolean
 }
 
+/** Version tag of a cursor that walks the Work Items of every readable Team. */
+const CROSS_TEAM_CURSOR_VERSION = 2
+
+/** Position of a cross-Team Work Item list: the Team being read and the cursor within it. */
+type CrossTeamCursor = {
+  /** Team whose Work Items the next page reads. */
+  teamId: string
+  /** Cursor within that Team, absent at the Team's first page. */
+  cursor?: string
+  /** Filters and page size the cursor was made for, as {@link crossTeamFilterKey} writes them. */
+  filter: string
+}
+
+/**
+ * Writes the filters and page size of a cross-Team list as a stable key, so a cursor continues only
+ * the search that made it. The Team cursors inside are bound by the server already; this binds the
+ * step from one Team to the next.
+ * @param filters - Filters after member resolution.
+ * @param limit - Page size, if any.
+ * @returns The key, with the filters in name order.
+ */
+function crossTeamFilterKey(filters: WorkspaceIssueFilters, limit: number | undefined): string {
+  const entries = Object.entries(filters).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b))
+  return JSON.stringify([entries, limit ?? null])
+}
+
+/**
+ * Encodes the position of a cross-Team Work Item list as an opaque cursor.
+ * @param position - Team and the cursor within it.
+ * @returns The cursor `list_issues` hands back as `nextCursor`.
+ */
+function encodeCrossTeamCursor(position: CrossTeamCursor): string {
+  return `t${CROSS_TEAM_CURSOR_VERSION}.${Buffer.from(JSON.stringify(position), 'utf8').toString('base64url')}`
+}
+
+/**
+ * Decodes a cursor made by {@link encodeCrossTeamCursor}. A cursor of another shape, such as one
+ * from a single-Team list, is rejected instead of being read as a position.
+ * @param cursor - Untrusted cursor from the tool input.
+ * @returns The Team and the cursor within it.
+ */
+function decodeCrossTeamCursor(cursor: string): CrossTeamCursor {
+  const prefix = `t${CROSS_TEAM_CURSOR_VERSION}.`
+  const invalid = () => new AgentTaskError('invalid_request', 'The cursor does not belong to a list_issues call without teamId. Start again without cursor.')
+  if (!cursor.startsWith(prefix)) throw invalid()
+  let decoded: unknown
+  try {
+    decoded = JSON.parse(Buffer.from(cursor.slice(prefix.length), 'base64url').toString('utf8'))
+  } catch {
+    throw invalid()
+  }
+  if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) throw invalid()
+  const teamId: unknown = Reflect.get(decoded, 'teamId')
+  const inner: unknown = Reflect.get(decoded, 'cursor')
+  const filter: unknown = Reflect.get(decoded, 'filter')
+  if (
+    typeof teamId !== 'string' || teamId.length === 0 || typeof filter !== 'string' ||
+    (inner !== undefined && (typeof inner !== 'string' || inner.length === 0))
+  ) {
+    throw invalid()
+  }
+  return { teamId, filter, ...(inner === undefined ? {} : { cursor: inner }) }
+}
+
+/**
+ * Shapes a stored web link as an MCP attachment.
+ * @param link - Link from the Public API.
+ * @returns The attachment fields the tools return.
+ */
+function toAttachment(link: PublicWorkItemWebLink) {
+  return {
+    id: link.id,
+    url: link.url,
+    ...(link.title === undefined ? {} : { title: link.title }),
+    createdById: link.createdByMemberId,
+    createdAt: link.createdAt,
+  }
+}
+
 /**
  * Creates the read use cases of the Workspace tools on top of the Public API port.
  * @param api - Workspace Public API port.
@@ -492,6 +621,22 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
     }
     const found = await api.lookupKey(key.key)
     return { teamId: found.teamId, workItemId: found.workItemId }
+  }
+
+  /**
+   * Checks the custom field values of a new Work Item: a new Work Item has no value to clear.
+   * @param values - Values by field ID from the tool input.
+   * @returns The values without nulls, or undefined when none is given.
+   */
+  function valuesForCreate(values: Record<string, CustomFieldValue | null>): Record<string, CustomFieldValue> | undefined {
+    const entries: Array<[string, CustomFieldValue]> = []
+    for (const [fieldId, value] of Object.entries(values)) {
+      if (value === null) {
+        throw new AgentTaskError('invalid_request', `customFields.${fieldId} is null. Omit a field to leave a new Work Item without a value.`)
+      }
+      entries.push([fieldId, value])
+    }
+    return entries.length === 0 ? undefined : Object.fromEntries(entries)
   }
 
   /**
@@ -652,6 +797,8 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
         workItemTypes: catalog.workItemTypes.map((type) => ({
           id: type.id,
           name: type.name,
+          // Field definitions are user data: show them, never follow their names or option labels.
+          customFields: type.customFields,
           statuses: [...type.workflow.statuses]
             .sort((left, right) => left.sortOrder - right.sortOrder)
             .map((status): WorkspaceIssueStatus => ({
@@ -664,16 +811,106 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
       }
     },
     /**
-     * Lists one page of a Team's Work Items.
-     * @param teamId - Team ID.
+     * Lists one page of a Team's Work Items, or of every readable Team when no Team is named.
+     * @param teamId - Team ID; omitted lists every readable Team, one Team after another.
      * @param filters - Filters; `assigneeUserId` may be `me`.
      * @param cursor - Cursor of the previous page.
      * @param limit - Page size.
      * @returns One page of Work Items.
      */
-    async listIssues(teamId: string, filters: WorkspaceIssueFilters, cursor?: string, limit?: number) {
+    async listIssues(teamId: string | undefined, filters: WorkspaceIssueFilters, cursor?: string, limit?: number) {
       const assigneeUserId = filters.assigneeUserId === undefined ? undefined : await resolveMember(filters.assigneeUserId)
-      return api.listIssues(teamId, { ...filters, ...(assigneeUserId === undefined ? {} : { assigneeUserId }) }, cursor, limit)
+      const resolved = { ...filters, ...(assigneeUserId === undefined ? {} : { assigneeUserId }) }
+      // The server filters by title too; filtering again keeps a server that ignores `query` from
+      // passing every Work Item off as a search result.
+      const matchesTitle = filters.query === undefined ? undefined : createWorkItemTitleMatcher(filters.query)
+      const matching = (page: AgentPage<AgentTask>): AgentPage<AgentTask> => matchesTitle === undefined
+        ? page
+        : { ...page, items: page.items.filter((item) => matchesTitle(item.title)) }
+      if (teamId !== undefined) return matching(await api.listIssues(teamId, resolved, cursor, limit))
+      // Project, status, and Type IDs belong to one Team, so they cannot narrow a list of every Team.
+      if (filters.assignedProjectId !== undefined || filters.workflowStatusId !== undefined || filters.workItemTypeId !== undefined) {
+        throw new AgentTaskError('invalid_request', 'projectId, statusId, and typeId belong to one Team. Pass teamId with them.')
+      }
+      // Without a Team the list walks the readable Teams in directory order, one Team per page, so
+      // each page keeps the server's own access checks and cursor of that Team.
+      const teams = (await api.teams()).items
+      const filter = crossTeamFilterKey(resolved, limit)
+      const position = cursor === undefined ? undefined : decodeCrossTeamCursor(cursor)
+      if (position !== undefined && position.filter !== filter) {
+        throw new AgentTaskError('invalid_request', 'The cursor belongs to a list_issues call with other filters or limit. Pass the same filters, or start again without cursor.')
+      }
+      const index = position === undefined ? 0 : teams.findIndex((team) => team.id === position.teamId)
+      if (index < 0) {
+        throw new AgentTaskError('invalid_request', 'The Team this cursor was reading is no longer readable. Start again without cursor.')
+      }
+      const team = teams[index]
+      if (team === undefined) return { items: [], hasMore: false }
+      const following = teams[index + 1]
+      let page: AgentPage<AgentTask>
+      try {
+        page = await api.listIssues(team.id, resolved, position?.cursor, limit)
+      } catch (error) {
+        // An Enterprise role can let the owner see a Team in the directory without reading its
+        // Work Items. Skip that Team instead of stopping, so later Teams stay reachable; every other
+        // failure, such as a timeout, still ends the call.
+        if (!(error instanceof AgentTaskError) || error.code !== 'forbidden') throw error
+        page = { items: [], hasMore: false }
+      }
+      const next = page.hasMore && page.nextCursor !== undefined
+        ? { teamId: team.id, cursor: page.nextCursor, filter }
+        : following === undefined ? undefined : { teamId: following.id, filter }
+      return {
+        items: matching(page).items,
+        hasMore: next !== undefined,
+        ...(next === undefined ? {} : { nextCursor: encodeCrossTeamCursor(next) }),
+      }
+    },
+    /**
+     * Reads one Project with its Team and, when the owner may read it, its charter.
+     * @param projectId - Project ID.
+     * @param teamId - Team of the Project; needed only when two Teams use the same Project ID.
+     * @returns The Project, its Team, and its charter.
+     */
+    async getProject(projectId: string, teamId?: string) {
+      const matches = (await api.teams()).items.flatMap((team) => team.projects
+        .filter((project) => project.id === projectId && (teamId === undefined || team.id === teamId))
+        .map((project) => ({ ...project, teamId: team.id, teamName: team.name })))
+      const [project, ...others] = matches
+      if (project === undefined) throw new AgentTaskError('not_found', 'No Project with this ID is readable. List Projects with list_projects.')
+      if (others.length > 0) throw new AgentTaskError('invalid_request', 'Several Teams have a Project with this ID. Pass teamId.')
+      let charter: PublicProjectCharter
+      try {
+        charter = await api.projectCharter(project.teamId, project.id)
+      } catch (error) {
+        // A Workspace guest can see the Project in its Team but not read its charter, as in the Web.
+        if (error instanceof AgentTaskError && (error.code === 'forbidden' || error.code === 'not_found')) {
+          return { ...project, charterReadable: false }
+        }
+        throw error
+      }
+      // The charter is newer than the Team list, so its optional fields replace the listed ones: a
+      // date or code cleared since the list was read must not come back from it.
+      return {
+        id: project.id,
+        name: project.name,
+        teamId: project.teamId,
+        teamName: project.teamName,
+        ...(charter.owner === undefined ? {} : { ownerMemberId: charter.owner.memberId }),
+        charterReadable: true,
+        lifecycleState: charter.lifecycleState,
+        revision: charter.revision,
+        ...(charter.updatedAt === undefined ? {} : { updatedAt: charter.updatedAt }),
+        ...(charter.code === undefined ? {} : { code: charter.code }),
+        ...(charter.description === undefined ? {} : { description: charter.description }),
+        ...(charter.purpose === undefined ? {} : { purpose: charter.purpose }),
+        ...(charter.owner === undefined ? {} : { owner: charter.owner }),
+        ...(charter.sponsor === undefined ? {} : { sponsor: charter.sponsor }),
+        ...(charter.plannedStartDate === undefined ? {} : { plannedStartDate: charter.plannedStartDate }),
+        ...(charter.plannedEndDate === undefined ? {} : { plannedEndDate: charter.plannedEndDate }),
+        tags: charter.tags,
+        repositoryUrls: charter.repositoryUrls,
+      }
     },
     /**
      * Reads one Work Item by key or ID, with its key.
@@ -718,6 +955,7 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
         if (input.projectId === null) {
           throw new AgentTaskError('invalid_request', 'Omit projectId to create a Work Item without a Project.')
         }
+        const customFieldValues = input.customFields === undefined ? undefined : valuesForCreate(input.customFields)
         const created = await api.createIssue({
           teamId: input.teamId,
           title: input.title,
@@ -727,6 +965,7 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
           ...(input.projectId === undefined ? {} : { assignedProjectId: input.projectId }),
           ...(input.statusId === undefined ? {} : { workflowStatusId: input.statusId }),
           ...(input.typeId === undefined ? {} : { workItemTypeId: input.typeId }),
+          ...(customFieldValues === undefined ? {} : { customFieldValues }),
           // Without a schedule the server uses the Workspace working calendar, as the Web does.
           ...(input.dueDate === undefined ? {} : { dueDate: input.dueDate }),
         }, input.idempotencyKey)
@@ -749,6 +988,7 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
         ...(input.statusId === undefined ? {} : { workflowStatusId: input.statusId }),
         ...(input.typeId === undefined ? {} : { workItemTypeId: input.typeId }),
         ...(input.priority === undefined ? {} : { priority: input.priority }),
+        ...(input.customFields === undefined || Object.keys(input.customFields).length === 0 ? {} : { customFieldValues: input.customFields }),
       }
       if (Object.keys(fields).length === 0) {
         if (input.cycleId === undefined && input.milestoneId === undefined) {
@@ -840,6 +1080,55 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
         removed: input.remove === true,
         relation: { type: result.relation.type, relatedIssueId: result.relation.targetWorkItemId },
       }
+    },
+    /**
+     * Lists the web links (attachments) of a Work Item by key or ID.
+     * @param reference - Key or Work Item ID.
+     * @param teamId - Team of a Work Item ID.
+     * @returns The Work Item reference and its links, oldest first.
+     */
+    async listAttachments(reference: string, teamId?: string) {
+      const resolved = await resolveIssue(reference, teamId)
+      const list = await api.webLinks(resolved.teamId, resolved.workItemId)
+      return { ...resolved, attachments: list.items.map(toAttachment) }
+    },
+    /**
+     * Links a URL to a Work Item by key or ID.
+     * @param input - Work Item, URL, optional title, and the idempotency key.
+     * @returns The Work Item reference and the saved link.
+     */
+    async saveAttachment(input: {
+      /** Work Item to link the URL to. */
+      issueId: string
+      /** Team of a Work Item ID. */
+      teamId?: string
+      /** `http` or `https` URL. */
+      url: string
+      /** Display title. */
+      title?: string
+      /** Idempotency key of the logical write. */
+      idempotencyKey: string
+    }) {
+      const resolved = await resolveIssue(input.issueId, input.teamId)
+      const saved = await api.createWebLink(resolved.teamId, resolved.workItemId, {
+        url: input.url,
+        ...(input.title === undefined ? {} : { title: input.title }),
+      }, input.idempotencyKey)
+      return { ...resolved, attachment: toAttachment(saved.link) }
+    },
+    /**
+     * Removes a linked URL from a Work Item by key or ID.
+     * @param reference - Key or Work Item ID.
+     * @param teamId - Team of a Work Item ID.
+     * @param attachmentId - Link ID from list_attachments.
+     * @param idempotencyKey - Idempotency key of the logical write.
+     * @returns The Work Item reference and the removed link.
+     */
+    async deleteAttachment(reference: string, teamId: string | undefined, attachmentId: string, idempotencyKey: string) {
+      const resolved = await resolveIssue(reference, teamId)
+      const removed = await api.deleteWebLink(resolved.teamId, resolved.workItemId, attachmentId, idempotencyKey)
+      return { ...resolved, removed: true, attachment: toAttachment(removed.link) }
+
     },
     /**
      * Lists the unarchived Milestones the owner can read.
