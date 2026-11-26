@@ -547,8 +547,11 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
         } catch (error) {
           const done = created.length === 0 ? 'No subtask was finished.' : `Subtasks 1 to ${created.length} were created under the parent.`
           // The child creation key replays only the same body, and the body carries the parent's Project. A
-          // conflict there means the parent moved to another Project after the first attempt created this child.
-          const projectChanged = childId === undefined && error instanceof AgentTaskError && error.code === 'idempotency_conflict'
+          // non-retryable conflict there means the body changed, usually because the parent moved to another
+          // Project after the first attempt created this child. A retryable one is an attempt still in progress,
+          // which the same key finishes, so it keeps the ordinary retry guidance below.
+          const projectChanged = childId === undefined && error instanceof AgentTaskError
+            && error.code === 'idempotency_conflict' && !error.retryable
           if (projectChanged) {
             throw new AgentTaskError(
               'idempotency_conflict',

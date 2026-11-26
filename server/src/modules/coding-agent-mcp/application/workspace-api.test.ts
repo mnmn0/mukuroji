@@ -128,7 +128,7 @@ test('create_subtasks explains a replay conflict after the parent moved to anoth
   const { api } = apiForRelations()
   const issues = createWorkspaceIssues({
     ...api,
-    createIssue: async () => { throw new AgentTaskError('idempotency_conflict', 'Different request', true) },
+    createIssue: async () => { throw new AgentTaskError('idempotency_conflict', 'Different request', false) },
   })
 
   await expect(issues.createSubtasks({ parentId: 'ABC-1', subtasks: [{ title: 'Design' }], idempotencyKey: 'moved' }))
@@ -137,6 +137,22 @@ test('create_subtasks explains a replay conflict after the parent moved to anoth
       retryable: false,
       message: expect.stringContaining("the parent's Project (or this subtask's arguments) has changed since then. Move the parent back to its earlier Project"),
     })
+})
+
+test('create_subtasks keeps same-key retry guidance while a child creation is still in progress', async () => {
+  const { api } = apiForRelations()
+  const issues = createWorkspaceIssues({
+    ...api,
+    createIssue: async () => { throw new AgentTaskError('idempotency_conflict', 'The same request is still running.', true) },
+  })
+
+  const failure = issues.createSubtasks({ parentId: 'ABC-1', subtasks: [{ title: 'Design' }], idempotencyKey: 'running' })
+  await expect(failure).rejects.toMatchObject({
+    code: 'idempotency_conflict',
+    retryable: true,
+    message: expect.stringContaining('Retry with the same arguments and idempotencyKey to finish without duplicates.'),
+  })
+  await expect(failure).rejects.not.toMatchObject({ message: expect.stringContaining("Project (or this subtask's arguments)") })
 })
 
 test('save_relation links and unlinks by key, and list_relations combines the tree with the other links', async () => {
