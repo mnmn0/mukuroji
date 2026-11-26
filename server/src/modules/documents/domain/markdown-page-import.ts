@@ -393,7 +393,8 @@ function stripContainerMarkers(line: string): string {
 
 /**
  * Splits paragraph Markdown into sections at blank lines that are outside fenced code, including
- * fences nested in lists or quotes, so no section starts or ends inside a code block.
+ * fences nested in lists or quotes, and that are followed by an unindented line, so no section
+ * starts inside a code block or a list item.
  *
  * @param text - Paragraph Markdown.
  * @returns Sections in order, without the blank lines between them.
@@ -417,7 +418,14 @@ function splitAtBlankLinesOutsideFences(text: string): string[] {
     lines.push(line)
   }
   if (lines.length > 0) sections.push(lines.join('\n'))
-  return sections
+  // An indented section continues the list item or code before it, so it is never split off.
+  const merged: string[] = []
+  for (const section of sections) {
+    const previous = merged.at(-1)
+    if (previous !== undefined && /^[ \t]/u.test(section)) merged[merged.length - 1] = `${previous}\n\n${section}`
+    else merged.push(section)
+  }
+  return merged
 }
 
 /**

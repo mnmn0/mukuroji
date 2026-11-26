@@ -147,6 +147,7 @@ describe('convertMarkdownToPageBlocks', () => {
     const refuse = (source: string) => convertMarkdownToPageBlocks(source, (prefix) => prefix)
     const fenced = `- item\n  \`\`\`\n  ${part}\n\n  ${part}\n  \`\`\``
     expect(refuse(fenced)).toEqual({ ok: false, code: 'block-too-long' })
+    expect(refuse(`- item\n\n  ${part}\n\n  ${part}`)).toEqual({ ok: false, code: 'block-too-long' })
     expect(refuse('b'.repeat(DOCUMENT_MAX_TEXT_LENGTH + 1))).toEqual({ ok: false, code: 'block-too-long' })
     expect(refuse('c'.repeat(MARKDOWN_PAGE_IMPORT_MAX_LENGTH + 1))).toEqual({ ok: false, code: 'too-large' })
     expect(refuse(Array.from({ length: 501 }, (_, index) => `## H${index}`).join('\n'))).toEqual({ ok: false, code: 'too-many-blocks' })
