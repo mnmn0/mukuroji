@@ -2143,7 +2143,13 @@ describe('budget threshold alerts', () => {
     ])
     // The alert carries percentages only, never an amount.
     expect(JSON.stringify(alerts)).not.toContain('100000')
-    expect(alerts[0]).toMatchObject({ outboxStatus: 'pending', summary: expect.stringContaining('92.5%') })
+    // The audit summary is readable without managing the Project, so only the notification message
+    // carries the percentages.
+    expect(alerts[0]).toMatchObject({
+      outboxStatus: 'pending',
+      summary: 'Project budget reached its alert threshold',
+      metadata: { notificationMessage: { params: { percent: '92.5' } } },
+    })
 
     const nextDay = await run('2026-11-25T00:00:00.000Z')
     expect(nextDay.map((alert) => alert.eventId)).toEqual(alerts.map((alert) => alert.eventId))

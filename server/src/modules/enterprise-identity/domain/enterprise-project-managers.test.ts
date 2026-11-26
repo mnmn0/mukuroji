@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
-import type { EnterpriseRoleAssignment } from '@mukuroji/contracts'
-import { listEnterpriseProjectManagerKeys } from './enterprise-project-managers'
+import type { EnterpriseIdentitySnapshot, EnterpriseRoleAssignment } from '@mukuroji/contracts'
+import { evaluateEnterpriseProjectManager, listEnterpriseProjectManagerKeys } from './enterprise-project-managers'
 
 /**
  * Builds a role assignment of the test Workspace.
@@ -45,4 +45,20 @@ test('lists members whose role manages the Project or its Team, once each', () =
     ],
   }, 't', 'p')
   expect(keys).toEqual(['manager@example.com', 'custom@example.com'])
+})
+
+test('evaluates a member against the Enterprise roles that govern them', () => {
+  const snapshot = (roleAssignments: EnterpriseRoleAssignment[]): EnterpriseIdentitySnapshot => ({
+    workspaceId: 'w', identityProviders: [], domains: [], customRoles: [], groupMappings: [], roleAssignments,
+    scimUsers: [], scimGroups: [], scimCredentials: [], serviceAccounts: [], breakGlassAccounts: [],
+    provisioningRuns: [], provisioningLogs: [],
+  })
+  expect(evaluateEnterpriseProjectManager(snapshot([]), 'a@example.com', 't', 'p')).toBe('not-governed')
+  expect(evaluateEnterpriseProjectManager(snapshot([assignment('a@example.com')]), 'A@example.com', 't', 'p')).toBe('manager')
+  expect(evaluateEnterpriseProjectManager(snapshot([assignment('a@example.com', { roleId: 'project:viewer' })]), 'a@example.com', 't', 'p')).toBe('not-manager')
+  expect(evaluateEnterpriseProjectManager(snapshot([assignment('a@example.com')]), 'a@example.com', 'other', 'p')).toBe('not-manager')
+  // A role given to a group that only a sign-in reveals could change either answer.
+  const group = assignment('group-1', { principalKind: 'directory-group' })
+  expect(evaluateEnterpriseProjectManager(snapshot([group]), 'a@example.com', 't', 'p')).toBe('unknown')
+  expect(evaluateEnterpriseProjectManager(snapshot([group, assignment('a@example.com', { roleId: 'project:viewer' })]), 'a@example.com', 't', 'p')).toBe('unknown')
 })

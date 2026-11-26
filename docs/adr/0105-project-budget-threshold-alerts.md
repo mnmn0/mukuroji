@@ -30,6 +30,10 @@ Issue #345 は「予算 90%（設定値）到達時に責任者へ通知」と�
    Enterprise identity table を読み取り専用で読む。
    受信者に Enterprise role が効いている Workspace では、配信時にも外部 channel の送信前にも、その role が今も Project の
    `projects.manage` を持つかを確かめ、古い manager member 行だけでは届けない（予算レポートと経費の API と同じ判定）。
+   毎朝の判定でも同じ規則で manager を絞る。Enterprise role が効く人はその role が Project を管理するときだけ、効かない人は
+   manager member 行で数える。owner が manager でなくなっていればほかの manager 全員に送る。sign-in 時にしか分からない
+   group への割り当てがあって owner を判定しきれないときは、owner だけに絞らず manager 全員に送る。
+   消化率と閾値は通知の message にだけ入れ、audit event の summary には入れない（audit を読めても Project を管理できない人がいる）。
 5. Automation に `budget-threshold` trigger を足す。この event で動き、Team の rule は自分の Team の Project の event でだけ
    動く。event に Work Item はないので、Work Item を変える action はこの trigger では対象がなく失敗する（form・webhook
    trigger と同じ）。通知・作成・webhook の action は使える。

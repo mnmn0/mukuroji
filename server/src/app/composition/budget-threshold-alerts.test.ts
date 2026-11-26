@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import type { TimeBudget } from '@mukuroji/contracts'
+import type { EnterpriseIdentitySnapshot, EnterpriseRoleAssignment, TimeBudget } from '@mukuroji/contracts'
 import { createBudgetThresholdReader, type BudgetThresholdReaderSources } from './budget-threshold-alerts'
 
 /** Budget of the test Project, half used by its approved expense. */
@@ -13,6 +13,34 @@ const budget: TimeBudget = {
   currency: 'JPY',
   revision: 1,
   updatedAt: '2026-01-01T00:00:00.000Z',
+}
+
+/**
+ * Builds an Enterprise snapshot of the test Workspace with the given role assignments.
+ *
+ * @param roleAssignments - Assignments in force.
+ * @returns The snapshot.
+ */
+function enterprise(roleAssignments: EnterpriseRoleAssignment[]): EnterpriseIdentitySnapshot {
+  return {
+    workspaceId: 'w', identityProviders: [], domains: [], customRoles: [], groupMappings: [], roleAssignments,
+    scimUsers: [], scimGroups: [], scimCredentials: [], serviceAccounts: [], breakGlassAccounts: [],
+    provisioningRuns: [], provisioningLogs: [],
+  }
+}
+
+/**
+ * Builds a direct member assignment of a role on the test Project.
+ *
+ * @param principalId - Member key.
+ * @param roleId - Role.
+ * @returns The assignment.
+ */
+function grant(principalId: string, roleId: 'project:manager' | 'project:viewer'): EnterpriseRoleAssignment {
+  return {
+    workspaceId: 'w', assignmentId: `${principalId}-${roleId}`, principalKind: 'member', principalId, roleId,
+    scope: { workspaceId: 'w', kind: 'project', targetId: 'p', parentTeamId: 't' }, source: 'direct',
+  }
 }
 
 /**
@@ -47,18 +75,28 @@ function sources(overrides: Partial<BudgetThresholdReaderSources> = {}): BudgetT
   }
 }
 
-test('adds the members an Enterprise role makes managers of the Project', async () => {
+test('adds Enterprise managers and drops managers whose Enterprise role no longer manages the Project', async () => {
   const now = new Date('2026-01-10T00:00:00.000Z')
-  const [status] = await createBudgetThresholdReader(sources({
-    readEnterpriseSnapshot: async () => ({
-      customRoles: [],
-      roleAssignments: [
-        { workspaceId: 'w', assignmentId: 'a1', principalKind: 'member', principalId: 'owner@example.com', roleId: 'project:manager', scope: { workspaceId: 'w', kind: 'project', targetId: 'p', parentTeamId: 't' }, source: 'direct' },
-        { workspaceId: 'w', assignmentId: 'a2', principalKind: 'member', principalId: 'lead@example.com', roleId: 'project:manager', scope: { workspaceId: 'w', kind: 'project', targetId: 'p', parentTeamId: 't' }, source: 'direct' },
-      ],
-    }),
-  })).listProjectBudgetStatuses('w', now)
-  expect(status).toMatchObject({ consumedPercent: 50, alertPercent: 90, ownerMemberKey: 'owner@example.com', managerMemberKeys: ['lead@example.com', 'owner@example.com'] })
+  const read = async (snapshot: EnterpriseIdentitySnapshot) =>
+    (await createBudgetThresholdReader(sources({ readEnterpriseSnapshot: async () => snapshot })).listProjectBudgetStatuses('w', now))[0]
+
+  expect(await read(enterprise([grant('owner@example.com', 'project:manager')]))).toMatchObject({
+    consumedPercent: 50,
+    alertPercent: 90,
+    ownerMemberKey: 'owner@example.com',
+    managerMemberKeys: ['lead@example.com', 'owner@example.com'],
+  })
+  // A role that only lets the lead view the Project wins over the lead's manager row.
+  expect((await read(enterprise([grant('lead@example.com', 'project:viewer'), grant('boss@example.com', 'project:manager')])))?.managerMemberKeys)
+    .toEqual(['boss@example.com'])
+  // An owner whose role no longer manages the Project is not among the managers, so the alert goes
+  // to the other managers instead.
+  expect(await read(enterprise([grant('owner@example.com', 'project:viewer')]))).toMatchObject({ managerMemberKeys: ['lead@example.com'] })
+  // A role given to a sign-in group could make the owner a manager or not, so the owner is not preferred.
+  const withGroup = enterprise([{ ...grant('group-1', 'project:manager'), principalKind: 'directory-group' }])
+  const unsure = await read(withGroup)
+  expect(unsure?.ownerMemberKey).toBeUndefined()
+  expect(unsure?.managerMemberKeys).toEqual(['lead@example.com'])
 
   const [legacyOnly] = await createBudgetThresholdReader(sources()).listProjectBudgetStatuses('w', now)
   expect(legacyOnly?.managerMemberKeys).toEqual(['lead@example.com'])

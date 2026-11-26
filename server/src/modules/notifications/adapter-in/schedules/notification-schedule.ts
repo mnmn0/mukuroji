@@ -322,6 +322,9 @@ export const BUDGET_THRESHOLD_REASON = 'budget-threshold'
 /** Local hour, in the Workspace time zone, of the one hourly run per day that checks budget use. */
 export const BUDGET_THRESHOLD_CHECK_HOUR = 9
 
+/** Audit summary of a budget threshold alert, which names no amount or percentage. */
+const BUDGET_THRESHOLD_AUDIT_SUMMARY = 'Project budget reached its alert threshold'
+
 const scheduleActorId = 'system:notification-schedule'
 const scheduleActorMemberKey = 'system'
 const defaultScanPageSize = 100
@@ -1674,7 +1677,9 @@ function createBudgetThresholdAuditEvent(
     entity: { type: 'project-budget', id: entityId },
     action: 'threshold-reached',
     changes: [],
-    summary: formatNotificationMessage(message, 'en'),
+    // Audit readers need not manage the Project, so the summary leaves out the confidential
+    // percentages; the notification carries them in its permission-checked message (ADR 0105).
+    summary: BUDGET_THRESHOLD_AUDIT_SUMMARY,
     metadata: {
       notificationMessage: message,
       actorMemberKey: scheduleActorMemberKey,

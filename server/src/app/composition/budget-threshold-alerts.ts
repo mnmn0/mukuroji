@@ -7,7 +7,7 @@ import {
   type TenantProfile,
   type EnterpriseIdentitySnapshot,
 } from '@mukuroji/contracts'
-import { listEnterpriseProjectManagerKeys } from '../../modules/enterprise-identity'
+import { evaluateEnterpriseProjectManager, listEnterpriseProjectManagerKeys } from '../../modules/enterprise-identity'
 import type {
   BudgetAlertProject,
   ScheduledBudgetThresholdReader,
@@ -39,7 +39,35 @@ export type BudgetThresholdReaderSources = {
   /** Reads every expense of a Project. */
   listExpenses(workspaceId: string, teamId: string, projectId: string): Promise<readonly ProjectExpense[]>
   /** Reads the Workspace's Enterprise roles, when the deployment has them. */
-  readEnterpriseSnapshot?(workspaceId: string): Promise<Pick<EnterpriseIdentitySnapshot, 'customRoles' | 'roleAssignments'>>
+  readEnterpriseSnapshot?(workspaceId: string): Promise<EnterpriseIdentitySnapshot>
+}
+
+/**
+ * Narrows a Project's managers to those delivery will accept. A member an Enterprise role governs
+ * counts only while that role manages the Project, and a member it does not govern counts by their
+ * manager row. Members an Enterprise role makes managers are added. An owner whose standing
+ * depends on sign-in groups is not preferred, so the other managers are told as well (ADR 0105).
+ *
+ * @param snapshot - Enterprise state of the Workspace.
+ * @param project - Project with its charter owner and manager members.
+ * @returns The effective managers and the owner to prefer.
+ */
+function selectEffectiveManagers(
+  snapshot: EnterpriseIdentitySnapshot,
+  project: BudgetAlertProject,
+): Pick<BudgetAlertProject, 'managerMemberKeys' | 'ownerMemberKey'> {
+  const legacy = new Set(project.managerMemberKeys)
+  const statusOf = (memberKey: string) => evaluateEnterpriseProjectManager(snapshot, memberKey, project.teamId, project.projectId)
+  const candidates = [...new Set([...project.managerMemberKeys, ...listEnterpriseProjectManagerKeys(snapshot, project.teamId, project.projectId)])]
+  const managerMemberKeys = candidates.filter((memberKey) => {
+    const status = statusOf(memberKey)
+    return status === 'manager' || (status !== 'not-manager' && legacy.has(memberKey))
+  })
+  const owner = project.ownerMemberKey
+  return {
+    managerMemberKeys,
+    ...(owner === undefined || statusOf(owner) === 'unknown' ? {} : { ownerMemberKey: owner }),
+  }
 }
 
 /**
@@ -61,7 +89,7 @@ export function createBudgetThresholdReader(sources: BudgetThresholdReaderSource
       if (profile && profile.status !== 'active') return []
       const timeZone = (profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS).timeZone
       const statuses: ScheduledProjectBudgetStatus[] = []
-      let enterprise: Pick<EnterpriseIdentitySnapshot, 'customRoles' | 'roleAssignments'> | undefined
+      let enterprise: EnterpriseIdentitySnapshot | undefined
       for (const project of await sources.readProjects(workspaceId)) {
         const consumption = await loadProjectBudgetConsumption(
           { workspaceId, teamId: project.teamId, projectId: project.projectId },
@@ -72,9 +100,9 @@ export function createBudgetThresholdReader(sources: BudgetThresholdReaderSource
         if (!consumption) continue
         const { budget } = consumption
         enterprise ??= await sources.readEnterpriseSnapshot?.(workspaceId)
-        const managerMemberKeys = enterprise
-          ? [...new Set([...project.managerMemberKeys, ...listEnterpriseProjectManagerKeys(enterprise, project.teamId, project.projectId)])]
-          : project.managerMemberKeys
+        const { managerMemberKeys, ownerMemberKey } = enterprise
+          ? selectEffectiveManagers(enterprise, project)
+          : project
         statuses.push({
           teamId: project.teamId,
           projectId: project.projectId,
@@ -84,7 +112,7 @@ export function createBudgetThresholdReader(sources: BudgetThresholdReaderSource
           ...(budget.periodTo === undefined ? {} : { periodTo: budget.periodTo }),
           alertPercent: budget.alertPercent ?? TIME_BUDGET_ALERT_PERCENT_DEFAULT,
           consumedPercent: consumption.consumedPercent,
-          ...(project.ownerMemberKey === undefined ? {} : { ownerMemberKey: project.ownerMemberKey }),
+          ...(ownerMemberKey === undefined ? {} : { ownerMemberKey }),
           managerMemberKeys,
         })
       }
