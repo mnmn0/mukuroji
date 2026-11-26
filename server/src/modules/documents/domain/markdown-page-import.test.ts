@@ -365,6 +365,12 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(convert(multiline).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: multiline }])
   })
 
+  test('sees a heading after inline HTML when finding the first heading', () => {
+    const result = convertMarkdownToPageBlocks('# First\n\n<span>text</span>\n# Second', (prefix) => prefix)
+    expect(result.ok).toBe(true)
+    expect(result).not.toHaveProperty('leadingTitle')
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])

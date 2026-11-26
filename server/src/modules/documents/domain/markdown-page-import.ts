@@ -681,11 +681,11 @@ function linesOutsideFences(text: string, skipHtmlBlocks = false, keepComments =
   let fence: string | undefined
   let container: FenceContainer = { quoted: false, column: 0 }
   let comment = false
-  /** Closing tag of the open raw HTML block, '' for one that ends at a blank line. */
+  /** Closing tag of the open raw HTML block. */
   let html: string | undefined
   for (const line of text.split('\n')) {
     if (html !== undefined) {
-      if (html === '' ? line.trim() === '' : line.toLowerCase().includes(html)) html = undefined
+      if (line.toLowerCase().includes(html)) html = undefined
       continue
     }
     if (!comment && fence !== undefined && leavesFenceContainer(line, container)) fence = undefined
@@ -700,12 +700,14 @@ function linesOutsideFences(text: string, skipHtmlBlocks = false, keepComments =
       continue
     }
     if (skipHtmlBlocks && !comment) {
+      // Only raw HTML blocks are left out. Another tag may be inline HTML, after which a heading is
+      // still a heading, so such lines are read as Markdown; a heading that is in fact HTML only
+      // keeps the first heading in the body.
       const raw = HTML_RAW_BLOCK_START.exec(line)
-      // A comment ends at `-->`, not at a blank line, so the comment scan below handles it.
-      if (raw !== null || (HTML_BLOCK_START.test(line) && !/^ {0,3}<!--/u.test(line))) {
-        const closing = raw === null ? '' : `</${(raw[1] ?? '').toLowerCase()}>`
+      if (raw !== null) {
+        const closing = `</${(raw[1] ?? '').toLowerCase()}>`
         // A raw block whose closing tag is on its first line ends there.
-        if (closing === '' || !line.toLowerCase().includes(closing)) html = closing
+        if (!line.toLowerCase().includes(closing)) html = closing
         continue
       }
     }
