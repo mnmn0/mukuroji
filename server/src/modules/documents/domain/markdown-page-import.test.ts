@@ -218,6 +218,30 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(result).toEqual({ ok: true, leadingTitle: 'Page', blocks: [expect.objectContaining({ type: 'paragraph' })] })
   })
 
+  test('keeps text with autolinks as paragraph Markdown', () => {
+    expect(convert('- [ ] Review https://example.com').blocks.map(({ type }) => type)).toEqual(['paragraph'])
+    expect(convert('| a |\n| - |\n| mail me@example.com |').blocks.map(({ type }) => type)).toEqual(['paragraph'])
+    expect(convert('- [ ] Review www.example.com').blocks.map(({ type }) => type)).toEqual(['paragraph'])
+  })
+
+  test('normalizes headings indented by up to three spaces', () => {
+    expect(convert('  ## Overview\n\n### Details').blocks).toEqual([
+      { id: expect.any(String), type: 'heading', level: 1, text: 'Overview' },
+      { id: expect.any(String), type: 'heading', level: 2, text: 'Details' },
+    ])
+    const nested = '- item\n\n  ## Inside\n\n### Details'
+    expect(convert(nested).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: nested }])
+  })
+
+  test('parses long heading lines in linear time', () => {
+    const started = performance.now()
+    const result = convertMarkdownToPageBlocks(`## a${' '.repeat(200_000)}b`, (prefix) => prefix)
+    expect(result.ok).toBe(false)
+    expect(performance.now() - started).toBeLessThan(2_000)
+    expect(convert('## Closed ##').blocks).toEqual([{ id: expect.any(String), type: 'heading', level: 1, text: 'Closed' }])
+    expect(convert('## C#').blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: '## C#' }])
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])

@@ -63,14 +63,10 @@ type ScannedBlock = DocumentBlock | RawHeading | RawMarkdownHeading
 /** Opening line of a fenced code block at the start of a line. */
 const FENCE_OPEN = /^(`{3,}|~{3,})(.*)$/u
 
-/** ATX heading line at the start of a line. */
-const ATX_HEADING = /^(#{1,6})(?:[ \t]+(.*?))?[ \t]*$/u
 
 /** Setext heading underline, which makes the paragraph line above it a heading. */
 const SETEXT_UNDERLINE = /^ {0,3}(=+|-+)[ \t]*$/u
 
-/** Closing sequence of an ATX heading. */
-const ATX_CLOSING = /[ \t]+#+[ \t]*$/u
 
 /** Task-list item line at the start of a line. */
 const TASK_ITEM = /^[-*+][ \t]+\[([ xX])\][ \t]+(.*)$/u
@@ -87,6 +83,42 @@ const SAFE_LANGUAGE = /^[A-Za-z0-9][A-Za-z0-9_+.-]{0,99}$/u
  * changes; native blocks show their text as written.
  */
 const MARKDOWN_SYNTAX = /[\\`*_[\]<>&~|!#$]/u
+
+/**
+ * Start of a URL or email address that GFM shows as a link, which a native block shows as plain
+ * text. Each part stops at the next `@`, so a line costs linear time.
+ */
+const AUTOLINK = /(?:https?:\/\/|www\.|[^\s@]@[^\s@]*\.)/iu
+
+/**
+ * Tells whether text shows differently as Markdown than as the plain text of a native block.
+ *
+ * @param text - Heading, checklist, or table text.
+ * @returns Whether the text holds Markdown syntax or an autolink.
+ */
+function hasMarkdownSyntax(text: string): boolean {
+  return MARKDOWN_SYNTAX.test(text) || AUTOLINK.test(text)
+}
+
+/**
+ * Reads an ATX heading at the start of a line with linear scans.
+ *
+ * @param line - Source line, without indentation.
+ * @returns The heading level and text without markers, or undefined when the line is not one.
+ */
+function parseAtxHeading(line: string): { level: number, text: string } | undefined {
+  let level = 0
+  while (level < line.length && line[level] === '#') level += 1
+  if (level < 1 || level > 6) return undefined
+  const after = line[level]
+  if (after !== undefined && after !== ' ' && after !== '\t') return undefined
+  const text = line.slice(level).trim()
+  // A closing run of `#` after a space or tab is not part of the text.
+  let end = text.length
+  while (end > 0 && text[end - 1] === '#') end -= 1
+  const closed = end < text.length && (end === 0 || text[end - 1] === ' ' || text[end - 1] === '\t')
+  return { level, text: closed ? text.slice(0, end).trimEnd() : text }
+}
 
 /**
  * Converts Markdown into the body blocks of one Document page with a linear line scan.
@@ -164,6 +196,10 @@ export function convertMarkdownToPageBlocks(
     }
     return block
   })
+  // A heading, kept as a block or as a Markdown line, holds at most one block's text.
+  if (blocks.some((block) => (block.type === 'heading' || block.type === 'paragraph') && block.text.length > DOCUMENT_MAX_TEXT_LENGTH)) {
+    return { ok: false, code: 'block-too-long' }
+  }
   if (blocks.length > DOCUMENT_MAX_BLOCK_COUNT) return { ok: false, code: 'too-many-blocks' }
   return { ok: true, blocks, ...(leadingTitle === undefined ? {} : { leadingTitle }) }
 }
@@ -178,9 +214,9 @@ export function convertMarkdownToPageBlocks(
  */
 function findLeadingTitle(lines: readonly string[]): { text: string, next: number } | undefined {
   const first = lines.findIndex((line) => line.trim() !== '')
-  const match = first < 0 ? null : ATX_HEADING.exec(lines[first] ?? '')
-  const text = (match?.[2] ?? '').replace(ATX_CLOSING, '').trim()
-  if (match?.[1] !== '#' || text === '') return undefined
+  const match = first < 0 ? undefined : parseAtxHeading(lines[first] ?? '')
+  const text = match?.text ?? ''
+  if (match?.level !== 1 || text === '') return undefined
   let fence: string | undefined
   for (let index = first + 1; index < lines.length; index += 1) {
     const line = lines[index] ?? ''
@@ -194,7 +230,8 @@ function findLeadingTitle(lines: readonly string[]): { text: string, next: numbe
       fence = open[1]
       continue
     }
-    if (ATX_HEADING.exec(line)?.[1] === '#') return undefined
+    // A heading may be indented by up to three spaces.
+    if (parseAtxHeading(line.replace(/^ {0,3}/u, ''))?.level === 1) return undefined
   }
   return { text: text.replace(/\\([!-/:-@[-`{-~])/gu, '$1'), next: first + 1 }
 }
@@ -336,7 +373,7 @@ function scanBlocks(
         flushParagraph()
         const text = above.trim()
         const rawLevel = underline[1]?.startsWith('=') ? 1 : 2
-        blocks.push(MARKDOWN_SYNTAX.test(text)
+        blocks.push(hasMarkdownSyntax(text)
           ? { type: 'raw-markdown-heading', rawLevel, text }
           : { type: 'raw-heading', rawLevel, text })
         index += 1
@@ -344,15 +381,19 @@ function scanBlocks(
       }
       keepWhole = true
     }
-    const heading = ATX_HEADING.exec(line)
+    // A heading may be indented by up to three spaces. After paragraph Markdown such a line may
+    // belong to a list item there, so the body is kept whole to keep the hierarchy.
+    const indentedHeading = /^ {1,3}#/u.test(line)
+    const heading = indentedHeading && paragraph.length > 0 ? undefined : parseAtxHeading(line.replace(/^ {1,3}/u, ''))
+    if (indentedHeading && paragraph.length > 0 && parseAtxHeading(line.trimStart()) !== undefined) keepWhole = true
     if (heading) {
-      const text = (heading[2] ?? '').replace(ATX_CLOSING, '').trim()
+      const text = heading.text
       if (text !== '') {
         // A heading always ends the paragraph before it, so it can stand as its own block. One
         // whose text holds Markdown stays Markdown but still takes part in level normalization.
         flushParagraph()
-        const rawLevel = heading[1]?.length ?? 1
-        blocks.push(MARKDOWN_SYNTAX.test(text)
+        const rawLevel = heading.level
+        blocks.push(hasMarkdownSyntax(text)
           ? { type: 'raw-markdown-heading', rawLevel, text }
           : { type: 'raw-heading', rawLevel, text })
         index += 1
@@ -584,7 +625,7 @@ function readChecklist(
   while (index < lines.length && (lines[index] ?? '').trim() !== '') {
     const match = TASK_ITEM.exec(lines[index] ?? '')
     const text = match?.[2]?.trim() ?? ''
-    if (!match || text === '' || MARKDOWN_SYNTAX.test(text)) return undefined
+    if (!match || text === '' || hasMarkdownSyntax(text)) return undefined
     items.push({ id: createId('item'), text, checked: match[1] !== ' ' })
     index += 1
   }
@@ -627,7 +668,7 @@ function readTable(
     index += 1
   }
   if (rows.length > DOCUMENT_MAX_TABLE_ROWS) return undefined
-  if ([...header, ...rows.flatMap((row) => row.cells.map((cell) => cell.text))].some((text) => MARKDOWN_SYNTAX.test(text))) {
+  if ([...header, ...rows.flatMap((row) => row.cells.map((cell) => cell.text))].some((text) => hasMarkdownSyntax(text))) {
     return undefined
   }
   return { block: { id: createId('table'), type: 'table', columns: header, rows }, next: index }
