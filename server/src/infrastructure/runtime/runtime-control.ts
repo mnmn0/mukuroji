@@ -48,6 +48,14 @@ export type RuntimeControlWorkerSurface = Exclude<
 >
 
 /**
+ * Deployment-wide AI assistance switch carried by the runtime-control document.
+ *
+ * `disabled` pauses new AI generations in every Workspace while the rest of the
+ * application keeps running; an absent value means `enabled`.
+ */
+export type RuntimeControlAiAssistanceMode = 'disabled' | 'enabled'
+
+/**
  * Exact version-one runtime-control document.
  */
 export interface RuntimeControlDocument {
@@ -57,6 +65,8 @@ export interface RuntimeControlDocument {
   readonly revision: number
   /** Global execution mode applied by every runtime surface. */
   readonly mode: RuntimeControlMode
+  /** Optional deployment-wide AI assistance switch; absent means enabled. */
+  readonly aiAssistance?: RuntimeControlAiAssistanceMode
 }
 
 /**
@@ -71,6 +81,8 @@ export interface RuntimeControlSnapshot {
   readonly revision?: number
   /** Bounded freshness or validation status. */
   readonly status: RuntimeControlStatus
+  /** AI assistance switch from the enforced document; absent means enabled. */
+  readonly aiAssistance?: RuntimeControlAiAssistanceMode
 }
 
 /**
@@ -193,12 +205,15 @@ const RUNTIME_CONTROL_DOCUMENT_KEYS: readonly string[] = [
   'revision',
   'schemaVersion',
 ]
+/** Optional key of the deployment-wide AI assistance switch. */
+const RUNTIME_CONTROL_AI_ASSISTANCE_KEY = 'aiAssistance'
 
 /**
  * Parses one exact version-one runtime-control document.
  *
  * Unknown fields, invalid UTF-8, oversized content, unsupported versions,
- * and non-positive revisions are rejected without echoing source content.
+ * and non-positive revisions are rejected without echoing source content. The
+ * only optional field is the `aiAssistance` switch.
  *
  * @param configuration - Candidate UTF-8 JSON bytes.
  * @param maximumBytes - Maximum accepted byte length.
@@ -229,19 +244,24 @@ export function parseRuntimeControlDocument(
   if (!isUnknownRecord(parsed) || Array.isArray(parsed)) {
     throw new RuntimeControlDocumentError()
   }
-  const keys = Object.keys(parsed).sort()
+  const keys = Object.keys(parsed)
+    .filter((key) => key !== RUNTIME_CONTROL_AI_ASSISTANCE_KEY)
+    .sort()
   if (
     keys.length !== RUNTIME_CONTROL_DOCUMENT_KEYS.length ||
     keys.some((key, index) => key !== RUNTIME_CONTROL_DOCUMENT_KEYS[index])
   ) {
     throw new RuntimeControlDocumentError()
   }
+  const aiAssistance = parsed[RUNTIME_CONTROL_AI_ASSISTANCE_KEY]
   if (
     parsed.schemaVersion !== 1 ||
     typeof parsed.revision !== 'number' ||
     !Number.isSafeInteger(parsed.revision) ||
     parsed.revision <= 0 ||
-    !isRuntimeControlMode(parsed.mode)
+    !isRuntimeControlMode(parsed.mode) ||
+    (RUNTIME_CONTROL_AI_ASSISTANCE_KEY in parsed &&
+      aiAssistance !== 'enabled' && aiAssistance !== 'disabled')
   ) {
     throw new RuntimeControlDocumentError()
   }
@@ -250,6 +270,7 @@ export function parseRuntimeControlDocument(
     schemaVersion: 1,
     revision: parsed.revision,
     mode: parsed.mode,
+    ...(aiAssistance === 'enabled' || aiAssistance === 'disabled' ? { aiAssistance } : {}),
   })
 }
 
@@ -377,6 +398,7 @@ export function createRuntimeControlProvider(
           'stale',
           accepted.document.revision,
           ageMilliseconds,
+          accepted.document.aiAssistance,
         )
       }
       return createSnapshot(
@@ -449,6 +471,7 @@ export function createRuntimeControlProvider(
       'current',
       document.revision,
       0,
+      document.aiAssistance,
     )
   }
 
@@ -520,6 +543,7 @@ export function createRuntimeControlProvider(
         'current',
         accepted.document.revision,
         0,
+        accepted.document.aiAssistance,
       )
     }
 
@@ -585,6 +609,7 @@ export function createRuntimeControlProvider(
           'current',
           accepted.document.revision,
           ageMilliseconds,
+          accepted.document.aiAssistance,
         ))
       }
       if (inFlight) return inFlight
@@ -696,6 +721,7 @@ export function runtimeControlIsReady(
  * @param status - Bounded state.
  * @param revision - Optional accepted revision.
  * @param ageMilliseconds - Optional non-negative age.
+ * @param aiAssistance - Optional AI assistance switch from the accepted document.
  * @returns Frozen runtime-control snapshot.
  */
 function createSnapshot(
@@ -703,11 +729,13 @@ function createSnapshot(
   status: RuntimeControlStatus,
   revision?: number,
   ageMilliseconds?: number,
+  aiAssistance?: RuntimeControlAiAssistanceMode,
 ): RuntimeControlSnapshot {
   return Object.freeze({
     mode,
     status,
     ...(revision === undefined ? {} : { revision }),
+    ...(aiAssistance === undefined ? {} : { aiAssistance }),
     ...(ageMilliseconds === undefined
       ? {}
       : { ageMilliseconds: Math.max(0, ageMilliseconds) }),
@@ -765,4 +793,19 @@ function isUnknownRecord(
   value: unknown,
 ): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
+}
+
+/**
+ * Checks whether a snapshot lets new AI generations start.
+ *
+ * AI needs the global mode to allow execution and the deployment-wide AI
+ * switch not to be off, so every fail-closed state also pauses AI.
+ *
+ * @param snapshot - Effective runtime-control snapshot.
+ * @returns Whether new AI generations may start.
+ */
+export function runtimeControlAllowsAiAssistance(
+  snapshot: RuntimeControlSnapshot,
+): boolean {
+  return runtimeControlAllowsExecution(snapshot) && snapshot.aiAssistance !== 'disabled'
 }

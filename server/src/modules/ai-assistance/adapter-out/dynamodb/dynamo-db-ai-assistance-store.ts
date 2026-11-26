@@ -3,18 +3,24 @@ import { isDeepStrictEqual } from 'node:util'
 import {
   GetCommand,
   PutCommand,
+  QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
   type DynamoDBDocumentClient,
   type GetCommandOutput,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
-import type {
-  AiAssistanceExternalProvider,
-  AiAssistancePolicy,
-  AiAssistancePreference,
-  DecideAiAssistanceGenerationRequest,
-  GenerateAiAssistanceRequest,
+import {
+  AI_ASSISTANCE_MAX_MONTHLY_TOKEN_LIMIT,
+  type AiAssistanceExternalProvider,
+  type AiAssistanceMemberUsage,
+  type AiAssistancePolicy,
+  type AiAssistanceTask,
+  type AiAssistanceTaskUsage,
+  type AiAssistanceUsageTotals,
+  type AiAssistancePreference,
+  type DecideAiAssistanceGenerationRequest,
+  type GenerateAiAssistanceRequest,
 } from '@mukuroji/contracts'
 import { z } from 'zod'
 import {
@@ -34,7 +40,10 @@ import {
   type ExpireAiAssistanceGenerationAttemptInput,
   type FailAiAssistanceGenerationReservationInput,
   type FinalizeAiAssistanceGenerationAttemptInput,
+  type AiAssistanceMonthlyBudgetCheck,
+  type AiAssistanceMonthlyUsage,
   type MarkAiAssistanceGenerationProviderStartedInput,
+  type RecordAiAssistanceGenerationUsageInput,
   type ReadAiAssistanceGenerationReservationInput,
   type ReserveAiAssistanceGenerationInput,
   type StartAiAssistanceGenerationAttemptInput,
@@ -70,6 +79,14 @@ const GENERATION_RECORD_PREFIX = 'AI_GENERATION#'
 const FEEDBACK_RECORD_PREFIX = 'AI_FEEDBACK#'
 const IDEMPOTENCY_RECORD_PREFIX = 'AI_IDEMPOTENCY#MEMBER#'
 const BUDGET_RECORD_PREFIX = 'AI_BUDGET#MINUTE#'
+const MONTHLY_USAGE_RECORD_PREFIX = 'AI_USAGE#MONTH#'
+const USAGE_RECORDED_RECORD_PREFIX = 'AI_USAGE_RECORDED#'
+/** Monthly usage rows stay readable for about thirteen months. */
+const MONTHLY_USAGE_RETENTION_DAYS = 400
+/** Estimated cost is summed in whole micro-USD so repeated additions stay exact. */
+const MICRO_USD_PER_USD = 1_000_000
+/** Most usage rows one month may hold: Workspace, every task, and members. */
+const MAX_MONTHLY_USAGE_ROWS = 10_000
 const GENERATION_BUDGET_WINDOW_MS = 60_000
 const MAX_STORED_GENERATION_SERIALIZED_BYTES = 350 * 1_024
 const MAX_MEMBER_IDENTIFIER_LENGTH = 320
@@ -589,6 +606,13 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore, AiProviderC
             generationLimit: input.budget.memberGenerationLimit,
             tokenLimit: input.budget.memberTokenLimit,
           }),
+          ...(input.monthlyBudget === undefined
+            ? []
+            : [createMonthlyBudgetConditionCheck(
+              this.#tableName,
+              input.workspaceId,
+              input.monthlyBudget,
+            )]),
         ],
       }))
       return { status: 'reserved', generationId: input.generationId }
@@ -607,8 +631,98 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore, AiProviderC
       ) {
         throw generationBudgetExceededError()
       }
+      if (input.monthlyBudget !== undefined && isTransactionConditionalFailureAt(error, 3)) {
+        throw monthlyBudgetExceededError()
+      }
       throw mapDynamoWriteError(error)
     }
+  }
+
+  /** Adds one finished attempt's provider usage to the monthly rows exactly once. */
+  async recordGenerationUsage(input: RecordAiAssistanceGenerationUsageInput): Promise<void> {
+    const month = requireUsageMonth(input.month)
+    const memberId = requireMemberIdentifier(input.memberId)
+    const generationId = requireIdentifier(input.generationId)
+    const inputTokens = input.usage.inputTokens ?? 0
+    const outputTokens = input.usage.outputTokens ?? 0
+    const costMicroUsd = input.usage.costUsd === undefined
+      ? 0
+      : Math.round(input.usage.costUsd * MICRO_USD_PER_USD)
+    if (![inputTokens, outputTokens, costMicroUsd].every((value) =>
+      Number.isSafeInteger(value) && value >= 0)) throw invalidRecordError()
+    const expiresAt = createMonthlyUsageExpiresAt(month)
+    const counts = {
+      inputTokens,
+      outputTokens,
+      costMicroUsd,
+      costUnavailable: input.usage.costUsd === undefined ? 1 : 0,
+    }
+    try {
+      await this.#documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.#tableName,
+              Item: {
+                workspaceId: input.workspaceId,
+                recordKey: `${USAGE_RECORDED_RECORD_PREFIX}${generationId}`,
+                recordType: 'ai-assistance-usage-recorded',
+                memberId,
+                month,
+                expiresAt,
+              },
+              ConditionExpression:
+                'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+            },
+          },
+          createMonthlyUsageCounterUpdate(this.#tableName, input.workspaceId, month, {
+            scope: 'workspace',
+          }, counts, expiresAt),
+          createMonthlyUsageCounterUpdate(this.#tableName, input.workspaceId, month, {
+            scope: 'task',
+            task: input.task,
+          }, counts, expiresAt),
+          createMonthlyUsageCounterUpdate(this.#tableName, input.workspaceId, month, {
+            scope: 'member',
+            memberId,
+          }, counts, expiresAt),
+        ],
+      }))
+    } catch (error) {
+      // The marker row already exists: this attempt was counted before.
+      if (isTransactionConditionalFailureAt(error, 0)) return
+      throw mapDynamoWriteError(error)
+    }
+  }
+
+  /** Reads the Workspace, task, and member usage rows of one month. */
+  async readMonthlyUsage(workspaceId: string, month: string): Promise<AiAssistanceMonthlyUsage> {
+    const prefix = `${MONTHLY_USAGE_RECORD_PREFIX}${requireUsageMonth(month)}#`
+    const usage: AiAssistanceMonthlyUsage = { totals: createZeroUsageTotals(), tasks: [], members: [] }
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    let rows = 0
+    do {
+      let response
+      try {
+        response = await this.#documentClient.send(new QueryCommand({
+          TableName: this.#tableName,
+          KeyConditionExpression: '#workspaceId = :workspaceId AND begins_with(#recordKey, :prefix)',
+          ExpressionAttributeNames: { '#workspaceId': 'workspaceId', '#recordKey': 'recordKey' },
+          ExpressionAttributeValues: { ':workspaceId': workspaceId, ':prefix': prefix },
+          ConsistentRead: true,
+          ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
+        }))
+      } catch (error) {
+        throw mapDynamoReadError(error)
+      }
+      for (const item of response.Items ?? []) {
+        rows += 1
+        if (rows > MAX_MONTHLY_USAGE_ROWS) throw invalidRecordError()
+        addMonthlyUsageRow(usage, workspaceId, prefix, item)
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey !== undefined)
+    return usage
   }
 
   /** Takes over or classifies an existing idempotency receipt without charging budget again. */
@@ -3077,6 +3191,8 @@ function isPolicyReplay(
     current.enabled === desired.enabled &&
     current.defaultModelId === desired.defaultModelId &&
     current.retentionDays === desired.retentionDays &&
+    current.monthlyTokenLimit === desired.monthlyTokenLimit &&
+    current.monthlyCostLimitUsd === desired.monthlyCostLimitUsd &&
     equalStrings(current.allowedModelIds, desired.allowedModelIds) &&
     equalStrings(current.enabledTasks, desired.enabledTasks)
 }
@@ -3101,6 +3217,12 @@ function createPolicyMutationFingerprint(input: {
       defaultModelId: input.policy.defaultModelId,
       enabledTasks: input.policy.enabledTasks,
       retentionDays: input.policy.retentionDays,
+      ...(input.policy.monthlyTokenLimit === undefined
+        ? {}
+        : { monthlyTokenLimit: input.policy.monthlyTokenLimit }),
+      ...(input.policy.monthlyCostLimitUsd === undefined
+        ? {}
+        : { monthlyCostLimitUsd: input.policy.monthlyCostLimitUsd }),
       revision: input.policy.revision,
     },
   })).digest('hex')
@@ -3155,6 +3277,279 @@ function idempotencyConflictError(): AiAssistanceError {
     'AiAssistanceIdempotencyConflict',
     'The AI assistance idempotency reservation no longer matches this request.',
   )
+}
+
+/**
+ * Creates the error for a reservation refused by a monthly Workspace cap.
+ *
+ * @returns Safe rate-limit error.
+ */
+function monthlyBudgetExceededError(): AiAssistanceError {
+  return new AiAssistanceError(
+    'rate-limit',
+    'AiAssistanceMonthlyBudgetExceeded',
+    'The Workspace reached its monthly AI assistance limit.',
+  )
+}
+
+/** Scope of one monthly usage row. */
+type MonthlyUsageScope =
+  | {
+    /** Whole Workspace. */
+    scope: 'workspace'
+  }
+  | {
+    /** One workflow. */
+    scope: 'task'
+    /** Workflow the generations served. */
+    task: AiAssistanceTask
+  }
+  | {
+    /** One member. */
+    scope: 'member'
+    /** Member who requested the generations. */
+    memberId: string
+  }
+
+/** Amounts one finished attempt adds to each monthly usage row. */
+type MonthlyUsageCounts = {
+  /** Provider-reported prompt tokens. */
+  inputTokens: number
+  /** Provider-reported completion tokens. */
+  outputTokens: number
+  /** Estimated cost in whole micro-USD. */
+  costMicroUsd: number
+  /** One when the attempt had no trustworthy cost estimate, otherwise zero. */
+  costUnavailable: number
+}
+
+/** Usage row fields read back for a month. */
+const monthlyUsageItemSchema = z.object({
+  workspaceId: z.string().min(1),
+  recordKey: z.string().startsWith(MONTHLY_USAGE_RECORD_PREFIX),
+  recordType: z.literal('ai-assistance-monthly-usage'),
+  scope: z.enum(['workspace', 'task', 'member']),
+  task: z.enum(['triage', 'summary', 'search', 'planning']).optional(),
+  memberId: z.string().min(1).optional(),
+  month: z.string(),
+  generationCount: z.number().int().min(0),
+  inputTokens: z.number().int().min(0),
+  outputTokens: z.number().int().min(0),
+  totalTokens: z.number().int().min(0),
+  costMicroUsd: z.number().int().min(0),
+  costUnavailableCount: z.number().int().min(0),
+  expiresAt: z.number().int().min(0),
+}).strict()
+
+/**
+ * Validates a usage month key.
+ *
+ * @param month - Calendar month in UTC.
+ * @returns The month when it is `YYYY-MM`.
+ */
+function requireUsageMonth(month: string): string {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw invalidRecordError()
+  return month
+}
+
+/**
+ * Computes the TTL of a month's usage rows.
+ *
+ * @param month - Calendar month in UTC, as `YYYY-MM`.
+ * @returns Epoch seconds about thirteen months after the month starts.
+ */
+function createMonthlyUsageExpiresAt(month: string): number {
+  const started = Date.parse(`${month}-01T00:00:00.000Z`)
+  if (!Number.isFinite(started)) throw invalidRecordError()
+  return Math.floor(started / 1_000) + MONTHLY_USAGE_RETENTION_DAYS * 86_400
+}
+
+/**
+ * Creates the record key of one monthly usage row.
+ *
+ * @param month - Calendar month in UTC, as `YYYY-MM`.
+ * @param scope - Workspace, workflow, or member.
+ * @returns Record key under the month prefix.
+ */
+function createMonthlyUsageRecordKey(month: string, scope: MonthlyUsageScope): string {
+  const prefix = `${MONTHLY_USAGE_RECORD_PREFIX}${month}#`
+  if (scope.scope === 'workspace') return `${prefix}WORKSPACE`
+  if (scope.scope === 'task') return `${prefix}TASK#${scope.task}`
+  return `${prefix}MEMBER#${encodeURIComponent(requireMemberIdentifier(scope.memberId))}`
+}
+
+/**
+ * Creates the unconditional counter update of one monthly usage row.
+ *
+ * @param tableName - AI assistance table.
+ * @param workspaceId - Workspace partition.
+ * @param month - Calendar month in UTC, as `YYYY-MM`.
+ * @param scope - Workspace, workflow, or member.
+ * @param counts - Amounts the attempt adds.
+ * @param expiresAt - TTL in epoch seconds.
+ * @returns DynamoDB transaction item.
+ */
+function createMonthlyUsageCounterUpdate(
+  tableName: string,
+  workspaceId: string,
+  month: string,
+  scope: MonthlyUsageScope,
+  counts: MonthlyUsageCounts,
+  expiresAt: number,
+) {
+  const names: Record<string, string> = {
+    '#recordType': 'recordType',
+    '#scope': 'scope',
+    '#month': 'month',
+    '#expiresAt': 'expiresAt',
+    '#generationCount': 'generationCount',
+    '#inputTokens': 'inputTokens',
+    '#outputTokens': 'outputTokens',
+    '#totalTokens': 'totalTokens',
+    '#costMicroUsd': 'costMicroUsd',
+    '#costUnavailableCount': 'costUnavailableCount',
+  }
+  const values: Record<string, unknown> = {
+    ':recordType': 'ai-assistance-monthly-usage',
+    ':scope': scope.scope,
+    ':month': month,
+    ':expiresAt': expiresAt,
+    ':one': 1,
+    ':inputTokens': counts.inputTokens,
+    ':outputTokens': counts.outputTokens,
+    ':totalTokens': counts.inputTokens + counts.outputTokens,
+    ':costMicroUsd': counts.costMicroUsd,
+    ':costUnavailable': counts.costUnavailable,
+  }
+  const setParts = [
+    '#recordType = if_not_exists(#recordType, :recordType)',
+    '#scope = if_not_exists(#scope, :scope)',
+    '#month = if_not_exists(#month, :month)',
+    '#expiresAt = if_not_exists(#expiresAt, :expiresAt)',
+  ]
+  if (scope.scope === 'task') {
+    names['#task'] = 'task'
+    values[':task'] = scope.task
+    setParts.push('#task = if_not_exists(#task, :task)')
+  }
+  if (scope.scope === 'member') {
+    names['#memberId'] = 'memberId'
+    values[':memberId'] = scope.memberId
+    setParts.push('#memberId = if_not_exists(#memberId, :memberId)')
+  }
+  return {
+    Update: {
+      TableName: tableName,
+      Key: { workspaceId, recordKey: createMonthlyUsageRecordKey(month, scope) },
+      UpdateExpression:
+        `SET ${setParts.join(', ')} ` +
+        'ADD #generationCount :one, #inputTokens :inputTokens, #outputTokens :outputTokens, ' +
+        '#totalTokens :totalTokens, #costMicroUsd :costMicroUsd, ' +
+        '#costUnavailableCount :costUnavailable',
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+    },
+  }
+}
+
+/**
+ * Creates the check that keeps a new reservation under the monthly Workspace caps.
+ *
+ * A month without a usage row passes, since nothing was recorded yet. An existing row
+ * must carry every capped total, so a damaged row without one refuses the reservation.
+ *
+ * @param tableName - AI assistance table.
+ * @param workspaceId - Workspace partition.
+ * @param budget - Month and caps from the Workspace policy.
+ * @returns DynamoDB transaction condition check.
+ */
+function createMonthlyBudgetConditionCheck(
+  tableName: string,
+  workspaceId: string,
+  budget: AiAssistanceMonthlyBudgetCheck,
+) {
+  const month = requireUsageMonth(budget.month)
+  const conditions: string[] = []
+  const names: Record<string, string> = {}
+  const values: Record<string, unknown> = {}
+  if (budget.tokenLimit !== undefined) {
+    if (
+      !Number.isSafeInteger(budget.tokenLimit) ||
+      budget.tokenLimit < 1 ||
+      budget.tokenLimit > AI_ASSISTANCE_MAX_MONTHLY_TOKEN_LIMIT
+    ) throw invalidRecordError()
+    names['#totalTokens'] = 'totalTokens'
+    values[':tokenLimit'] = budget.tokenLimit
+    conditions.push('#totalTokens < :tokenLimit')
+  }
+  if (budget.costLimitUsd !== undefined) {
+    const costLimitMicroUsd = Math.round(budget.costLimitUsd * MICRO_USD_PER_USD)
+    if (!Number.isSafeInteger(costLimitMicroUsd) || costLimitMicroUsd < 1) throw invalidRecordError()
+    names['#costMicroUsd'] = 'costMicroUsd'
+    values[':costLimitMicroUsd'] = costLimitMicroUsd
+    conditions.push('#costMicroUsd < :costLimitMicroUsd')
+  }
+  if (conditions.length === 0) throw invalidRecordError()
+  names['#recordKey'] = 'recordKey'
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: { workspaceId, recordKey: createMonthlyUsageRecordKey(month, { scope: 'workspace' }) },
+      ConditionExpression: `attribute_not_exists(#recordKey) OR (${conditions.join(' AND ')})`,
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+    },
+  }
+}
+
+/**
+ * Creates zero totals.
+ *
+ * @returns Totals with every count at zero.
+ */
+function createZeroUsageTotals(): AiAssistanceUsageTotals {
+  return { generations: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, costUnavailableGenerations: 0 }
+}
+
+/**
+ * Validates one monthly usage row and adds it to the month.
+ *
+ * @param usage - Month being assembled.
+ * @param workspaceId - Workspace partition that was queried.
+ * @param prefix - Month record-key prefix that was queried.
+ * @param item - Raw DynamoDB item.
+ */
+function addMonthlyUsageRow(
+  usage: AiAssistanceMonthlyUsage,
+  workspaceId: string,
+  prefix: string,
+  item: Record<string, unknown>,
+): void {
+  const parsed = monthlyUsageItemSchema.safeParse(item)
+  if (!parsed.success || parsed.data.workspaceId !== workspaceId || !parsed.data.recordKey.startsWith(prefix)) {
+    throw invalidRecordError()
+  }
+  const row = parsed.data
+  const totals: AiAssistanceUsageTotals = {
+    generations: row.generationCount,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    costUsd: row.costMicroUsd / MICRO_USD_PER_USD,
+    costUnavailableGenerations: row.costUnavailableCount,
+  }
+  if (row.scope === 'workspace') {
+    usage.totals = totals
+    return
+  }
+  if (row.scope === 'task') {
+    if (row.task === undefined) throw invalidRecordError()
+    const task: AiAssistanceTaskUsage = { ...totals, task: row.task }
+    usage.tasks.push(task)
+    return
+  }
+  if (row.memberId === undefined) throw invalidRecordError()
+  const member: AiAssistanceMemberUsage = { ...totals, memberId: row.memberId }
+  usage.members.push(member)
 }
 
 /** Creates the stable transport-safe error returned when either fixed-window cap is full. */

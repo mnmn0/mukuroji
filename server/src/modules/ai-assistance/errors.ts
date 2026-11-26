@@ -30,6 +30,8 @@ export type AiAssistanceErrorCode =
   | 'AiAssistanceIdempotencyConflict'
   | 'AiAssistanceGenerationInProgress'
   | 'AiAssistanceRateLimitExceeded'
+  | 'AiAssistanceMonthlyBudgetExceeded'
+  | 'AiAssistanceDeploymentPaused'
   | 'AiAssistanceDecisionAlreadyRecorded'
   | 'AiAssistanceAttemptFailed'
   | 'AiAssistancePersistenceError'

@@ -100,7 +100,10 @@ import { createXrayApiAccessRecorder } from '../../infrastructure/observability/
 import { createDynamoDbReadinessProbe } from '../../infrastructure/observability/readiness'
 import {
   createStaticRuntimeControlProvider,
+  runtimeControlAllowsAiAssistance,
+  type RuntimeControlProvider,
 } from '../../infrastructure/runtime/runtime-control'
+import { getSafeRuntimeControlSnapshot } from './runtime-control-safety'
 import {
   createProductionRuntimeControlProvider,
   createProductionRuntimeControlObservationRecorder,
@@ -835,6 +838,7 @@ function createLazyAiAssistanceService(
     getPolicy: (actor) => resolveService().getPolicy(actor),
     updatePolicy: (actor, request, authorization) =>
       resolveService().updatePolicy(actor, request, authorization),
+    getUsage: (actor, month) => resolveService().getUsage(actor, month),
     getPreference: (actor) => resolveService().getPreference(actor),
     updatePreference: (actor, request, authorization) =>
       resolveService().updatePreference(actor, request, authorization),
@@ -1047,10 +1051,12 @@ type ProductionAiAssistanceRuntime = {
  * of Workspace API keys in production.
  *
  * @param auditEvents - Existing Workspace audit persistence boundary.
+ * @param runtimeControl - Runtime control whose AI switch pauses generation; always on when omitted.
  * @returns Service, provider key service, and model list backed by the existing Workspace Search table.
  */
 function createProductionAiAssistanceRuntime(
   auditEvents: AuditEventsClient,
+  runtimeControl?: RuntimeControlProvider,
 ): ProductionAiAssistanceRuntime {
   if (!auditEvents) {
     throw new TypeError('AI assistance audit events dependency is required.')
@@ -1230,6 +1236,12 @@ function createProductionAiAssistanceRuntime(
     workspaceTokenLimitPerMinute,
     memberTokenLimitPerMinute,
     worstCaseTokensPerGeneration,
+    ...(runtimeControl === undefined
+      ? {}
+      : {
+          isDeploymentAiAssistanceEnabled: async () =>
+            runtimeControlAllowsAiAssistance(await getSafeRuntimeControlSnapshot(runtimeControl)),
+        }),
   })
   return {
     service,
@@ -1319,15 +1331,17 @@ function createAiProviderCredentialAuditEvent(
  * Creates the production AI assistance dependency bundle lazily.
  *
  * @param auditEvents - Existing audit event client used for policy-transition persistence.
+ * @param runtimeControl - Runtime control whose AI switch pauses generation; always on when omitted.
  * @returns AI assistance dependencies that defer provider configuration until use.
  */
 export function createProductionAiAssistanceDependencies(
   auditEvents: AuditEventsClient,
+  runtimeControl?: RuntimeControlProvider,
 ): AiAssistanceDependencies {
   let runtime: ProductionAiAssistanceRuntime | undefined
   /** Resolves the runtime once for this dependency graph. */
   const resolveRuntime = () => {
-    runtime ??= createProductionAiAssistanceRuntime(auditEvents)
+    runtime ??= createProductionAiAssistanceRuntime(auditEvents, runtimeControl)
     return runtime
   }
   return {
@@ -1886,8 +1900,9 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
     createTimeTrackingIdempotencyPort(adapters.idempotency, adapters.transactions),
   )
   const workspace = createProductionWorkspaceDependencies()
+  const operational = createProductionOperationalDependencies()
   return {
-    operational: createProductionOperationalDependencies(),
+    operational,
     authentication: createProductionAuthenticationDependencies(),
     workspace,
     workItems: createProductionWorkItemDependencies(
@@ -1898,7 +1913,10 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
     capacityPlanning: {
       capacityPlanningService: createCapacityPlanningService(timeTrackingService),
     },
-    aiAssistance: createProductionAiAssistanceDependencies(workspace.auditEvents),
+    aiAssistance: createProductionAiAssistanceDependencies(
+      workspace.auditEvents,
+      operational.runtimeControl,
+    ),
     developerPlatform: {
       ...adapters,
       publicWorkItems: createCanonicalPublicWorkItemService(),
@@ -1937,8 +1955,9 @@ export function createProductionAppDependencies(): AppDependencies {
           DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
     },
   )
+  const operational = createProductionOperationalDependencies()
   return {
-    operational: createProductionOperationalDependencies(),
+    operational,
     authentication: createProductionAuthenticationDependencies(),
     workspace,
     workItems: createProductionWorkItemDependencies(
@@ -1949,7 +1968,10 @@ export function createProductionAppDependencies(): AppDependencies {
     capacityPlanning: {
       capacityPlanningService: createCapacityPlanningService(timeTrackingService),
     },
-    aiAssistance: createProductionAiAssistanceDependencies(workspace.auditEvents),
+    aiAssistance: createProductionAiAssistanceDependencies(
+      workspace.auditEvents,
+      operational.runtimeControl,
+    ),
     developerPlatform,
   }
 }

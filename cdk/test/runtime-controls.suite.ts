@@ -189,6 +189,10 @@ test('retains a validated hosted baseline and deploys it all at once', () => {
     $schema: 'http://json-schema.org/draft-04/schema#',
     additionalProperties: false,
     properties: {
+      aiAssistance: {
+        enum: ['enabled', 'disabled'],
+        type: 'string',
+      },
       mode: {
         enum: ['enabled', 'disabled', 'read-only'],
         type: 'string',
