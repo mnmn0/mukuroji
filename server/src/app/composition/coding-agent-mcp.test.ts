@@ -337,6 +337,55 @@ test('two instances of one member never share a claim, and a release lets the ot
   }
 }, 30_000)
 
+test('the hook heartbeat renews only the runs of the same instance and always exits 0', async () => {
+  const fake = startFakeApi()
+  const stampDirectory = await mkdtemp(join(tmpdir(), 'mukuroji-heartbeat-test-'))
+  let client: Client | undefined
+  /**
+   * Runs the handler in heartbeat mode.
+   *
+   * @param extra - Environment of the hook.
+   * @returns Exit code and stderr.
+   */
+  const heartbeat = async (extra: Record<string, string>) => {
+    const child = Bun.spawn([process.execPath, handlerPath, '--heartbeat'], {
+      env: { MUKUROJI_MCP_URL: `http://127.0.0.1:${fake.api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token',
+        MUKUROJI_MCP_TEAM_ID: 'team', MUKUROJI_MCP_ASSIGNEE_ID: 'agent', XDG_CACHE_HOME: stampDirectory, ...extra },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const [exitCode, stderr, stdout] = await Promise.all([child.exited, new Response(child.stderr).text(), new Response(child.stdout).text()])
+    return { exitCode, stderr, stdout }
+  }
+  try {
+    client = await connect(fake.api.port, 'legacy', { MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' })
+    expect((await call(client, 'start_task', { taskId: 'task', expectedRevision: 1, workflowStatusId: 'coding', idempotencyKey: crypto.randomUUID() })).isError).toBe(false)
+
+    expect(await heartbeat({ MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' }))
+      .toEqual({ exitCode: 0, stdout: '', stderr: 'mukuroji heartbeat: 1 renewed, 0 recent, 0 failed\n' })
+    // A hook that fires again within a minute does not call the API.
+    expect((await heartbeat({ MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' })).stderr)
+      .toBe('mukuroji heartbeat: skipped, renewed within the last minute\n')
+    expect((await heartbeat({ MUKUROJI_MCP_RUNTIME: 'codex', MUKUROJI_MCP_INSTANCE_ID: 'instance-b' })).stderr)
+      .toBe('mukuroji heartbeat: 0 renewed, 0 recent, 0 failed\n')
+    // A Project restriction keeps the hook to the runs the MCP server itself would act on.
+    expect((await heartbeat({ MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a',
+      MUKUROJI_MCP_PROJECT_ID: 'other-project' })).stderr)
+      .toBe('mukuroji heartbeat: 0 renewed, 0 recent, 0 failed\n')
+    // Each scope keeps its own stamp: the scoped hook above called the API although the unscoped one had
+    // just succeeded, and only its own next call is skipped.
+    expect((await heartbeat({ MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a',
+      MUKUROJI_MCP_PROJECT_ID: 'other-project' })).stderr)
+      .toBe('mukuroji heartbeat: skipped, renewed within the last minute\n')
+    // Missing configuration is reported, and the hook still exits 0.
+    expect(await heartbeat({ MUKUROJI_MCP_ASSIGNEE_ID: '' })).toMatchObject({ exitCode: 0, stderr: expect.stringContaining('MUKUROJI_MCP_') })
+  } finally {
+    await client?.close()
+    await fake.api.stop(true)
+    await rm(stampDirectory, { recursive: true, force: true })
+  }
+}, 30_000)
+
 test('create_task leaves the schedule to the server so the Workspace working calendar applies', async () => {
   const fake = startFakeApi()
   let client: Client | undefined

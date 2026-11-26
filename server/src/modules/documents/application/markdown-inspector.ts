@@ -1,0 +1,455 @@
+import { fromMarkdown } from 'mdast-util-from-markdown'
+import { gfmFromMarkdown } from 'mdast-util-gfm'
+import { gfm } from 'micromark-extension-gfm'
+import type {
+  MarkdownHtmlFinder,
+  MarkdownInspector,
+  MarkdownOpenBlock,
+  MarkdownSourceRange,
+} from '../domain/document-content'
+
+/** Plain paragraph placed after a text to see whether the text absorbs it. */
+const MARKDOWN_BOUNDARY_PROBE = 'mukuroji-export-boundary'
+
+/** A fence marker at the start of a fenced code block's source. */
+const FENCE_OPENER = /^ {0,3}(`{3,}|~{3,})/u
+
+/**
+ * Finds the source ranges of HTML blocks and inline HTML in Markdown, parsed with the CommonMark
+ * and GFM grammar (micromark) that the web app renders paragraphs with. A node spanning several
+ * lines gives one range per line, without the markers of a blockquote or list around it.
+ *
+ * @param text - Markdown text.
+ * @returns Non-overlapping ranges in source order.
+ * @throws TypeError when the parser returns an HTML node without a source position.
+ */
+const findMarkdownHtmlRanges: MarkdownHtmlFinder = (text) => {
+  const ranges: MarkdownSourceRange[] = []
+  const pending: unknown[] = [parseMarkdown(text)]
+  while (pending.length > 0) {
+    const node = pending.pop()
+    if (!isMarkdownNodeRecord(node)) continue
+    if (node.type === 'html') {
+      const start = readMarkdownOffset(node.position, 'start')
+      const end = readMarkdownOffset(node.position, 'end')
+      if (start === undefined || end === undefined || end < start) {
+        throw new TypeError('A Markdown HTML node has no source position.')
+      }
+      ranges.push(...splitHtmlNodeLines(text, start, end, typeof node.value === 'string' ? node.value : ''))
+      continue
+    }
+    if (Array.isArray(node.children)) pending.push(...node.children)
+  }
+  return ranges.sort((left, right) => left.start - right.start)
+}
+
+/**
+ * Splits the source of one HTML node into the ranges of its own text on each line. A later line
+ * of a node inside a blockquote or list starts with the container's markers, which belong to the
+ * container and are left out, so escaping the node's text never changes the container.
+ *
+ * @param text - Markdown text.
+ * @param start - Offset of the node's first character.
+ * @param end - Offset after the node's last character.
+ * @param value - The node's text without container markers.
+ * @returns One range per non-empty line, in source order.
+ */
+function splitHtmlNodeLines(
+  text: string,
+  start: number,
+  end: number,
+  value: string,
+): MarkdownSourceRange[] {
+  // CR, LF, and CRLF each end a line, as for the parser.
+  const valueLines = value.split(/\r\n|\r|\n/u)
+  const ranges: MarkdownSourceRange[] = []
+  let lineStart = start
+  const source = text.slice(start, end)
+  const lineBreak = /\r\n|\r|\n/gu
+  const lines: Array<{ line: string; breakLength: number }> = []
+  let from = 0
+  for (let match = lineBreak.exec(source); match !== null; match = lineBreak.exec(source)) {
+    lines.push({ line: source.slice(from, match.index), breakLength: match[0].length })
+    from = match.index + match[0].length
+  }
+  lines.push({ line: source.slice(from), breakLength: 0 })
+  lines.forEach(({ line, breakLength }, index) => {
+    const lineEnd = lineStart + line.length
+    if (index === 0) {
+      ranges.push({ start: lineStart, end: lineEnd })
+    } else {
+      const valueLine = valueLines[index]
+      // When the node's line cannot be matched, only the container markers are left out.
+      const contentStart = valueLine !== undefined && line.endsWith(valueLine)
+        ? lineEnd - valueLine.length
+        : lineStart + (/^[ \t>]*/u.exec(line)?.[0].length ?? 0)
+      ranges.push({ start: contentStart, end: lineEnd, continuesNode: true })
+    }
+    lineStart = lineEnd + breakLength
+  })
+  return ranges.filter((range) => range.end > range.start)
+}
+
+/**
+ * Tells whether a parsed Markdown node is an object with a type.
+ *
+ * @param value - Parsed node.
+ * @returns Whether the value is a node record.
+ */
+function isMarkdownNodeRecord(
+  value: unknown,
+): value is Record<string, unknown> & { type: unknown } {
+  return typeof value === 'object' && value !== null && 'type' in value
+}
+
+/**
+ * Reads one source offset from a parsed node's position.
+ *
+ * @param position - The node's `position`.
+ * @param edge - Which end of the node.
+ * @returns The offset, or `undefined` when the parser gave none.
+ */
+function readMarkdownOffset(position: unknown, edge: 'start' | 'end'): number | undefined {
+  if (typeof position !== 'object' || position === null || !(edge in position)) return undefined
+  const point: unknown = Reflect.get(position, edge)
+  if (typeof point !== 'object' || point === null || !('offset' in point)) return undefined
+  const offset: unknown = point.offset
+  return typeof offset === 'number' && Number.isSafeInteger(offset) ? offset : undefined
+}
+
+/**
+ * Tells whether Markdown would absorb a plain paragraph that follows it after a blank line, as
+ * an export joins blocks. A fenced code block left open at the end is reported with the fence
+ * line that closes it.
+ *
+ * @param text - Markdown text.
+ * @returns `undefined` when the following paragraph stays its own block; otherwise what is open.
+ */
+function findMarkdownOpenBlock(text: string): MarkdownOpenBlock | undefined {
+  const probeOffset = text.length + 2
+  const root = parseMarkdown(`${text}\n\n${MARKDOWN_BOUNDARY_PROBE}`)
+  const children = isMarkdownNodeRecord(root) && Array.isArray(root.children) ? root.children : []
+  const last: unknown = children.at(-1)
+  if (!isMarkdownNodeRecord(last)) return {}
+  const start = readMarkdownOffset(last.position, 'start')
+  if (last.type === 'paragraph' && start === probeOffset) return undefined
+  if (last.type === 'code' && start !== undefined) {
+    const marker = FENCE_OPENER.exec(text.slice(start))?.[1]
+    if (marker !== undefined) return { closingFence: marker }
+  }
+  return {}
+}
+
+/**
+ * Parses Markdown with the CommonMark and GFM grammar the web app renders paragraphs with.
+ *
+ * @param text - Markdown text.
+ * @returns The parsed tree.
+ */
+function parseMarkdown(text: string): unknown {
+  const cached = recentMarkdownTrees.get(text)
+  if (cached !== undefined) return cached
+  const tree: unknown = fromMarkdown(text, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
+  if (text.length > RECENT_MARKDOWN_TREE_MAX_LENGTH) return tree
+  recentMarkdownTrees.set(text, tree)
+  if (recentMarkdownTrees.size > RECENT_MARKDOWN_TREE_COUNT) {
+    const oldest = recentMarkdownTrees.keys().next()
+    if (!oldest.done) recentMarkdownTrees.delete(oldest.value)
+  }
+  return tree
+}
+
+/**
+ * Trees an export reads again kept by {@link parseMarkdown}: a paragraph is read to escape it,
+ * to check that it stays closed, and again in the checks with each neighbour. The trees are only
+ * read, never changed.
+ */
+const RECENT_MARKDOWN_TREE_COUNT = 8
+
+/**
+ * Longest text whose tree {@link parseMarkdown} keeps: one paragraph block, with room for the
+ * probe and fence it is checked with. A whole run of blocks is read once and not kept, so the
+ * kept trees stay small.
+ */
+const RECENT_MARKDOWN_TREE_MAX_LENGTH = 60_000
+
+/** The last parsed trees, by source text, oldest first. */
+const recentMarkdownTrees = new Map<string, unknown>()
+
+/** One rewrite of a source range; nested rewrites inside the kept part are applied too. */
+type ReferenceEdit = {
+  /** Offset of the first character the edit covers. */
+  start: number
+  /** Offset after the last character the edit covers. */
+  end: number
+  /** The source from `start` up to here is kept, with the edits inside it applied. */
+  keepEnd: number
+  /** Text written after the kept part, in place of the rest of the range. */
+  suffix: string
+}
+
+/** A reference definition: where a link or image reference points. */
+type MarkdownDefinition = {
+  /** Destination URL, with escapes and character references decoded. */
+  url: string
+  /** Title, or `null` without one. */
+  title: string | null
+}
+
+/**
+ * Rewrites the references of one block so they keep their meaning once blocks are joined into one
+ * file. A link or image that uses a reference definition becomes an inline link or image, the
+ * definitions are removed, and footnote labels become `<scope>-<n>`, numbered in order of first
+ * use, so the same block always gets the same labels.
+ *
+ * @param text - Markdown of one block.
+ * @param scope - Name of the block, unique in the file.
+ * @param maxExpansion - Most characters the written destinations and titles may add up to; they
+ *   are counted before the text is built.
+ * @returns The rewritten Markdown, or `undefined` when a reference's source is not as expected or
+ *   the written destinations and titles pass `maxExpansion`.
+ */
+function localizeMarkdownReferences(text: string, scope: string, maxExpansion: number): string | undefined {
+  const root = parseMarkdown(text)
+  const definitions = new Map<string, MarkdownDefinition>()
+  const footnoteLabels = new Map<string, string>()
+  const nodes: Array<Record<string, unknown>> = []
+  const pending: unknown[] = [root]
+  while (pending.length > 0) {
+    const node = pending.shift()
+    if (!isMarkdownNodeRecord(node)) continue
+    nodes.push(node)
+    if (Array.isArray(node.children)) pending.unshift(...node.children)
+  }
+  for (const node of nodes) {
+    // CommonMark uses the first definition of a label.
+    if (node.type === 'definition' && typeof node.identifier === 'string' && !definitions.has(node.identifier)) {
+      if (typeof node.url !== 'string' || (node.title !== null && node.title !== undefined && typeof node.title !== 'string')) {
+        return undefined
+      }
+      definitions.set(node.identifier, { url: node.url, title: typeof node.title === 'string' ? node.title : null })
+    }
+    if (
+      (node.type === 'footnoteReference' || node.type === 'footnoteDefinition') &&
+      typeof node.identifier === 'string' &&
+      !footnoteLabels.has(node.identifier)
+    ) {
+      footnoteLabels.set(node.identifier, `${scope}-${footnoteLabels.size + 1}`)
+    }
+  }
+  const edits: ReferenceEdit[] = []
+  /** Characters the written destinations and titles add up to so far. */
+  let expansion = 0
+  for (const node of nodes) {
+    const start = readMarkdownOffset(node.position, 'start')
+    const end = readMarkdownOffset(node.position, 'end')
+    if (start === undefined || end === undefined) {
+      if (isReferenceNodeType(node.type)) return undefined
+      continue
+    }
+    if (node.type === 'text') {
+      edits.push(...escapeLiteralFootnoteCarets(text, start, end))
+      continue
+    }
+    // Labels are read from the source: the parser's `label` has character references decoded.
+    const source = text.slice(start, end)
+    const identifier = typeof node.identifier === 'string' ? node.identifier : undefined
+    if (node.type === 'linkReference' || node.type === 'imageReference') {
+      const definition = identifier === undefined ? undefined : definitions.get(identifier)
+      const labelLength = referenceLabelLength(source, node.referenceType)
+      if (definition === undefined || labelLength === undefined) return undefined
+      const destination = renderInlineDestination(definition)
+      expansion += destination.length
+      if (expansion > maxExpansion) return undefined
+      edits.push({ start, end, keepEnd: end - labelLength, suffix: destination })
+    } else if (node.type === 'definition') {
+      edits.push({ start, end, keepEnd: start, suffix: '' })
+    } else if (node.type === 'footnoteReference' || node.type === 'footnoteDefinition') {
+      const renamed = identifier === undefined ? undefined : footnoteLabels.get(identifier)
+      const labelLength = footnoteLabelLength(source)
+      if (renamed === undefined || labelLength === undefined) return undefined
+      edits.push({ start, end: start + labelLength, keepEnd: start, suffix: `[^${renamed}]` })
+    }
+  }
+  const localized = applyReferenceEdits(text, 0, text.length, edits.sort((left, right) => left.start - right.start))
+  // A definition removed at the end leaves its blank lines behind; they show nothing.
+  return definitions.size === 0 ? localized : localized?.replace(/(?:\n[ \t]*)+$/u, '')
+}
+
+/**
+ * Finds the length of the label part that ends a link or image reference's source: `[label]` of
+ * a full reference, `[]` of a collapsed one, and nothing of a shortcut one.
+ *
+ * @param source - Source of the reference.
+ * @param referenceType - The parser's `referenceType`.
+ * @returns The length, or `undefined` when the source does not end as the type says.
+ */
+function referenceLabelLength(source: string, referenceType: unknown): number | undefined {
+  if (referenceType === 'shortcut') return 0
+  if (referenceType === 'collapsed') return source.endsWith('[]') ? 2 : undefined
+  if (referenceType !== 'full' || !source.endsWith(']')) return undefined
+  // A label holds no unescaped bracket, so it opens at the last `[` that is not escaped.
+  for (let index = source.length - 2; index >= 0; index -= 1) {
+    if (source[index] === '[' && !isEscapedAt(source, index)) return source.length - index
+  }
+  return undefined
+}
+
+/**
+ * Finds the length of the `[^label]` that starts a footnote reference's or definition's source.
+ *
+ * @param source - Source of the footnote reference or definition.
+ * @returns The length, or `undefined` when the source does not start with a label.
+ */
+function footnoteLabelLength(source: string): number | undefined {
+  if (!source.startsWith('[^')) return undefined
+  // A label holds no unescaped bracket, so it closes at the first `]` that is not escaped.
+  for (let index = 2; index < source.length; index += 1) {
+    if (source[index] === ']' && !isEscapedAt(source, index)) return index + 1
+  }
+  return undefined
+}
+
+/**
+ * Tells whether the character at an offset follows an odd number of backslashes.
+ *
+ * @param text - Source text.
+ * @param index - Offset of the character.
+ * @returns Whether a backslash escapes it.
+ */
+function isEscapedAt(text: string, index: number): boolean {
+  let backslashes = 0
+  while (text[index - 1 - backslashes] === '\\') backslashes += 1
+  return backslashes % 2 === 1
+}
+
+/**
+ * Escapes the `^` of every literal `[^` in one text node. Such text is not a footnote in its own
+ * block, but once the blocks are joined a footnote label given to another block, such as `2-1`,
+ * would make `[^2-1]` a reference to that block's footnote. `[\^` shows the same text and is never
+ * a footnote, so the export keeps the text as the app shows it.
+ *
+ * @param text - Markdown of one block.
+ * @param start - Offset of the text node's first character.
+ * @param end - Offset after the text node's last character.
+ * @returns Edits that insert a backslash before each such `^`.
+ */
+function escapeLiteralFootnoteCarets(text: string, start: number, end: number): ReferenceEdit[] {
+  const edits: ReferenceEdit[] = []
+  for (let index = Math.max(start, 1); index < end; index += 1) {
+    if (text[index] !== '^' || text[index - 1] !== '[') continue
+    // An escaped `[` opens no footnote.
+    if (!isEscapedAt(text, index - 1)) edits.push({ start: index, end: index, keepEnd: index, suffix: '\\' })
+  }
+  return edits
+}
+
+/**
+ * Tells whether a parsed node type is a reference or definition the export rewrites.
+ *
+ * @param type - Parsed node type.
+ * @returns Whether the node is rewritten.
+ */
+function isReferenceNodeType(type: unknown): boolean {
+  return type === 'linkReference' || type === 'imageReference' || type === 'definition' ||
+    type === 'footnoteReference' || type === 'footnoteDefinition'
+}
+
+/**
+ * Writes the inline destination and title of a link or image that used a definition.
+ *
+ * @param definition - The definition the reference used.
+ * @returns `(<url> "title")`, escaped so it reads back as the same destination and title.
+ */
+function renderInlineDestination(definition: MarkdownDefinition): string {
+  // `|` is escaped too, so a link in a table cell does not split the cell; the escape reads back
+  // as `|` outside a table as well.
+  const url = definition.url.replace(/[\\<>&|]/gu, '\\$&')
+  if (definition.title === null) return `(<${url}>)`
+  const title = definition.title.replace(/[\\"&|]/gu, '\\$&').replace(/\r\n?|\n/gu, ' ')
+  return `(<${url}> "${title}")`
+}
+
+/**
+ * Applies non-crossing edits to a range of text; an edit may hold other edits in its kept part.
+ *
+ * @param text - Source text.
+ * @param from - Offset where the range starts.
+ * @param to - Offset where the range ends.
+ * @param edits - Edits sorted by start.
+ * @returns The rewritten range, or `undefined` when two edits cross.
+ */
+function applyReferenceEdits(
+  text: string,
+  from: number,
+  to: number,
+  edits: readonly ReferenceEdit[],
+): string | undefined {
+  let output = ''
+  let index = from
+  for (let position = 0; position < edits.length;) {
+    const edit = edits[position]
+    if (edit === undefined) break
+    if (edit.start < index || edit.end > to) return undefined
+    let next = position + 1
+    while (next < edits.length && (edits[next]?.start ?? to) < edit.end) next += 1
+    const inner = edits.slice(position + 1, next)
+    if (inner.some((child) => child.end > edit.keepEnd)) return undefined
+    const kept = applyReferenceEdits(text, edit.start, edit.keepEnd, inner)
+    if (kept === undefined) return undefined
+    output += text.slice(index, edit.start) + kept + edit.suffix
+    index = edit.end
+    position = next
+  }
+  return output + text.slice(index, to)
+}
+
+/**
+ * Tells whether two Markdown texts joined by a blank line keep the top-level blocks each has on its
+ * own: the same blocks starting at the same source, with the same list numbering and heading
+ * levels.
+ *
+ * @param previous - Markdown that comes first.
+ * @param next - Markdown that follows after a blank line.
+ * @returns Whether joining them changes neither.
+ */
+function keepsMarkdownBlocksApart(previous: string, next: string): boolean {
+  const apart = [
+    ...summarizeTopLevelBlocks(previous, 0),
+    ...summarizeTopLevelBlocks(next, previous.length + 2),
+  ]
+  const together = summarizeTopLevelBlocks(`${previous}\n\n${next}`, 0)
+  return together.length === apart.length && together.every((summary, index) => summary === apart[index])
+}
+
+/**
+ * Describes the top-level blocks of Markdown by kind, start, list numbering, and heading level.
+ *
+ * @param text - Markdown text.
+ * @param shift - Offset added to the starts, where the text starts in a joined text.
+ * @returns One description per top-level block, in order.
+ */
+function summarizeTopLevelBlocks(text: string, shift: number): string[] {
+  const root = parseMarkdown(text)
+  const children = isMarkdownNodeRecord(root) && Array.isArray(root.children) ? root.children : []
+  return children.map((child: unknown) => {
+    if (!isMarkdownNodeRecord(child)) return 'unknown'
+    // Only the start is compared: where a block ends can take in trailing blank lines once joined.
+    const start = readMarkdownOffset(child.position, 'start')
+    return JSON.stringify([
+      child.type,
+      start === undefined ? null : start + shift,
+      child.ordered ?? null,
+      child.start ?? null,
+      child.depth ?? null,
+    ])
+  })
+}
+
+/** Reads export Markdown with the grammar the web app renders it with. */
+export const markdownInspector: MarkdownInspector = {
+  findHtml: findMarkdownHtmlRanges,
+  findOpenBlock: findMarkdownOpenBlock,
+  localizeReferences: localizeMarkdownReferences,
+  keepsBlocksApart: keepsMarkdownBlocksApart,
+}

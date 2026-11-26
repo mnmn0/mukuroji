@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
-import { hostname, userInfo } from 'node:os'
+import { mkdir, stat, writeFile } from 'node:fs/promises'
+import { homedir, hostname, userInfo } from 'node:os'
+import { join } from 'node:path'
 import { AGENT_RUN_RUNTIMES, type AgentRunRuntime } from '@mukuroji/contracts'
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/server'
@@ -10,7 +12,8 @@ import { createWorkspaceApi } from '../../modules/coding-agent-mcp/adapter-out/h
 import { createWorkspaceMcpServer } from '../../modules/coding-agent-mcp/adapter-in/mcp/workspace-server'
 import { assessServerCompatibility, type ServerCompatibility } from '../../modules/coding-agent-mcp/application/compatibility'
 import { maximumAgentTeams } from '../../modules/coding-agent-mcp/application/multi-team-agent-tasks'
-import { AgentTaskError } from '../../modules/coding-agent-mcp/application/work-item-api'
+import { heartbeatOwnRuns, type HookHeartbeatResult } from '../../modules/coding-agent-mcp/application/hook-heartbeat'
+import { AgentTaskError, type AgentRunRecord, type AgentWorkItemApi } from '../../modules/coding-agent-mcp/application/work-item-api'
 
 const profileSchema = z.enum(['tasks', 'workspace']).default('tasks')
 
@@ -114,6 +117,100 @@ export function composeCodingAgentMcp(environment: Record<string, string | undef
       deriveAgentInstanceId(config.MUKUROJI_MCP_RUNTIME, config.MUKUROJI_MCP_ASSIGNEE_ID),
   }, config.MUKUROJI_MCP_READ_ONLY === 'true', serverCompatibility)
   return Object.assign(createServer, { serverCompatibility })
+}
+
+/**
+ * Composes the heartbeat an agent hook runs between tool calls (`mcp.mjs --heartbeat`). It reads
+ * the same configuration as the tasks profile and derives the same instance ID, so it renews only
+ * the runs this machine, account, runtime, and assignee started.
+ *
+ * @param environment - Process environment or isolated test configuration.
+ * @returns A call that renews this instance's active runs.
+ * @throws AgentTaskError configuration when the tasks profile is not fully configured.
+ */
+export function composeCodingAgentHeartbeat(
+  environment: Record<string, string | undefined> = process.env,
+): () => Promise<HookHeartbeatResult & { throttled: boolean }> {
+  const profile = profileSchema.safeParse(environment.MUKUROJI_MCP_PROFILE)
+  if (!profile.success || profile.data !== 'tasks') {
+    throw new AgentTaskError('configuration', 'The heartbeat needs the tasks profile configuration.')
+  }
+  const parsed = configSchema.safeParse(environment)
+  if (!parsed.success) {
+    throw new AgentTaskError('configuration', 'Set the same MUKUROJI_MCP_* values as the MCP server for the heartbeat.')
+  }
+  const config = parsed.data
+  const teamIds = readTeamIds(config.MUKUROJI_MCP_TEAM_ID, config.MUKUROJI_MCP_TEAM_IDS)
+  if (teamIds.length > 1 && config.MUKUROJI_MCP_PROJECT_ID !== undefined) {
+    throw new AgentTaskError('configuration', 'MUKUROJI_MCP_PROJECT_ID needs exactly one Team. Remove it or configure a single Team.')
+  }
+  const teams = teamIds.map((teamId) => ({
+    teamId,
+    api: createAgentWorkItemApi({ origin: config.MUKUROJI_MCP_URL, token: config.MUKUROJI_MCP_TOKEN, teamId }),
+  }))
+  const runInScope = createHeartbeatProjectScope(teams[0].api, config.MUKUROJI_MCP_PROJECT_ID)
+  const owner = {
+    assigneeUserId: config.MUKUROJI_MCP_ASSIGNEE_ID,
+    instanceId: config.MUKUROJI_MCP_INSTANCE_ID ??
+      deriveAgentInstanceId(config.MUKUROJI_MCP_RUNTIME, config.MUKUROJI_MCP_ASSIGNEE_ID),
+  }
+  // Hooks fire on every tool call, so one machine-local stamp per instance keeps the API calls
+  // to one heartbeat a minute; leases are several minutes long. The stamp lives in the account's
+  // own cache directory, not a shared temporary directory another account could plant files in.
+  // The key includes the Teams and Project, so a hook renewing one scope never suppresses another.
+  const stampDirectory = join(environment.XDG_CACHE_HOME?.trim() || join(homedir(), '.cache'), 'mukuroji-mcp')
+  const stampPath = join(stampDirectory, `heartbeat-${createHash('sha256')
+    .update([config.MUKUROJI_MCP_URL, owner.assigneeUserId, owner.instanceId, teamIds.join(','), config.MUKUROJI_MCP_PROJECT_ID ?? ''].join('\u0000')).digest('hex').slice(0, 32)}`)
+  return async () => {
+    if (await readStampAgeMs(stampPath) < HOOK_HEARTBEAT_INTERVAL_MS) return { renewed: 0, recent: 0, failed: 0, throttled: true }
+    const result = await heartbeatOwnRuns(teams, owner, runInScope ? { runInScope } : {})
+    if (result.failed === 0) {
+      await mkdir(stampDirectory, { recursive: true, mode: 0o700 })
+        .then(() => writeFile(stampPath, '', { mode: 0o600 }))
+        .catch(() => undefined)
+    }
+    return { ...result, throttled: false }
+  }
+}
+
+/**
+ * Creates the Project check of a hook heartbeat, so the hook renews only runs the MCP server
+ * itself would act on when `MUKUROJI_MCP_PROJECT_ID` restricts it.
+ *
+ * @param api - API of the single configured Team.
+ * @param projectId - Configured Project, if any.
+ * @returns A check of a run's task, or undefined when no Project is configured.
+ */
+function createHeartbeatProjectScope(
+  api: Pick<AgentWorkItemApi, 'get'>,
+  projectId: string | undefined,
+): ((run: AgentRunRecord) => Promise<boolean>) | undefined {
+  if (projectId === undefined) return undefined
+  return async (run) => {
+    try {
+      return (await api.get(run.workItemId)).assignedProjectId === projectId
+    } catch (error) {
+      if (error instanceof AgentTaskError && ['not_found', 'forbidden'].includes(error.code)) return false
+      throw error
+    }
+  }
+}
+
+/** Shortest interval between two hook heartbeats of one instance. */
+const HOOK_HEARTBEAT_INTERVAL_MS = 60_000
+
+/**
+ * Reads how long ago the last hook heartbeat of an instance succeeded.
+ *
+ * @param path - Stamp file of the instance.
+ * @returns Age in milliseconds, or infinity when no heartbeat was recorded.
+ */
+async function readStampAgeMs(path: string): Promise<number> {
+  try {
+    return Date.now() - (await stat(path)).mtimeMs
+  } catch {
+    return Number.POSITIVE_INFINITY
+  }
 }
 
 /**
