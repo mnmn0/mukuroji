@@ -51,6 +51,19 @@ describe('Automation editors', () => {
     }
   })
 
+  test('builds a budget-threshold trigger that takes no configuration', () => {
+    expect(createAutomationTrigger('budget-threshold', 'ignored')).toEqual({ type: 'budget-threshold' })
+    expect(isAutomationTriggerConfigurationValid('budget-threshold', '')).toBe(true)
+    const html = renderToStaticMarkup(
+      <AutomationRuleEditor
+        initialTriggerType="budget-threshold"
+        locale="ja"
+        onCreate={async () => undefined}
+      />,
+    )
+    expect(html).toContain('予算消化率が閾値に到達')
+  })
+
   test('renders the baseline-slip day field', () => {
     const html = renderToStaticMarkup(
       <AutomationRuleEditor

@@ -204,10 +204,20 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
         actions: ['dynamodb:Query', 'dynamodb:Scan'],
         resources: [workspaceAccessTable.tableArn],
       }));
-      // Unsubmitted time entries for timesheet reminders.
+      // Unsubmitted time entries for timesheet reminders, and the Project time cost a budget
+      // threshold alert measures (ADR 0105).
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['dynamodb:Query'],
         resources: [`${analyticsTable.tableArn}/index/TimeEntryTeamDateIndex`],
+      }));
+      // Project budgets and Project expenses for budget threshold alerts (ADR 0105).
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem'],
+        resources: [analyticsTable.tableArn],
+      }));
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [planningTable.tableArn],
       }));
     },
   };

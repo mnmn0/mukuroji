@@ -55,6 +55,7 @@ import {
   createNotificationDeliveryPlan,
   parsePlanningUpdateTargetScheduleProjection,
   parseStoredNotificationPreferences,
+  BUDGET_THRESHOLD_REACHED_EVENT_TYPE,
   MEMBER_ACCESS_EXPIRING_EVENT_TYPE,
   MEMBER_ACCESS_EXPIRY_REASON,
   TIMESHEET_REMINDER_EVENT_TYPE,
@@ -982,6 +983,7 @@ async function processRecord(
         isCurrentEscalationManager(authorizationEvent, candidate.memberKey, directoryItems) &&
         isCurrentWeeklyReportRecipient(authorizationEvent, candidate.memberKey, directoryItems) &&
         isCurrentMemberAccessExpiryRecipient(authorizationEvent, candidate.memberKey, directoryItems) &&
+        isCurrentBudgetThresholdRecipient(authorizationEvent, candidate.memberKey, directoryItems) &&
         await isEligibleRecipient(
           authorizationEvent,
           candidate.memberKey,
@@ -2233,6 +2235,34 @@ export function isCurrentMemberAccessExpiryRecipient(
 }
 
 /**
+ * Reports whether a recipient may still receive a Project budget threshold alert (ADR 0105).
+ *
+ * Budget use is confidential to Project managers, so a recipient who stepped down from managing
+ * the Project after the scan is not told. The same check runs at projection and again before an
+ * external channel sends.
+ *
+ * @param event - Event whose Project the alert is for.
+ * @param memberKey - Recipient member key.
+ * @param directoryItems - Current Project directory rows.
+ * @returns True for other events, or when the recipient still manages the event's Project.
+ */
+export function isCurrentBudgetThresholdRecipient(
+  event: Pick<AuditProjectionEvent, 'eventType' | 'projectId'>,
+  memberKey: string,
+  directoryItems: ProjectDirectoryItem[],
+) {
+  if (event.eventType !== BUDGET_THRESHOLD_REACHED_EVENT_TYPE) return true
+  const recipient = normalizeMemberKey(memberKey)
+  return Boolean(event.projectId) && recipient !== undefined && directoryItems.some((item) =>
+    item.entryType === 'project-member' &&
+    item.projectId === event.projectId &&
+    item.role === 'manager' &&
+    item.archivedAt === undefined &&
+    normalizeMemberKey(item.memberKey) === recipient
+  )
+}
+
+/**
  * Reports whether a recipient may receive a Work Item escalation as a current Project manager.
  *
  * @param event - Scheduled event whose Project scope reflects the current Work Item.
@@ -3069,6 +3099,7 @@ export async function authorizeNotificationDelivery(
   if (!isCurrentEscalationManager(refreshed, memberKey, directory)) return false
   if (!isCurrentWeeklyReportRecipient(refreshed, memberKey, directory)) return false
   if (!isCurrentMemberAccessExpiryRecipient(refreshed, memberKey, directory)) return false
+  if (!isCurrentBudgetThresholdRecipient(refreshed, memberKey, directory)) return false
   if (
     currentPlanningActivityEvent &&
     !hasSamePlanningScope(refreshed, currentPlanningActivityEvent) &&

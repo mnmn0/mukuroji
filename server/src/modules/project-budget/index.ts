@@ -29,3 +29,10 @@ export {
   type ProjectExpenseCallerAuthorizationCheck,
   type ProjectExpenseStore,
 } from './adapter-out/dynamodb/project-expense-store'
+export {
+  loadProjectBudgetConsumption,
+  sumApprovedProjectExpenses,
+  type ApprovedProjectExpenseTotal,
+  type ProjectBudgetConsumption,
+  type ProjectBudgetConsumptionPorts,
+} from './application/project-budget-consumption'

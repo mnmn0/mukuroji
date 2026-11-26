@@ -1,4 +1,12 @@
-import { toWorkspaceLocalDate, type TimeBudget, type TimeTrackingSummary } from '@mukuroji/contracts'
+import {
+  TIME_BUDGET_ALERT_PERCENT_DEFAULT,
+  TIME_BUDGET_ALERT_PERCENT_MAX,
+  TIME_BUDGET_ALERT_PERCENT_MIN,
+  isTimeBudgetAlertPercent,
+  toWorkspaceLocalDate,
+  type TimeBudget,
+  type TimeTrackingSummary,
+} from '@mukuroji/contracts'
 import { useId, useMemo, useState, type FormEvent } from 'react'
 import type { Locale } from '../../../shared/i18n/i18n'
 import type { SaveTimeBudgetInput, TimeReportBudgetScope } from '../api/timeReport'
@@ -112,6 +120,8 @@ export function TimeBudgetPanel({
   // A budget per period keeps its dates; changing them would save another period's budget.
   const isPeriodLocked = editTarget === 'shown' && budget?.periodBudget === true
   const savesPeriodBudget = editTarget === 'newPeriod' || isPeriodLocked
+  // Only a Project's default budget notifies its owner when its use reaches the alert (ADR 0105).
+  const editsAlertPercent = projectId !== undefined && !savesPeriodBudget
   /**
    * Reads the period the editor starts with.
    *
@@ -210,6 +220,11 @@ export function TimeBudgetPanel({
       setMessage({ tone: 'error', text: t('timeTracking.budget.invalidAmount') })
       return
     }
+    const alertPercent = editsAlertPercent && read('alertPercent') ? Number(read('alertPercent')) : undefined
+    if (alertPercent !== undefined && !isTimeBudgetAlertPercent(alertPercent)) {
+      setMessage({ tone: 'error', text: t('timeTracking.budget.invalidAlertPercent') })
+      return
+    }
     if (savesPeriodBudget && (!periodFrom || !periodTo)) {
       setMessage({ tone: 'error', text: t('timeTracking.budget.periodRequired') })
       return
@@ -231,6 +246,7 @@ export function TimeBudgetPanel({
         ...(periodFrom ? { periodFrom } : {}),
         ...(periodTo ? { periodTo } : {}),
         ...(savesPeriodBudget ? { periodBudget: true } : {}),
+        ...(alertPercent === undefined ? {} : { alertPercent }),
         expectedRevision: replaced?.revision ?? 0,
         ...(replaced ? { expectedUpdatedAt: replaced.updatedAt } : {}),
       })
@@ -385,6 +401,22 @@ export function TimeBudgetPanel({
                   required
                 />
               </label>
+              {editsAlertPercent ? (
+                <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+                  {t('timeTracking.budget.alertPercent')}
+                  <input
+                    className="workbench-input min-h-9 w-24 px-2"
+                    data-testid="time-budget-alert-percent"
+                    defaultValue={String(budget?.alertPercent ?? TIME_BUDGET_ALERT_PERCENT_DEFAULT)}
+                    inputMode="numeric"
+                    max={TIME_BUDGET_ALERT_PERCENT_MAX}
+                    min={TIME_BUDGET_ALERT_PERCENT_MIN}
+                    name="alertPercent"
+                    step={1}
+                    type="number"
+                  />
+                </label>
+              ) : null}
               {fiscalYearOptions.length > 0 && !isPeriodLocked ? (
                 <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]">
                   {t('timeTracking.budget.fiscalYear')}

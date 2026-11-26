@@ -189,6 +189,8 @@ export const timeTrackingMessages = {
   'timeTracking.budget.usePeriod': 'この期間で集計',
   'timeTracking.budget.actualNote': '実績は上で選んだ集計期間の値です。予算の期間と比べるときは「この期間で集計」を使ってください。',
   'timeTracking.budget.empty': '予算はまだ設定されていません。',
+  'timeTracking.budget.alertPercent': '通知する消化率（%）',
+  'timeTracking.budget.invalidAlertPercent': '通知する消化率は 1〜1000 の整数で入力してください。',
   'timeTracking.budget.invalidAmount': '予算額と通貨（例: JPY）を正しく入力してください。',
   'timeTracking.budget.saved': '予算を保存しました。',
   'timeTracking.budget.currency': '通貨',

@@ -211,6 +211,8 @@ function validateAutomationTrigger(value: unknown): AutomationTrigger {
         ...(typeof minDelayDays === 'number' ? { minDelayDays } : {}),
       }
     }
+    case 'budget-threshold':
+      return { type: 'budget-threshold' }
     case 'custom-field':
       return {
         type: 'custom-field',

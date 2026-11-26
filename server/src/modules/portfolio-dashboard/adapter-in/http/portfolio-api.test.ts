@@ -3,9 +3,12 @@ import {
   parseTeamPortfolioResponse,
   parseTeamPortfolioSnapshotResponse,
   previousPortfolioMonth,
+  type ProjectExpense,
   type TeamPortfolioResponse,
 } from '@mukuroji/contracts'
 import { createApiTestHarness } from '../../../../api/test-support/api-test-harness'
+import { createMutationAuditContext } from '../../../audit'
+import { InMemoryProjectExpenseStore } from '../../../project-budget'
 
 const {
   app,
@@ -13,6 +16,7 @@ const {
   createAccessToken,
   getTestAppDependencies,
   resetTestApp,
+  setTestAppDependencies,
 } = createApiTestHarness()
 
 afterEach(() => {
@@ -103,6 +107,69 @@ test('summarizes each readable Project with its budget, log, and a saved monthly
   expect(past.status).toBe(400)
   const malformed = await request('/api/teams/core-team/portfolio/snapshots/2026-13')
   expect(malformed.status).toBe(400)
+})
+
+test('counts approved expenses of the budget period toward the budget use (ADR 0104)', async () => {
+  configureFakeProjectClients(true)
+  const store = new InMemoryProjectExpenseStore()
+  setTestAppDependencies({ projectExpenses: store })
+  const budget = await request('/api/teams/core-team/projects/refero/time-budget', 'PUT', {
+    amountMinor: 100_000,
+    currency: 'USD',
+    expectedRevision: 0,
+  })
+  expect(budget.status).toBe(200)
+  const now = new Date().toISOString()
+  const today = now.slice(0, 10)
+  /**
+   * Stores an expense of the Project as it is after a decision.
+   *
+   * @param id - Expense ID.
+   * @param amountMinor - Amount.
+   * @param currency - Currency.
+   * @param status - Decision state.
+   */
+  const seed = async (id: string, amountMinor: number, currency: string, status: 'approved' | 'submitted') => {
+    const expense: ProjectExpense = {
+      id,
+      teamId: 'core-team',
+      projectId: 'refero',
+      date: today,
+      category: 'License',
+      amountMinor,
+      currency,
+      receiptFileIds: [],
+      status,
+      submittedByMemberId: 'a@example.com',
+      submittedAt: now,
+      ...(status === 'approved' ? { decision: { outcome: 'approved' as const, decidedByMemberId: 'b@example.com', decidedAt: now } } : {}),
+      revision: status === 'approved' ? 2 : 1,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await store.create({
+      workspaceId: 'user#demo@example.com',
+      teamId: 'core-team',
+      projectId: 'refero',
+      now,
+      callerAuthorization: [{ ConditionCheck: { TableName: 't', Key: {}, ConditionExpression: 'attribute_exists(a)' } }],
+      auditContext: createMutationAuditContext({
+        workspaceId: 'user#demo@example.com',
+        actor: { id: 'seed', kind: 'user', displayName: 'Seed' },
+        idempotencyKey: id,
+        request: { method: 'POST', path: '/seed', body: {} },
+        source: { kind: 'api' },
+      }),
+      expense,
+      creationFingerprint: id,
+    })
+  }
+  await seed('approved-usd', 2_500, 'USD', 'approved')
+  await seed('approved-eur', 1_000, 'EUR', 'approved')
+  await seed('pending-usd', 9_000, 'USD', 'submitted')
+
+  const refero = (await readPortfolio()).projects.find((project) => project.projectId === 'refero')
+  expect(refero?.budget).toMatchObject({ amountMinor: 100_000, currency: 'USD', actualCostMinor: 2_500, hasOtherCurrencyCost: true })
 })
 
 test('counts Projects the reader cannot read and hides costs the reader may not see', async () => {

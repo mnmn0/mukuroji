@@ -66,6 +66,15 @@ Notify action の `notifyAssignee: true` は、rule が対象にしている Wor
 
 同じ判定で、遅れが `WORK_ITEM_BASELINE_SLIP_NOTIFICATION_DAYS`（3日、Focus の既定閾値と同じ）を越えた変更では、担当者に理由 `baseline-slip` の通知を送り、通知の概要を「baseline より N 日遅れ」にする。作成者と watcher には通常の日程変更通知と同じく届く。Team ごとの閾値は Focus の優先ルールだけで、通知の閾値は今は固定。
 
+### budget threshold trigger
+
+`{ "type": "budget-threshold" }` は、Project の既定の予算の消化率（予算通貨の工数コスト + 承認済み経費）が予算の
+`alertPercent`（省略時 90%）に達したときに動く（ADR 0105）。判定は notification schedule が毎日 9 時（日本時間）に行い、
+予算期間・予算額・通貨・閾値ごとに `project-budget.threshold-reached` の audit event を1回だけ書く。trigger はこの event だけを見る。
+event の `metadata` は `teamId`、`projectId`、`budgetThresholdPercent`、`budgetConsumedPercent` を持ち、金額は持たない。
+Team の rule は自分の Team の Project の event でだけ動く。event に Work Item はないので、Work Item を変える action は使えない
+（form・webhook trigger と同じ）。通知・Work Item の作成・Webhook の action を使う。
+
 ## 実行と冪等性
 
 実行 ID は Workspace、論理 rule ID、元 event ID から決定的に作り、最初に予約した immutable rule version を execution に固定する。Rule 編集後に同じ event が再配信されても新 version の action は重複実行せず、途中の execution は固定済み version で再開する。実行開始は status と attempt の条件付き更新、および期限付き runner lease で一つの worker だけが取得する。同じ event が並行再配信された場合、後続 worker は保存済み execution を返して action を開始しない。

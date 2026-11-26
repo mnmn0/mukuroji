@@ -50,7 +50,7 @@ export function automationTriggerRequiresConfiguration(type: AutomationTrigger['
 
 /** Trigger type が汎用設定欄を使用するか返します。 */
 export function automationTriggerUsesConfiguration(type: AutomationTrigger['type']) {
-  return type !== 'comment' && type !== 'schedule'
+  return type !== 'comment' && type !== 'schedule' && type !== 'budget-threshold'
 }
 
 /** Trigger type ごとの設定値が作成可能か返します。 */
@@ -499,6 +499,8 @@ export function createAutomationTrigger(
       const minDelayDays = readBaselineSlipDays(value)
       return { type, ...(minDelayDays === undefined ? {} : { minDelayDays }) }
     }
+    case 'budget-threshold':
+      return { type }
     case 'form':
       return { type, formId: value }
     case 'relation':

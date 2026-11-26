@@ -286,6 +286,27 @@ describe('Automation rule domain', () => {
     }
   })
 
+  test('fires a budget-threshold trigger on a budget alert of its own Team only', () => {
+    const alert: AutomationEvent = {
+      ...event,
+      eventType: 'project-budget.threshold-reached',
+      changes: [],
+      metadata: { teamId: 'core', projectId: 'api', budgetThresholdPercent: 90, budgetConsumedPercent: 92 },
+    }
+    const trigger: AutomationTrigger = { type: 'budget-threshold' }
+    expect(matchesAutomationTrigger(trigger, alert)).toBe(true)
+    expect(matchesAutomationTrigger(trigger, event)).toBe(false)
+    expect(matchesAutomationRuleOwnerTeam({ ownerTeamId: 'core', trigger }, alert)).toBe(true)
+    expect(matchesAutomationRuleOwnerTeam({ ownerTeamId: 'ops', trigger }, alert)).toBe(false)
+    expect(validateCreateAutomationRuleInput({
+      name: 'Budget alert',
+      enabled: true,
+      ownerTeamId: 'core',
+      trigger: { type: 'budget-threshold', ignored: true },
+      actions: [{ type: 'notify', recipientMemberKeys: ['finance@example.com'], title: 'Budget alert' }],
+    }).trigger).toEqual({ type: 'budget-threshold' })
+  })
+
   test('matches relation changes by event type', () => {
     const blockerRemoved: AutomationEvent = {
       ...event,

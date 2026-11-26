@@ -148,6 +148,17 @@ export type AutomationBaselineSlipTrigger = {
   minDelayDays?: number
 }
 
+/**
+ * Detects a Project budget whose use reached its alert percentage (ADR 0105): the cost of the
+ * time recorded on the Project plus its approved expenses, against the budget's `alertPercent`.
+ * The daily budget check records the crossing once per budget and threshold, and a Team rule
+ * fires only for its own Team's Projects. The event carries no Work Item.
+ */
+export type AutomationBudgetThresholdTrigger = {
+  /** Trigger discriminator. */
+  type: 'budget-threshold'
+}
+
 /** Approval decisions an approval trigger can filter on. */
 export const AUTOMATION_APPROVAL_DECISIONS = ['approved', 'rejected', 'changes-requested'] as const
 
@@ -167,12 +178,13 @@ export type AutomationApprovalTrigger = {
   decision?: AutomationApprovalDecision
 }
 
-/** Automation rule が扱える12種類の trigger です。 */
+/** Automation rule が扱える13種類の trigger です。 */
 export type AutomationTrigger =
   | AutomationStatusTrigger
   | AutomationAssigneeTrigger
   | AutomationDueTrigger
   | AutomationBaselineSlipTrigger
+  | AutomationBudgetThresholdTrigger
   | AutomationCustomFieldTrigger
   | AutomationWorkItemTypeTrigger
   | AutomationCommentTrigger

@@ -1,5 +1,11 @@
 import type { TimeBudget } from './time-tracking'
 
+/**
+ * Audit event type recorded once when a Project budget's use reaches its alert percentage
+ * (ADR 0105). It notifies the Project owner and fires the `budget-threshold` Automation trigger.
+ */
+export const PROJECT_BUDGET_THRESHOLD_REACHED_EVENT_TYPE = 'project-budget.threshold-reached'
+
 /** Calendar bucket of the Project budget report series. */
 export type ProjectBudgetReportInterval = 'day' | 'week'
 

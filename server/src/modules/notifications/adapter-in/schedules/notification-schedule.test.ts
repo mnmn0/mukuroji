@@ -2056,3 +2056,138 @@ describe('member access expiry notices', () => {
     expect(moved[0]?.eventId).not.toBe(notices[0]?.eventId)
   })
 })
+
+describe('budget threshold alerts', () => {
+  test('tells the owning manager once a day at 9:00 when a Project budget reaches its alert, and again after the budget changes', async () => {
+    const reads: string[] = []
+    let amountMinor = 100_000
+    const budgetThresholdReader = {
+      async listProjectBudgetStatuses(workspaceId: string, now: Date) {
+        reads.push(`${workspaceId}@${now.toISOString()}`)
+        return [
+          {
+            teamId: 'core-team',
+            projectId: 'api',
+            amountMinor,
+            currency: 'JPY',
+            alertPercent: 90,
+            consumedPercent: 92.5,
+            ownerMemberKey: 'lead@example.com',
+            managerMemberKeys: ['pm@example.com', 'lead@example.com'],
+          },
+          {
+            teamId: 'core-team',
+            projectId: 'web',
+            amountMinor,
+            currency: 'JPY',
+            alertPercent: 90,
+            consumedPercent: 89.9,
+            managerMemberKeys: ['pm@example.com'],
+          },
+          {
+            teamId: 'core-team',
+            projectId: 'ops',
+            amountMinor,
+            currency: 'JPY',
+            periodFrom: '2026-04-01',
+            periodTo: '2027-03-31',
+            alertPercent: 50,
+            consumedPercent: 60,
+            // The owner does not manage the Project, so every manager is told instead.
+            ownerMemberKey: 'sponsor@example.com',
+            managerMemberKeys: ['ops@example.com', 'pm@example.com'],
+          },
+        ]
+      },
+    }
+    const run = async (now: string) => {
+      const recording = createRecordingDocumentClient((name, input) => {
+        if (name !== 'ScanCommand') return {}
+        return input.TableName === 'ProjectDirectoryTable'
+          ? { Items: [{ directoryId: 'workspace-1', entryType: 'team', teamId: 'core-team' }] }
+          : { Items: [] }
+      })
+      await runNotificationSchedule(createRunOptions(recording.client, {
+        now: new Date(now),
+        budgetThresholdReader,
+      }))
+      return recording.commands
+        .filter(({ name }) => name === 'PutCommand')
+        .map(({ input }) => readPutItem(input))
+        .filter((event) => event.eventType === 'project-budget.threshold-reached')
+    }
+
+    // 10:00 in Japan checks nothing.
+    expect(await run('2026-11-24T01:00:00.000Z')).toEqual([])
+    expect(reads).toEqual([])
+
+    const alerts = await run('2026-11-24T00:00:00.000Z')
+    expect(reads).toEqual(['workspace-1@2026-11-24T00:00:00.000Z'])
+    expect(alerts.map((alert) => alert.metadata)).toEqual([
+      expect.objectContaining({
+        teamId: 'core-team',
+        projectId: 'api',
+        deepLink: '/projects/api/overview?teamId=core-team',
+        budgetThresholdPercent: 90,
+        budgetConsumedPercent: 92.5,
+        notificationMessage: { code: 'project-budget.threshold-reached', params: { percent: '92.5', threshold: '90' } },
+        notificationCandidates: [{ memberKey: 'lead@example.com', reason: 'budget-threshold' }],
+      }),
+      expect.objectContaining({
+        projectId: 'ops',
+        notificationCandidates: [
+          { memberKey: 'ops@example.com', reason: 'budget-threshold' },
+          { memberKey: 'pm@example.com', reason: 'budget-threshold' },
+        ],
+      }),
+    ])
+    // The alert carries percentages only, never an amount.
+    expect(JSON.stringify(alerts)).not.toContain('100000')
+    expect(alerts[0]).toMatchObject({ outboxStatus: 'pending', summary: expect.stringContaining('92.5%') })
+
+    const nextDay = await run('2026-11-25T00:00:00.000Z')
+    expect(nextDay.map((alert) => alert.eventId)).toEqual(alerts.map((alert) => alert.eventId))
+    amountMinor = 120_000
+    const changed = await run('2026-11-26T00:00:00.000Z')
+    expect(changed[0]?.eventId).not.toBe(alerts[0]?.eventId)
+  })
+})
+
+describe('budget threshold check failures', () => {
+  test('checks the other Workspaces when one fails, then fails the run', async () => {
+    const budgetThresholdReader = {
+      async listProjectBudgetStatuses(workspaceId: string) {
+        if (workspaceId === 'workspace-a') throw new Error('expense row is corrupt')
+        return [{
+          teamId: 'core-team',
+          projectId: 'api',
+          amountMinor: 1_000,
+          currency: 'JPY',
+          alertPercent: 90,
+          consumedPercent: 95,
+          managerMemberKeys: ['pm@example.com'],
+        }]
+      },
+    }
+    const recording = createRecordingDocumentClient((name, input) => {
+      if (name !== 'ScanCommand') return {}
+      return input.TableName === 'ProjectDirectoryTable'
+        ? {
+            Items: [
+              { directoryId: 'workspace-a', entryType: 'team', teamId: 'core-team' },
+              { directoryId: 'workspace-b', entryType: 'team', teamId: 'core-team' },
+            ],
+          }
+        : { Items: [] }
+    })
+    await expect(runNotificationSchedule(createRunOptions(recording.client, {
+      now: new Date('2026-11-24T00:00:00.000Z'),
+      budgetThresholdReader,
+    }))).rejects.toThrow('expense row is corrupt')
+    const alerts = recording.commands
+      .filter(({ name }) => name === 'PutCommand')
+      .map(({ input }) => readPutItem(input))
+      .filter((event) => event.eventType === 'project-budget.threshold-reached')
+    expect(alerts.map((alert) => alert.workspaceId ?? alert.directoryId)).toEqual(['workspace-b'])
+  })
+})

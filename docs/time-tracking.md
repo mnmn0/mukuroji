@@ -91,6 +91,15 @@ Costs other than time, such as subcontracting or licenses, are Project expenses 
 - `POST .../expenses/:expenseId/decision` with `outcome` (`approved` or `rejected`), an optional `note`, and `expectedRevision` decides a submitted expense. The manager who submitted it gets `403 ProjectExpenseSelfDecisionForbidden`; another Project manager must decide.
 - `PUT .../expenses/:expenseId` replaces a submitted or rejected expense and submits it again under the caller; `DELETE .../expenses/:expenseId` with `expectedRevision` removes it. An approved expense answers `409 ProjectExpenseApproved` to both.
 - A Project holds at most 2,000 expenses (`413 ProjectExpensesFull`). Only approved expenses count toward the budget report.
+- The Team portfolio (PMO dashboard) adds the approved expenses dated within the budget period up to today to each Project's `actualCostMinor`, so its budget use includes them; an approved expense in another currency sets `hasOtherCurrencyCost`.
+
+## Budget threshold alerts
+
+A Project's default budget takes `alertPercent` (a whole number from 1 to 1000, default 90) in the same `PUT .../projects/:projectId/time-budget` ([ADR 0105](adr/0105-project-budget-threshold-alerts.md)). A save that omits it keeps the stored value; a Team budget or a budget per period answers `400 InvalidBudgetAlertPercent`.
+
+Once a day, in the 9:00 run of the notification schedule (Asia/Tokyo, the clock the timesheet reminders use), each active Project with a budget is measured the way the budget report counts cost: time cost plus approved expenses in the budget currency, from the period start (or the first record without a period) through today or the period end. At or past `alertPercent`, the schedule writes one `project-budget.threshold-reached` audit event whose ID comes from the Workspace, Project, budget period, amount, currency, and threshold, so later runs are duplicates until one of them changes. The event carries the percentages only (`budgetThresholdPercent`, `budgetConsumedPercent`), never an amount.
+
+The alert notifies the charter owner when they manage the Project, or else every Project manager (reason `budget-threshold`), and a recipient who no longer manages the Project when the notification is delivered is skipped. The same event fires the `budget-threshold` Automation trigger ([Automation](automation.md#budget-threshold-trigger)).
 
 ## Write access and manager scope
 

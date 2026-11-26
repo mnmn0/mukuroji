@@ -102,6 +102,10 @@ export const NOTIFICATION_MESSAGE_TEMPLATES = {
     en: 'A member of your Project loses access on {date}. Hand over their work before then.',
     ja: 'Project のメンバーの利用期限が {date} に切れます。それまでに担当を引き継いでください。',
   },
+  'project-budget.threshold-reached': {
+    en: 'The Project budget is {percent}% used, reaching its {threshold}% alert.',
+    ja: 'Project の予算消化率が {percent}% になり、通知の閾値 {threshold}% に達しました。',
+  },
   'planning-update.health-changed': {
     en: 'Health changed to {health}: {excerpt}',
     ja: 'Health が{health}になりました: {excerpt}',

@@ -43,6 +43,7 @@ import {
   processCollaborationProjectionBatch,
   projectsSubscribedWatchers,
   readMemberAccessExpiryNoticeFence,
+  isCurrentBudgetThresholdRecipient,
   isCurrentMemberAccessExpiryRecipient,
   publishRealtimeInvalidation,
   refreshPlanningScheduledNotificationEvent,
@@ -192,6 +193,23 @@ describe('collaboration projection pure helpers', () => {
     // An event that does not name the expiring member is never sent.
     expect(isCurrentMemberAccessExpiryRecipient({ ...event, accessExpiryMemberKey: undefined }, 'lead@example.com', directory))
       .toBe(false)
+  })
+
+  test('sends a budget threshold alert only to a current manager of its Project', () => {
+    const event = { eventType: 'project-budget.threshold-reached', projectId: 'platform' }
+    const directory: ProjectDirectoryItem[] = [
+      { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'lead@example.com', role: 'manager' },
+      { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'dev@example.com', role: 'member' },
+      { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'former@example.com', role: 'manager', archivedAt: '2026-11-01T00:00:00.000Z' },
+      { entryType: 'project-member', teamId: 'core', projectId: 'other', memberKey: 'elsewhere@example.com', role: 'manager' },
+    ]
+
+    expect(isCurrentBudgetThresholdRecipient(event, 'Lead@example.com', directory)).toBe(true)
+    expect(isCurrentBudgetThresholdRecipient(event, 'dev@example.com', directory)).toBe(false)
+    expect(isCurrentBudgetThresholdRecipient(event, 'former@example.com', directory)).toBe(false)
+    expect(isCurrentBudgetThresholdRecipient(event, 'elsewhere@example.com', directory)).toBe(false)
+    expect(isCurrentBudgetThresholdRecipient({ eventType: 'project-budget.threshold-reached' }, 'lead@example.com', directory)).toBe(false)
+    expect(isCurrentBudgetThresholdRecipient({ eventType: 'comment.created' }, 'dev@example.com', directory)).toBe(true)
   })
 
   test('fans Work Item and Planning update events out to current recipients but not the actor', async () => {

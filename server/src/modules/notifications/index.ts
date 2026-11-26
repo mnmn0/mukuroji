@@ -101,9 +101,19 @@ export type {
   ScheduledMemberAccessExpiryReader,
 } from './application/member-access-expiry-notices'
 export { createDynamoDbMemberProjectReader } from './adapter-out/dynamodb/member-project-reader'
+/** Exposes the budget threshold alert reader port (ADR 0105) and its Project Directory adapter. */
+export type {
+  ScheduledBudgetThresholdReader,
+  ScheduledProjectBudgetStatus,
+} from './application/budget-threshold-alerts'
+export {
+  createDynamoDbBudgetAlertProjectReader,
+  type BudgetAlertProject,
+} from './adapter-out/dynamodb/budget-alert-project-reader'
 /** Exposes reminder override validation shared by HTTP adapters. */
 export { normalizeTeamReminderDays } from './domain/reminder-days'
 export {
+  BUDGET_THRESHOLD_REACHED_EVENT_TYPE,
   MEMBER_ACCESS_EXPIRING_EVENT_TYPE,
   MEMBER_ACCESS_EXPIRY_REASON,
   TIMESHEET_REMINDER_EVENT_TYPE,

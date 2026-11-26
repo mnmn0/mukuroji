@@ -189,6 +189,8 @@ export const timeTrackingMessages = {
   'timeTracking.budget.usePeriod': 'Report this period',
   'timeTracking.budget.actualNote': 'Actuals cover the report period selected above. Use “Report this period” to compare with the budget period.',
   'timeTracking.budget.empty': 'No budget has been set yet.',
+  'timeTracking.budget.alertPercent': 'Alert at (%)',
+  'timeTracking.budget.invalidAlertPercent': 'Enter a whole number from 1 to 1000 for the alert percentage.',
   'timeTracking.budget.invalidAmount': 'Enter a valid amount and currency code (for example USD).',
   'timeTracking.budget.saved': 'Budget saved.',
   'timeTracking.budget.currency': 'Currency',
