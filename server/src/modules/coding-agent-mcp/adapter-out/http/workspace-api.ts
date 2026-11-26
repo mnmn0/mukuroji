@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
   isCanonicalWorkItemKey,
+  PUBLIC_PLANNING_ENTITY_TYPES,
   PUBLIC_WORK_ITEM_RELATION_TYPES,
   type PublicCredentialOwner,
   type PublicWorkItemHierarchy,
@@ -10,6 +11,14 @@ import {
   type PublicSubtaskBatch,
   type PublicTeamList,
   type PublicWorkItemKeyLookup,
+  type PublicPlanningEntity,
+  type PublicPlanningEntityList,
+  type PublicPlanningEntityMutation,
+  type PublicPlanningStatusUpdate,
+  type PublicPlanningStatusUpdateMutation,
+  type PublicPlanningStatusUpdatePage,
+  type PublicWorkItemPlanning,
+  type PlanningUpdateTarget,
 } from '@mukuroji/contracts'
 import { AgentTaskError, type AgentTask } from '../../application/work-item-api'
 import type { WorkspaceApi } from '../../application/workspace-api'
@@ -58,6 +67,61 @@ const hierarchySchema: z.ZodType<PublicWorkItemHierarchy> = z.object({
   schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier,
   parentWorkItemId: identifier.nullable(), childWorkItemIds: z.array(identifier), wbsNumber: z.string().optional(),
 })
+
+const dateRangeSchema = z.object({ startDate: z.iso.date(), endDate: z.iso.date() })
+const healthSchema = z.enum(['unknown', 'on-track', 'at-risk', 'off-track'])
+const riskSchema = z.enum(['none', 'low', 'medium', 'high', 'critical'])
+const planningEntitySchema: z.ZodType<PublicPlanningEntity> = z.object({
+  id: identifier, type: z.enum(PUBLIC_PLANNING_ENTITY_TYPES), title: z.string(), description: z.string().optional(),
+  parentId: identifier.optional(), teamId: identifier.optional(), projectId: identifier.optional(),
+  ownerMemberId: identifier, status: z.enum(['proposed', 'planned', 'active', 'paused', 'completed', 'canceled']),
+  health: healthSchema, risk: riskSchema, progress: z.number().min(0).max(100), linkedWorkItemCount: z.number().int().min(0),
+  baseline: dateRangeSchema, forecast: dateRangeSchema,
+  cadence: z.object({ unit: z.enum(['week', 'month']), count: z.number().int().positive() }).optional(),
+  capacity: z.number().int().min(0).optional(), goalFramework: z.enum(['goal', 'objective', 'key-result']).optional(),
+  createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(),
+})
+const revision = z.number().int().min(0)
+const planningEntityListSchema: z.ZodType<PublicPlanningEntityList> = z.object({
+  schemaVersion: z.literal(1), revision, items: z.array(planningEntitySchema).max(10000),
+})
+const planningEntityMutationSchema: z.ZodType<PublicPlanningEntityMutation> = z.object({
+  schemaVersion: z.literal(1), revision, item: planningEntitySchema,
+})
+const workItemPlanningSchema: z.ZodType<PublicWorkItemPlanning> = z.object({
+  schemaVersion: z.literal(1), revision, teamId: identifier, workItemId: identifier,
+  cycleId: identifier.optional(), milestoneId: identifier.optional(), goalIds: z.array(identifier).max(1000),
+})
+const updateTargetSchema: z.ZodType<PlanningUpdateTarget> = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('project'), teamId: identifier, projectId: identifier }),
+  z.object({ type: z.literal('initiative'), entityId: identifier }),
+  z.object({ type: z.literal('team'), teamId: identifier }),
+])
+const statusUpdateSchema: z.ZodType<PublicPlanningStatusUpdate> = z.object({
+  id: identifier, version: z.number().int().positive(), target: updateTargetSchema, health: healthSchema, risk: riskSchema,
+  summary: z.string(), riskSummary: z.string(), decisionSummary: z.string(), helpNeeded: z.string(), nextAction: z.string(),
+  progress: z.object({ percent: z.number().min(0).max(100), linkedWorkItemCount: z.number().int().min(0) }),
+  authorMemberId: identifier, coveredDueAt: z.iso.datetime(), createdAt: z.iso.datetime(), acknowledgedAt: z.iso.datetime().optional(),
+})
+const statusUpdatePageSchema: z.ZodType<PublicPlanningStatusUpdatePage> = z.object({
+  schemaVersion: z.literal(1), revision, items: z.array(statusUpdateSchema).max(100),
+  hasMore: z.boolean(), nextCursor: z.string().min(1).max(2048).optional(),
+}).refine((page) => page.hasMore === (page.nextCursor !== undefined))
+const statusUpdateMutationSchema: z.ZodType<PublicPlanningStatusUpdateMutation> = z.object({
+  schemaVersion: z.literal(1), revision, item: statusUpdateSchema,
+})
+
+/**
+ * Tells whether two update targets name the same Project, Team, or Initiative.
+ * @param left - First target.
+ * @param right - Second target.
+ * @returns Whether they are the same target.
+ */
+function sameTarget(left: PlanningUpdateTarget, right: PlanningUpdateTarget): boolean {
+  if (left.type === 'project') return right.type === 'project' && left.teamId === right.teamId && left.projectId === right.projectId
+  if (left.type === 'team') return right.type === 'team' && left.teamId === right.teamId
+  return right.type === 'initiative' && left.entityId === right.entityId
+}
 
 /** Trusted operator configuration of a Workspace connection, which fixes no Team. */
 export type WorkspaceApiConfiguration = {
@@ -223,6 +287,67 @@ export function createWorkspaceApi(
       return scopedRelations(await request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}/subtask-batches`, subtaskBatchSchema, 'POST', input, key, {
         teamId: id(teamId, 'teamId'),
       }), teamId, workItemId)
+    },
+    /** Lists Planning entities of one type, checking the type and scope of each; see {@link WorkspaceApi.planningEntities}. */
+    async planningEntities(type, scope) {
+      const list = await request('planning/entities', planningEntityListSchema, 'GET', undefined, undefined, {
+        type,
+        ...(scope.teamId === undefined ? {} : { teamId: id(scope.teamId, 'teamId') }),
+        ...(scope.projectId === undefined ? {} : { projectId: id(scope.projectId, 'projectId') }),
+      })
+      if (list.items.some((item) => item.type !== type ||
+          (scope.teamId !== undefined && item.teamId !== scope.teamId) ||
+          (scope.projectId !== undefined && item.projectId !== scope.projectId))) {
+        throw new AgentTaskError('invalid_response', 'The API returned Planning entities outside the requested scope.')
+      }
+      return list
+    },
+    /** Creates a Milestone with `POST planning/milestones`; see {@link WorkspaceApi.createMilestone}. */
+    async createMilestone(input, key) {
+      const created = await request('planning/milestones', planningEntityMutationSchema, 'POST', input, key)
+      if (created.item.type !== 'milestone') throw new AgentTaskError('invalid_response', 'The API returned another kind of Planning entity.')
+      return created
+    },
+    /** Updates a Milestone with `PATCH`, checking its ID; see {@link WorkspaceApi.updateMilestone}. */
+    async updateMilestone(milestoneId, input, key) {
+      const updated = await request(`planning/milestones/${encodeURIComponent(id(milestoneId, 'id'))}`, planningEntityMutationSchema, 'PATCH', input, key)
+      if (updated.item.id !== milestoneId || updated.item.type !== 'milestone') {
+        throw new AgentTaskError('invalid_response', 'The API returned another Planning entity.')
+      }
+      return updated
+    },
+    /** Reads a Work Item's Cycle and Milestone; see {@link WorkspaceApi.workItemPlanning}. */
+    async workItemPlanning(teamId, workItemId) {
+      return scopedRelations(await request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}/planning`, workItemPlanningSchema, 'GET', undefined, undefined, {
+        teamId: id(teamId, 'teamId'),
+      }), teamId, workItemId)
+    },
+    /** Changes a Work Item's Cycle or Milestone with `PUT`; see {@link WorkspaceApi.updateWorkItemPlanning}. */
+    async updateWorkItemPlanning(teamId, workItemId, input, key) {
+      return scopedRelations(await request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}/planning`, workItemPlanningSchema, 'PUT', input, key, {
+        teamId: id(teamId, 'teamId'),
+      }), teamId, workItemId)
+    },
+    /** Lists a target's health updates, checking each one's target; see {@link WorkspaceApi.statusUpdates}. */
+    async statusUpdates(target, cursor, limit = 20) {
+      const query = target.type === 'initiative'
+        ? { targetType: 'initiative', entityId: id(target.entityId, 'initiativeId') }
+        : target.type === 'team'
+          ? { targetType: 'team', teamId: id(target.teamId, 'teamId') }
+          : { targetType: 'project', teamId: id(target.teamId, 'teamId'), projectId: id(target.projectId, 'projectId') }
+      const page = await request('planning/status-updates', statusUpdatePageSchema, 'GET', undefined, undefined, { ...query, cursor, limit })
+      if (page.items.some((item) => !sameTarget(item.target, target))) {
+        throw new AgentTaskError('invalid_response', 'The API returned the updates of another target.')
+      }
+      return page
+    },
+    /** Publishes a health update, checking its target; see {@link WorkspaceApi.publishStatusUpdate}. */
+    async publishStatusUpdate(input, key) {
+      const published = await request('planning/status-updates', statusUpdateMutationSchema, 'POST', input, key)
+      if (!sameTarget(published.item.target, input.target)) {
+        throw new AgentTaskError('invalid_response', 'The API published the update for another target.')
+      }
+      return published
     },
     /** Adds a comment to a Work Item; see {@link WorkspaceApi.addComment}. */
     addComment(teamId, workItemId, body, key) {

@@ -82,6 +82,18 @@ v1 の schema は `calendarSource` を持たないので、応答の `calendarPo
 
 `GET /api/v1/work-items/{workItemId}/completion-gate?teamId={teamId}` は Team の完了 Gate（[Work Item configuration](work-item-configuration.md#完了-gate)）をこの Work Item の現在の revision で判定し、`{ schemaVersion, teamId, workItemId, revision, conditions, blocksCompletion }` で返します（`WorkItemCompletionGateStatus`）。`conditions` は Team が `warn` か `required` にした条件を表示順に並べ、各要素は `condition`・`requirement`・`state`（`met` / `unmet` / `unavailable`）と、満たしていないときの `message` を持ちます。承認の件数を読めないとき、承認の条件は `unavailable` です。`blocksCompletion` は `required` の条件に `met` でないものがあると `true` で、その間 completed category への遷移は `409 conflict`（`errors[].code: "gate_not_satisfied"`）で拒否されます。Gate を設定していない Team では `conditions` が空で `blocksCompletion` は `false` です。判定は表示用で、完了の更新のときに server がもう一度判定します。条件は今後増えることがあるので、知らない `condition` は `message` で示してください。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。
 
+## Planning（Milestone・Cycle・健康度の更新）
+
+Planning の endpoint は、読み取りに `work-items:read`、書き込みに `work-items:write` の scope を使います。権限は Web の Planning と同じで、credential の持ち主が Web で読めない entity は返さず、書けない entity は `403` です（ADR 0107）。応答の `revision` は Workspace 全体の Planning の revision です。書き込みの `expectedRevision` は省略でき、省略すると最新の revision に書きます。送った場合は、その後に Planning が変わっていれば `409` です。書き込みはすべて `Idempotency-Key` が要り、応答が失われた後の同じ key の再試行は作り済みの結果を返します。
+
+`GET /api/v1/planning/entities?type={type}` は archive されていない Planning entity を `{ schemaVersion, revision, items }` で返します（`PublicPlanningEntityList`）。`type` は `portfolio`・`roadmap`・`initiative`・`goal`・`phase`・`milestone`・`release`・`cycle` のどれかで、`teamId`（と `projectId`）で Team・Project の entity に絞れます。
+
+`POST /api/v1/planning/milestones` は body `{ title, parentId, targetDate, teamId?, projectId?, description?, ownerMemberId?, status?, health?, risk?, baselineDate?, expectedRevision? }` で Milestone を作り、`201` と `{ schemaVersion, revision, item }` を返します（`PublicPlanningEntityMutation`）。Milestone は 1 日で、`targetDate` が予定日、`baselineDate`（既定は `targetDate`）が基準日です。親は Phase・Goal・Initiative・Roadmap で、Team と Project は親と同じにします。`PATCH /api/v1/planning/milestones/{milestoneId}` は送った項目だけを変え、`200` と同じ形を返します。Team・Project・親は変えられません。
+
+`GET /api/v1/work-items/{workItemId}/planning?teamId={teamId}` は Work Item の Cycle・Milestone・Goal を `{ schemaVersion, revision, teamId, workItemId, cycleId?, milestoneId?, goalIds }` で返します（`PublicWorkItemPlanning`）。読めない entity は含めません。`PUT` は body `{ cycleId?, milestoneId?, expectedRevision? }` で Cycle と Milestone を変え、`null` で外します。送らない項目は今の値のままです。
+
+`GET /api/v1/planning/status-updates?targetType={project|team|initiative}` は健康度の更新を新しい順に `{ schemaVersion, revision, items, hasMore, nextCursor? }` で返します（`PublicPlanningStatusUpdatePage`）。対象は `teamId` と `projectId`（project）、`teamId`（team）、`entityId`（initiative）で指します。`POST /api/v1/planning/status-updates` は body `{ target, health, summary, risk?, riskSummary?, decisionSummary?, helpNeeded?, nextAction?, expectedRevision? }` で更新を公開し、`201` と `{ schemaVersion, revision, item }` を返します。更新の cadence がない対象は `409 conflict` です（cadence は Web の Planning で設定します）。公開した更新は Public API から編集・削除できません。
+
 ## Work Item Type catalog
 
 `GET /api/v1/work-item-types?teamId={teamId}` は権限内の作成用schemaを返します。

@@ -50,6 +50,7 @@ import {
   type PublicAttachmentService,
   type PublicDocumentService,
   type PublicWorkItemRelationService,
+  type PublicPlanningService,
   type PublicDirectoryService,
   type PublicWorkItemService,
 } from './public-api'
@@ -254,6 +255,8 @@ function createTestRouter(input: {
   documents?: PublicDocumentService
   /** Relation service used by relation route tests. */
   workItemRelations?: PublicWorkItemRelationService
+  /** Planning service used by Planning route tests. */
+  planning?: PublicPlanningService
   /** Attachment service used by attachment route tests. */
   attachments?: PublicAttachmentService
   /** Directory service used by Team, Project member, and key route tests. */
@@ -294,6 +297,7 @@ function createTestRouter(input: {
     ...(input.agentTelemetry ? { agentTelemetry: input.agentTelemetry } : {}),
     ...(input.documents ? { documents: input.documents } : {}),
     ...(input.workItemRelations ? { workItemRelations: input.workItemRelations } : {}),
+    ...(input.planning ? { planning: input.planning } : {}),
     ...(input.attachments ? { attachments: input.attachments } : {}),
     ...(input.directory ? { directory: input.directory } : {}),
     openApiDocument: { openapi: '3.1.0' },
@@ -848,6 +852,115 @@ describe('public API router', () => {
       'create team-1/task-1 child task-3 relation-key relation-key',
       'authorize team-1/task-1->task-3',
       'delete team-1/task-1 blockedBy task-2 delete-key',
+    ])
+  })
+
+  test('reads and writes Planning with the matching scopes, validates bodies, and replays a keyed Milestone create', async () => {
+    const calls: string[] = []
+    const entity = {
+      id: 'ms-1', type: 'milestone' as const, title: 'Beta', parentId: 'initiative-1', ownerMemberId: 'owner', status: 'planned' as const,
+      health: 'unknown' as const, risk: 'none' as const, progress: 0, linkedWorkItemCount: 0,
+      baseline: { startDate: '2026-12-10', endDate: '2026-12-10' }, forecast: { startDate: '2026-12-10', endDate: '2026-12-10' },
+      createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z',
+    }
+    const update = {
+      id: 'pu-1', version: 1, target: { type: 'team' as const, teamId: 'team-1' }, health: 'on-track' as const, risk: 'none' as const,
+      summary: 'On plan.', riskSummary: '', decisionSummary: '', helpNeeded: '', nextAction: '',
+      progress: { percent: 0, linkedWorkItemCount: 0 }, authorMemberId: 'owner',
+      coveredDueAt: '2026-11-27T00:00:00.000Z', createdAt: '2026-11-26T00:00:00.000Z',
+    }
+    const { platform, router } = createTestRouter({
+      planning: {
+        async listEntities(_credential, type, scope) {
+          calls.push(`list ${type} ${scope.teamId ?? '-'} ${scope.projectId ?? '-'}`)
+          return { schemaVersion: 1, revision: 4, items: [entity] }
+        },
+        async authorizeMilestoneCreate(_credential, input) { calls.push(`authorize create ${input.title}`) },
+        async createMilestone(_credential, input, context) {
+          calls.push(`create ${input.title} ${input.parentId} ${input.targetDate} ${context.idempotencyKey}`)
+          return { schemaVersion: 1, revision: 5, item: entity }
+        },
+        async authorizeMilestoneUpdate() { throw new Error('not used') },
+        async updateMilestone(_credential, milestoneId, input) {
+          calls.push(`update ${milestoneId} ${JSON.stringify(input)}`)
+          return { schemaVersion: 1, revision: 6, item: entity }
+        },
+        async getWorkItemPlanning(_credential, teamId, workItemId) {
+          return { schemaVersion: 1, revision: 6, teamId, workItemId, goalIds: [] }
+        },
+        async authorizeWorkItemPlanningChange() { throw new Error('not used') },
+        async updateWorkItemPlanning(_credential, teamId, workItemId, input) {
+          calls.push(`planning ${teamId}/${workItemId} ${JSON.stringify(input)}`)
+          return { schemaVersion: 1, revision: 7, teamId, workItemId, cycleId: 'cycle-1', goalIds: [] }
+        },
+        async listStatusUpdates(_credential, target, limit) {
+          calls.push(`updates ${JSON.stringify(target)} ${limit}`)
+          return { schemaVersion: 1, revision: 7, items: [update], hasMore: false }
+        },
+        async authorizeStatusUpdate() { throw new Error('not used') },
+        async publishStatusUpdate(_credential, input) {
+          calls.push(`publish ${JSON.stringify(input)}`)
+          return { schemaVersion: 1, revision: 8, item: update }
+        },
+      },
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+    const read = (path: string, secret = reader.secret) => router.request(`http://localhost${path}`, { headers: { Authorization: `Bearer ${secret}` } })
+    const write = (path: string, method: string, key: string, body: unknown, secret = writer.secret) => router.request(`http://localhost${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
+      body: JSON.stringify(body),
+    })
+    const milestone = { title: 'Beta', parentId: 'initiative-1', targetDate: '2026-12-10' }
+
+    const listed = await read('/v1/planning/entities?type=milestone&teamId=team-1')
+    const unknownType = await read('/v1/planning/entities?type=task')
+    const projectWithoutTeam = await read('/v1/planning/entities?type=cycle&projectId=web')
+    const listDenied = await read('/v1/planning/entities?type=milestone', writer.secret)
+    const created = await write('/v1/planning/milestones', 'POST', 'milestone-key', milestone)
+    const replayed = await write('/v1/planning/milestones', 'POST', 'milestone-key', milestone)
+    const createDenied = await write('/v1/planning/milestones', 'POST', 'reader-key', milestone, reader.secret)
+    const withoutParent = await write('/v1/planning/milestones', 'POST', 'parent-key', { title: 'Beta', targetDate: '2026-12-10' })
+    const badDate = await write('/v1/planning/milestones', 'POST', 'date-key', { ...milestone, targetDate: '2026-02-30' })
+    const updated = await write('/v1/planning/milestones/ms-1', 'PATCH', 'patch-key', { health: 'at-risk', description: null })
+    const emptyPatch = await write('/v1/planning/milestones/ms-1', 'PATCH', 'empty-key', { expectedRevision: 3 })
+    const linked = await write('/v1/work-items/task-1/planning?teamId=team-1', 'PUT', 'link-key', { cycleId: 'cycle-1', milestoneId: null })
+    const emptyLink = await write('/v1/work-items/task-1/planning?teamId=team-1', 'PUT', 'empty-link-key', { expectedRevision: 3 })
+    const planning = await read('/v1/work-items/task-1/planning?teamId=team-1')
+    const updates = await read('/v1/planning/status-updates?targetType=team&teamId=team-1&limit=5')
+    const badTarget = await read('/v1/planning/status-updates?targetType=portfolio&entityId=p-1')
+    const published = await write('/v1/planning/status-updates', 'POST', 'update-key', { target: { type: 'team', teamId: 'team-1' }, health: 'on-track', summary: 'On plan.' })
+    const withoutSummary = await write('/v1/planning/status-updates', 'POST', 'summary-key', { target: { type: 'team', teamId: 'team-1' }, health: 'on-track' })
+
+    expect(listed.status).toBe(200)
+    expect(await listed.json()).toEqual({ schemaVersion: 1, revision: 4, items: [entity] })
+    expect(unknownType.status).toBe(400)
+    expect(projectWithoutTeam.status).toBe(400)
+    expect(listDenied.status).toBe(403)
+    expect(created.status).toBe(201)
+    expect(replayed.status).toBe(201)
+    expect(replayed.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(createDenied.status).toBe(403)
+    expect(withoutParent.status).toBe(400)
+    expect(badDate.status).toBe(400)
+    expect(updated.status).toBe(200)
+    expect(emptyPatch.status).toBe(400)
+    expect(linked.status).toBe(200)
+    expect(emptyLink.status).toBe(400)
+    expect(await planning.json()).toEqual({ schemaVersion: 1, revision: 6, teamId: 'team-1', workItemId: 'task-1', goalIds: [] })
+    expect(updates.status).toBe(200)
+    expect(badTarget.status).toBe(400)
+    expect(published.status).toBe(201)
+    expect(withoutSummary.status).toBe(400)
+    expect(calls).toEqual([
+      'list milestone team-1 -',
+      'create Beta initiative-1 2026-12-10 milestone-key',
+      'authorize create Beta',
+      'update ms-1 {"description":null,"health":"at-risk"}',
+      'planning team-1/task-1 {"cycleId":"cycle-1","milestoneId":null}',
+      'updates {"type":"team","teamId":"team-1"} 5',
+      'publish {"target":{"type":"team","teamId":"team-1"},"health":"on-track","summary":"On plan."}',
     ])
   })
 

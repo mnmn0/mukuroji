@@ -74,6 +74,9 @@ Workspace profile は `1.0.0` より後に公開される `mcp.mjs` から使え
 ように頼むと、`get_issue` や `list_issues` で読みます。「タスクを作って」「`ABC-123` の優先度を上げて」「コメントを書いて」と頼むと、
 `save_issue` と `save_comment` で書き込みます。「`ABC-123` を 3 つの子タスクに分けて」「`ABC-5` が `ABC-4` を止めていると記録して」と
 頼むと、`create_subtasks` と `save_relation` で親子と依存を付けます。分け方は先に agent に案を出させ、確認してから作らせてください。
+「`ABC-123` を今の Cycle に入れて」「Beta の Milestone を 9 月 4 日にずらして」「Project の今週の健康度を報告して」と頼むと、
+`save_issue` の `cycleId`、`save_milestone`、`save_status_update` で Planning を更新します。健康度の更新は公開すると直せないため、
+内容を確認してから公開させてください。
 読むだけにしたい場合は `MUKUROJI_MCP_READ_ONLY=true` を足します。
 読み書きできる範囲は token の持ち主が Web で扱える範囲と同じです。Software factory が off の環境では、
 **agent を接続** の設定例がはじめからこの profile になります。
