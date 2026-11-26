@@ -218,6 +218,53 @@ describe('GitHub issue protocol', () => {
     await protocol.push(request, { ...mutation, expectedExternalVersion: version })
     expect(requests.map((entry) => entry.method)).toEqual(['GET', 'GET', 'PATCH'])
   })
+
+  test('returns its own completed write on a retry instead of reporting a changed issue', async () => {
+    const protocol = new GitHubIssueProtocol()
+    const mutation = {
+      externalId: 'acme/app#12',
+      resourceType: 'issue' as const,
+      workItemRevision: 4,
+      title: 'Fix login',
+      description: 'Steps to reproduce',
+      originMarker: 'v1.payload.signature',
+      operationId: 'operation-1',
+      statusCategory: 'completed',
+      expectedExternalVersion: '2026-11-25T10:00:00Z',
+    }
+    // The first PATCH landed but its response was lost: the issue holds this write's marker.
+    const written = issue({
+      updated_at: '2026-11-25T11:00:00Z',
+      state: 'closed',
+      body: 'Steps to reproduce\n\n<!-- mukuroji-origin:v1.payload.signature -->',
+    })
+    const replay = createRequester([{ status: 200, payload: written }])
+    expect(await protocol.push(replay.request, mutation)).toMatchObject({
+      externalVersion: '2026-11-25T11:00:00Z',
+      state: 'closed',
+      originMarker: 'v1.payload.signature',
+    })
+    expect(replay.requests.map((entry) => entry.method)).toEqual(['GET'])
+
+    // A description with CRLF line endings reads back with LF and still counts as this write.
+    const crlf = createRequester([{
+      status: 200,
+      payload: { ...written, body: 'Line one\r\nLine two\r\n\r\n<!-- mukuroji-origin:v1.payload.signature -->' },
+    }])
+    expect(await protocol.push(crlf.request, { ...mutation, description: 'Line one\r\nLine two' }))
+      .toMatchObject({ description: 'Line one\nLine two' })
+    expect(crlf.requests.map((entry) => entry.method)).toEqual(['GET'])
+
+    // An edit that kept the marker but changed the contents is still a change.
+    const edited = createRequester([{ status: 200, payload: { ...written, title: 'Fix login on Safari' } }])
+    await expect(protocol.push(edited.request, mutation)).rejects.toMatchObject({ code: 'ConnectorExternalVersionChanged' })
+    // Another write's marker is a change too.
+    const other = createRequester([{
+      status: 200,
+      payload: { ...written, body: 'Steps to reproduce\n\n<!-- mukuroji-origin:v1.other.signature -->' },
+    }])
+    await expect(protocol.push(other.request, mutation)).rejects.toMatchObject({ code: 'ConnectorExternalVersionChanged' })
+  })
 })
 
 describe('bundled GitHub connector settings', () => {

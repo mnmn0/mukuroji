@@ -1,10 +1,16 @@
 import {
   parseWorkItemKey,
+  type CreatePublicSubtaskBatchRequest,
   type CreatePublicWorkItemRequest,
   type PublicCredentialOwner,
   type PublicProjectMemberList,
+  type PublicSubtaskBatch,
   type PublicTeamList,
+  type PublicWorkItemHierarchy,
   type PublicWorkItemKeyLookup,
+  type PublicWorkItemRelationList,
+  type PublicWorkItemRelationMutation,
+  type PublicWorkItemRelationType,
   type TeamIssueCommentResponseItem,
   type UpdatePublicWorkItemRequest,
   type WorkflowStatusCategory,
@@ -117,7 +123,85 @@ export interface WorkspaceApi {
    * @returns The saved comment.
    */
   addComment(teamId: string, workItemId: string, body: string, key: string): Promise<TeamIssueCommentResponseItem>
+  /**
+   * Reads a Work Item's parent, children, and WBS number.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The readable parent and children.
+   */
+  hierarchy(teamId: string, workItemId: string): Promise<PublicWorkItemHierarchy>
+  /**
+   * Lists a Work Item's relations other than children.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns Relations whose other Work Item the owner can read.
+   */
+  relations(teamId: string, workItemId: string): Promise<PublicWorkItemRelationList>
+  /**
+   * Links two Work Items of one Team.
+   * @param teamId - Team that owns both Work Items.
+   * @param workItemId - Work Item the relation is named from.
+   * @param input - Relation type and the other Work Item.
+   * @param key - Idempotency key of the logical write.
+   * @returns The created relation.
+   */
+  createRelation(
+    teamId: string,
+    workItemId: string,
+    input: { type: PublicWorkItemRelationType, targetWorkItemId: string },
+    key: string,
+  ): Promise<PublicWorkItemRelationMutation>
+  /**
+   * Removes a relation between two Work Items of one Team.
+   * @param teamId - Team that owns both Work Items.
+   * @param workItemId - Work Item the relation is named from.
+   * @param targetWorkItemId - Other Work Item.
+   * @param type - Relation type from the first Work Item's point of view.
+   * @param key - Idempotency key of the logical write.
+   * @returns The removed relation.
+   */
+  deleteRelation(
+    teamId: string,
+    workItemId: string,
+    targetWorkItemId: string,
+    type: PublicWorkItemRelationType,
+    key: string,
+  ): Promise<PublicWorkItemRelationMutation>
+  /**
+   * Binds an idempotency key to a parent and the whole list of subtasks before any is created, so
+   * that the same key with another list is refused instead of adding the difference.
+   * @param teamId - Team of the parent.
+   * @param workItemId - Parent Work Item.
+   * @param input - The subtasks in order, as they will be created.
+   * @param key - Idempotency key of the batch.
+   * @returns The reserved batch.
+   */
+  reserveSubtaskBatch(
+    teamId: string,
+    workItemId: string,
+    input: CreatePublicSubtaskBatchRequest,
+    key: string,
+  ): Promise<PublicSubtaskBatch>
 }
+
+/** One Work Item `create_subtasks` creates under the parent. */
+export type WorkspaceSubtaskInput = {
+  /** Title. */
+  title: string
+  /** Description text. */
+  description?: string
+  /** Assignee member ID, or `me`; defaults to `me`. */
+  assigneeId?: string
+  /** Work Item Type ID; the parent's Type must allow it as a child. */
+  typeId?: string
+  /** Priority; defaults to medium. */
+  priority?: 'high' | 'medium' | 'low'
+  /** Due date as `YYYY-MM-DD`. */
+  dueDate?: string
+}
+
+/** Most Work Items one `create_subtasks` call creates. */
+export const WORKSPACE_SUBTASK_LIMIT = 20
 
 /** Fields of `save_issue`; an `id` updates that Work Item, no `id` creates one. */
 export type WorkspaceIssueSaveInput = {
@@ -373,6 +457,155 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
     async saveComment(reference: string, teamId: string | undefined, body: string, idempotencyKey: string) {
       const resolved = await resolveIssue(reference, teamId)
       return { ...resolved, comment: await api.addComment(resolved.teamId, resolved.workItemId, body, idempotencyKey) }
+    },
+    /**
+     * Reads a Work Item's parent, children, WBS number, and other relations by key or ID.
+     * @param reference - Key or Work Item ID.
+     * @param teamId - Team of a Work Item ID.
+     * @returns The hierarchy and the relations other than children.
+     */
+    async listRelations(reference: string, teamId?: string) {
+      const resolved = await resolveIssue(reference, teamId)
+      const [hierarchy, list] = await Promise.all([
+        api.hierarchy(resolved.teamId, resolved.workItemId),
+        api.relations(resolved.teamId, resolved.workItemId),
+      ])
+      return {
+        ...resolved,
+        parentId: hierarchy.parentWorkItemId,
+        childIds: hierarchy.childWorkItemIds,
+        ...(hierarchy.wbsNumber === undefined ? {} : { wbsNumber: hierarchy.wbsNumber }),
+        relations: list.relations.map((relation) => ({
+          type: relation.type,
+          relatedIssueId: relation.targetWorkItemId,
+          ...(relation.createdAt === undefined ? {} : { createdAt: relation.createdAt }),
+        })),
+      }
+    },
+    /**
+     * Links or unlinks two Work Items of one Team by key or ID.
+     * @param input - Both Work Items, the relation type, whether to remove it, and the idempotency key.
+     * @returns The Work Item reference and the changed relation.
+     */
+    async saveRelation(input: {
+      /** Work Item the relation is named from. */
+      issueId: string
+      /** Team of Work Item IDs. */
+      teamId?: string
+      /** Relation type from the first Work Item's point of view. */
+      type: PublicWorkItemRelationType
+      /** Other Work Item, by key or by ID in the same Team. */
+      relatedIssueId: string
+      /** Whether to remove the relation instead of adding it. */
+      remove?: boolean
+      /** Idempotency key of the logical write. */
+      idempotencyKey: string
+    }) {
+      const resolved = await resolveIssue(input.issueId, input.teamId)
+      const related = await resolveIssue(input.relatedIssueId, input.teamId)
+      if (related.teamId !== resolved.teamId) {
+        throw new AgentTaskError('invalid_request', 'Relations link Work Items of one Team. Both Work Items must be in the same Team.')
+      }
+      const result = input.remove === true
+        ? await api.deleteRelation(resolved.teamId, resolved.workItemId, related.workItemId, input.type, input.idempotencyKey)
+        : await api.createRelation(resolved.teamId, resolved.workItemId, {
+            type: input.type,
+            targetWorkItemId: related.workItemId,
+          }, input.idempotencyKey)
+      return {
+        ...resolved,
+        removed: input.remove === true,
+        relation: { type: result.relation.type, relatedIssueId: result.relation.targetWorkItemId },
+      }
+    },
+    /**
+     * Creates Work Items under a parent, one by one, each with a key derived from the call's key, so
+     * that a retry with the same arguments and key finishes the remaining ones without duplicates.
+     * @param input - Parent, the new Work Items, and the idempotency key.
+     * @returns The parent reference and the created children in input order.
+     */
+    async createSubtasks(input: {
+      /** Parent Work Item by key or ID. */
+      parentId: string
+      /** Team of a Work Item ID. */
+      teamId?: string
+      /** Work Items to create under the parent. */
+      subtasks: WorkspaceSubtaskInput[]
+      /** Idempotency key of the logical write. */
+      idempotencyKey: string
+    }) {
+      if (input.subtasks.length === 0 || input.subtasks.length > WORKSPACE_SUBTASK_LIMIT) {
+        throw new AgentTaskError('invalid_request', `Pass 1 to ${WORKSPACE_SUBTASK_LIMIT} subtasks.`)
+      }
+      const parent = await resolveIssue(input.parentId, input.teamId)
+      // Children join the parent's Project so that the people who see the parent also see them.
+      const [{ memberId: owner }, parentIssue] = await Promise.all([api.me(), api.getIssue(parent.teamId, parent.workItemId)])
+      const entries = input.subtasks.map((subtask) => ({
+        title: subtask.title,
+        assigneeUserId: subtask.assigneeId === undefined || subtask.assigneeId === 'me' ? owner : subtask.assigneeId,
+        priority: subtask.priority ?? 'medium',
+        ...(subtask.description === undefined ? {} : { description: subtask.description }),
+        ...(subtask.typeId === undefined ? {} : { workItemTypeId: subtask.typeId }),
+        ...(subtask.dueDate === undefined ? {} : { dueDate: subtask.dueDate }),
+      }))
+      // The key is bound to the parent and the whole list first, so the same key with a changed list
+      // fails here before any subtask is created, while the same list resumes where it stopped.
+      try {
+        await api.reserveSubtaskBatch(parent.teamId, parent.workItemId, { subtasks: entries }, `${input.idempotencyKey}.batch`)
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'idempotency_conflict' && !error.retryable) {
+          throw new AgentTaskError(
+            'idempotency_conflict',
+            'This idempotencyKey was already used for create_subtasks with another parent or another list of subtasks. No subtask was created. Retry with the same arguments, or use a new idempotencyKey for a different list.',
+            false,
+          )
+        }
+        throw error
+      }
+      const created: Array<{ id: string, title: string, key?: string }> = []
+      for (const [index, entry] of entries.entries()) {
+        let childId: string | undefined
+        try {
+          const child = await api.createIssue({
+            teamId: parent.teamId,
+            ...entry,
+            ...(parentIssue.assignedProjectId ? { assignedProjectId: parentIssue.assignedProjectId } : {}),
+          }, `${input.idempotencyKey}.subtask.${index}`)
+          childId = child.id
+          await api.createRelation(parent.teamId, child.id, {
+            type: 'parent',
+            targetWorkItemId: parent.workItemId,
+          }, `${input.idempotencyKey}.subtask.${index}.parent`)
+          created.push({ id: child.id, title: child.title, ...await keyAfterWrite(parent.teamId, child.id) })
+        } catch (error) {
+          const done = created.length === 0 ? 'No subtask was finished.' : `Subtasks 1 to ${created.length} were created under the parent.`
+          // The child creation key replays only the same body, and the body carries the parent's Project. A
+          // non-retryable conflict there means the body changed, usually because the parent moved to another
+          // Project after the first attempt created this child. A retryable one is an attempt still in progress,
+          // which the same key finishes, so it keeps the ordinary retry guidance below.
+          const projectChanged = childId === undefined && error instanceof AgentTaskError
+            && error.code === 'idempotency_conflict' && !error.retryable
+          if (projectChanged) {
+            throw new AgentTaskError(
+              'idempotency_conflict',
+              `${done} Subtask ${index + 1} was already created by an earlier attempt with this idempotencyKey, but the parent's Project (or this subtask's arguments) has changed since then. Move the parent back to its earlier Project and retry with the same arguments and idempotencyKey, or check the parent's subtasks with list_relations before retrying with a new idempotencyKey.`,
+              false,
+            )
+          }
+          const message = error instanceof AgentTaskError ? error.message : 'The request failed.'
+          // The child exists once its creation succeeded, so name it: a Type the parent does not allow can be
+          // changed with save_issue, and the same arguments and key then replay the creation and link it.
+          const unlinked = childId === undefined
+            ? ''
+            : ` Work Item ${childId} was created but is not linked to the parent yet; if its Type is not allowed under the parent, change it with save_issue and retry.`
+          throw new AgentTaskError(
+            error instanceof AgentTaskError ? error.code : 'transport',
+            `${done} Subtask ${index + 1} failed: ${message}${unlinked} Retry with the same arguments and idempotencyKey to finish without duplicates.`,
+            error instanceof AgentTaskError ? error.retryable : true,
+          )
+        }
+      }
+      return { ...parent, subtasks: created }
     },
   }
 }
