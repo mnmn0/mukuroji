@@ -1,4 +1,4 @@
-import { splitDocumentPageLinks } from '../model/markdownFolderImport'
+import { splitDocumentPageLinks } from '@mukuroji/contracts'
 
 /**
  * Props of stored text that may hold links to other pages.

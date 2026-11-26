@@ -4,6 +4,15 @@ import type {
   DocumentHeadingBlock,
   DocumentTableRow,
 } from '@mukuroji/contracts'
+import { createNativeBlockChecker } from './markdownNativeBlocks'
+import {
+  isMarkdownImportWithinParseLimits,
+  readInlineLinkRanges,
+  readMarkdownImportStructure,
+  type MarkdownImportStructure,
+  type MarkdownLineRange,
+  type MarkdownTopLevelBlock,
+} from './markdownStructure'
 
 /**
  * Largest Markdown file the import accepts, in bytes. A stored page must fit
@@ -132,6 +141,15 @@ const THEMATIC_BREAK = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/u
 /** One cell of a table delimiter row, such as `---` or `:-:`. */
 const DELIMITER_CELL = /^:?-+:?$/u
 
+/**
+ * Markdown that can tie blank-separated parts of a file together: a reference or footnote
+ * definition, a footnote reference, a quote, or a list item, also inside a quote or a list.
+ */
+const MAY_SPAN_BLOCKS = /^[ \t>]*\[|\[\^|^ {0,3}>|^[ \t>]*(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/mu
+
+/** A link destination that reads back as written without `<>` or escapes. */
+const PLAIN_DESTINATION = /^[^\s()<>\\&]+$/u
+
 /** Code-fence language identifiers the server accepts. */
 const SAFE_LANGUAGE = /^[A-Za-z0-9][A-Za-z0-9_+.-]{0,99}$/u
 
@@ -139,8 +157,8 @@ const SAFE_LANGUAGE = /^[A-Za-z0-9][A-Za-z0-9_+.-]{0,99}$/u
  * Converts Markdown into the title and blocks of one Document page.
  *
  * Headings, fenced code, Mermaid diagrams, task lists, and pipe tables become
- * their matching blocks; everything else stays as plain paragraph text, since
- * paragraphs store text rather than rendered Markdown. When the source starts
+ * their matching blocks; everything else stays as paragraph Markdown, escapes
+ * included, since paragraphs are shown as Markdown. When the source starts
  * with the only `#` heading, as Markdown exported from a page does, that
  * heading becomes the title and `##` becomes level 1, so exported pages keep
  * their heading levels. Otherwise levels are shifted so the shallowest heading
@@ -157,15 +175,48 @@ export function convertMarkdownToDocument(
   if (new TextEncoder().encode(source).length > MARKDOWN_IMPORT_MAX_BYTES) {
     return { ok: false, code: 'too-large' }
   }
-  const lines = source.replace(/^\uFEFF/u, '').split(/\r\n?|\n/u)
-  if (lines.every((line) => line.trim() === '')) {
+  const sourceLines = source.replace(/^\uFEFF/u, '').split(/\r\n?|\n/u)
+  if (sourceLines.every((line) => line.trim() === '')) {
     return { ok: false, code: 'empty' }
   }
-  const scanned = scanBlocks(lines, options.createId, options.resolveLink)
+  const text = sourceLines.join('\n')
+  // Each block is rendered on its own, so the file's reference definitions are applied before it
+  // is split, and blocks the file joins, such as a loose list or a footnote, are put back together.
+  // The file is parsed only when it has a definition, a footnote, or a list item, is within the
+  // parse limits, and a line scan with throwaway IDs has not rejected an oversized table.
+  // A file the parser could take too long on is split by lines only, as before references were
+  // made inline.
+  // A file whose link targets are rewritten is parsed too, so only links the parser reads are
+  // rewritten, and code examples keep their text.
+  const rewritesLinks = options.resolveLink !== undefined && text.includes('](')
+  const spans = (MAY_SPAN_BLOCKS.test(text) || rewritesLinks) && isMarkdownImportWithinParseLimits(text)
+  if (spans) {
+    const checked = scanBlocks(sourceLines, () => 'unused', undefined, undefined, undefined, false)
+    if (!checked.ok) return checked
+  }
+  const linked = spans && rewritesLinks && options.resolveLink
+    ? rewriteParsedLinkTargets(text, options.resolveLink, readInlineLinkRanges(text))
+    : text
+  // Every destination a reference is written with stays in the page's text, so references that
+  // add more than the page can hold are refused before the long text is built.
+  const structure = spans ? readMarkdownImportStructure(linked, options.resolveLink, MAX_CONTENT_BYTES) : undefined
+  if (structure === 'too-large') return { ok: false, code: 'too-large' }
+  const scanned = scanBlocks(
+    structure?.text.split('\n') ?? sourceLines,
+    options.createId,
+    // A parsed file has its link targets rewritten already.
+    structure === undefined ? options.resolveLink : undefined,
+    structure?.topLevelBlocks,
+    structure?.footnoteReferences.map(({ line }) => line).sort((a, b) => a - b),
+  )
   if (!scanned.ok) return scanned
+  const together = structure === undefined
+    ? scanned.blocks
+    : keepFileBlocksTogether(scanned.blocks, scanned.paragraphLines, structure, MAX_CONTENT_BYTES)
+  if (together === 'too-large') return { ok: false, code: 'too-large' }
+  let body = together
 
   let title = options.fallbackTitle
-  let body = scanned.blocks
   let titleTaken = false
   const first = body[0]
   const topLevelCount = body.filter(
@@ -226,43 +277,155 @@ export function titleFromMarkdownFileName(fileName: string): string {
  * @param lines - Source lines without line terminators.
  * @param createId - ID factory.
  * @param resolveLink - Optional rewriter of link targets.
+ * @param topLevelBlocks - Lines and kinds of each top-level block of the parsed file, when it was
+ *   parsed. A list, quote, or footnote definition is kept whole in paragraph Markdown, so a code
+ *   fence, heading, table, divider, or task item nested in it keeps its place instead of becoming
+ *   a block of its own. Only a top-level list of task items alone becomes a checklist.
+ * @param footnoteLines - Lines that hold a footnote reference, in ascending order, when the file was
+ *   parsed. A top-level block with one of them, of any kind, is kept whole in paragraph Markdown,
+ *   with no part of it split off by the line scan, and such a paragraph never becomes an embed:
+ *   a checklist, table, heading, or embed shows its text without rendering footnotes, so it would
+ *   show the label instead of the footnote, and the definition, which only a paragraph block
+ *   carries along, would be lost. A link that uses a reference definition needs none of this,
+ *   since its destination is already written inline.
+ * @param checkNative - Whether a heading, checklist, table, or embed is made only of Markdown it
+ *   shows exactly, keeping other Markdown as a paragraph. A scan that only looks for an oversized
+ *   table leaves this off, which spares the parses.
  * @returns Scanned blocks, or a table that exceeds the server limits.
  */
 function scanBlocks(
   lines: readonly string[],
   createId: (prefix: string) => string,
   resolveLink?: (href: string) => string | undefined,
+  topLevelBlocks?: readonly MarkdownTopLevelBlock[],
+  footnoteLines?: readonly number[],
+  checkNative = true,
 ):
-  | { ok: true; blocks: ScannedBlock[] }
+  | { ok: true; blocks: ScannedBlock[]; paragraphLines: Map<string, MarkdownLineRange> }
   | { ok: false; code: 'table-too-large' } {
   const blocks: ScannedBlock[] = []
+  /** Source lines of each paragraph block, by block ID. */
+  const paragraphLines = new Map<string, MarkdownLineRange>()
   /** Rewrites link targets with the resolver, or keeps the text as written. */
   const rewrite: LinkRewriter = resolveLink
-    ? (raw) => rewriteLinkTargets(raw, resolveLink)
+    // Without a parse, text that may hold a code block keeps its link-like text as written.
+    ? (raw) => MAY_HOLD_CODE_BLOCK.test(raw) ? raw : rewriteLinkTargets(raw, resolveLink)
     : (raw) => raw
+  /** Whether each top-level block is a list of task items alone, once worked out. */
+  const checklistBlocks = new Map<MarkdownLineRange, boolean>()
+  /** Rewritten lines, by line, read once each when a native block is checked against them. */
+  const rewrittenLines = new Map<number, string>()
+  /** Whether a heading, checklist item, table, or embed would show its Markdown exactly. */
+  const nativeBlocks = createNativeBlockChecker(
+    lines.length,
+    (line) => {
+      const known = rewrittenLines.get(line)
+      if (known !== undefined) return known
+      const source = rewrite(lines[line] ?? '')
+      rewrittenLines.set(line, source)
+      return source
+    },
+    (kind, line) => {
+      if (kind === 'heading') {
+        const heading = ATX_HEADING.exec(line)
+        return heading?.[1] ? unescapeMarkdown(removeClosingHashes(heading[2] ?? '')) : undefined
+      }
+      if (kind === 'task') {
+        const task = TASK_ITEM.exec(line)
+        return task ? unescapeMarkdown((task[2] ?? '').trim()) : undefined
+      }
+      const link = readStandaloneLink(line)
+      return link ? unescapeMarkdown(link.label).trim() : undefined
+    },
+  )
+  /**
+   * Tells whether a task item line renders as the checklist item read from it would show it.
+   *
+   * @param line - Index of the task item line.
+   * @returns Whether a checklist item shows it exactly.
+   */
+  const showsTaskLineExactly = (line: number) => {
+    const task = TASK_ITEM.exec(lines[line] ?? '')
+    return task !== null && (!checkNative || nativeBlocks.shows('task', line, readTask(task).text))
+  }
+  /**
+   * Reads a task item the way a checklist item stores it.
+   *
+   * @param task - Match of a task item line.
+   * @returns The item's text and check state.
+   */
+  const readTask = (task: RegExpExecArray) => ({
+    text: unescapeMarkdown(rewrite((task[2] ?? '').trim())),
+    checked: task[1] !== ' ',
+  })
+  /**
+   * Tells whether every task item line of a top-level block renders as its checklist item shows.
+   *
+   * @param range - Lines of the block.
+   * @returns Whether a checklist shows the whole block exactly.
+   */
+  const everyTaskLineShownExactly = (range: MarkdownLineRange) => {
+    for (let line = range.first; line <= range.last; line += 1) {
+      if ((lines[line] ?? '').trim() !== '' && !showsTaskLineExactly(line)) return false
+    }
+    return true
+  }
+  /** Top-level blocks kept whole in paragraph Markdown, by their first line. */
+  const containers = new Map(
+    (topLevelBlocks ?? [])
+      .filter((block) =>
+        holdsLine(footnoteLines, block) ||
+        (CONTAINER_BLOCK_TYPES.has(block.type) && (
+          !startsChecklist(lines, block.first, topLevelBlocks, checklistBlocks)
+            ? block.last > block.first
+            // A list of task items with an item a checklist would show otherwise stays whole.
+            : !everyTaskLineShownExactly(block))))
+      .map((block) => [block.first, block]),
+  )
   let paragraph: string[] = []
+  let paragraphFirstLine = 0
+  /**
+   * Adds source lines to the paragraph being read.
+   *
+   * @param first - First line to add.
+   * @param end - Line after the last one to add.
+   */
+  const addParagraphLines = (first: number, end: number) => {
+    if (paragraph.length === 0) paragraphFirstLine = first
+    paragraph.push(...lines.slice(first, end))
+  }
   const flushParagraph = () => {
     if (paragraph.length === 0) return
     const raw = paragraph.join('\n')
+    const range = { first: paragraphFirstLine, last: paragraphFirstLine + paragraph.length - 1 }
     paragraph = []
-    const link = readStandaloneLink(raw)
+    const link = holdsLine(footnoteLines, range) ? undefined : readStandaloneLink(raw)
+    // A target in `<>` may hold spaces, so only a target the resolver rewrites becomes an embed.
     const url = link
-      ? (resolveLink?.(link.href) ?? (isEmbeddableUrl(link.href) ? link.href : undefined))
+      ? (resolveLink?.(link.href) ?? (!link.angle && isEmbeddableUrl(link.href) ? link.href : undefined))
       : undefined
-    if (link && url) {
-      const title = unescapeMarkdown(link.label).trim()
+    const title = link ? unescapeMarkdown(link.label).trim() : ''
+    // An embed shows its title as written, so a link whose text renders otherwise stays a
+    // paragraph, as does a link without text, which the embed would show as its URL.
+    if (
+      link && url && title !== '' && title.length <= MAX_TITLE_LENGTH && range.first === range.last &&
+      (!checkNative || nativeBlocks.shows('embed', range.first, title))
+    ) {
       blocks.push({
         id: createId('block'),
         type: 'embed',
         url,
-        ...(title ? { title: title.slice(0, MAX_TITLE_LENGTH) } : {}),
+        title,
       })
       return
     }
+    const id = createId('block')
+    paragraphLines.set(id, range)
     blocks.push({
-      id: createId('block'),
+      id,
       type: 'paragraph',
-      text: unescapeMarkdown(rewrite(raw)),
+      // Paragraphs are shown as Markdown, so escapes such as `\*` stay to keep text literal.
+      text: rewrite(raw),
     })
   }
 
@@ -272,6 +435,16 @@ function scanBlocks(
     if (line.trim() === '') {
       flushParagraph()
       index += 1
+      continue
+    }
+
+    const container = containers.get(index)
+    if (container !== undefined) {
+      // A list, quote, or footnote definition is one block when rendered, so every line of it,
+      // blank ones included, stays in the paragraph, whatever blocks are nested in it.
+      if (paragraph.length === 0) paragraphFirstLine = index
+      paragraph.push(...lines.slice(index, container.last + 1))
+      index = container.last + 1
       continue
     }
 
@@ -292,73 +465,305 @@ function scanBlocks(
 
     const heading = ATX_HEADING.exec(line)
     if (heading?.[1]) {
-      flushParagraph()
-      blocks.push({
-        type: 'raw-heading',
-        rawLevel: heading[1].length,
-        text: unescapeMarkdown(removeClosingHashes(heading[2] ?? '')),
-      })
+      const text = unescapeMarkdown(removeClosingHashes(heading[2] ?? ''))
+      // A heading shows its text as written, so one that renders otherwise stays a paragraph.
+      if (!checkNative || nativeBlocks.shows('heading', index, text)) {
+        flushParagraph()
+        blocks.push({ type: 'raw-heading', rawLevel: heading[1].length, text })
+        index += 1
+        continue
+      }
+      addParagraphLines(index, index + 1)
       index += 1
       continue
     }
 
-    if (TASK_ITEM.test(line)) {
-      flushParagraph()
-      const items: DocumentChecklistItem[] = []
-      let task = TASK_ITEM.exec(line)
+    if (TASK_ITEM.test(line) && startsChecklist(lines, index, topLevelBlocks, checklistBlocks)) {
+      const tasks: Array<{ text: string; checked: boolean; shown: boolean }> = []
+      let end = index
+      let task: RegExpExecArray | null = TASK_ITEM.exec(line)
       while (task) {
-        items.push({
-          id: createId('item'),
-          text: unescapeMarkdown(rewrite((task[2] ?? '').trim())),
-          checked: task[1] !== ' ',
-        })
-        index += 1
-        task = TASK_ITEM.exec(lines[index] ?? '')
+        tasks.push({ ...readTask(task), shown: showsTaskLineExactly(end) })
+        end += 1
+        task = startsChecklist(lines, end, topLevelBlocks, checklistBlocks) ? TASK_ITEM.exec(lines[end] ?? '') : null
       }
-      blocks.push({ id: createId('block'), type: 'checklist', items })
+      // A checklist item shows its text as written, so a list with an item that renders
+      // otherwise stays paragraph Markdown, whole.
+      if (tasks.every(({ shown }) => shown)) {
+        flushParagraph()
+        const items = tasks.map(({ text, checked }): DocumentChecklistItem => ({ id: createId('item'), text, checked }))
+        blocks.push({ id: createId('block'), type: 'checklist', items })
+      } else {
+        addParagraphLines(index, end)
+      }
+      index = end
       continue
     }
 
     const table = readTableStart(lines, index)
     if (table) {
-      flushParagraph()
       const columns = splitTableRow(line, rewrite)
       if (columns.length > MAX_TABLE_COLUMNS) {
         return { ok: false, code: 'table-too-large' }
       }
-      const rows: DocumentTableRow[] = []
-      let rowIndex = nextTableRowIndex(lines, table.delimiterIndex + 1, table.spaced)
+      /** The header, delimiter, and body row lines, which the table renders from. */
+      const tableLines = [line, lines[table.delimiterIndex] ?? '']
+      const rows: string[][] = []
+      let end = table.delimiterIndex + 1
+      let rowIndex = nextTableRowIndex(lines, end, table.spaced)
       while (rowIndex !== undefined) {
         if (rows.length === MAX_TABLE_ROWS) {
           return { ok: false, code: 'table-too-large' }
         }
-        const cells = splitTableRow(lines[rowIndex] ?? '', rewrite)
-        rows.push({
-          id: createId('row'),
-          cells: columns.map((_, column) => ({
-            id: createId('cell'),
-            text: cells[column] ?? '',
-          })),
-        })
-        index = rowIndex + 1
-        rowIndex = nextTableRowIndex(lines, index, table.spaced)
+        const rowLine = lines[rowIndex] ?? ''
+        const cells = splitTableRow(rowLine, rewrite)
+        tableLines.push(rowLine)
+        rows.push(columns.map((_, column) => cells[column] ?? ''))
+        end = rowIndex + 1
+        rowIndex = nextTableRowIndex(lines, end, table.spaced)
       }
-      index = Math.max(index, table.delimiterIndex + 1)
-      blocks.push({ id: createId('block'), type: 'table', columns, rows })
+      // A table cell shows its text as written, apart from links to other pages, so a table
+      // with a cell that renders otherwise stays paragraph Markdown.
+      if (!checkNative || nativeBlocks.showsTable(tableLines.map(rewrite), columns, rows)) {
+        flushParagraph()
+        const tableRows = rows.map((cells): DocumentTableRow => ({
+          id: createId('row'),
+          cells: cells.map((text) => ({ id: createId('cell'), text })),
+        }))
+        blocks.push({ id: createId('block'), type: 'table', columns, rows: tableRows })
+      } else {
+        addParagraphLines(index, end)
+      }
+      index = end
       continue
     }
 
-    if (THEMATIC_BREAK.test(line)) {
-      flushParagraph()
-      index += 1
-      continue
-    }
+    // No block shows a divider, so a thematic break stays in paragraph Markdown, which renders it.
 
+    if (paragraph.length === 0) paragraphFirstLine = index
     paragraph.push(line)
     index += 1
   }
   flushParagraph()
-  return { ok: true, blocks }
+  return { ok: true, blocks, paragraphLines }
+}
+
+/**
+ * Tells whether one of the given lines falls within a range of lines.
+ *
+ * @param lines - Line numbers in ascending order, or `undefined` for none.
+ * @param range - Lines to look at.
+ * @returns Whether a line of `lines` is in `range`.
+ */
+function holdsLine(lines: readonly number[] | undefined, range: MarkdownLineRange): boolean {
+  if (lines === undefined) return false
+  // The first line at or after the start of the range, found by bisection.
+  let low = 0
+  let high = lines.length
+  while (low < high) {
+    const middle = (low + high) >> 1
+    if ((lines[middle] ?? 0) < range.first) low = middle + 1
+    else high = middle
+  }
+  const line = lines[low]
+  return line !== undefined && line <= range.last
+}
+
+/**
+ * Tells whether a task item line may be read as a checklist item. Without a parsed file, every
+ * task item line may. Otherwise the line's top-level block must be a list of task items alone,
+ * all at the indent of its first line, as the export writes a checklist; a task item nested in
+ * another item, or in a list with other items, would lose its place in that list as a checklist.
+ *
+ * @param lines - Source lines.
+ * @param index - Line of the task item.
+ * @param topLevelBlocks - Lines of each top-level block of the parsed file.
+ * @param cache - Answers already worked out, by top-level block.
+ * @returns Whether the line may start or continue a checklist.
+ */
+function startsChecklist(
+  lines: readonly string[],
+  index: number,
+  topLevelBlocks: readonly MarkdownLineRange[] | undefined,
+  cache: Map<MarkdownLineRange, boolean>,
+): boolean {
+  if (topLevelBlocks === undefined) return true
+  const range = topLevelBlocks.find(({ first, last }) => first <= index && index <= last)
+  if (range === undefined) return true
+  const known = cache.get(range)
+  if (known !== undefined) return known
+  const answer = isTaskItemList(lines, range)
+  cache.set(range, answer)
+  return answer
+}
+
+/**
+ * Tells whether a top-level block is a list of task items alone, all at its first line's indent.
+ *
+ * @param lines - Source lines.
+ * @param range - Lines of the block.
+ * @returns Whether every non-blank line is such a task item.
+ */
+function isTaskItemList(lines: readonly string[], range: MarkdownLineRange): boolean {
+  const indent = /^[ \t]*/u.exec(lines[range.first] ?? '')?.[0] ?? ''
+  for (let line = range.first; line <= range.last; line += 1) {
+    const text = lines[line] ?? ''
+    if (text.trim() === '') continue
+    if (!TASK_ITEM.test(text) || /^[ \t]*/u.exec(text)?.[0] !== indent) return false
+  }
+  return true
+}
+
+/**
+ * Puts back together the paragraph blocks that the file joins but blank lines split: paragraphs
+ * of one top-level block, such as the items of a loose list, become one block, and a footnote
+ * definition is added to each block that uses it, since each block is rendered on its own.
+ *
+ * @param blocks - Scanned blocks, in order.
+ * @param paragraphLines - Source lines of each paragraph block, by block ID.
+ * @param structure - Structure of the whole file.
+ * @param maxCopiedLength - Most characters the footnote definitions copied to the blocks that use
+ *   them may add up to. Each copy stays in the page's text, so past this the page is too large;
+ *   the count stops before the copies are built.
+ * @returns The blocks with split paragraphs joined and footnotes moved to their use, or
+ *   `'too-large'` when the copied definitions would make the page too large.
+ */
+function keepFileBlocksTogether(
+  blocks: readonly ScannedBlock[],
+  paragraphLines: ReadonlyMap<string, MarkdownLineRange>,
+  structure: MarkdownImportStructure,
+  maxCopiedLength: number,
+): ScannedBlock[] | 'too-large' {
+  const lines = new Map(paragraphLines)
+  const joined: ScannedBlock[] = []
+  for (const block of blocks) {
+    const previous = joined.at(-1)
+    const previousLines = previous?.type === 'paragraph' ? lines.get(previous.id) : undefined
+    const blockLines = block.type === 'paragraph' ? lines.get(block.id) : undefined
+    if (
+      previous?.type === 'paragraph' && block.type === 'paragraph' && previousLines && blockLines &&
+      structure.topLevelBlocks.some((range) => range.first <= previousLines.last && range.last >= blockLines.first)
+    ) {
+      joined[joined.length - 1] = {
+        ...previous,
+        text: `${previous.text}${'\n'.repeat(blockLines.first - previousLines.last)}${block.text}`,
+      }
+      lines.set(previous.id, { first: previousLines.first, last: blockLines.last })
+      continue
+    }
+    joined.push(block)
+  }
+
+  const paragraphs = joined.filter(isScannedParagraph)
+  /**
+   * Finds the paragraph block that holds a source line.
+   *
+   * @param line - Source line.
+   * @returns The block, or `undefined` when no paragraph block holds the line.
+   */
+  const paragraphAt = (line: number) => paragraphs.find((block) => {
+    const range = lines.get(block.id)
+    return range !== undefined && range.first <= line && line <= range.last
+  })
+  /**
+   * Finds the definition of a footnote; as with the renderer, the first one counts.
+   *
+   * @param identifier - Normalized footnote label.
+   * @returns The definition, or `undefined` when the file has none.
+   */
+  const definitionOf = (identifier: string) =>
+    structure.footnoteDefinitions.find((candidate) => candidate.identifier === identifier)
+  /** Whether a block starts with a footnote definition, so it moves to the blocks that use it. */
+  const holdsDefinition = (range: MarkdownLineRange) =>
+    structure.footnoteDefinitions.some(({ first }) => first === range.first)
+  /** Text added to the end of each block, by block ID, each kept once by its key. */
+  const attachments = new Map<string, Array<{ key: string; text: string }>>()
+  const moved = new Set<string>()
+  const sourceLines = structure.text.split('\n')
+  /** Characters of the definitions added to blocks so far. */
+  let copiedLength = 0
+  for (const block of paragraphs) {
+    const range = lines.get(block.id)
+    if (!range || holdsDefinition(range)) continue
+    // A definition may use other footnotes, so every definition the block reaches through its
+    // references moves with it; each label is followed once, so a cycle ends.
+    const pending = structure.footnoteReferences
+      .filter(({ line }) => range.first <= line && line <= range.last)
+      .map(({ identifier }) => identifier)
+    const followed = new Set<string>()
+    while (pending.length > 0) {
+      const identifier = pending.shift() ?? ''
+      if (followed.has(identifier)) continue
+      followed.add(identifier)
+      const definition = definitionOf(identifier)
+      if (!definition) continue
+      pending.push(...structure.footnoteReferences
+        .filter(({ line }) => definition.first <= line && line <= definition.last)
+        .map((reference) => reference.identifier))
+      const holder = paragraphAt(definition.first)
+      if (!holder || holder === block) continue
+      const attached = attachments.get(block.id) ?? []
+      // A block that starts with the definition moves whole. A definition inside another block,
+      // such as a quote, is copied without the text around it, which stays where it is.
+      const holderStart = lines.get(holder.id)?.first
+      const nested = holderStart !== definition.first || !FOOTNOTE_DEFINITION_START.test(sourceLines[definition.first] ?? '')
+      const attachment = nested
+        ? { key: `footnote:${identifier}`, text: extractNestedDefinition(sourceLines, definition) }
+        : { key: `block:${holder.id}`, text: holder.text }
+      if (!attached.some(({ key }) => key === attachment.key)) {
+        copiedLength += attachment.text.length
+        if (copiedLength > maxCopiedLength) return 'too-large'
+        attachments.set(block.id, [...attached, attachment])
+      }
+      if (!nested) moved.add(holder.id)
+    }
+  }
+  return joined.flatMap((block): ScannedBlock[] => {
+    if (block.type !== 'paragraph') return [block]
+    if (moved.has(block.id)) return []
+    const attached = (attachments.get(block.id) ?? []).map(({ text }) => text)
+    return [{ ...block, text: [block.text, ...attached].join('\n\n') }]
+  })
+}
+
+/**
+ * Kinds of top-level blocks that can hold other blocks, which import keeps whole in one paragraph
+ * block so that what is nested in them keeps its place.
+ */
+const CONTAINER_BLOCK_TYPES: ReadonlySet<string> = new Set(['list', 'blockquote', 'footnoteDefinition'])
+
+/** A footnote definition at the start of a line, outside any container. */
+const FOOTNOTE_DEFINITION_START = /^ {0,3}\[\^/u
+
+/**
+ * Copies a footnote definition that sits inside another block, such as a quote or a list item,
+ * without that block's markers: the markers before `[^` on its first line are removed from every
+ * line of the definition that starts with them.
+ *
+ * @param lines - Source lines of the file.
+ * @param definition - Lines of the definition.
+ * @returns The definition's Markdown.
+ */
+function extractNestedDefinition(lines: readonly string[], definition: MarkdownLineRange): string {
+  const first = lines[definition.first] ?? ''
+  const prefix = first.slice(0, Math.max(0, first.indexOf('[^')))
+  // A quote marker may be written without its space on a blank line of the definition.
+  const barePrefix = prefix.trimEnd()
+  return lines.slice(definition.first, definition.last + 1)
+    .map((line) => line.startsWith(prefix)
+      ? line.slice(prefix.length)
+      : line.trimEnd() === barePrefix ? '' : line)
+    .join('\n')
+}
+
+/**
+ * Tells whether a scanned block is a paragraph.
+ *
+ * @param block - Scanned block.
+ * @returns Whether the block is a paragraph block.
+ */
+function isScannedParagraph(block: ScannedBlock): block is Extract<ScannedBlock, { type: 'paragraph' }> {
+  return block.type === 'paragraph'
 }
 
 /**
@@ -616,15 +1021,17 @@ function splitTableRow(line: string, rewrite: LinkRewriter = (raw) => raw): stri
 }
 
 /**
- * Reads a paragraph that consists of exactly one inline link, `[label](href)`.
+ * Reads a paragraph that consists of exactly one inline link, `[label](href)` or
+ * `[label](<href>)`.
  *
  * @param raw - Raw paragraph text, before escapes are removed.
- * @returns The raw label and target, or undefined when the paragraph holds
- *   anything else, spans lines, or the link has a title.
+ * @returns The raw label, the target with its escapes removed, and whether it was written in
+ *   `<>`, or undefined when the paragraph holds anything else, spans lines, or the link has a
+ *   title.
  */
 function readStandaloneLink(
   raw: string,
-): { label: string; href: string } | undefined {
+): { label: string; href: string; angle: boolean } | undefined {
   const text = raw.trim()
   if (!text.startsWith('[') || !text.endsWith(')') || text.includes('\n')) {
     return undefined
@@ -641,9 +1048,83 @@ function readStandaloneLink(
     position += 1
   }
   if (text[position] !== ']' || text[position + 1] !== '(') return undefined
-  const href = text.slice(position + 2, -1)
-  if (href === '' || /[\s()]/u.test(href)) return undefined
-  return { label: text.slice(1, position), href }
+  const destination = readLinkDestination(text, position + 2)
+  if (!destination || destination.titled || destination.close !== text.length - 1) return undefined
+  return { label: text.slice(1, position), href: destination.href, angle: destination.angle }
+}
+
+/** Where the destination of an inline link is and what it says. */
+type LinkDestination = {
+  /** Offset of the destination, including its `<` when it has one. */
+  start: number
+  /** Offset after the destination, including its `>` when it has one. */
+  end: number
+  /** Offset of the `)` that closes the link. */
+  close: number
+  /** The destination with its `<>` and backslash escapes removed. */
+  href: string
+  /** Whether the destination is written in `<>`. */
+  angle: boolean
+  /** Whether a title follows the destination. */
+  titled: boolean
+}
+
+/**
+ * Reads the destination and optional title of an inline link, from just after its `(` up to the
+ * closing `)`. A destination is either written in `<>`, which may hold spaces, or is a run
+ * without spaces or parentheses. Each part stops at a character that every following link also
+ * has, so rescanning after a failed read does not grow with the text.
+ *
+ * @param text - Raw Markdown text.
+ * @param open - Offset just after the `(`.
+ * @returns The destination, or undefined when the text there is not a destination this import
+ *   rewrites.
+ */
+function readLinkDestination(text: string, open: number): LinkDestination | undefined {
+  /**
+   * Skips spaces and tabs.
+   *
+   * @param from - Offset to start at.
+   * @returns The offset of the next other character.
+   */
+  const skipSpace = (from: number) => {
+    let index = from
+    while (text[index] === ' ' || text[index] === '\t') index += 1
+    return index
+  }
+  const start = skipSpace(open)
+  let end = start
+  const angle = text[start] === '<'
+  if (angle) {
+    end += 1
+    while (end < text.length && text[end] !== '>') {
+      const character = text[end]
+      if (character === '\n' || character === '<') return undefined
+      end += character === '\\' ? 2 : 1
+    }
+    if (text[end] !== '>') return undefined
+    end += 1
+  } else {
+    while (end < text.length && !/[\s()]/u.test(text[end] ?? '')) end += text[end] === '\\' ? 2 : 1
+    if (end === start) return undefined
+  }
+  const href = unescapeMarkdown(angle ? text.slice(start + 1, end - 1) : text.slice(start, end))
+  let close = skipSpace(end)
+  let titled = false
+  const quote = text[close]
+  if (close > end && (quote === '"' || quote === "'" || quote === '(')) {
+    const closing = quote === '(' ? ')' : quote
+    // A title in parentheses holds no unescaped `(`, so the scan stops at the next link's `(`;
+    // a quoted title stops at the next same quote. Each scan ends where the next could start.
+    let index = close + 1
+    while (index < text.length && text[index] !== closing && !(quote === '(' && text[index] === '(')) {
+      index += text[index] === '\\' ? 2 : 1
+    }
+    if (text[index] !== closing) return undefined
+    titled = true
+    close = skipSpace(index + 1)
+  }
+  return text[close] === ')' ? { start, end, close, href, angle, titled } : undefined
 }
 
 /**
@@ -665,8 +1146,8 @@ function isEmbeddableUrl(href: string): boolean {
 }
 
 /**
- * Rewrites the targets of inline links, `[label](href)`, in raw Markdown text.
- * Escaped brackets and code spans are left alone. The scan is linear, so long
+ * Rewrites the targets of inline links, `[label](href)`, `[label](<href>)`, and either with a
+ * title, in raw Markdown text. Escaped brackets and code spans are left alone. The scan is linear, so long
  * text cannot make it backtrack.
  *
  * @param raw - Raw text, before escapes are removed.
@@ -701,12 +1182,12 @@ function rewriteLinkTargets(
     if (codeFence === 0 && character === '[') labelOpen = true
     if (codeFence === 0 && labelOpen && character === ']' && raw[position + 1] === '(') {
       labelOpen = false
-      let end = position + 2
-      while (end < raw.length && !/[\s()]/u.test(raw[end] ?? '')) end += 1
-      if (raw[end] === ')' && end > position + 2) {
-        const href = raw.slice(position + 2, end)
-        result += `](${resolveLink(href) ?? href})`
-        position = end + 1
+      const destination = readLinkDestination(raw, position + 2)
+      const target = destination ? resolveLink(destination.href) : undefined
+      if (destination && target !== undefined) {
+        result += raw.slice(position, destination.start) + writeLinkTarget(target) +
+          raw.slice(destination.end, destination.close + 1)
+        position = destination.close + 1
         continue
       }
     }
@@ -715,6 +1196,57 @@ function rewriteLinkTargets(
   }
   return result
 }
+
+/**
+ * Rewrites the targets of the inline links and images the parser read in a file, leaving any
+ * text that only looks like a link, such as one in a code block, a code span, or HTML, as written.
+ *
+ * @param text - Markdown file.
+ * @param resolveLink - Returns the new target, or undefined to keep it.
+ * @param links - Source ranges of the parsed inline links and images, in order.
+ * @returns The file with resolved link targets replaced; the line count stays the same.
+ */
+function rewriteParsedLinkTargets(
+  text: string,
+  resolveLink: (href: string) => string | undefined,
+  links: ReadonlyArray<{ start: number; end: number }>,
+): string {
+  let result = ''
+  let copied = 0
+  for (const link of links) {
+    // An image may sit in a link's text; it is rewritten with the link, from left to right.
+    if (link.start < copied) continue
+    // The label ends at the `](` whose destination closes the link where the parser ended it.
+    for (let index = text.indexOf('](', link.start); index !== -1 && index < link.end; index = text.indexOf('](', index + 1)) {
+      const destination = readLinkDestination(text, index + 2)
+      if (destination?.close !== link.end - 1) continue
+      const target = resolveLink(destination.href)
+      if (target !== undefined) {
+        result += text.slice(copied, destination.start) + writeLinkTarget(target)
+        copied = destination.end
+      }
+      break
+    }
+  }
+  return result + text.slice(copied)
+}
+
+/**
+ * Writes a rewritten link target. A page link is written without `<>`, as the text of table cells
+ * and checklist items only recognizes `[label](/documents/<id>)`.
+ *
+ * @param target - New target.
+ * @returns The destination as Markdown.
+ */
+function writeLinkTarget(target: string): string {
+  return PLAIN_DESTINATION.test(target) ? target : `<${target.replace(/[\\<>&]/gu, '\\$&')}>`
+}
+
+/**
+ * A line that may open a fenced or indented code block, after any quote or list markers, which a
+ * file read by lines only cannot tell apart from text.
+ */
+const MAY_HOLD_CODE_BLOCK = /^(?:[ \t]*(?:>|[-+*]|\d{1,9}[.)])(?=[ \t]|$))*[ \t]*(?:`{3,}|~{3,})|^(?: {4}|\t)/mu
 
 /**
  * Removes Markdown backslash escapes so stored text reads as written.

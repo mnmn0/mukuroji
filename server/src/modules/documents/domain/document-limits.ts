@@ -30,6 +30,12 @@ export const DOCUMENT_MENTION_MAX_COUNT = 20
 /** Maximum page size for document comments. */
 export const DOCUMENT_COMMENT_MAX_PAGE_LIMIT = 100
 
+/**
+ * Most participants of an older comment thread written to its participant index in one reply
+ * transaction; a larger thread keeps reading every comment page instead.
+ */
+export const DOCUMENT_THREAD_PARTICIPANT_BACKFILL_LIMIT = 25
+
 /** Maximum page size for document backlinks. */
 export const DOCUMENT_BACKLINK_MAX_PAGE_LIMIT = 50
 

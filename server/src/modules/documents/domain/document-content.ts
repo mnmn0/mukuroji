@@ -1,3 +1,4 @@
+import { splitDocumentPageLinks } from '@mukuroji/contracts'
 import type {
   DocumentBlock,
   DocumentDetail,
@@ -308,17 +309,20 @@ function countElementLinks(document: DocumentDetail): Map<string, number> {
  *
  * @param document - Canonical document snapshot to render.
  * @param format - Requested export format.
+ * @param markdown - Reads paragraph Markdown with the app's Markdown grammar.
  * @returns Safe rendered artifact.
  */
 export function renderDocumentExport(
   document: DocumentDetail,
   format: DocumentExportFormat,
+  markdown: MarkdownInspector,
 ): RenderedDocumentExport {
   validateDocumentPayload(document)
   return renderDocumentArtifact(
     document,
     format,
     document.id,
+    markdown,
   )
 }
 
@@ -327,16 +331,19 @@ export function renderDocumentExport(
  *
  * @param document - Public document projection to render.
  * @param format - Requested export format.
+ * @param markdown - Reads paragraph Markdown with the app's Markdown grammar.
  * @returns Safe rendered artifact.
  */
 export function renderPublicDocumentExport(
   document: PublicDocument,
   format: DocumentExportFormat,
+  markdown: MarkdownInspector,
 ): RenderedDocumentExport {
   return renderDocumentArtifact(
     document,
     format,
     'document',
+    markdown,
   )
 }
 
@@ -345,13 +352,15 @@ export function renderPublicDocumentExport(
  *
  * @param document - Permission-filtered document projection.
  * @param format - Requested text export format.
+ * @param markdown - Reads paragraph Markdown with the app's Markdown grammar.
  * @returns Safe rendered artifact.
  */
 export function renderDocumentProjectionExport(
   document: DocumentDetail,
   format: DocumentExportFormat,
+  markdown: MarkdownInspector,
 ): RenderedDocumentExport {
-  return renderDocumentArtifact(document, format, document.id)
+  return renderDocumentArtifact(document, format, document.id, markdown)
 }
 
 /**
@@ -360,12 +369,14 @@ export function renderDocumentProjectionExport(
  * @param document - Document projection to render.
  * @param format - Requested export format.
  * @param fallbackFileName - File name to use when the document title is empty.
+ * @param markdown - Reads paragraph Markdown with the app's Markdown grammar.
  * @returns Rendered export content and metadata.
  */
 function renderDocumentArtifact(
   document: DocumentDetail | PublicDocument,
   format: DocumentExportFormat,
   fallbackFileName: string,
+  markdown: MarkdownInspector,
 ): RenderedDocumentExport {
   const safeBaseName = sanitizeFileName(
     document.title || fallbackFileName,
@@ -401,7 +412,7 @@ function renderDocumentArtifact(
       format,
       contentType: 'text/markdown; charset=utf-8',
       fileName: `${safeBaseName}.md`,
-      content: renderMarkdown(document.title, document.blocks),
+      content: renderMarkdown(document.title, document.blocks, markdown),
     }
   }
   throw new DocumentError(400, 'UnsupportedDocumentExport', `Unsupported export format: ${String(format)}.`)
@@ -1184,17 +1195,57 @@ export function validateCanonicalDocumentWorkItemId(
  *
  * @param title - Document title.
  * @param blocks - Blocks to render.
+ * @param markdown - Reads paragraph Markdown with the app's Markdown grammar.
  * @returns Markdown document text.
  */
-function renderMarkdown(title: string, blocks: readonly DocumentBlock[]): string {
-  const parts = [`# ${escapeMarkdownText(title)}`]
+function renderMarkdown(
+  title: string,
+  blocks: readonly DocumentBlock[],
+  markdown: MarkdownInspector,
+): string {
+  const parts = [`# ${escapeMarkdownHeadingText(title)}`]
+  /** Plain-text fallbacks of paragraph parts, by part index. */
+  const plainParts = new Map<number, string>()
+  /**
+   * Parts that cannot join a neighbour or carry raw HTML, so the export does not parse them: the
+   * title, headings, tables, fenced code, and paragraphs written as literal text.
+   */
+  const isolatedParts = new Set([0])
+  /** Isolated lists, which need a block boundary next to a part that is parsed. */
+  const fencedParts = new Set<number>()
+  const budget = createMarkdownParseBudget()
+  /** Characters that rewriting references into inline links may still add to the page. */
+  const expansion = { left: MARKDOWN_EXPORT_MAX_REFERENCE_EXPANSION }
   for (const block of blocks) {
+    if (block.type === 'heading' || block.type === 'table' || block.type === 'code' || block.type === 'diagram') {
+      isolatedParts.add(parts.length)
+    }
     switch (block.type) {
-      case 'paragraph':
-        parts.push(escapeMarkdownText(block.text))
+      case 'paragraph': {
+        // A blank paragraph shows nothing; written out, it would only add blank lines, which do
+        // not keep the blocks around it apart.
+        if (/^[ \t\r\n]*$/u.test(block.text)) break
+        // The parser takes far longer than the text's length on some input, such as many
+        // emphasis delimiters or deeply nested lists, so a paragraph past the limits, or past what
+        // the page has left, is written as literal text without being parsed.
+        if (!budget.take(block.text)) {
+          isolatedParts.add(parts.length)
+          parts.push(renderLiteralMarkdownParagraph(block.text))
+          break
+        }
+        // Paragraph text is Markdown already, so only raw HTML is escaped: the file never carries
+        // runnable HTML, and the page imports back with the same rendering.
+        // Footnote labels are named by the block's place in the file, which an export of the
+        // exported file keeps, so exporting it again gives the same labels.
+        const rendered = renderMarkdownParagraph(block.text, markdown, String(parts.length), expansion)
+        // An empty paragraph, such as one that held only definitions, shows nothing and is left out.
+        if (rendered === '') break
+        plainParts.set(parts.length, renderPlainMarkdownParagraph(block.text))
+        parts.push(rendered)
         break
+      }
       case 'heading':
-        parts.push(`${'#'.repeat(block.level + 1)} ${escapeMarkdownText(block.text)}`)
+        parts.push(`${'#'.repeat(block.level + 1)} ${escapeMarkdownHeadingText(block.text)}`)
         break
       case 'table': {
         // Rows are joined by single newlines: a blank line ends a GFM table.
@@ -1217,15 +1268,22 @@ function renderMarkdown(title: string, blocks: readonly DocumentBlock[]): string
           ),
         )
         break
-      case 'checklist':
-        parts.push(
-          block.items
-            .map((item) => `- [${item.checked ? 'x' : ' '}] ${escapeMarkdownText(item.text)}`)
-            .join('\n'),
-        )
+      case 'checklist': {
+        // An empty checklist shows nothing and is left out, so its neighbours are compared directly.
+        if (block.items.length === 0) break
+        const checklist = block.items
+          .map((item) => `- [${item.checked ? 'x' : ' '}] ${renderMarkdownLinkedText(item.text)}`)
+          .join('\n')
+        // A list past the parse budget is not parsed; boundaries keep it apart from its neighbours.
+        if (!budget.take(checklist)) {
+          isolatedParts.add(parts.length)
+          fencedParts.add(parts.length)
+        }
+        parts.push(checklist)
         break
+      }
       case 'embed':
-        parts.push(`[${escapeMarkdownText(block.title ?? block.url)}](${escapeMarkdownUrl(block.url)})`)
+        parts.push(`[${escapeMarkdownNativeText(block.title ?? block.url)}](${escapeMarkdownUrl(block.url)})`)
         break
       case 'diagram':
         parts.push(
@@ -1236,7 +1294,173 @@ function renderMarkdown(title: string, blocks: readonly DocumentBlock[]): string
         )
     }
   }
-  return `${parts.join('\n\n')}\n`
+  // Each paragraph was checked on its own; each run of parts that can join is checked again
+  // together, so a construct that spans blocks can never leave raw HTML. The isolated parts
+  // between the runs hold no raw HTML and join nothing, so they are not parsed.
+  const sections: string[] = []
+  let run: string[] = []
+  for (const entry of joinMarkdownBlocks(parts, plainParts, { isolated: isolatedParts, fenced: fencedParts }, markdown)) {
+    if (!entry.isolated) {
+      run.push(entry.text)
+      continue
+    }
+    if (run.length > 0) sections.push(escapeMarkdownHtml(run.join('\n\n'), markdown.findHtml))
+    run = []
+    sections.push(entry.text)
+  }
+  if (run.length > 0) sections.push(escapeMarkdownHtml(run.join('\n\n'), markdown.findHtml))
+  return `${sections.join('\n\n')}\n`
+}
+
+/**
+ * Limits of the Markdown one export parses, per part and for the whole page. The parse time of
+ * a part grows with the square of its delimiters and punctuation, and with its lines and list or
+ * quote markers, so the page limits are on the sum of squares and the sums.
+ */
+/**
+ * Most characters the inline destinations and titles of rewritten references may add to one
+ * export. Many short references to a long definition would otherwise grow the file far past the
+ * page; a paragraph whose references do not fit in what is left is written as plain text.
+ */
+const MARKDOWN_EXPORT_MAX_REFERENCE_EXPANSION = 1_000_000
+
+const MARKDOWN_EXPORT_PARSE_LIMITS = {
+  /** Most emphasis, strikethrough, closing bracket, and table delimiters of one part. */
+  partDelimiters: 500,
+  /** Most of the squares of those counts of all the parts parsed. */
+  documentDelimiterSquares: 1_500_000,
+  /** Most ASCII punctuation characters of one part. */
+  partPunctuation: 2_000,
+  /** Most of the squares of those counts of all the parts parsed. */
+  documentPunctuationSquares: 20_000_000,
+  /** Most lines of one part. */
+  partLines: 1_000,
+  /** Most lines of all the parts parsed. */
+  documentLines: 5_000,
+  /** Most list and quote markers at line starts of one part. */
+  partContainers: 1_000,
+  /** Most of those markers of all the parts parsed. */
+  documentContainers: 5_000,
+  /** Most list and quote markers at the start of one line. */
+  nesting: 8,
+} as const
+
+/** One list or quote marker at the start of a line, with the spaces before and after it. */
+const MARKDOWN_CONTAINER_MARKER = /^[ \t]*(?:>|[-+*](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))[ \t]?/u
+
+/** How much parse work a Markdown text gives, as measured by {@link measureMarkdownParseLoad}. */
+type MarkdownParseLoad = {
+  /** Emphasis, strikethrough, closing bracket, and table delimiters. */
+  delimiters: number
+  /** ASCII punctuation characters. */
+  punctuation: number
+  /** Lines. */
+  lines: number
+  /** List and quote markers at line starts. */
+  containers: number
+  /** Most list and quote markers at the start of one line. */
+  nesting: number
+}
+
+/** What is left of the Markdown parse work of one export. */
+type MarkdownParseBudget = {
+  /**
+   * Takes a part's work from the budget when it fits in the limits of one part and in what is
+   * left; a part that does not fit takes nothing and must be written without parsing.
+   *
+   * @param text - Markdown of the part.
+   * @returns Whether the part may be parsed.
+   */
+  take: (text: string) => boolean
+}
+
+/**
+ * Creates the parse budget of one export. The parser takes far longer than a text's length on
+ * some input, such as dense emphasis or brackets, deep nesting, or many list lines, and each
+ * parsed part is read several times, so the work is bounded per part and for the page.
+ *
+ * @returns A budget with the whole page's work left.
+ */
+function createMarkdownParseBudget(): MarkdownParseBudget {
+  const limits = MARKDOWN_EXPORT_PARSE_LIMITS
+  let delimiterSquares = limits.documentDelimiterSquares
+  let punctuationSquares = limits.documentPunctuationSquares
+  let lines = limits.documentLines
+  let containers = limits.documentContainers
+  return {
+    take: (text) => {
+      const load = measureMarkdownParseLoad(text, limits.partLines)
+      if (
+        load === undefined || load.nesting > limits.nesting ||
+        load.delimiters > limits.partDelimiters || load.delimiters ** 2 > delimiterSquares ||
+        load.punctuation > limits.partPunctuation || load.punctuation ** 2 > punctuationSquares ||
+        load.lines > lines ||
+        load.containers > limits.partContainers || load.containers > containers
+      ) {
+        return false
+      }
+      delimiterSquares -= load.delimiters ** 2
+      punctuationSquares -= load.punctuation ** 2
+      lines -= load.lines
+      containers -= load.containers
+      return true
+    },
+  }
+}
+
+/**
+ * Measures, in one linear scan, what makes the Markdown parser slow on a text.
+ *
+ * @param text - Markdown text.
+ * @param maxLines - Most lines worth measuring.
+ * @returns The text's load, or `undefined` when it has more than `maxLines` lines.
+ */
+function measureMarkdownParseLoad(text: string, maxLines: number): MarkdownParseLoad | undefined {
+  // CR, LF, and CRLF each end a line, as for the parser.
+  const lines = text.split(/\r\n|\r|\n/u)
+  if (lines.length > maxLines) return undefined
+  let containers = 0
+  let nesting = 0
+  for (const line of lines) {
+    let rest = line
+    let depth = 0
+    for (
+      let marker = MARKDOWN_CONTAINER_MARKER.exec(rest);
+      marker && marker[0] !== '';
+      marker = MARKDOWN_CONTAINER_MARKER.exec(rest)
+    ) {
+      depth += 1
+      rest = rest.slice(marker[0].length)
+    }
+    containers += depth
+    nesting = Math.max(nesting, depth)
+  }
+  let delimiters = 0
+  let punctuation = 0
+  for (const character of text) {
+    if (character === '*' || character === '_' || character === '~' || character === ']' || character === '|') {
+      delimiters += 1
+    }
+    if (ASCII_PUNCTUATION_CHARACTER.test(character)) punctuation += 1
+  }
+  return { delimiters, punctuation, lines: lines.length, containers, nesting }
+}
+
+/** One ASCII punctuation character. */
+const ASCII_PUNCTUATION_CHARACTER = /^[!-/:-@[-`{-~]$/u
+
+/**
+ * Writes paragraph text as literal Markdown text without parsing it: every ASCII punctuation
+ * character is escaped, so no Markdown or HTML is left, and the leading spaces and tabs of each
+ * line become character references, so no line becomes indented code.
+ *
+ * @param text - Paragraph Markdown.
+ * @returns Markdown that shows the text as written.
+ */
+function renderLiteralMarkdownParagraph(text: string): string {
+  return text
+    .replace(ASCII_PUNCTUATION, '\\$&')
+    .replace(/^[ \t]+/gmu, (indent) => indent.replaceAll(' ', '&#32;').replaceAll('\t', '&#9;'))
 }
 
 /**
@@ -1510,13 +1734,309 @@ function safeSvgColor(value: string | undefined, fallback: string): string {
 }
 
 /**
- * Escapes Markdown punctuation in plain text.
+ * Escapes the text of a block the page shows as written, such as a checklist item or an embed
+ * title, so the Markdown renders those same characters: a character reference or a strikethrough
+ * would otherwise render differently, and the import would keep the block as a paragraph.
  *
- * @param value - Plain text to escape.
+ * @param value - Text the page shows.
+ * @param special - Characters to escape.
  * @returns Escaped Markdown text.
  */
-function escapeMarkdownText(value: string): string {
-  return value.replace(/([\\`*_[\]<>])/gu, '\\$1')
+function escapeMarkdownNativeText(value: string, special: RegExp = MARKDOWN_NATIVE_TEXT_SPECIAL): string {
+  return value.replace(special, '\\$&')
+}
+
+/**
+ * Characters escaped in text a block shows as written. The backslash is among them, so one pass
+ * escapes it together with the rest and an escape the text holds is written as text.
+ */
+const MARKDOWN_NATIVE_TEXT_SPECIAL = /[\\`*_[\]<>&~]/gu
+
+/** Characters escaped in a table cell: those of {@link MARKDOWN_NATIVE_TEXT_SPECIAL} and the cell separator. */
+const MARKDOWN_TABLE_CELL_SPECIAL = /[\\`*_[\]<>&~|]/gu
+
+/**
+ * Escapes the text of a heading, which the page shows as written. A closing run of `#` would
+ * otherwise be read as the end of the heading and dropped.
+ *
+ * @param value - Heading text.
+ * @returns Escaped Markdown text for after the heading's `#` marker.
+ */
+function escapeMarkdownHeadingText(value: string): string {
+  // The first `#` of a closing run is written escaped; the text on both sides is escaped apart.
+  const closing = /(?:^|[ \t])(#+)[ \t]*$/u.exec(value)
+  if (closing?.[1] === undefined) return escapeMarkdownNativeText(value)
+  const hash = closing.index + closing[0].length - closing[0].trimStart().length
+  return `${escapeMarkdownNativeText(value.slice(0, hash))}\\#${escapeMarkdownNativeText(value.slice(hash + 1))}`
+}
+
+/**
+ * Writes the text of a checklist item or a table cell, which the page shows as written apart from
+ * links to other pages: those are written as Markdown links, so the Markdown renders them as
+ * links too, and the rest is escaped.
+ *
+ * @param value - Stored text.
+ * @param special - Characters to escape in the text and the link labels.
+ * @returns Markdown text.
+ */
+function renderMarkdownLinkedText(value: string, special: RegExp = MARKDOWN_NATIVE_TEXT_SPECIAL): string {
+  return splitDocumentPageLinks(value)
+    .map((segment) => segment.type === 'text'
+      ? escapeMarkdownNativeText(segment.text, special)
+      : `[${escapeMarkdownNativeText(segment.label, special)}](${segment.href})`)
+    .join('')
+}
+
+/** The start of a raw HTML tag, comment, declaration, or processing instruction. */
+const RAW_HTML_START = /<(?=\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/>]|$)|!|\?)/gu
+
+/**
+ * Parses that look for raw HTML again after escaping. Escaping an HTML block can turn its other
+ * lines into Markdown with HTML of its own, so the text is parsed again until none is left.
+ */
+const MARKDOWN_HTML_ESCAPE_MAX_PASSES = 4
+
+/** ASCII punctuation, each of which a backslash makes literal in CommonMark. */
+const ASCII_PUNCTUATION = /[!-/:-@[-`{-~]/gu
+
+/** Source range of the text of one raw HTML node on one line, as offsets into the parsed text. */
+export type MarkdownSourceRange = {
+  /** Offset of the first character. */
+  start: number
+  /** Offset after the last character. */
+  end: number
+  /** Whether the range is a later line of its node, so it starts a line of the node's text. */
+  continuesNode?: boolean
+}
+
+/**
+ * Finds the raw HTML in Markdown text with the CommonMark and GFM grammar the app renders
+ * paragraphs with. The parser is a library, so it is supplied from outside the domain.
+ *
+ * @param text - Markdown text.
+ * @returns Non-overlapping source ranges of HTML blocks and inline HTML, in source order.
+ */
+export type MarkdownHtmlFinder = (text: string) => readonly MarkdownSourceRange[]
+
+/** How a Markdown text affects the Markdown that follows it after a blank line. */
+export type MarkdownOpenBlock = {
+  /** Fence line that closes a fenced code block left open at the end of the text. */
+  closingFence?: string
+}
+
+/** Reads Markdown with the CommonMark and GFM grammar the app renders paragraphs with. */
+export type MarkdownInspector = {
+  /** Finds the raw HTML ranges in Markdown. */
+  findHtml: MarkdownHtmlFinder
+  /**
+   * Tells whether Markdown would absorb what follows it after a blank line.
+   *
+   * @param text - Markdown text.
+   * @returns `undefined` when the next block stays its own block; otherwise what is left open.
+   */
+  findOpenBlock: (text: string) => MarkdownOpenBlock | undefined
+  /**
+   * Rewrites the references of one block so they keep their meaning once the blocks are joined
+   * into one file: links and images that use a reference definition become inline, the
+   * definitions are dropped, and footnote labels are renamed to labels of this block.
+   *
+   * @param text - Markdown of one block.
+   * @param scope - Name of the block, unique in the file, used in its footnote labels.
+   * @param maxExpansion - Most characters the written destinations and titles may add up to.
+   * @returns The rewritten Markdown, or `undefined` when a reference cannot be rewritten safely
+   *   or the written destinations and titles would pass `maxExpansion`.
+   */
+  localizeReferences: (text: string, scope: string, maxExpansion: number) => string | undefined
+  /**
+   * Tells whether two Markdown texts joined by a blank line keep the top-level blocks each has on
+   * its own: the same number and kinds of blocks, and the same list numbering.
+   *
+   * @param previous - Markdown that comes first.
+   * @param next - Markdown that follows after a blank line.
+   * @returns Whether joining them changes neither.
+   */
+  keepsBlocksApart: (previous: string, next: string) => boolean
+}
+
+/**
+ * Renders one paragraph block's Markdown so it neither carries raw HTML nor reaches into the
+ * next block: a fenced code block left open is closed, and a paragraph that would still absorb
+ * the next block is written as plain text instead.
+ *
+ * @param text - Paragraph Markdown.
+ * @param markdown - Reads Markdown with the app's Markdown grammar.
+ * @param scope - Name of the block, unique in the file.
+ * @param expansion - Characters rewritten references may still add to the page; what this
+ *   paragraph adds is taken from it.
+ * @returns Markdown for the paragraph.
+ */
+function renderMarkdownParagraph(
+  text: string,
+  markdown: MarkdownInspector,
+  scope: string,
+  expansion: { left: number },
+): string {
+  // Each block is rendered on its own in the app, so its reference definitions and footnotes must
+  // not reach the other blocks of the joined file. References that would grow the page past the
+  // limit are not rewritten, and the paragraph is written as plain text instead.
+  const localized = markdown.localizeReferences(text, scope, expansion.left)
+  if (localized !== undefined) expansion.left -= Math.max(0, localized.length - text.length)
+  // A shortcut reference named like the block boundary would link to it in the joined file.
+  if (localized === undefined || /mukuroji-block-boundary/iu.test(localized)) {
+    return renderPlainMarkdownParagraph(text)
+  }
+  let rendered = escapeMarkdownHtml(localized, markdown.findHtml)
+  let open = markdown.findOpenBlock(rendered)
+  if (open?.closingFence !== undefined) {
+    rendered = `${rendered}${rendered.endsWith('\n') ? '' : '\n'}${open.closingFence}`
+    open = markdown.findOpenBlock(rendered)
+  }
+  return open === undefined ? rendered : renderPlainMarkdownParagraph(text)
+}
+
+/**
+ * Reference definition written between two blocks that Markdown would otherwise read as one, such
+ * as two lists. A definition shows nothing and ends every list, quote, and footnote before it, so
+ * each block keeps the structure it has in the app; import drops it with the other definitions.
+ */
+const MARKDOWN_BLOCK_BOUNDARY = '[mukuroji-block-boundary]: #'
+
+/** One part of the joined file, or a boundary written between two parts. */
+type JoinedMarkdownPart = {
+  /** Markdown of the part. */
+  text: string
+  /** Whether the part joins no neighbour and holds no raw HTML, so it is not parsed again. */
+  isolated: boolean
+}
+
+/**
+ * Joins the Markdown of the blocks with blank lines, so each block keeps the structure it has on
+ * its own, as the app renders every block separately. Where two neighbours would merge, such as
+ * two lists or an indented paragraph after a list, {@link MARKDOWN_BLOCK_BOUNDARY} is written
+ * between them; a paragraph that still merges is written as plain text. Only neighbours are
+ * compared, since no block is let continue into the next one, and a pair with an isolated part
+ * is not compared.
+ *
+ * @param parts - Markdown of each block, in order.
+ * @param plainParts - Plain-text fallbacks of paragraph parts, by index.
+ * @param unparsed - Indexes of the parts that are not parsed: `isolated` parts join no
+ *   neighbour, and `fenced` ones are lists, kept apart from a neighbour by a boundary.
+ * @param markdown - Reads Markdown with the app's Markdown grammar.
+ * @returns The parts and boundaries of the joined file, in order.
+ */
+function joinMarkdownBlocks(
+  parts: readonly string[],
+  plainParts: ReadonlyMap<number, string>,
+  unparsed: { isolated: ReadonlySet<number>; fenced: ReadonlySet<number> },
+  markdown: MarkdownInspector,
+): JoinedMarkdownPart[] {
+  const joined: JoinedMarkdownPart[] = []
+  /** Whether the last part is a list that was not parsed. */
+  let previousFenced = false
+  for (const [index, part] of parts.entries()) {
+    const isolated = unparsed.isolated.has(index)
+    const fenced = unparsed.fenced.has(index)
+    const previous = joined.at(-1)
+    if (previous !== undefined && (fenced || previousFenced)) {
+      // A list that was not parsed may join a part next to it, which a boundary prevents.
+      joined.push({ text: MARKDOWN_BLOCK_BOUNDARY, isolated: true }, { text: part, isolated })
+      previousFenced = fenced
+      continue
+    }
+    previousFenced = fenced
+    if (previous === undefined || isolated || previous.isolated || markdown.keepsBlocksApart(previous.text, part)) {
+      joined.push({ text: part, isolated })
+      continue
+    }
+    if (
+      markdown.keepsBlocksApart(previous.text, MARKDOWN_BLOCK_BOUNDARY) &&
+      markdown.keepsBlocksApart(MARKDOWN_BLOCK_BOUNDARY, part)
+    ) {
+      joined.push({ text: MARKDOWN_BLOCK_BOUNDARY, isolated: false }, { text: part, isolated: false })
+      continue
+    }
+    joined.push({ text: plainParts.get(index) ?? part, isolated: false })
+  }
+  return joined
+}
+
+/**
+ * Writes paragraph text as plain Markdown text, for a paragraph whose Markdown cannot be kept
+ * without changing another block. Leading spaces and tabs of the first line become character
+ * references, so the text cannot continue a list or code block before it.
+ *
+ * @param text - Paragraph Markdown.
+ * @returns Escaped plain text.
+ */
+function renderPlainMarkdownParagraph(text: string): string {
+  // Backslashes are escaped in the same pass as the other characters.
+  return text
+    .replace(/[\\`*_[\]<>~]/gu, '\\$&')
+    .replace(/^[ \t]+/u, (indent) => indent.replaceAll(' ', '&#32;').replaceAll('\t', '&#9;'))
+}
+
+/**
+ * Escapes the raw HTML in Markdown, so the exported file never carries runnable HTML.
+ *
+ * The text is parsed with the same CommonMark and GFM grammar the app renders paragraphs with,
+ * and only the text of HTML blocks and inline HTML is changed. The app shows that text literally,
+ * so every Markdown character in it is escaped too: `<div>\n**x**\n</div>` stays literal instead
+ * of turning bold once the tags are escaped. Markdown outside those nodes, including blockquote
+ * markers, autolinks, code spans (also across lines), fenced code, and backslash escapes, stays
+ * as written, so the text imports back with the same rendering. If HTML is still found after a
+ * few passes, every raw HTML start in the text is escaped instead, which is safe but may show a
+ * backslash inside code.
+ *
+ * @param value - Markdown text.
+ * @param findHtml - Finds the raw HTML ranges in Markdown.
+ * @returns Markdown whose HTML tags are shown as text.
+ */
+function escapeMarkdownHtml(value: string, findHtml: MarkdownHtmlFinder): string {
+  let text = value
+  for (let pass = 0; pass < MARKDOWN_HTML_ESCAPE_MAX_PASSES; pass += 1) {
+    const ranges = findHtml(text)
+    if (ranges.length === 0) return text
+    let escaped = ''
+    let index = 0
+    for (const { start, end, continuesNode } of ranges) {
+      escaped += text.slice(index, start) + escapeHtmlNodeText(text.slice(start, end), continuesNode === true)
+      index = end
+    }
+    text = escaped + text.slice(index)
+  }
+  return findHtml(text).length === 0 ? text : escapeRawHtmlStarts(value)
+}
+
+/**
+ * Escapes the text of one raw HTML node on one line so Markdown shows it literally, as the app
+ * does. Every ASCII punctuation character is backslash-escaped. On a later line of the node, the
+ * leading spaces and tabs become character references, so the line cannot become indented code
+ * once the node is no longer HTML.
+ *
+ * @param text - Text of the node on one line.
+ * @param continuesNode - Whether the text starts a later line of the node.
+ * @returns Markdown that shows the text literally.
+ */
+function escapeHtmlNodeText(text: string, continuesNode: boolean): string {
+  const escaped = text.replace(ASCII_PUNCTUATION, '\\$&')
+  if (!continuesNode) return escaped
+  return escaped.replace(/^[ \t]+/u, (indent) => indent.replaceAll(' ', '&#32;').replaceAll('\t', '&#9;'))
+}
+
+/**
+ * Escapes each `<` that starts raw HTML in text. A `<` already escaped by an odd number of
+ * backslashes is left as it is, so exporting an imported page does not add another backslash on
+ * each round trip.
+ *
+ * @param text - Markdown text, or the source of one raw HTML node.
+ * @returns The text with unescaped raw HTML starts escaped.
+ */
+function escapeRawHtmlStarts(text: string): string {
+  return text.replace(RAW_HTML_START, (match, offset: number) => {
+    let backslashes = 0
+    while (text[offset - 1 - backslashes] === '\\') backslashes += 1
+    return backslashes % 2 === 1 ? match : '\\<'
+  })
 }
 
 /**
@@ -1526,7 +2046,7 @@ function escapeMarkdownText(value: string): string {
  * @returns Escaped table-cell text.
  */
 function escapeMarkdownTableCell(value: string): string {
-  return escapeMarkdownText(value).replaceAll('|', '\\|').replace(/\r?\n/gu, '<br>')
+  return renderMarkdownLinkedText(value, MARKDOWN_TABLE_CELL_SPECIAL).replace(/\r?\n/gu, '<br>')
 }
 
 /**
