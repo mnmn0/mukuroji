@@ -105,7 +105,13 @@ export function convertMarkdownToPageBlocks(
   // block is shown on its own; such Markdown stays whole in one paragraph so every reference
   // keeps its definition. A raw HTML block is shown literally up to its end, so Markdown with one
   // stays whole too and nothing inside it becomes a native block.
-  if (linesOutsideFences(bodyText).some((line) => REFERENCE_DEFINITION.test(line) || HTML_BLOCK_START.test(line))) {
+  // A definition or HTML block may sit inside a list item or quote, so container markers are
+  // removed first; a false match only keeps more Markdown together.
+  const keepsWhole = linesOutsideFences(bodyText).some((line) => {
+    const content = stripContainerMarkers(line)
+    return REFERENCE_DEFINITION.test(content) || HTML_BLOCK_START.test(content)
+  })
+  if (keepsWhole) {
     if (bodyText.length > DOCUMENT_MAX_TEXT_LENGTH) return { ok: false, code: 'block-too-long' }
     return {
       ok: true,

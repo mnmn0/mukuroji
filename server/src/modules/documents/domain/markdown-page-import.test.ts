@@ -154,6 +154,16 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(convert('```html\n<div>\n```\n\n## Heading').blocks.map(({ type }) => type)).toEqual(['code', 'heading'])
   })
 
+  test('keeps Markdown whole when a definition or HTML block sits in a list item or quote', () => {
+    for (const source of [
+      'See [docs][ref].\n\n## Details\n\n> [ref]: https://example.com',
+      'See [docs][ref].\n\n## Details\n\n- [ref]: https://example.com',
+      'Intro\n\n> <pre>\n> ## Literal\n> </pre>',
+    ]) {
+      expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
+    }
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])
