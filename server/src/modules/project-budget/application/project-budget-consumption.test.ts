@@ -156,6 +156,17 @@ describe('loadProjectBudgetConsumption', () => {
     expect(await loadProjectBudgetConsumption(scope, 'UTC', now, ports(budget({ amountMinor: 0 }), [], []))).toBeUndefined()
     expect(await loadProjectBudgetConsumption(scope, 'UTC', now, ports(undefined, [], []))).toBeUndefined()
   })
+
+  test('refuses a total cost past the exact integer range and keeps one at its edge', async () => {
+    const now = new Date('2026-06-01T00:00:00.000Z')
+    const half = 2 ** 52
+    // Exactly the largest safe integer still counts.
+    expect(await loadProjectBudgetConsumption(scope, 'UTC', now, ports(budget(), [], [expense('2026-01-05', half), expense('2026-01-06', half - 1)])))
+      .toMatchObject({ actualCostMinor: Number.MAX_SAFE_INTEGER })
+    // One more minor unit could no longer be added exactly, so the check fails instead of guessing.
+    await expect(loadProjectBudgetConsumption(scope, 'UTC', now, ports(budget(), [], [expense('2026-01-05', half), expense('2026-01-06', half)])))
+      .rejects.toThrow(RangeError)
+  })
 })
 
 describe('sumApprovedProjectExpenses', () => {
