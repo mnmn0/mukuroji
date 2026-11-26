@@ -103,7 +103,7 @@ Software factory が無効な環境でも使えます（Agent Run の API を呼
 | `get_project` | Project を ID で読み、Team と charter（lifecycle・code・説明・目的・責任者・sponsor・予定日・tag・リポジトリ）を返す。Workspace guest のように charter を読めない場合は `charterReadable: false` で Project だけを返す。別の Team に同じ ID の Project があるときは `teamId` が要る |
 | `list_users` | Project の active なメンバーと role。担当者を選ぶため。Project の member 以上の権限が要る |
 | `list_issue_statuses` | Team の Work Item Type ごとの workflow status（ID・名前・カテゴリー・初期 status）と custom field の定義（ID・名前・値の種類・必須・選択肢） |
-| `list_issues` | Work Item をタイトルの語（`query`、全部を含むものだけ。大文字小文字と全角半角を区別しない）・担当者（メンバー ID か `me`）・更新時刻で絞ってページ取得。`teamId` を省くと読める Team を順に 1 Team ずつ読み、`nextCursor` が次の Team へ進む。Project・status・Type の絞り込みは Team ごとの ID なので `teamId` と一緒に渡す。`query` はページごとに絞るので、空のページでも `hasMore` が `true` なら続きを読む |
+| `list_issues` | Work Item をタイトルの語（`query`、全部を含むものだけ。大文字小文字と全角半角を区別しない）・担当者（メンバー ID か `me`）・更新時刻で絞ってページ取得。`teamId` を省くと読める Team を順に 1 Team ずつ読み、`nextCursor` が次の Team へ進む。Team は見えても Work Item を読めない Team（Enterprise のロールなど）は空のページにして次へ進む。Project・status・Type の絞り込みは Team ごとの ID なので `teamId` と一緒に渡す。`query` はページごとに絞るので、空のページでも `hasMore` が `true` なら続きを読む |
 | `get_issue` | key（`ABC-123`）だけ、または ID と `teamId` で Work Item を読む。key も返す。`teamId` を渡すと値は常に ID として読む（`task-1` のような古い ID を key と取り違えないため） |
 | `list_comments` | Work Item のコメントを新しい順にページ取得。key だけでも指せる |
 | `save_issue` | `id` なしで Work Item を作成（`teamId` と `title` が必須、担当者の既定は `me`）。`id`（key か ID と `teamId`）ありで更新し、渡した項目だけを変える。更新には `get_issue` で読んだ `expectedRevision` が要る。`dueDate` は作成時だけ。`description` は作成時 100000 文字、更新時 4096 文字まで。`customFields` で custom field を field ID ごとに設定でき（選択肢は option ID、日付は `YYYY-MM-DD`）、更新では渡した field だけが変わり `null` で消す |

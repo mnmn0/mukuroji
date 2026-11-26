@@ -370,3 +370,24 @@ test('attachments resolve the key and shape the stored web links', async () => {
     `delete:team:task:${link.id}:k2`,
   ])
 })
+
+test('list_issues without a Team skips a Team whose Work Items are not readable and stops on other failures', async () => {
+  const { api: base } = apiWithTeams({ beta: [[task({ id: 'b1', teamId: 'beta', title: 'Login timeout' })]] })
+  const failing = (code: 'forbidden' | 'unavailable'): WorkspaceApi => ({
+    ...base,
+    listIssues: async (teamId, filters, cursor) => {
+      if (teamId === 'alpha') throw new AgentTaskError(code, 'Team alpha failed.')
+      return base.listIssues(teamId, filters, cursor)
+    },
+  })
+
+  const issues = createWorkspaceIssues(failing('forbidden'))
+  const first = await issues.listIssues(undefined, {})
+  expect(first.items).toEqual([])
+  expect(first.hasMore).toBe(true)
+  const second = await issues.listIssues(undefined, {}, first.nextCursor)
+  expect(second.items.map((item) => item.id)).toEqual(['b1'])
+  expect(second.hasMore).toBe(false)
+
+  await expect(createWorkspaceIssues(failing('unavailable')).listIssues(undefined, {})).rejects.toMatchObject({ code: 'unavailable' })
+})

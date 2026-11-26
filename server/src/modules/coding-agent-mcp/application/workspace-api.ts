@@ -510,8 +510,17 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
       }
       const team = teams[index]
       if (team === undefined) return { items: [], hasMore: false }
-      const page = await api.listIssues(team.id, resolved, position?.cursor, limit)
       const following = teams[index + 1]
+      let page: AgentPage<AgentTask>
+      try {
+        page = await api.listIssues(team.id, resolved, position?.cursor, limit)
+      } catch (error) {
+        // An Enterprise role can let the owner see a Team in the directory without reading its
+        // Work Items. Skip that Team instead of stopping, so later Teams stay reachable; every other
+        // failure, such as a timeout, still ends the call.
+        if (!(error instanceof AgentTaskError) || error.code !== 'forbidden') throw error
+        page = { items: [], hasMore: false }
+      }
       const next = page.hasMore && page.nextCursor !== undefined
         ? { teamId: team.id, cursor: page.nextCursor }
         : following === undefined ? undefined : { teamId: following.id }

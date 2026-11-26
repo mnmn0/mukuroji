@@ -1,10 +1,8 @@
 import { parseWorkItemWebLinkTitle, parseWorkItemWebLinkUrl, type PublicWorkItemWebLink } from '@mukuroji/contracts'
 import { useMemo, useState, type FormEvent } from 'react'
-import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import { WorkItemConfigurationApiError } from '../api/errors'
-import { createWorkItemWebLink, deleteWorkItemWebLink } from '../api/webLinks'
-import { useWorkItemWebLinks } from '../queries/useWorkItemWebLinks'
+import { useWorkItemWebLinksController } from '../mutations/useWorkItemWebLinksController'
 
 /** Translator of the Work Item messages. */
 type Translate = ReturnType<typeof createTranslator>
@@ -51,25 +49,16 @@ export type WorkItemWebLinksPanelContainerProps = {
  */
 export function WorkItemWebLinksPanelContainer({ accessToken, canManage, locale, teamId, workItemId }: WorkItemWebLinksPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const runner = useMemo(() => createMutationRequestRunner(), [])
-  const { data, error, isLoading, mutate } = useWorkItemWebLinks(accessToken, teamId, workItemId)
+  const controller = useWorkItemWebLinksController(accessToken, teamId, workItemId)
   return (
     <WorkItemWebLinksPanel
       canManage={canManage}
-      hasLoadError={data === undefined && error !== undefined}
-      isLoading={isLoading}
-      links={data ?? []}
-      onAdd={canManage ? async (input) => {
-        await runner.run(`web-link:create:${teamId}:${workItemId}`, JSON.stringify(input), (context) =>
-          createWorkItemWebLink(accessToken, teamId, workItemId, input, context))
-        await mutate()
-      } : undefined}
-      onRemove={canManage ? async (link) => {
-        await runner.run(`web-link:delete:${teamId}:${workItemId}:${link.id}`, link.id, (context) =>
-          deleteWorkItemWebLink(accessToken, teamId, workItemId, link.id, context))
-        await mutate()
-      } : undefined}
-      onRetry={() => void mutate()}
+      hasLoadError={controller.hasLoadError}
+      isLoading={controller.isLoading}
+      links={controller.links}
+      onAdd={canManage ? controller.add : undefined}
+      onRemove={canManage ? controller.remove : undefined}
+      onRetry={controller.retry}
       t={t}
     />
   )
