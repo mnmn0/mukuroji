@@ -444,6 +444,71 @@ test('starts and reports on a Work Item through the MCP server', async ({ reques
   }
 })
 
+test('breaks a Work Item down and links Work Items through the Workspace MCP profile', async ({ request }, testInfo) => {
+  const parentId = requireState('workItemId')
+  const issued = await readJson(
+    await request.post('/api/developer/me/api-keys', {
+      headers: mutationHeaders(),
+      data: { name: `Smoke Workspace MCP ${runSuffix}`, expiresAt: new Date(Date.now() + 86_400_000).toISOString() },
+    }),
+    201,
+  )
+  const secret = readString(issued, ['secret'])
+  const apiKeyId = readString(issued, ['apiKey', 'id'])
+  const baseURL = testInfo.project.use.baseURL
+  if (!baseURL) throw new Error('The real-server config must set use.baseURL.')
+  let mcp: McpStdioClient | undefined
+  try {
+    mcp = await McpStdioClient.connect({
+      MUKUROJI_MCP_URL: new URL(baseURL).origin,
+      MUKUROJI_MCP_TOKEN: secret,
+      MUKUROJI_MCP_PROFILE: 'workspace',
+    })
+    const teamId = requireState('teamId')
+    const split = { parentId, teamId, subtasks: [{ title: `Design ${runSuffix}` }, { title: `Build ${runSuffix}` }], idempotencyKey: crypto.randomUUID() }
+    const created = await mcp.callTool('create_subtasks', split)
+    expect(created).toMatchObject({ isError: false, structuredContent: { data: { workItemId: parentId, subtasks: [{}, {}] } } })
+    const design = readString(created.structuredContent, ['data', 'subtasks', '0', 'id'])
+    const build = readString(created.structuredContent, ['data', 'subtasks', '1', 'id'])
+    // A retry with the same key and arguments returns the same children instead of new ones.
+    expect(await mcp.callTool('create_subtasks', split)).toMatchObject({
+      isError: false, structuredContent: { data: { subtasks: [{ id: design }, { id: build }] } },
+    })
+
+    const tree = await mcp.callTool('list_relations', { issueId: parentId, teamId })
+    expect(tree).toMatchObject({ isError: false, structuredContent: { data: { childIds: [design, build] } } })
+
+    const linked = await mcp.callTool('save_relation', {
+      issueId: build, teamId, type: 'blockedBy', relatedIssueId: design, idempotencyKey: crypto.randomUUID(),
+    })
+    expect(linked).toMatchObject({ isError: false, structuredContent: { data: { relation: { type: 'blockedBy', relatedIssueId: design } } } })
+    expect(await mcp.callTool('list_relations', { issueId: design, teamId })).toMatchObject({
+      isError: false,
+      structuredContent: { data: { parentId, relations: expect.arrayContaining([
+        expect.objectContaining({ type: 'blocks', relatedIssueId: build }),
+        expect.objectContaining({ type: 'parent', relatedIssueId: parentId }),
+      ]) } },
+    })
+    // Making a child the parent of its own parent would be a cycle, so it is refused.
+    const cycle = await mcp.callTool('save_relation', {
+      issueId: parentId, teamId, type: 'parent', relatedIssueId: design, idempotencyKey: crypto.randomUUID(),
+    })
+    expect(cycle).toMatchObject({ isError: true })
+
+    const unlinked = await mcp.callTool('save_relation', {
+      issueId: design, teamId, type: 'blocks', relatedIssueId: build, remove: true, idempotencyKey: crypto.randomUUID(),
+    })
+    expect(unlinked).toMatchObject({ isError: false, structuredContent: { data: { removed: true } } })
+    expect(await mcp.callTool('list_relations', { issueId: build, teamId })).toMatchObject({
+      isError: false, structuredContent: { data: { parentId, relations: [expect.objectContaining({ type: 'parent', relatedIssueId: parentId })] } },
+    })
+  } finally {
+    await mcp?.close()
+    const revoked = await request.delete(`/api/developer/me/api-keys/${encodeURIComponent(apiKeyId)}`, { headers: mutationHeaders() })
+    expect(revoked.ok(), `Revoking the smoke token returned ${revoked.status()}.`).toBe(true)
+  }
+})
+
 test('shows the started Work Items and the agent run on the Factory board API', async ({ request }) => {
   const teamId = requireState('teamId')
   const board = await readJson(

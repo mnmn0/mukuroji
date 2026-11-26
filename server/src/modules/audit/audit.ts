@@ -1590,6 +1590,8 @@ const publicAuditMetadataFields = new Set([
   // Session authentication methods of a sign-in, such as `pwd` or `SOFTWARE_TOKEN_MFA`.
   'authenticationMethods',
   'commentId',
+  // Team manager completion Gate override: the reason they gave and the unmet condition IDs.
+  'completionGateOverride',
   'contextItemId',
   'customerId',
   'dependencyId',

@@ -35,6 +35,7 @@ const defaultSettings: AgentSettings = {
   projectBriefs: {},
   fileFailedRunsToTriage: false,
   fileStalledRunsToTriage: false,
+  notifyAssigneeOfRunEvents: false,
   acceptNewRuns: true,
 }
 

@@ -50,6 +50,8 @@ import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { createTeamTimeTrackingPath, createTeamTriagePath } from '../../shared/routing/paths'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
+import { resolveAllowedChildWorkItemTypes } from '../../features/ai-assistance/mutations/useAiPlanningStructureAdoption'
+import type { AiPlanningStructureAdoptionContext } from '../../features/ai-assistance/ui/AiPlanningStructureAdoption'
 import {
   resolveRecordedRemainingEffortMinutes,
   resolveWorkItemDraftRevision,
@@ -79,7 +81,8 @@ import {
   WorkItemContributorsEditor,
 } from '../../work-items/ui/WorkItemContributorsEditor'
 import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
-import { readAcceptanceCriteriaDraftSubmission } from '../../work-items/model/acceptanceCriteria'
+import { readAcceptanceCriteriaDraftSubmission, selectCompletionGateAcceptanceCriteria } from '../../work-items/model/acceptanceCriteria'
+import { readCompletionGateOverrideSubmission } from '../../work-items/model/completionGateOverride'
 import { WorkItemAcceptanceCriteriaEditor } from '../../work-items/ui/WorkItemAcceptanceCriteriaEditor'
 import { WorkItemCompletionGateStatus } from '../../work-items/ui/WorkItemCompletionGateStatus'
 import { useAcceptanceCriteriaDraft } from '../../work-items/ui/useAcceptanceCriteriaDraft'
@@ -142,6 +145,8 @@ export type TaskDetailAiAssistanceRenderContext = {
   resolveWorkItemLabel?: (endpoint: WorkItemDependencyEndpoint) => string
   /** Whether Planning adoption must confirm replacing local edits. */
   requirePlanningAdoptionConfirmation?: boolean
+  /** Parent and allowed child types for creating proposed children and dependencies; omit when read-only. */
+  planningStructureAdoption?: AiPlanningStructureAdoptionContext
   /** Reports Summary operation state to the local Work Item save guard. */
   onSummaryOperationPendingChange?: (pending: boolean) => void
   /** Revision-fenced Work Item source shared by both workflows. */
@@ -672,6 +677,21 @@ export function TaskDetailPane({
     onPlanningAdopt: isReadOnly ? undefined : handleAiPlanningAdopt,
     onPlanningOperationPendingChange: handleAiPlanningOperationPendingChange,
     onSummaryOperationPendingChange: handleAiSummaryOperationPendingChange,
+    planningStructureAdoption: isReadOnly || !issue
+      ? undefined
+      : {
+          childTypes: resolveAllowedChildWorkItemTypes(
+            workItemTypes,
+            issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+          ).map((type) => ({ id: type.id, name: type.name })),
+          parent: {
+            ...(issue.assignedProjectId ? { assignedProjectId: issue.assignedProjectId } : {}),
+            assigneeUserId: issue.assigneeUserId,
+            teamId: issue.teamId,
+            workItemId: issue.id,
+            workItemTypeId: issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+          },
+        },
     requirePlanningAdoptionConfirmation: isEditorDirty,
     resolveStatusLabel: (statusId) =>
       workflowStatuses.find((status) => status.id === statusId)?.name ?? statusId,
@@ -986,6 +1006,10 @@ export function TaskDetailPane({
     if (acceptanceCriteriaSubmission) {
       nextIssueInput.acceptanceCriteria = acceptanceCriteriaSubmission.criteria
     }
+    const completionGateOverride = canCorrectActualDates ? readCompletionGateOverrideSubmission(formData) : undefined
+    if (completionGateOverride) {
+      nextIssueInput.completionGateOverride = completionGateOverride
+    }
 
     void submitIssueUpdate(nextIssueInput)
   }
@@ -1128,9 +1152,16 @@ export function TaskDetailPane({
         readOnly={isReadOnly}
       />
       <WorkItemCompletionGateStatus
-        acceptanceCriteria={(issue ?? currentTask).acceptanceCriteria}
+        acceptanceCriteria={selectCompletionGateAcceptanceCriteria(
+          acceptanceCriteriaDraftState.draft.rows,
+          (issue ?? currentTask).acceptanceCriteria,
+        )}
         approvalSummary={(issue ?? currentTask).approvalSummary}
         locale={locale}
+        {...(canCorrectActualDates && !isReadOnly && (issue ?? currentTask).statusCategory !== 'completed'
+          // The Team manager who may correct actual dates is the one who may override the Gate.
+          ? { overrideFormId: editorFormId }
+          : {})}
         policy={resolvedConfiguration?.completionGate}
       />
     </>

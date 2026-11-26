@@ -9,6 +9,7 @@ import type { ReactNode } from 'react'
 import type { Locale, MessageKey } from '../../../shared/i18n/i18n'
 import type { AiAssistanceController } from '../mutations/useAiAssistanceController'
 import { createAiAssistantSessionKey } from '../model/assistantSessionKey'
+import type { AiPlanningStructureAdoptionContext } from './AiPlanningStructureAdoption'
 import { AiSummaryAssistant } from './AiSummaryAssistant'
 import { AiWorkItemPlanningAssistant } from './AiWorkItemPlanningAssistant'
 
@@ -40,6 +41,8 @@ export type TaskDetailAiAssistanceRenderContext = {
   resolveWorkItemLabel?: (endpoint: WorkItemDependencyEndpoint) => string
   /** Whether Planning adoption must confirm replacing local edits. */
   requirePlanningAdoptionConfirmation?: boolean
+  /** Parent and allowed child types for creating proposed children and dependencies; omit when read-only. */
+  planningStructureAdoption?: AiPlanningStructureAdoptionContext
   /** Reports Summary operation state to the local Work Item save guard. */
   onSummaryOperationPendingChange?: (pending: boolean) => void
   /** Revision-fenced Work Item source shared by both workflows. */
@@ -96,6 +99,7 @@ export function createTaskDetailAiAssistanceRenderer(
             requireAdoptionConfirmation={context.requirePlanningAdoptionConfirmation}
             shouldConfirmAdoption={context.shouldConfirmPlanningAdoption}
             source={context.source}
+            structureAdoption={context.planningStructureAdoption}
             t={context.t}
           />
         )

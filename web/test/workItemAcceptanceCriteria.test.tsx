@@ -7,6 +7,7 @@ import {
   createEmptyAcceptanceCriterionDraftRow,
   parseAcceptanceCriterionDraftRows,
   readAcceptanceCriteriaDraftSubmission,
+  selectCompletionGateAcceptanceCriteria,
   serializeAcceptanceCriterionDraftRows,
   toAcceptanceCriterionDraftRows,
 } from '../src/work-items/model/acceptanceCriteria'
@@ -132,4 +133,20 @@ describe('acceptance criteria editor', () => {
     expect(markup).toContain(`aria-describedby="${errorId}" aria-invalid="true"`)
     expect(markup).not.toContain('<fieldset aria-invalid')
   })
+})
+
+test('the completion Gate reads the open draft instead of the saved criteria', () => {
+  const allMet = criteria.map((criterion) => ({ ...criterion, satisfied: true }))
+  expect(selectCompletionGateAcceptanceCriteria(undefined, allMet)).toBe(allMet)
+
+  // Unchecking a saved criterion and adding a new one both count before the draft is saved.
+  const rows = [
+    ...toAcceptanceCriterionDraftRows(allMet).map((row, index) => index === 0 ? { ...row, satisfied: false } : row),
+    { ...createEmptyAcceptanceCriterionDraftRow('new-1'), text: 'Release notes' },
+  ]
+  expect(selectCompletionGateAcceptanceCriteria(rows, allMet)).toEqual([
+    { id: 'a'.repeat(32), text: 'Tests pass', satisfied: false },
+    { id: 'b'.repeat(32), text: 'Docs updated', satisfied: true },
+    { id: 'new-1', text: 'Release notes', satisfied: false },
+  ])
 })

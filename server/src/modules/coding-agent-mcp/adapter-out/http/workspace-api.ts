@@ -1,8 +1,13 @@
 import { z } from 'zod'
 import {
   isCanonicalWorkItemKey,
+  PUBLIC_WORK_ITEM_RELATION_TYPES,
   type PublicCredentialOwner,
+  type PublicWorkItemHierarchy,
+  type PublicWorkItemRelationList,
+  type PublicWorkItemRelationMutation,
   type PublicProjectMemberList,
+  type PublicSubtaskBatch,
   type PublicTeamList,
   type PublicWorkItemKeyLookup,
 } from '@mukuroji/contracts'
@@ -35,6 +40,23 @@ const membersSchema: z.ZodType<PublicProjectMemberList> = z.object({
 })
 const keyLookupSchema: z.ZodType<PublicWorkItemKeyLookup> = z.object({
   schemaVersion: z.literal(1), key: z.string().refine(isCanonicalWorkItemKey), teamId: identifier, workItemId: identifier,
+})
+
+const relationSchema = z.object({
+  type: z.enum(PUBLIC_WORK_ITEM_RELATION_TYPES), targetWorkItemId: identifier, createdAt: z.iso.datetime().optional(),
+})
+const relationListSchema: z.ZodType<PublicWorkItemRelationList> = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, relations: z.array(relationSchema).max(1000),
+})
+const relationMutationSchema: z.ZodType<PublicWorkItemRelationMutation> = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, relation: relationSchema,
+})
+const subtaskBatchSchema: z.ZodType<PublicSubtaskBatch> = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, subtaskCount: z.number().int().min(1),
+})
+const hierarchySchema: z.ZodType<PublicWorkItemHierarchy> = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier,
+  parentWorkItemId: identifier.nullable(), childWorkItemIds: z.array(identifier), wbsNumber: z.string().optional(),
 })
 
 /** Trusted operator configuration of a Workspace connection, which fixes no Team. */
@@ -81,6 +103,20 @@ export function createWorkspaceApi(
   function id(value: string, label: string): string {
     if (!identifier.safeParse(value).success) throw new AgentTaskError('invalid_request', `${label} is invalid.`)
     return value
+  }
+
+  /**
+   * Checks that a relation response belongs to the Work Item that was asked for.
+   * @param response - Relation list, mutation, or hierarchy from the response.
+   * @param teamId - Requested Team.
+   * @param workItemId - Requested Work Item.
+   * @returns The response.
+   */
+  function scopedRelations<T extends { teamId: string, workItemId: string }>(response: T, teamId: string, workItemId: string): T {
+    if (response.teamId !== teamId || response.workItemId !== workItemId) {
+      throw new AgentTaskError('invalid_response', 'The API returned the relations of another Work Item.')
+    }
+    return response
   }
 
   return {
@@ -154,6 +190,37 @@ export function createWorkspaceApi(
     /** Updates a Work Item with `PATCH` and checks its Team and ID; see {@link WorkspaceApi.updateIssue}. */
     async updateIssue(teamId, workItemId, input, key) {
       return scoped(await request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}`, taskSchema, 'PATCH', input, key, {
+        teamId: id(teamId, 'teamId'),
+      }), teamId, workItemId)
+    },
+    /** Reads a Work Item's parent, children, and WBS number; see {@link WorkspaceApi.hierarchy}. */
+    async hierarchy(teamId, workItemId) {
+      return scopedRelations(await request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}/hierarchy`, hierarchySchema, 'GET', undefined, undefined, {
+        teamId: id(teamId, 'teamId'),
+      }), teamId, workItemId)
+    },
+    /** Lists a Work Item's relations other than children; see {@link WorkspaceApi.relations}. */
+    async relations(teamId, workItemId) {
+      return scopedRelations(await request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}/relations`, relationListSchema, 'GET', undefined, undefined, {
+        teamId: id(teamId, 'teamId'),
+      }), teamId, workItemId)
+    },
+    /** Links two Work Items with `POST relations`; see {@link WorkspaceApi.createRelation}. */
+    async createRelation(teamId, workItemId, input, key) {
+      return scopedRelations(await request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}/relations`, relationMutationSchema, 'POST', {
+        type: input.type, targetWorkItemId: id(input.targetWorkItemId, 'relatedIssueId'),
+      }, key, { teamId: id(teamId, 'teamId') }), teamId, workItemId)
+    },
+    /** Removes a relation with `DELETE relations/{target}/{type}`; see {@link WorkspaceApi.deleteRelation}. */
+    async deleteRelation(teamId, workItemId, targetWorkItemId, type, key) {
+      return scopedRelations(await request(
+        `work-items/${encodeURIComponent(id(workItemId, 'id'))}/relations/${encodeURIComponent(id(targetWorkItemId, 'relatedIssueId'))}/${type}`,
+        relationMutationSchema, 'DELETE', undefined, key, { teamId: id(teamId, 'teamId') },
+      ), teamId, workItemId)
+    },
+    /** Reserves a subtask batch with `POST subtask-batches`; see {@link WorkspaceApi.reserveSubtaskBatch}. */
+    async reserveSubtaskBatch(teamId, workItemId, input, key) {
+      return scopedRelations(await request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}/subtask-batches`, subtaskBatchSchema, 'POST', input, key, {
         teamId: id(teamId, 'teamId'),
       }), teamId, workItemId)
     },

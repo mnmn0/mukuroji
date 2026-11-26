@@ -20,6 +20,7 @@ import {
 import {
   AUTOMATION_EXECUTION_DEAD_LETTERED_EVENT_TYPE,
   AUTOMATION_RULE_RATE_LIMITED_EVENT_TYPE,
+  isAgentRunNotificationReason,
   isCanonicalWorkItemKey,
   parseNotificationMessage,
   type EnterpriseIdentitySnapshot,
@@ -1635,6 +1636,7 @@ export async function publishRealtimeInvalidation(
 
 /**
  * notification candidate を canonical member key でまとめ、actor 自身を除外します。
+ * Agent Run の通知 reason は、agent が担当者の credential で動くため actor 本人にも届けます。
  */
 export function groupNotificationCandidates(event: AuditProjectionEvent) {
   const actorKey = normalizeMemberKey(event.actorMemberKey ?? event.actorUserId)
@@ -1643,7 +1645,7 @@ export function groupNotificationCandidates(event: AuditProjectionEvent) {
   for (const candidate of event.notificationCandidates) {
     const memberKey = normalizeMemberKey(candidate.memberKey)
 
-    if (!memberKey || memberKey === actorKey) {
+    if (!memberKey || (memberKey === actorKey && !isAgentRunNotificationReason(candidate.reason))) {
       continue
     }
 

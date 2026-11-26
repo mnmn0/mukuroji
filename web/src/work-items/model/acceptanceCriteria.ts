@@ -120,6 +120,22 @@ export function countSatisfiedAcceptanceCriteria(
 }
 
 /**
+ * Chooses the acceptance criteria the completion Gate checklist reads: the open draft when one is
+ * being edited, because the editor saves it with the same update the Gate judges, else the saved list.
+ *
+ * @param rows - Rows of the open draft; absent while the saved list is only shown.
+ * @param saved - Criteria stored on the Work Item.
+ * @returns Criteria to evaluate, with a new row keyed by its draft key.
+ */
+export function selectCompletionGateAcceptanceCriteria(
+  rows: readonly AcceptanceCriterionDraftRow[] | undefined,
+  saved: readonly WorkItemAcceptanceCriterion[] | undefined,
+): readonly WorkItemAcceptanceCriterion[] | undefined {
+  if (rows === undefined) return saved
+  return rows.map((row) => ({ id: row.criterionId ?? row.key, text: row.text, satisfied: row.satisfied }))
+}
+
+/**
  * Serializes draft rows for the editor form's hidden field.
  *
  * @param rows - Rows being edited.

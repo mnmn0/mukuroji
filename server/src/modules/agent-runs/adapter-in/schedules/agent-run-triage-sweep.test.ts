@@ -47,9 +47,14 @@ function createRun(runNumber: number, startedAt: Date, teamId = 'core'): StoredA
  * @param flags - Which runs the Team files.
  * @param flags.failed - Whether failed runs are filed.
  * @param flags.stalled - Whether stalled runs are filed.
+ * @param flags.notify - Whether the assignee is notified of stalled runs.
  * @param teamId - Team whose settings are saved.
  */
-async function saveFlags(store: InMemoryAgentRunStore, flags: { failed: boolean; stalled: boolean }, teamId = 'core'): Promise<void> {
+async function saveFlags(
+  store: InMemoryAgentRunStore,
+  flags: { failed: boolean; stalled: boolean; notify?: boolean },
+  teamId = 'core',
+): Promise<void> {
   const current = await store.getSettings('workspace-1', teamId)
   await store.saveSettings('workspace-1', teamId, readUpdateAgentSettingsRequest({
     expectedRevision: current.revision,
@@ -57,6 +62,7 @@ async function saveFlags(store: InMemoryAgentRunStore, flags: { failed: boolean;
     allowTakeoverAfterLeaseExpiry: false,
     fileFailedRunsToTriage: flags.failed,
     fileStalledRunsToTriage: flags.stalled,
+    notifyAssigneeOfRunEvents: flags.notify === true,
   }), 'manager-1', now, `save-${current.revision}`)
 }
 
@@ -232,6 +238,64 @@ describe('Agent Run triage sweep', () => {
     const second = createDependencies(store)
     expect(await runAgentRunTriageSweep(second.dependencies)).toMatchObject({ stalledFiled: 0 })
     expect(second.filings).toEqual([])
+  })
+
+  test('notifies the assignee of a stalled run once, without filing, when the Team only notifies', async () => {
+    const store = new InMemoryAgentRunStore()
+    await saveFlags(store, { failed: false, stalled: false, notify: true })
+    const stalled = createRun(1, new Date(now.getTime() - 45 * minute))
+    store.seed(stalled)
+    store.seed(createRun(2, new Date(now.getTime() - 5 * minute)))
+    const notified: { runId: string; projectId?: string }[] = []
+    const notifier = {
+      /**
+       * Records a notification.
+       * @param run - Stalled run.
+       * @param workItem - Its Work Item.
+       * @param workItem.projectId - Project of the Work Item.
+       */
+      async notifyStalled(run: StoredAgentRun, workItem: { projectId?: string }) {
+        notified.push({ runId: run.runId, ...(workItem.projectId ? { projectId: workItem.projectId } : {}) })
+      },
+    }
+    const first = createDependencies(store)
+    expect(await runAgentRunTriageSweep({ ...first.dependencies, notifier })).toMatchObject({ stalledFiled: 0, stalledNotified: 1, errors: 0 })
+    expect(first.filings).toEqual([])
+    expect(notified).toEqual([{ runId: stalled.runId, projectId: 'checkout' }])
+
+    // A heartbeat recovers the run and it stalls again later: the run was already notified.
+    const recovered = await store.heartbeat(stalled, stalled.instanceIdHash, now)
+    store.seed({ ...recovered, leaseExpiresAt: new Date(now.getTime() - minute).toISOString() })
+    const second = createDependencies(store)
+    expect(await runAgentRunTriageSweep({ ...second.dependencies, notifier })).toMatchObject({ stalledNotified: 0 })
+    expect(notified).toHaveLength(1)
+
+    // Without a notifier, a Team that only notifies is not swept for stalls.
+    const withoutNotifier = new InMemoryAgentRunStore()
+    await saveFlags(withoutNotifier, { failed: false, stalled: false, notify: true })
+    withoutNotifier.seed(createRun(3, new Date(now.getTime() - 45 * minute)))
+    const silent = createDependencies(withoutNotifier)
+    expect(await runAgentRunTriageSweep(silent.dependencies)).toMatchObject({ stalledFiled: 0, stalledNotified: 0 })
+    expect((await withoutNotifier.getRun('workspace-1', 'core', createRun(3, now).runId))?.stallTriagedAt).toBeUndefined()
+  })
+
+  test('files and notifies a stalled run when the Team does both', async () => {
+    const store = new InMemoryAgentRunStore()
+    await saveFlags(store, { failed: false, stalled: true, notify: true })
+    store.seed(createRun(1, new Date(now.getTime() - 45 * minute)))
+    let notifications = 0
+    const sweep = createDependencies(store)
+    expect(await runAgentRunTriageSweep({
+      ...sweep.dependencies,
+      notifier: {
+        /** Counts a notification. */
+        async notifyStalled() {
+          notifications += 1
+        },
+      },
+    })).toMatchObject({ stalledFiled: 1, stalledNotified: 1 })
+    expect(sweep.filings).toHaveLength(1)
+    expect(notifications).toBe(1)
   })
 
   test('moves past filed stalled runs, so a Team with more than one read bound of them keeps progressing', async () => {

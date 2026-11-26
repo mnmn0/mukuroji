@@ -136,6 +136,7 @@ import type {
   WorkflowStatusCategory,
   WorkItemPriority,
   WorkItemAcceptanceCriterion,
+  WorkItemCompletionGateOverrideRecord,
   WorkItemContributorAssignment,
   WorkItemRelation,
   WorkItemSchedule,
@@ -1319,6 +1320,11 @@ export type PublicUpdateTeamIssueRequestBody = {
   actualStartDate?: unknown
   /** Manager correction of the actual end date; the API handler moves it to `actualDateCorrection`. */
   actualEndDate?: unknown
+  /**
+   * Team manager override of an unmet completion Gate; the API handler authorizes it and records
+   * it as `completionGateOverridden`.
+   */
+  completionGateOverride?: unknown
 }
 
 /**
@@ -1346,6 +1352,8 @@ export type UpdateTeamIssueRequestBody = PublicUpdateTeamIssueRequestBody & {
   archivedBy?: unknown
   /** Team manager correction of the actual dates, authorized by the API handler. */
   actualDateCorrection?: WorkItemActualDateCorrection
+  /** Completion Gate override a Team manager used for this update, authorized by the API handler. */
+  completionGateOverridden?: WorkItemCompletionGateOverrideRecord
   /**
    * ISO instant that dates the status transition, set by an internal caller that predicted the
    * resulting actual dates at that instant. Defaults to the update time.
@@ -3854,7 +3862,9 @@ export class DynamoDbTeamIssuesClient {
         issueId,
         eventType: 'updated',
         actorUserId,
-        summary: 'Issue was updated.',
+        summary: input.completionGateOverridden
+          ? createCompletionGateOverrideSummary(input.completionGateOverridden)
+          : 'Issue was updated.',
         createdAt: expressionAttributeValues[':updatedAt'] as string,
       })
       const baselineRead = await this.readWorkItemBaselineSlip(
@@ -3916,6 +3926,14 @@ export class DynamoDbTeamIssuesClient {
           ...(completionTransition ? { completionTransition: true } : {}),
           ...(leavesCompletion ? { completionReopened: true } : {}),
           ...(input.actualDateCorrection ? { actualDateCorrection: true } : {}),
+          ...(input.completionGateOverridden
+            ? {
+                completionGateOverride: {
+                  reason: input.completionGateOverridden.reason,
+                  conditions: [...input.completionGateOverridden.conditions],
+                },
+              }
+            : {}),
         },
       })
       const idempotencyCompletion = await idempotency?.prepare({
@@ -6688,4 +6706,15 @@ function getEnv(name: string) {
  */
 function isClosedWorkItemState(statusCategory: WorkflowStatusCategory, archivedAt: unknown) {
   return statusCategory === 'completed' || statusCategory === 'canceled' || archivedAt !== undefined
+}
+
+/**
+ * Builds the activity summary of an update that completed a Work Item through a manager's
+ * completion Gate override.
+ *
+ * @param override - Override the manager used.
+ * @returns Summary naming the unmet conditions and the reason.
+ */
+function createCompletionGateOverrideSummary(override: WorkItemCompletionGateOverrideRecord): string {
+  return `Completed by overriding the completion Gate (${override.conditions.join(', ')}): ${override.reason}`
 }
