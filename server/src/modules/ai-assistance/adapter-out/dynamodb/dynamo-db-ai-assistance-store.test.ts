@@ -2359,9 +2359,13 @@ describe('DynamoDbAiAssistanceStore', () => {
             TableName: 'WorkspaceSearchTable',
             Key: { workspaceId: 'workspace-1', recordKey: 'AI_USAGE#MONTH#2026-08#WORKSPACE' },
             ConditionExpression:
-              '(attribute_not_exists(#totalTokens) OR #totalTokens < :tokenLimit) AND ' +
-              '(attribute_not_exists(#costMicroUsd) OR #costMicroUsd < :costLimitMicroUsd)',
-            ExpressionAttributeNames: { '#totalTokens': 'totalTokens', '#costMicroUsd': 'costMicroUsd' },
+              'attribute_not_exists(#recordKey) OR ' +
+              '(#totalTokens < :tokenLimit AND #costMicroUsd < :costLimitMicroUsd)',
+            ExpressionAttributeNames: {
+              '#totalTokens': 'totalTokens',
+              '#costMicroUsd': 'costMicroUsd',
+              '#recordKey': 'recordKey',
+            },
             ExpressionAttributeValues: { ':tokenLimit': 50_000, ':costLimitMicroUsd': 12_500_000 },
           },
         })

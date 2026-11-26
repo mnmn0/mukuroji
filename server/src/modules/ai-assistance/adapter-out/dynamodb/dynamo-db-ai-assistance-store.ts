@@ -3455,7 +3455,8 @@ function createMonthlyUsageCounterUpdate(
 /**
  * Creates the check that keeps a new reservation under the monthly Workspace caps.
  *
- * A month without a usage row passes, since nothing was recorded yet.
+ * A month without a usage row passes, since nothing was recorded yet. An existing row
+ * must carry every capped total, so a damaged row without one refuses the reservation.
  *
  * @param tableName - AI assistance table.
  * @param workspaceId - Workspace partition.
@@ -3479,21 +3480,22 @@ function createMonthlyBudgetConditionCheck(
     ) throw invalidRecordError()
     names['#totalTokens'] = 'totalTokens'
     values[':tokenLimit'] = budget.tokenLimit
-    conditions.push('(attribute_not_exists(#totalTokens) OR #totalTokens < :tokenLimit)')
+    conditions.push('#totalTokens < :tokenLimit')
   }
   if (budget.costLimitUsd !== undefined) {
     const costLimitMicroUsd = Math.round(budget.costLimitUsd * MICRO_USD_PER_USD)
     if (!Number.isSafeInteger(costLimitMicroUsd) || costLimitMicroUsd < 1) throw invalidRecordError()
     names['#costMicroUsd'] = 'costMicroUsd'
     values[':costLimitMicroUsd'] = costLimitMicroUsd
-    conditions.push('(attribute_not_exists(#costMicroUsd) OR #costMicroUsd < :costLimitMicroUsd)')
+    conditions.push('#costMicroUsd < :costLimitMicroUsd')
   }
   if (conditions.length === 0) throw invalidRecordError()
+  names['#recordKey'] = 'recordKey'
   return {
     ConditionCheck: {
       TableName: tableName,
       Key: { workspaceId, recordKey: createMonthlyUsageRecordKey(month, { scope: 'workspace' }) },
-      ConditionExpression: conditions.join(' AND '),
+      ConditionExpression: `attribute_not_exists(#recordKey) OR (${conditions.join(' AND ')})`,
       ExpressionAttributeNames: names,
       ExpressionAttributeValues: values,
     },

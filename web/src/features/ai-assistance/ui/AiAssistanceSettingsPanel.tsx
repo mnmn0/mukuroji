@@ -332,7 +332,36 @@ export function AiAssistanceSettingsPanel({
   preferenceFeedback,
   t,
 }: AiAssistanceSettingsPanelProps) {
-  const policyValidation = policy ? validatePolicy(policy) : undefined
+  const [monthlyLimitInput, setMonthlyLimitInput] = useState<MonthlyLimitInputState>({
+    editorVersion: policyEditorVersion,
+    unparsedFields: [],
+  })
+  const unparsedMonthlyFields = monthlyLimitInput.editorVersion === policyEditorVersion
+    ? monthlyLimitInput.unparsedFields
+    : []
+  const basePolicyValidation = policy ? validatePolicy(policy) : undefined
+  const policyValidation = basePolicyValidation && unparsedMonthlyFields.length > 0
+    ? { ...basePolicyValidation, monthlyLimitsValid: false, valid: false }
+    : basePolicyValidation
+
+  /**
+   * Records a typed monthly cap, remembering text the browser could not parse as a number.
+   *
+   * @param field - Cap being edited.
+   * @param input - Number input that changed.
+   */
+  const changeMonthlyLimit = (field: MonthlyLimitField, input: HTMLInputElement) => {
+    const unparsed = input.validity.badInput
+    setMonthlyLimitInput({
+      editorVersion: policyEditorVersion,
+      unparsedFields: [
+        ...unparsedMonthlyFields.filter((candidate) => candidate !== field),
+        ...(unparsed ? [field] : []),
+      ],
+    })
+    if (!policy || !onPolicyChange) return
+    onPolicyChange(withMonthlyLimit(policy, field, unparsed ? '' : input.value))
+  }
 
   if (!deploymentEnabled) {
     return (
@@ -585,11 +614,7 @@ export function AiAssistanceSettingsPanel({
                       className="workbench-input min-h-[44px] px-3 font-normal text-[var(--workbench-text)]"
                       inputMode="numeric"
                       min="1"
-                      onChange={(event) => onPolicyChange?.(withMonthlyLimit(
-                        policy,
-                        'monthlyTokenLimit',
-                        event.target.value,
-                      ))}
+                      onChange={(event) => changeMonthlyLimit('monthlyTokenLimit', event.currentTarget)}
                       step="1"
                       type="number"
                       value={policy.monthlyTokenLimit ?? ''}
@@ -605,11 +630,7 @@ export function AiAssistanceSettingsPanel({
                       className="workbench-input min-h-[44px] px-3 font-normal text-[var(--workbench-text)]"
                       inputMode="decimal"
                       min="0.01"
-                      onChange={(event) => onPolicyChange?.(withMonthlyLimit(
-                        policy,
-                        'monthlyCostLimitUsd',
-                        event.target.value,
-                      ))}
+                      onChange={(event) => changeMonthlyLimit('monthlyCostLimitUsd', event.currentTarget)}
                       step="0.01"
                       type="number"
                       value={policy.monthlyCostLimitUsd ?? ''}
@@ -858,6 +879,17 @@ function areStringArraysEqual(left: readonly string[], right: readonly string[])
     left.every((value) => right.includes(value))
 }
 
+/** Optional monthly cap field of the Workspace policy. */
+type MonthlyLimitField = 'monthlyTokenLimit' | 'monthlyCostLimitUsd'
+
+/** Monthly cap inputs whose text the browser could not parse, for one policy editor. */
+type MonthlyLimitInputState = {
+  /** Policy editor version the state belongs to; a new editor starts clean. */
+  editorVersion: number
+  /** Caps whose current text is not a number, which keeps Save disabled. */
+  unparsedFields: MonthlyLimitField[]
+}
+
 /**
  * Replaces one optional monthly cap from the typed text.
  *
@@ -868,7 +900,7 @@ function areStringArraysEqual(left: readonly string[], right: readonly string[])
  */
 function withMonthlyLimit(
   policy: AiAssistancePolicy,
-  field: 'monthlyTokenLimit' | 'monthlyCostLimitUsd',
+  field: MonthlyLimitField,
   text: string,
 ): AiAssistancePolicy {
   const rest: AiAssistancePolicy = { ...policy }
