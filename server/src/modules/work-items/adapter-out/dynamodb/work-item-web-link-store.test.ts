@@ -105,7 +105,7 @@ test('maps a failed condition to a conflict and throttling to a retryable failur
   await expect(broken.write(writeInput())).rejects.toMatchObject({ status: 502, code: 'WorkItemWebLinkStorageFailure' })
 })
 
-test('reads a stored row and rejects one whose link is not a safe URL', async () => {
+test('reads a stored row and rejects one with an unsafe link URL or a broken creation time', async () => {
   const row = {
     workspaceId: 'w', recordKey: 'WORK_ITEM_WEB_LINKS#t#i', entryType: 'work-item-web-links', schemaVersion: 1,
     revision: 2, workItemCreatedAt: '2026-11-01T00:00:00.000Z', links: [link],
@@ -119,4 +119,9 @@ test('reads a stored row and rejects one whose link is not a safe URL', async ()
   expect(await good.get('w', 't', 'i')).toEqual({ revision: 2, workItemCreatedAt: '2026-11-01T00:00:00.000Z', links: [link] })
   expect(await empty.get('w', 't', 'i')).toBeNull()
   await expect(corrupt.get('w', 't', 'i')).rejects.toMatchObject({ status: 502 })
+  // A broken creation time would read as a recreated Work Item and hide the links, so it fails closed.
+  const brokenCreatedAt = new DynamoDbWorkItemWebLinkStore('planning', fakeClient(() => ({
+    Item: { ...row, workItemCreatedAt: 'broken' },
+  })).client)
+  await expect(brokenCreatedAt.get('w', 't', 'i')).rejects.toMatchObject({ status: 502 })
 })

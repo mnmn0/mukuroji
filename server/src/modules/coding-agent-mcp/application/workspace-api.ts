@@ -505,7 +505,7 @@ export type WorkspaceIssueStatus = {
 }
 
 /** Version tag of a cursor that walks the Work Items of every readable Team. */
-const CROSS_TEAM_CURSOR_VERSION = 1
+const CROSS_TEAM_CURSOR_VERSION = 2
 
 /** Position of a cross-Team Work Item list: the Team being read and the cursor within it. */
 type CrossTeamCursor = {
@@ -513,6 +513,21 @@ type CrossTeamCursor = {
   teamId: string
   /** Cursor within that Team, absent at the Team's first page. */
   cursor?: string
+  /** Filters and page size the cursor was made for, as {@link crossTeamFilterKey} writes them. */
+  filter: string
+}
+
+/**
+ * Writes the filters and page size of a cross-Team list as a stable key, so a cursor continues only
+ * the search that made it. The Team cursors inside are bound by the server already; this binds the
+ * step from one Team to the next.
+ * @param filters - Filters after member resolution.
+ * @param limit - Page size, if any.
+ * @returns The key, with the filters in name order.
+ */
+function crossTeamFilterKey(filters: WorkspaceIssueFilters, limit: number | undefined): string {
+  const entries = Object.entries(filters).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b))
+  return JSON.stringify([entries, limit ?? null])
 }
 
 /**
@@ -543,10 +558,14 @@ function decodeCrossTeamCursor(cursor: string): CrossTeamCursor {
   if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) throw invalid()
   const teamId: unknown = Reflect.get(decoded, 'teamId')
   const inner: unknown = Reflect.get(decoded, 'cursor')
-  if (typeof teamId !== 'string' || teamId.length === 0 || (inner !== undefined && (typeof inner !== 'string' || inner.length === 0))) {
+  const filter: unknown = Reflect.get(decoded, 'filter')
+  if (
+    typeof teamId !== 'string' || teamId.length === 0 || typeof filter !== 'string' ||
+    (inner !== undefined && (typeof inner !== 'string' || inner.length === 0))
+  ) {
     throw invalid()
   }
-  return { teamId, ...(inner === undefined ? {} : { cursor: inner }) }
+  return { teamId, filter, ...(inner === undefined ? {} : { cursor: inner }) }
 }
 
 /**
@@ -816,7 +835,11 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
       // Without a Team the list walks the readable Teams in directory order, one Team per page, so
       // each page keeps the server's own access checks and cursor of that Team.
       const teams = (await api.teams()).items
+      const filter = crossTeamFilterKey(resolved, limit)
       const position = cursor === undefined ? undefined : decodeCrossTeamCursor(cursor)
+      if (position !== undefined && position.filter !== filter) {
+        throw new AgentTaskError('invalid_request', 'The cursor belongs to a list_issues call with other filters or limit. Pass the same filters, or start again without cursor.')
+      }
       const index = position === undefined ? 0 : teams.findIndex((team) => team.id === position.teamId)
       if (index < 0) {
         throw new AgentTaskError('invalid_request', 'The Team this cursor was reading is no longer readable. Start again without cursor.')
@@ -835,8 +858,8 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
         page = { items: [], hasMore: false }
       }
       const next = page.hasMore && page.nextCursor !== undefined
-        ? { teamId: team.id, cursor: page.nextCursor }
-        : following === undefined ? undefined : { teamId: following.id }
+        ? { teamId: team.id, cursor: page.nextCursor, filter }
+        : following === undefined ? undefined : { teamId: following.id, filter }
       return {
         items: matching(page).items,
         hasMore: next !== undefined,
@@ -866,8 +889,14 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
         }
         throw error
       }
+      // The charter is newer than the Team list, so its optional fields replace the listed ones: a
+      // date or code cleared since the list was read must not come back from it.
       return {
-        ...project,
+        id: project.id,
+        name: project.name,
+        teamId: project.teamId,
+        teamName: project.teamName,
+        ...(charter.owner === undefined ? {} : { ownerMemberId: charter.owner.memberId }),
         charterReadable: true,
         lifecycleState: charter.lifecycleState,
         revision: charter.revision,

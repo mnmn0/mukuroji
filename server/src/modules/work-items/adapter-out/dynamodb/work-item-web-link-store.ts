@@ -270,6 +270,8 @@ function parseStoredLinks(row: Record<string, unknown>, workspaceId: string, key
     !Number.isSafeInteger(revision) ||
     revision < 1 ||
     typeof workItemCreatedAt !== 'string' ||
+    workItemCreatedAt.length === 0 ||
+    Number.isNaN(Date.parse(workItemCreatedAt)) ||
     !Array.isArray(links) ||
     links.length > WORK_ITEM_WEB_LINK_LIMIT
   ) {

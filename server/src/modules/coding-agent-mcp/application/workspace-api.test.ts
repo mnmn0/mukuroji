@@ -287,8 +287,31 @@ test('list_issues without a Team refuses Team-scoped filters and foreign cursors
     await expect(issues.listIssues(undefined, filters)).rejects.toMatchObject({ code: 'invalid_request' })
   }
   await expect(issues.listIssues(undefined, {}, 'server-cursor')).rejects.toMatchObject({ code: 'invalid_request' })
-  const gone = `t1.${Buffer.from(JSON.stringify({ teamId: 'removed' })).toString('base64url')}`
+  const gone = `t2.${Buffer.from(JSON.stringify({ teamId: 'removed', filter: JSON.stringify([[], null]) })).toString('base64url')}`
   await expect(issues.listIssues(undefined, {}, gone)).rejects.toMatchObject({ code: 'invalid_request' })
+})
+
+test('get_project takes dates and code from the charter, not from an older Team list', async () => {
+  const { api: base } = apiWithTeams({})
+  const api: WorkspaceApi = {
+    ...base,
+    teams: async () => {
+      const listed = await base.teams()
+      return { ...listed, items: listed.items.map((team) => ({
+        ...team,
+        projects: team.projects.map((project) => ({ ...project, code: 'OLD', plannedStartDate: '2026-01-05', plannedEndDate: '2026-02-27' })),
+      })) }
+    },
+    projectCharter: async (teamId, projectId) => ({
+      schemaVersion: 1, teamId, projectId, lifecycleState: 'active', revision: 5,
+      plannedEndDate: '2026-03-31', tags: [], repositoryUrls: [],
+    }),
+  }
+
+  const project = await createWorkspaceIssues(api).getProject('ops')
+  expect(project).toMatchObject({ id: 'ops', name: 'Ops', teamId: 'beta', charterReadable: true, plannedEndDate: '2026-03-31' })
+  expect(project).not.toHaveProperty('plannedStartDate')
+  expect(project).not.toHaveProperty('code')
 })
 
 test('get_project returns the charter, or the Project alone when the charter is not readable', async () => {
@@ -403,6 +426,18 @@ test('list_issues without a Team skips a Team whose Work Items are not readable 
   expect(second.hasMore).toBe(false)
 
   await expect(createWorkspaceIssues(failing('unavailable')).listIssues(undefined, {})).rejects.toMatchObject({ code: 'unavailable' })
+})
+
+test('a cross-Team cursor continues only the search and page size that made it', async () => {
+  const { api } = apiWithTeams({ beta: [[task({ id: 'b1', teamId: 'beta', title: 'Login timeout' })]] })
+  const issues = createWorkspaceIssues(api)
+
+  const first = await issues.listIssues(undefined, { query: 'login' }, undefined, 10)
+  expect(first.hasMore).toBe(true)
+  await expect(issues.listIssues(undefined, { query: 'timeout' }, first.nextCursor, 10)).rejects.toMatchObject({ code: 'invalid_request' })
+  await expect(issues.listIssues(undefined, { query: 'login' }, first.nextCursor, 20)).rejects.toMatchObject({ code: 'invalid_request' })
+  const second = await issues.listIssues(undefined, { query: 'login' }, first.nextCursor, 10)
+  expect(second.items.map((item) => item.id)).toEqual(['b1'])
 })
 
 /** Creates a Milestone as the Public API returns it. */

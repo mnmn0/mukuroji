@@ -21,6 +21,8 @@ export function useWorkItemWebLinksController(accessToken: string, teamId: strin
     links: data ?? [],
     isLoading,
     hasLoadError: data === undefined && error !== undefined,
+    // A failed re-read keeps the last links on screen; say so and offer the retry.
+    hasRefreshError: data !== undefined && error !== undefined,
     /** Reads the links again. */
     retry: () => {
       void mutate()

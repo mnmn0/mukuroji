@@ -69,3 +69,15 @@ export const ReadOnly: Story = {
 export const LoadError: Story = {
   args: { links: [], hasLoadError: true },
 }
+
+/** A later read failed: the last links stay and the panel offers a retry. */
+export const RefreshError: Story = {
+  args: { hasRefreshError: true },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText('Links could not be refreshed. The list may be out of date.')).toBeVisible()
+    await expect(canvas.getByRole('link', { name: 'Pull request #826' })).toBeVisible()
+    await userEvent.click(canvas.getByRole('button', { name: 'Reload links' }))
+    await expect(args.onRetry).toHaveBeenCalled()
+  },
+}

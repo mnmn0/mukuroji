@@ -947,6 +947,7 @@ export const workItemsMessages = {
   'workItems.webLinks.readOnly': '参照のみ',
   'workItems.webLinks.loading': 'リンクを読み込んでいます…',
   'workItems.webLinks.loadError': 'リンクを読み込めませんでした。',
+  'workItems.webLinks.refreshError': 'リンクを最新にできませんでした。表示が古い可能性があります。',
   'workItems.webLinks.retry': 'リンクを再読み込み',
   'workItems.webLinks.empty': 'リンクはまだありません。',
   'workItems.webLinks.add': 'リンクを追加',

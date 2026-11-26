@@ -19,6 +19,8 @@ export type WorkItemWebLinksPanelProps = {
   isLoading?: boolean
   /** Whether the first read failed. */
   hasLoadError?: boolean
+  /** Whether a later read failed while the last links are still shown. */
+  hasRefreshError?: boolean
   /** Reads the links again. */
   onRetry?: () => void
   /** Adds a link. */
@@ -54,6 +56,7 @@ export function WorkItemWebLinksPanelContainer({ accessToken, canManage, locale,
     <WorkItemWebLinksPanel
       canManage={canManage}
       hasLoadError={controller.hasLoadError}
+      hasRefreshError={controller.hasRefreshError}
       isLoading={controller.isLoading}
       links={controller.links}
       onAdd={canManage ? controller.add : undefined}
@@ -86,7 +89,7 @@ function describeWebLinkError(error: unknown, t: Translate) {
  * @param props - View props.
  * @returns The panel.
  */
-export function WorkItemWebLinksPanel({ canManage, hasLoadError, isLoading, links, onAdd, onRemove, onRetry, t }: WorkItemWebLinksPanelProps) {
+export function WorkItemWebLinksPanel({ canManage, hasLoadError, hasRefreshError, isLoading, links, onAdd, onRemove, onRetry, t }: WorkItemWebLinksPanelProps) {
   const [isAdding, setIsAdding] = useState(false)
   const [url, setUrl] = useState('')
   const [title, setTitle] = useState('')
@@ -148,6 +151,7 @@ export function WorkItemWebLinksPanel({ canManage, hasLoadError, isLoading, link
           <button
             aria-expanded={isAdding}
             className="workbench-button-secondary min-h-9 px-3"
+            disabled={busy}
             onClick={() => {
               setErrorMessage(undefined)
               setIsAdding((current) => !current)
@@ -171,6 +175,7 @@ export function WorkItemWebLinksPanel({ canManage, hasLoadError, isLoading, link
             <span>{t('workItems.webLinks.url')}</span>
             <input
               className="workbench-input h-9 px-3"
+              disabled={busy}
               maxLength={2048}
               onChange={(event) => setUrl(event.target.value)}
               placeholder={t('workItems.webLinks.urlPlaceholder')}
@@ -181,7 +186,7 @@ export function WorkItemWebLinksPanel({ canManage, hasLoadError, isLoading, link
           </label>
           <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
             <span>{t('workItems.webLinks.linkTitle')}</span>
-            <input className="workbench-input h-9 px-3" maxLength={256} onChange={(event) => setTitle(event.target.value)} value={title} />
+            <input className="workbench-input h-9 px-3" disabled={busy} maxLength={256} onChange={(event) => setTitle(event.target.value)} value={title} />
           </label>
           <div className="flex flex-wrap gap-2">
             <button className="workbench-button-primary min-h-9 px-3" disabled={busy} type="submit">{t('workItems.webLinks.save')}</button>
@@ -190,6 +195,15 @@ export function WorkItemWebLinksPanel({ canManage, hasLoadError, isLoading, link
             </button>
           </div>
         </form>
+      ) : null}
+
+      {hasRefreshError && !isLoading ? (
+        <div className="mt-4 flex flex-wrap items-center gap-3 text-sm text-[var(--workbench-muted)]" role="alert">
+          <span>{t('workItems.webLinks.refreshError')}</span>
+          {onRetry ? (
+            <button className="workbench-button-secondary min-h-9 px-3" onClick={onRetry} type="button">{t('workItems.webLinks.retry')}</button>
+          ) : null}
+        </div>
       ) : null}
 
       {isLoading ? (
