@@ -2303,7 +2303,7 @@ function AnalyticsMetricCard({
       </p>
       {result.warnings.length > 0 ? (
         <p className="mt-3 text-xs font-semibold text-fg-amber-700">
-          {formatAnalyticsWarning(result.warnings[0] ?? '', t)}
+          {result.warnings.map((warning) => formatAnalyticsWarning(warning, t)).join(' ')}
         </p>
       ) : null}
       <button

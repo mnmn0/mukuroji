@@ -562,7 +562,10 @@ describe('AnalyticsWorkbench', () => {
       metric: 'evm-spi' as const,
       definition: { ...base.definition, key: 'evm-spi' as const, label: 'SPI', unit: 'index' as const },
       value: 0.8,
-      warnings: ['2 Project(s) you do not manage were left out of the earned value.'],
+      warnings: [
+        '2 Project(s) you do not manage were left out of the earned value.',
+        '1 Project(s) have no baseline with planned effort and were left out.',
+      ],
     }
     const html = renderToStaticMarkup(
       <AnalyticsWorkbench
@@ -573,7 +576,8 @@ describe('AnalyticsWorkbench', () => {
       />,
     )
     expect(html).toContain('0.80')
-    expect(html).toContain('自分が管理していない Project 2件は出来高に含めていません。')
+    // Every warning shows, so both reasons a Project was left out are visible.
+    expect(html).toContain('自分が管理していない Project 2件は出来高に含めていません。 予定工数のある baseline がない Project 1件は含めていません。')
     expect(html).toContain('baseline の予定工数で測ります')
 
     const table = {

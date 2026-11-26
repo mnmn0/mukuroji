@@ -83,6 +83,7 @@ async function seedProject(): Promise<string> {
       statusCategory: 'unstarted',
       schedule: { ...createDefaultUnscheduledWorkItemSchedule(600), mode: 'date-range', startDate: '2026-01-07', endDate: '2026-01-08', durationDays: 2 },
     },
+    { ...withoutProject(base), id: 'loose' },
   ]
   teamIssues = createTeamIssuesFake({
     async getTeamHierarchyEntries(): Promise<TeamWorkItemHierarchyEntry[]> {
@@ -125,6 +126,18 @@ async function seedProject(): Promise<string> {
 }
 
 /**
+ * Copies a Work Item without its Project.
+ *
+ * @param issue - Work Item.
+ * @returns The copy, assigned to no Project.
+ */
+function withoutProject(issue: TeamIssueResponseItem): TeamIssueResponseItem {
+  const { assignedProjectId, ...rest } = issue
+  void assignedProjectId
+  return rest
+}
+
+/**
  * Runs a query and returns its snapshot.
  *
  * @param query - Query.
@@ -151,6 +164,16 @@ test('measures SPI, CPI, and EAC of a managed Project from its baseline, progres
   expect(eac?.value).toBe(20)
   expect(eac?.groups).toEqual([{ key: `core-team\0${projectId}`, label: projectId, value: 20, sampleSize: 1 }])
   expect(eac?.rows[0]?.values).toMatchObject({ plannedValueHours: 20, earnedValueHours: 10, actualHours: 10 })
+})
+
+test('measures whole Projects even when the report lists Work Items', async () => {
+  await seedProject()
+  const query = createQuery()
+
+  // The listed Work Item has no Project; the Project of the Team scope is still measured.
+  const snapshot = await runQuery({ ...query, filter: { ...query.filter, workItems: [{ teamId: 'core-team', workItemId: 'loose' }] } })
+
+  expect(snapshot.widgets[0]?.value).toBe(0.5)
 })
 
 test('measures nothing for an as-of time more than a day old', async () => {

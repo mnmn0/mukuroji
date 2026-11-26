@@ -20,7 +20,7 @@ Work Item の canonical row と audit event から `asOf` 時点の state を巻
   （SPI = ΣEV ÷ ΣPV、CPI = ΣEV ÷ ΣAC、EAC = ΣBAC ÷ CPI）。Group は Team と Project だけ。Chart は Team か Project で分ける
   ことを必須にし、日・週の series は作らない。Evidence は Work Item ごとではないので返さない。
 - **読み方**：該当 widget を含む query のときだけ、API が report の範囲（Team / Project の filter）にある認可済み Work Item の
-  現在の Project を Team 付きで集め、閲覧者が Project manager である Project ごとに予算レポートと同じ読み取りで値を作る。
+  現在の Project を Team 付きで集め（Work Item の指定などほかの filter では絞らず、Project 全体を測る）、閲覧者が Project manager である Project ごとに予算レポートと同じ読み取りで値を作る。
   AC は Project に `asOf` の日付までに記録したすべての時間（予定日のない baseline でも過去の実績を落とさないため）。
   値は丸める前の分で受け取り、足して割ったあとに丸める。経費は読まない。1 query で 20 Project を超えれば
   `413`（`AnalyticsEarnedValueLimitExceeded`）にする。同じ Team の Work Item の読み取りは query の中で使い回す。

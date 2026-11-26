@@ -273,7 +273,7 @@ PV が 0 なら SPI、AC が 0 なら CPI と EAC、CPI が 0 なら EAC は `nu
 API は EVM の widget を含む query のときだけ、report の範囲（Team / Project の filter）にある認可済み Work Item の今の
 Project を Team 付きで集め、閲覧者が Project manager である Project を読みます。それ以外の Project と、予定工数のある
 baseline がない Project は件数を warning で返します。1 query で 20 Project を超えれば `413`
-（`AnalyticsEarnedValueLimitExceeded`）です。担当者・状態などほかの filter は EVM に効きません。Group は Team と Project
+（`AnalyticsEarnedValueLimitExceeded`）です。Work Item の指定・担当者・状態などほかの filter は EVM に効かず、Project 全体を測ります。Group は Team と Project
 だけで、chart はどちらかで分けることが必須です（日・週の series は作りません）。Table は Project ごとに BAC / PV / EV / AC
 の時間と値を返します。Evidence はありません。
 

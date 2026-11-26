@@ -843,7 +843,10 @@ async function executeNormalizedAnalyticsQuery(
   const earnedValue = analyticsQueryReadsEarnedValue(normalizedQuery)
     ? await readAuthorizedAnalyticsEarnedValue(
         principal,
-        authorized.workItems,
+        // Earned value measures whole Projects, so a Work Item list does not narrow them (ADR 0110).
+        normalizedQuery.filter.workItems === undefined
+          ? authorized.workItems
+          : (await readAccessibleAnalyticsWorkItems(principal, withoutAnalyticsWorkItemList(normalizedQuery.filter))).workItems,
         authorized.authorizedProjectIds,
         normalizedQuery.filter.projectIds,
         normalizedQuery.asOf,
@@ -1250,18 +1253,7 @@ async function readCurrentAnalyticsPermissionScopeHash(
   readsEarnedValue = false,
 ) {
   const normalized = normalizeAnalyticsQueryInput(query)
-  const cacheKey = JSON.stringify({
-    teamIds: normalized.filter.teamIds ?? null,
-    projectIds: normalized.filter.projectIds ?? null,
-    includeArchived: normalized.filter.includeArchived === true,
-    workItems: normalized.filter.workItems ?? null,
-  })
-  let accessible = cache.workItems.get(cacheKey)
-  if (!accessible) {
-    accessible = readAccessibleAnalyticsWorkItems(principal, normalized.filter)
-    cache.workItems.set(cacheKey, accessible)
-  }
-  const current = await accessible
+  const current = await readCachedAccessibleAnalyticsWorkItems(principal, normalized.filter, cache)
   if (readsMilestones && !cache.milestones) {
     cache.milestones = readReadableAnalyticsMilestones(principal)
   }
@@ -1285,10 +1277,14 @@ async function readCurrentAnalyticsPermissionScopeHash(
   }
   let earnedValueProjectKeys: string[] | undefined
   if (readsEarnedValue) {
+    // The same Team and Project scope as the query, without its Work Item list (ADR 0110).
+    const projectScope = normalized.filter.workItems === undefined
+      ? current
+      : await readCachedAccessibleAnalyticsWorkItems(principal, withoutAnalyticsWorkItemList(normalized.filter), cache)
     try {
       earnedValueProjectKeys = (await readAnalyticsEarnedValueProjects(
         principal,
-        current.workItems,
+        projectScope.workItems,
         current.authorizedProjectIds,
         normalized.filter.projectIds,
       )).managed.map((project) => createAnalyticsEarnedValueProjectKey(project.teamId, project.projectId))
@@ -1311,6 +1307,46 @@ async function readCurrentAnalyticsPermissionScopeHash(
     readsAgentCost ? await readAnalyticsAgentCostTeamIds(principal, current.workItems) : undefined,
     earnedValueProjectKeys,
   )
+}
+
+/**
+ * Reads the accessible Work Items of a filter scope once for the snapshots of one response.
+ *
+ * @param principal - Viewer.
+ * @param filter - Normalized query filter.
+ * @param cache - Reads shared by the snapshots of one response.
+ * @returns The accessible Work Items and readable Project IDs.
+ */
+async function readCachedAccessibleAnalyticsWorkItems(
+  principal: WorkspacePrincipal,
+  filter: AnalyticsQueryInput['filter'],
+  cache: AnalyticsPermissionScopeReadCache,
+): Promise<Awaited<ReturnType<typeof readAccessibleAnalyticsWorkItems>>> {
+  const cacheKey = JSON.stringify({
+    teamIds: filter.teamIds ?? null,
+    projectIds: filter.projectIds ?? null,
+    includeArchived: filter.includeArchived === true,
+    workItems: filter.workItems ?? null,
+  })
+  let accessible = cache.workItems.get(cacheKey)
+  if (!accessible) {
+    accessible = readAccessibleAnalyticsWorkItems(principal, filter)
+    cache.workItems.set(cacheKey, accessible)
+  }
+  return await accessible
+}
+
+/**
+ * Returns the filter without its Work Item list, the Team and Project scope that earned value
+ * measures whole Projects in.
+ *
+ * @param filter - Normalized query filter.
+ * @returns The filter without `workItems`.
+ */
+function withoutAnalyticsWorkItemList(filter: AnalyticsQueryInput['filter']): AnalyticsQueryInput['filter'] {
+  const { workItems: listed, ...scope } = filter
+  void listed
+  return scope
 }
 
 /** Permission scope hash that no saved snapshot has. */
