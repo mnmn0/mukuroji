@@ -264,9 +264,10 @@ warning だけを返します（hash にも Team を加えません）。
 
 [ADR 0110](adr/0110-analytics-earned-value-metrics.md)。値は Project の予算レポート
 （[docs/time-tracking.md](time-tracking.md)）の EVM と同じ計算の工数版です。PV は baseline の各 Work Item の予定工数を
-予定開始日〜終了日に均等に割り振った `asOf` の日付までの合計、EV は予定工数 × Work Item の今の進捗率、AC は予算期間の開始と
-baseline の予定日のうち最も早い日から `asOf` の日付までの記録時間です。中止した Work Item は BAC・PV・EV から外します。
-複数の Project をまとめた値と group の値は、分を足してから割ります（SPI = ΣEV ÷ ΣPV、CPI = ΣEV ÷ ΣAC、EAC = ΣBAC ÷ CPI）。
+予定開始日〜終了日に均等に割り振った `asOf` の日付までの合計、EV は予定工数 × Work Item の今の進捗率、AC は Project に
+`asOf` の日付までに記録したすべての時間（経費は含めません）です。中止した Work Item は BAC・PV・EV から外します。
+複数の Project をまとめた値と group の値は、丸める前の分を足してから割り、最後に丸めます（SPI = ΣEV ÷ ΣPV、
+CPI = ΣEV ÷ ΣAC、EAC = ΣBAC ÷ CPI）。
 PV が 0 なら SPI、AC が 0 なら CPI と EAC、CPI が 0 なら EAC は `null` です。
 
 API は EVM の widget を含む query のときだけ、report の範囲（Team / Project の filter）にある認可済み Work Item の今の

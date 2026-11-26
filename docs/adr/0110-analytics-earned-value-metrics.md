@@ -21,7 +21,8 @@ Work Item の canonical row と audit event から `asOf` 時点の state を巻
   ことを必須にし、日・週の series は作らない。Evidence は Work Item ごとではないので返さない。
 - **読み方**：該当 widget を含む query のときだけ、API が report の範囲（Team / Project の filter）にある認可済み Work Item の
   現在の Project を Team 付きで集め、閲覧者が Project manager である Project ごとに予算レポートと同じ読み取りで値を作る。
-  AC は予算期間の開始と baseline の予定日のうち最も早い日から `asOf` の日付までの記録時間。1 query で 20 Project を超えれば
+  AC は Project に `asOf` の日付までに記録したすべての時間（予定日のない baseline でも過去の実績を落とさないため）。
+  値は丸める前の分で受け取り、足して割ったあとに丸める。経費は読まない。1 query で 20 Project を超えれば
   `413`（`AnalyticsEarnedValueLimitExceeded`）にする。同じ Team の Work Item の読み取りは query の中で使い回す。
   新しい保存 row・index・事前集計は作らない。
 - **`asOf` の制限**：EV は Work Item の今の進捗を使うので、`asOf` が 1 日より前の query では値を作らず、
@@ -43,6 +44,6 @@ Work Item の canonical row と audit event から `asOf` 時点の state を巻
 ## 結果
 
 - Report に「SPI」「CPI」「EAC」を置ける。CSV/PDF にも出る。Table は Project ごとに BAC / PV / EV / AC の時間と値を出す。
-- 1 query で Project ごとに予算・baseline・進捗方式・時間・経費の読み取りと Team の Work Item の読み取り（Team ごとに 1 回）が増える。
-- 予算レポートの EVM と同じ値になる（AC の開始日が同じとき）。
+- 1 query で Project ごとに予算・baseline・進捗方式・時間の読み取りと Team の Work Item の読み取り（Team ごとに 1 回）が増える。
+- 予算レポートの EVM と同じ値になる（予算レポートの期間が Project のすべての記録時間を含むとき）。
 - 更新した文書：`docs/analytics.md`、`docs/guide/pm.md`。

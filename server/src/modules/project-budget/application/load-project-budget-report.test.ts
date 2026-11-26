@@ -146,28 +146,31 @@ describe('loadProjectBudgetReport', () => {
 })
 
 describe('loadProjectEarnedValue', () => {
-  test('counts time from the first planned date through the as-of date', async () => {
+  test('counts every minute recorded on the Project through the as-of date without rounding', async () => {
     const calls: string[] = []
+    const base = ports([{ issues: [{ id: 'a', statusCategory: 'started', schedule: {}, assignedProjectId: 'p' }] }], calls)
     const figures = await loadProjectEarnedValue(
       { workspaceId: 'w', teamId: 't', projectId: 'p', timeZone: 'Asia/Tokyo', asOf: Date.parse('2026-01-05T12:00:00.000Z') },
-      ports([{ issues: [{ id: 'a', statusCategory: 'started', schedule: {}, assignedProjectId: 'p' }] }], calls),
+      {
+        ...base,
+        // 60 planned minutes over 2026-01-05..11 plan 60/7 minutes a day, which the report rounds.
+        getBaseline: async () => ({
+          revision: 1,
+          capturedAt: '2026-01-01T00:00:00.000Z',
+          entries: [{ workItemId: 'a', startDate: '2026-01-05', endDate: '2026-01-11', plannedEffortMinutes: 60 }],
+        }),
+      },
       100,
     )
 
-    // The baseline plans 2026-01-05..06, so time is read from 2026-01-05 to the as-of date.
+    // Time is read from long before the plan, and expenses are not read for effort figures.
     expect(calls).toEqual([
       'budget w/t/p',
-      'entries p 2026-01-04T10:00:00.000Z 2026-01-06T14:00:00.000Z',
-      'expenses w/t/p',
+      'entries p 1999-12-31T10:00:00.000Z 2026-01-06T14:00:00.000Z',
     ])
-    // Half of the 600 planned minutes are due by the end of 2026-01-05; a started Work Item earns half.
-    expect(figures).toMatchObject({
-      budgetAtCompletionMinutes: 600,
-      plannedValueMinutes: 300,
-      earnedValueMinutes: 300,
-      actualMinutes: 60,
-      schedulePerformanceIndex: 1,
-    })
+    // A started Work Item earns half of its 60 minutes; planned value stays unrounded.
+    expect(figures).toMatchObject({ budgetAtCompletionMinutes: 60, earnedValueMinutes: 30, actualMinutes: 60 })
+    expect(figures?.plannedValueMinutes).toBeCloseTo(60 / 7, 10)
   })
 
   test('reads nothing more for a Project without a baseline that plans effort', async () => {

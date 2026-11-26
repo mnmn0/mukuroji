@@ -2,7 +2,6 @@ import {
   deriveWorkItemProgressPercent,
   type ProjectBudgetReport,
   type ProjectBudgetReportInterval,
-  type ProjectEarnedValueMetrics,
   type ProjectExpense,
   type ProjectScheduleBaseline,
   type TimeBudget,
@@ -13,6 +12,9 @@ import {
 import { splitTimeEntryByLocalDate } from '../../time-tracking'
 import {
   createProjectBudgetReport,
+  measureProjectEarnedValueMinutes,
+  type ProjectBudgetReportInput,
+  type ProjectEarnedValueMinutes,
   type ProjectBudgetTimeEntry,
   type ProjectBudgetWorkItemProgress,
 } from '../project-budget-report'
@@ -137,7 +139,9 @@ export async function loadProjectBudgetReport(
     ports.getBudget(workspaceId, teamId, projectId),
     ports.getBaseline(workspaceId, teamId, projectId),
   ])
-  return await buildProjectBudgetReport(request, ports, workItemLimit, budget ?? null, baseline, ports.now().getTime())
+  return createProjectBudgetReport(
+    await readReportInput(request, ports, workItemLimit, budget ?? null, baseline, ports.now().getTime(), true),
+  )
 }
 
 /** A validated earned value request of a caller already authorized to manage the Project. */
@@ -155,12 +159,19 @@ export type ProjectEarnedValueRequest = {
 }
 
 /**
- * Loads the earned value figures of a Project at an instant, the same way the budget report does.
+ * First local date the earned value of a Project counts recorded time from: in practice every
+ * entry the Project has, so actual time is the Project's total to date.
+ */
+const PROJECT_TO_DATE_FROM = '2000-01-01'
+
+/**
+ * Loads the exact earned value figures of a Project at an instant, the same way the budget report
+ * calculates them, so a caller can add Projects up before it rounds.
  *
- * Actual time counts from the earliest of the budget period start and the baseline's planned dates
- * through the as-of date. Earned value reads the Work Items' current progress, so the
- * caller measures only at a recent as-of instant (ADR 0110). The caller must already have checked
- * that the principal manages the Project.
+ * Actual time is every minute recorded on the Project through the as-of date. Earned value reads
+ * the Work Items' current progress, so the caller measures only at a recent as-of instant
+ * (ADR 0110). Expenses are not read, because the figures are in effort. The caller must already
+ * have checked that the principal manages the Project.
  *
  * @param request - Validated request.
  * @param ports - Team-scoped reads.
@@ -172,33 +183,29 @@ export async function loadProjectEarnedValue(
   request: ProjectEarnedValueRequest,
   ports: ProjectBudgetReportPorts,
   workItemLimit: number,
-): Promise<ProjectEarnedValueMetrics | null> {
+): Promise<ProjectEarnedValueMinutes | null> {
   const { workspaceId, teamId, projectId, timeZone } = request
   const [budget, baseline] = await Promise.all([
     ports.getBudget(workspaceId, teamId, projectId),
     ports.getBaseline(workspaceId, teamId, projectId),
   ])
-  const plannedDates = (baseline?.entries ?? [])
-    .filter((entry) => (entry.plannedEffortMinutes ?? 0) > 0)
-    .flatMap((entry) => [entry.startDate, entry.endDate].filter((date): date is string => date !== undefined))
-  if (baseline === null || !(baseline.entries.some((entry) => (entry.plannedEffortMinutes ?? 0) > 0))) return null
+  if (baseline === null || !baseline.entries.some((entry) => (entry.plannedEffortMinutes ?? 0) > 0)) return null
   const asOfDate = localDateAt(request.asOf, timeZone)
-  const starts = [...plannedDates, ...(budget?.periodFrom === undefined ? [] : [budget.periodFrom]), asOfDate].sort()
-  const from = starts[0] ?? asOfDate
-  const report = await buildProjectBudgetReport(
+  const from = asOfDate < PROJECT_TO_DATE_FROM ? asOfDate : PROJECT_TO_DATE_FROM
+  return measureProjectEarnedValueMinutes(await readReportInput(
     { workspaceId, teamId, projectId, from, to: asOfDate, timeZone, interval: 'week' },
     ports,
     workItemLimit,
     budget ?? null,
     baseline,
     request.asOf,
-  )
-  return report.earnedValue
+    false,
+  ))
 }
 
 /**
- * Reads the progress, time, and expenses of a Project and builds its budget report from the
- * budget and baseline already read.
+ * Reads the progress, time, and expenses of a Project and assembles the budget report input from
+ * the budget and baseline already read.
  *
  * @param request - Validated request.
  * @param ports - Team-scoped reads.
@@ -206,17 +213,19 @@ export async function loadProjectEarnedValue(
  * @param budget - Project budget, or `null`.
  * @param baseline - Active schedule baseline, or `null`.
  * @param now - Instant whose local date is the report's today, epoch milliseconds.
- * @returns The report.
+ * @param includeExpenses - Whether to read the Project expenses; without them none count.
+ * @returns The report input.
  * @throws ProjectBudgetReportError when the Team has too many Work Items or a page read stalls.
  */
-async function buildProjectBudgetReport(
+async function readReportInput(
   request: ProjectBudgetReportRequest,
   ports: ProjectBudgetReportPorts,
   workItemLimit: number,
   budget: TimeBudget | null,
   baseline: ProjectScheduleBaseline | null,
   now: number,
-): Promise<ProjectBudgetReport> {
+  includeExpenses: boolean,
+): Promise<ProjectBudgetReportInput> {
   const { workspaceId, teamId, projectId, timeZone } = request
   const [progressMode, entries, expenses] = await Promise.all([
     ports.getProgressMode(workspaceId, teamId),
@@ -227,13 +236,13 @@ async function buildProjectBudgetReport(
       from: new Date(Date.parse(`${request.from}T00:00:00Z`) - MAX_TIMEZONE_OFFSET_MS).toISOString(),
       to: new Date(Date.parse(`${request.to}T00:00:00Z`) + DAY_MS + MAX_TIMEZONE_OFFSET_MS).toISOString(),
     }),
-    ports.listExpenses(workspaceId, teamId, projectId),
+    includeExpenses ? ports.listExpenses(workspaceId, teamId, projectId) : Promise.resolve([]),
   ])
   const baselineIds = new Set((baseline?.entries ?? []).map((entry) => entry.workItemId))
   const workItems = baselineIds.size === 0
     ? new Map<string, ProjectBudgetWorkItemProgress>()
     : await readWorkItemProgress(request, ports, baselineIds, progressMode, workItemLimit)
-  return createProjectBudgetReport({
+  return {
     teamId,
     projectId,
     from: request.from,
@@ -246,7 +255,7 @@ async function buildProjectBudgetReport(
     workItems,
     entries: entries.flatMap((entry) => toBudgetEntries(entry, timeZone)),
     expenses,
-  })
+  }
 }
 
 /**

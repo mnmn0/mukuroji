@@ -92,6 +92,78 @@ const milestoneGroupSnapshot = {
       : result),
 }
 
+/** SPI, CPI by Project, and EAC by Project of the Projects the viewer manages (ADR 0110). */
+const earnedValueWidgets = [
+  { id: 'evm-spi', type: 'metric' as const, title: 'SPI', metric: 'evm-spi' as const, size: 'small' as const },
+  { id: 'evm-cpi', type: 'chart' as const, title: 'CPI', metric: 'evm-cpi' as const, visualization: 'bar' as const, groupBy: { dimension: 'project' as const } },
+  { id: 'evm-eac', type: 'table' as const, title: 'EAC', metric: 'evm-eac' as const, groupBy: { dimension: 'project' as const }, size: 'large' as const },
+]
+
+/** Base widget result the earned value results copy their shape from. */
+const [earnedValueBaseResult] = analyticsSnapshotFixture.widgets
+
+/** Snapshot of the earned value widgets, with one Project the viewer does not manage left out. */
+const earnedValueSnapshot = earnedValueBaseResult === undefined
+  ? analyticsSnapshotFixture
+  : {
+      ...analyticsSnapshotFixture,
+      widgets: [
+        {
+          ...earnedValueBaseResult,
+          widgetId: 'evm-spi',
+          metric: 'evm-spi' as const,
+          definition: { ...earnedValueBaseResult.definition, key: 'evm-spi' as const, label: 'SPI', unit: 'index' as const },
+          value: 0.83,
+          sampleSize: 2,
+          series: [],
+          groups: [],
+          rows: [],
+          warnings: ['1 Project(s) you do not manage were left out of the earned value.'],
+        },
+        {
+          ...earnedValueBaseResult,
+          widgetId: 'evm-cpi',
+          metric: 'evm-cpi' as const,
+          definition: { ...earnedValueBaseResult.definition, key: 'evm-cpi' as const, label: 'CPI', unit: 'index' as const },
+          value: 0.96,
+          sampleSize: 2,
+          series: [],
+          groups: [
+            { key: 'core-team\0refero', label: 'refero', value: 1.25, sampleSize: 1 },
+            { key: 'core-team\0product-roadmap', label: 'product-roadmap', value: 0.5, sampleSize: 1 },
+          ],
+          rows: [],
+          warnings: [],
+        },
+        {
+          ...earnedValueBaseResult,
+          widgetId: 'evm-eac',
+          metric: 'evm-eac' as const,
+          definition: { ...earnedValueBaseResult.definition, key: 'evm-eac' as const, label: 'EAC', unit: 'hours' as const },
+          value: 312,
+          sampleSize: 2,
+          series: [],
+          groups: [
+            { key: 'core-team\0refero', label: 'refero', value: 160, sampleSize: 1 },
+            { key: 'core-team\0product-roadmap', label: 'product-roadmap', value: 200, sampleSize: 1 },
+          ],
+          rows: [
+            {
+              id: 'core-team\0refero',
+              label: 'refero',
+              values: { teamId: 'core-team', projectId: 'refero', budgetAtCompletionHours: 200, plannedValueHours: 100, earnedValueHours: 100, actualHours: 80, value: 160 },
+            },
+            {
+              id: 'core-team\0product-roadmap',
+              label: 'product-roadmap',
+              values: { teamId: 'core-team', projectId: 'product-roadmap', budgetAtCompletionHours: 100, plannedValueHours: 50, earnedValueHours: 25, actualHours: 50, value: 200 },
+            },
+          ],
+          warnings: [],
+        },
+      ],
+    }
+
 const multipleFilters = {
   ...analyticsFilterFixture,
   assigneeUserIds: ['owner@example.com', 'reviewer@example.com'],
@@ -230,6 +302,25 @@ export const MilestoneGroups: Story = {
     const widget = within(canvasElement).getByTestId('analytics-widget-chart-cycle-time')
     await expect(widget).toHaveTextContent('β リリース')
     await expect(widget).toHaveTextContent('未設定')
+  },
+}
+
+/**
+ * 自分が管理する Project の SPI・CPI・EAC です。CPI は Project ごとの棒、EAC は Project ごとの BAC / PV / EV / AC の表で、
+ * 管理していない Project は warning で知らせます。
+ */
+export const EarnedValue: Story = {
+  args: {
+    builder: true,
+    snapshot: earnedValueSnapshot,
+    widgets: earnedValueWidgets,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('analytics-widget-evm-spi')).toHaveTextContent('0.83')
+    await expect(canvas.getByTestId('analytics-widget-evm-spi')).toHaveTextContent('自分が管理していない Project 1件は出来高に含めていません。')
+    await expect(canvas.getByTestId('analytics-widget-evm-cpi')).toHaveTextContent('Refero')
+    await expect(canvas.getByTestId('analytics-widget-evm-eac')).toHaveTextContent('出来高 EV（時間）')
   },
 }
 
