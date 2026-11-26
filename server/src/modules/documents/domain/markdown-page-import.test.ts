@@ -247,6 +247,11 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(result).toEqual(expect.objectContaining({ ok: true, leadingTitle: 'Page' }))
   })
 
+  test('finds a definition after a backtick line that opens no fence', () => {
+    const source = 'See [docs][ref].\n\n## Details\n\n```bad`info\n\n[ref]: https://example.com'
+    expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])

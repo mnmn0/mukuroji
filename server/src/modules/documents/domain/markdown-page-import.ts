@@ -454,6 +454,20 @@ function opensHtmlComment(line: string, open: boolean): boolean {
 }
 
 /**
+ * Reads the marker of a line that opens a fenced code block. A backtick fence whose info string
+ * holds a backtick is not a fence.
+ *
+ * @param content - Line without indentation or container markers.
+ * @returns The fence marker, or undefined when the line opens no fence.
+ */
+function readFenceOpening(content: string): string | undefined {
+  const open = FENCE_OPEN.exec(content)
+  const marker = open?.[1]
+  if (marker === undefined || (marker.startsWith('`') && (open?.[2] ?? '').includes('`'))) return undefined
+  return marker
+}
+
+/**
  * Tells whether a line closes a fenced code block.
  *
  * @param line - Line to check.
@@ -508,9 +522,9 @@ function linesOutsideFences(text: string): string[] {
       if (closesFence(content, fence)) fence = undefined
       continue
     }
-    const open = comment ? null : /^(`{3,}|~{3,})/u.exec(content)
-    if (open?.[1] !== undefined) {
-      fence = open[1]
+    const open = comment ? undefined : readFenceOpening(content)
+    if (open !== undefined) {
+      fence = open
       continue
     }
     const visible = removeHtmlComments(line, comment)
@@ -578,8 +592,8 @@ function splitAtBlankLinesOutsideFences(text: string): string[] {
       lines = []
       continue
     } else {
-      const open = /^(`{3,}|~{3,})/u.exec(content)
-      if (open?.[1] !== undefined) fence = open[1]
+      const open = readFenceOpening(content)
+      if (open !== undefined) fence = open
       else comment = opensHtmlComment(line, false)
     }
     lines.push(line)

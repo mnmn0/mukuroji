@@ -167,6 +167,31 @@ async function requireVisibleWorkItem(
 }
 
 /**
+ * Checks that the credential owner can view the Work Item a new page links to. A Work Item the owner
+ * cannot view is reported like a missing one, so a write cannot tell hidden Work Items apart.
+ *
+ * @param credential - Authenticated developer credential.
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemId - Work Item ID.
+ * @returns A promise that resolves when the Work Item is visible.
+ * @throws PublicApiServiceError 422 when the Work Item is missing or hidden from the owner.
+ */
+async function requireLinkableWorkItem(
+  credential: AuthenticatedDeveloperCredential,
+  teamId: string,
+  workItemId: string,
+): Promise<void> {
+  try {
+    await requireVisibleWorkItem(credential, teamId, workItemId)
+  } catch (error) {
+    if (error instanceof Error && 'status' in error && (error.status === 403 || error.status === 404)) {
+      throw new PublicApiServiceError(422, 'validation_failed', 'Work Item was not found.')
+    }
+    throw error
+  }
+}
+
+/**
  * Resolves the credential owner as a Documents writer, with the same Project roles, Enterprise
  * scope boundary, and authorization fences as a signed-in member's Documents write.
  *
@@ -470,6 +495,11 @@ export function createCanonicalPublicDocumentService(): PublicDocumentService {
         const target = input.workItem === undefined
           ? undefined
           : { kind: 'work-item' as const, workItemId: toWorkItemRelationTargetId(input.workItem.teamId, input.workItem.workItemId) }
+        // The owner must be able to view the Work Item itself, as the linked-Document reads require,
+        // so a write cannot probe or link a Work Item that Enterprise RBAC hides.
+        if (input.workItem !== undefined) {
+          await requireLinkableWorkItem(credential, input.workItem.teamId, input.workItem.workItemId)
+        }
         const relationTargetAuthorizationSnapshots = target === undefined
           ? undefined
           : await validateDocumentRelationTargets(principal, [target])
