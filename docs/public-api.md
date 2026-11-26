@@ -192,9 +192,9 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   `{ expectedRevision, title?, content? }` で title を変えるか、ページ・テンプレートの本文を `content` で全部置き換えます。
   どちらも `work-items:write` scope と `Idempotency-Key` が要り、応答は作成・更新後の `PublicDocumentSummary`
   （`{ id, kind, title, scope, parentId?, revision }`）です。本文は `GET /api/v1/documents/{documentId}` で読み直します。
-  応答が届かず同じ key で再送した更新は、その後に Document が編集されていなければ、自分の書き込みを見つけて
-  `409` にせず今の Document を返します。その後に別の編集で revision が進んでいれば `409 conflict` になるので、
-  Document を読み直してください。
+  同じ key の再送は、Public API が応答を記録していれば、権限を確かめ直してから記録した応答を返します。
+  応答の記録がなく書き込みだけが保存されていた場合は、その後に Document が編集されていなければ自分の書き込みを
+  見つけて今の Document を返し、別の編集で revision が進んでいれば `409 conflict` を返すので、Document を読み直してください。
   権限は Web の Documents と同じで、Enterprise RBAC では `documents.write` か `documents.manage`、作成は Project の
   member 以上（Workspace は guest 以外）、link する Work Item は持ち主が閲覧できることが要ります。更新は Document を
   閲覧できなければ `404`、閲覧だけなら `403`、`expectedRevision` が古ければ `409 conflict` です。

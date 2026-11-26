@@ -225,42 +225,13 @@ function findLeadingTitle(lines: readonly string[]): { text: string, next: numbe
   if (match?.level !== 1 || text === '') return undefined
   // Another `#` heading, outside fenced code and HTML comments and indented by up to three
   // spaces, means the first one is not a title.
-  const rest = linesOutsideHtmlBlocks(linesOutsideFences(lines.slice(first + 1).join('\n')))
+  const rest = linesOutsideFences(lines.slice(first + 1).join('\n'), true)
   if (rest.some((line) => parseAtxHeading(line.replace(/^ {0,3}/u, ''))?.level === 1)) return undefined
   return { text: text.replace(/\\([!-/:-@[-`{-~])/gu, '$1'), next: first + 1 }
 }
 
 /** Opening tag of a raw HTML block that ends at its closing tag rather than at a blank line. */
 const HTML_RAW_BLOCK_START = /^ {0,3}<(pre|script|style|textarea)(?:[\s>]|$)/iu
-
-/**
- * Removes the lines inside raw HTML blocks, which show as HTML rather than as Markdown. A `<pre>`,
- * `<script>`, `<style>`, or `<textarea>` block runs to its closing tag, and any other one to the
- * next blank line.
- *
- * @param lines - Top-level lines, outside fenced code.
- * @returns The lines outside HTML blocks, in order.
- */
-function linesOutsideHtmlBlocks(lines: readonly string[]): string[] {
-  const outside: string[] = []
-  /** Closing tag of the open raw block, '' for a block that ends at a blank line. */
-  let closing: string | undefined
-  for (const line of lines) {
-    if (closing === undefined) {
-      const raw = HTML_RAW_BLOCK_START.exec(line)
-      if (raw !== null) {
-        closing = `</${(raw[1] ?? '').toLowerCase()}>`
-      } else if (HTML_BLOCK_START.test(line)) {
-        closing = ''
-      } else {
-        outside.push(line)
-        continue
-      }
-    }
-    if (closing === '' ? line.trim() === '' : line.toLowerCase().includes(closing)) closing = undefined
-  }
-  return outside
-}
 
 /**
  * Start of a reference or footnote definition, such as `[docs]: https://example.com`. Its content
@@ -357,7 +328,8 @@ function scanBlocks(
     }
     // The definition an export writes between two blocks only keeps them apart, so it ends the
     // open paragraph and is dropped.
-    if (isBlockBoundary(line)) {
+    // An export writes it after a blank line, so right after text it is that text's continuation.
+    if (isBlockBoundary(line) && (index === 0 || (lines[index - 1] ?? '').trim() === '')) {
       flushParagraph()
       index += 1
       continue
@@ -433,7 +405,12 @@ function scanBlocks(
       }
     }
     if (atBlockStart(index)) {
-      const checklist = readChecklist(lines, index, createId)
+      // An item after a blank line continues a list of the open paragraph that has the same bullet,
+      // so it cannot start a checklist of its own.
+      const isTask = TASK_ITEM.test(line)
+      const lastText = isTask ? paragraph.findLast((text) => text.trim() !== '') : undefined
+      const continuesList = lastText !== undefined && /^[-*+][ \t]/u.test(lastText) && lastText[0] === line[0]
+      const checklist = !isTask || continuesList ? undefined : readChecklist(lines, index, createId)
       if (checklist) {
         flushParagraph()
         blocks.push(checklist.block)
@@ -676,17 +653,26 @@ function joinListSections(sections: readonly string[]): string[] {
 /**
  * Returns the lines of paragraph Markdown that are outside fenced code (including fences nested
  * in lists or quotes) and outside HTML comments, so text that is not shown as Markdown is never
- * read as Markdown.
+ * read as Markdown. With `skipHtmlBlocks`, the lines of raw HTML blocks are left out too, in the
+ * same pass, so a fence line inside `<pre>` opens no fence and a `<pre>` line inside a fence
+ * opens no HTML block.
  *
  * @param text - Paragraph Markdown.
+ * @param skipHtmlBlocks - Whether to leave out raw HTML blocks, start line included.
  * @returns Lines outside fenced code, in order.
  */
-function linesOutsideFences(text: string): string[] {
+function linesOutsideFences(text: string, skipHtmlBlocks = false): string[] {
   const lines: string[] = []
   let fence: string | undefined
   let container: FenceContainer = { quoted: false, column: 0 }
   let comment = false
+  /** Closing tag of the open raw HTML block, '' for one that ends at a blank line. */
+  let html: string | undefined
   for (const line of text.split('\n')) {
+    if (html !== undefined) {
+      if (html === '' ? line.trim() === '' : line.toLowerCase().includes(html)) html = undefined
+      continue
+    }
     if (!comment && fence !== undefined && leavesFenceContainer(line, container)) fence = undefined
     if (!comment && fence !== undefined) {
       if (closesNestedFence(line, fence, container)) fence = undefined
@@ -697,6 +683,15 @@ function linesOutsideFences(text: string): string[] {
       fence = open
       container = readFenceContainer(line)
       continue
+    }
+    if (skipHtmlBlocks && !comment) {
+      const raw = HTML_RAW_BLOCK_START.exec(line)
+      if (raw !== null || HTML_BLOCK_START.test(line)) {
+        const closing = raw === null ? '' : `</${(raw[1] ?? '').toLowerCase()}>`
+        // A raw block whose closing tag is on its first line ends there.
+        if (closing === '' || !line.toLowerCase().includes(closing)) html = closing
+        continue
+      }
     }
     const visible = removeHtmlComments(line, comment)
     comment = visible.open

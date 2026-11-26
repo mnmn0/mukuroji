@@ -317,6 +317,22 @@ describe('convertMarkdownToPageBlocks', () => {
       .toEqual({ ok: false, code: 'block-too-long' })
   })
 
+  test('keeps a first heading when backticks inside pre open no fence', () => {
+    const result = convertMarkdownToPageBlocks('# Page\n\n<pre>\n```\n</pre>\n\n# Other', (prefix) => prefix)
+    expect(result.ok).toBe(true)
+    expect(result).not.toHaveProperty('leadingTitle')
+  })
+
+  test('keeps a mixed list whole when a task item comes last', () => {
+    const source = '- [ ] Draft\n\n- Review\n\n- [x] Publish'
+    expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
+  })
+
+  test('keeps a boundary line that continues list text', () => {
+    const blocks = convert('- item\n[mukuroji-block-boundary]: #').blocks
+    expect(JSON.stringify(blocks)).toContain('[mukuroji-block-boundary]: #')
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])
