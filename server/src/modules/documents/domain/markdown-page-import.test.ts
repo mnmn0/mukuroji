@@ -70,21 +70,17 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(convert('# A\n\n# B_2').leadingTitle).toBeUndefined()
   })
 
-  test('copies a reference definition into each paragraph a native block separated it from', () => {
-    const { blocks } = convert('See [docs][ref].\n\n## Details\n\nAgain [ref].\n\n[ref]: https://example.com')
+  test('keeps Markdown with reference or footnote definitions whole in one paragraph', () => {
+    const source = 'See [docs][ref] and [^note].\n\n## Details\n\n- [ ] task\n\n[ref]: https://example.com\n\n[^note]: first\n\n    second'
+    expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
+    expect(convert(`# Plan\n\n${source}`)).toMatchObject({ leadingTitle: 'Plan', blocks: [{ type: 'paragraph', text: source }] })
 
-    expect(blocks.map((block) => block.type === 'paragraph' ? block.text : block.type)).toEqual([
-      'See [docs][ref].\n\n[ref]: https://example.com',
-      'heading',
-      'Again [ref].\n\n[ref]: https://example.com',
-    ])
     const inCode = convert('See [ref].\n\n## Example\n\n- item\n\n  ```text\n  [ref]: https://example.com\n  ```').blocks
-    expect(inCode[0]).toMatchObject({ type: 'paragraph', text: 'See [ref].' })
+    expect(inCode.map(({ type }) => type)).toEqual(['paragraph', 'heading', 'paragraph'])
     const inComment = convert('See [ref].\n\n## Example\n\n<!--\n[ref]: https://example.com\n-->').blocks
-    expect(inComment[0]).toMatchObject({ type: 'paragraph', text: 'See [ref].' })
-    const again = convert(blocks.map((block) => block.type === 'paragraph' ? block.text : '## Details').join('\n\n')).blocks
-    expect(again.map((block) => block.type === 'paragraph' ? block.text : block.type))
-      .toEqual(blocks.map((block) => block.type === 'paragraph' ? block.text : block.type))
+    expect(inComment.map(({ type }) => type)).toEqual(['paragraph', 'heading', 'paragraph'])
+    expect(convertMarkdownToPageBlocks(`[ref]: https://example.com\n\n${'x'.repeat(DOCUMENT_MAX_TEXT_LENGTH)}`, (prefix) => prefix))
+      .toEqual({ ok: false, code: 'block-too-long' })
   })
 
   test('shifts levels so the shallowest heading is level 1 when there is no single title heading', () => {

@@ -78,7 +78,8 @@ const MARKDOWN_SYNTAX = /[\\`*_[\]<>&~|!#$]/u
  * diagram), an ATX heading of plain text a heading, a run of plain task items a checklist, and a
  * pipe table of plain cells a table. Everything else, including lists, quotes, links, and the
  * blank lines between them, stays together as paragraph Markdown, which the page shows as
- * Markdown; a reference definition is copied into each other paragraph that uses its label.
+ * Markdown. Markdown with a reference or footnote definition stays whole in one paragraph, so
+ * every reference keeps its definition.
  *
  * When the body starts with the only `#` heading, as Markdown a page exports does, that heading
  * (whatever Markdown its text holds) is left out and returned as `leadingTitle`, and `##` becomes level 1, so exported Markdown
@@ -96,7 +97,20 @@ export function convertMarkdownToPageBlocks(
   if (source.length > MARKDOWN_PAGE_IMPORT_MAX_LENGTH) return { ok: false, code: 'too-large' }
   const lines = source.replace(/^\uFEFF/u, '').split(/\r\n?|\n/u)
   const title = findLeadingTitle(lines)
-  const scanned = scanBlocks(title === undefined ? lines : lines.slice(title.next), createId)
+  const bodyLines = title === undefined ? lines : lines.slice(title.next)
+  const bodyText = bodyLines.join('\n').trim()
+  // A reference or footnote definition resolves anywhere in the document, but each paragraph
+  // block is shown on its own; such Markdown stays whole in one paragraph so every reference
+  // keeps its definition.
+  if (linesOutsideFences(bodyText).some((line) => REFERENCE_DEFINITION.test(line))) {
+    if (bodyText.length > DOCUMENT_MAX_TEXT_LENGTH) return { ok: false, code: 'block-too-long' }
+    return {
+      ok: true,
+      blocks: [{ id: createId('paragraph'), type: 'paragraph', text: bodyText }],
+      ...(title === undefined ? {} : { leadingTitle: title.text }),
+    }
+  }
+  const scanned = scanBlocks(bodyLines, createId)
   if (!scanned.ok) return scanned
   const body = scanned.blocks
   const leadingTitle = title?.text
@@ -111,7 +125,6 @@ export function convertMarkdownToPageBlocks(
         text: block.text,
       }
     : block)
-  if (!shareReferenceDefinitions(blocks)) return { ok: false, code: 'block-too-long' }
   if (blocks.length > DOCUMENT_MAX_BLOCK_COUNT) return { ok: false, code: 'too-many-blocks' }
   return { ok: true, blocks, ...(leadingTitle === undefined ? {} : { leadingTitle }) }
 }
@@ -148,53 +161,6 @@ function findLeadingTitle(lines: readonly string[]): { text: string, next: numbe
 
 /** Reference definition line, such as `[docs]: https://example.com`. */
 const REFERENCE_DEFINITION = /^ {0,3}\[([^\]]+)\]:[ \t]*\S/u
-
-/**
- * Normalizes a reference label the way Markdown matches it.
- *
- * @param label - Label text between the brackets.
- * @returns Case-folded label with collapsed whitespace.
- */
-function normalizeReferenceLabel(label: string): string {
-  return label.trim().replace(/\s+/gu, ' ').toLowerCase()
-}
-
-/**
- * Copies reference definitions into each other paragraph that uses their label. Each paragraph is
- * shown as Markdown on its own, so a reference whose definition a native block separated from it
- * would otherwise show unresolved. A paragraph that already defines a label keeps its own.
- *
- * @param blocks - Page blocks; paragraphs are changed in place.
- * @returns Whether every paragraph still fits in one block.
- */
-function shareReferenceDefinitions(blocks: DocumentBlock[]): boolean {
-  const definitions = new Map<string, string>()
-  const ownLabels = new Map<DocumentBlock, Set<string>>()
-  for (const block of blocks) {
-    if (block.type !== 'paragraph') continue
-    const labels = new Set<string>()
-    for (const line of linesOutsideFences(block.text)) {
-      const label = REFERENCE_DEFINITION.exec(line)?.[1]
-      if (label === undefined) continue
-      const key = normalizeReferenceLabel(label)
-      labels.add(key)
-      if (!definitions.has(key)) definitions.set(key, line.trim())
-    }
-    ownLabels.set(block, labels)
-  }
-  if (definitions.size === 0) return true
-  let fits = true
-  for (const block of blocks) {
-    if (block.type !== 'paragraph') continue
-    const own = ownLabels.get(block) ?? new Set<string>()
-    const used = [...linesOutsideFences(block.text).join('\n').matchAll(/\[([^\]]+)\]/gu)].map((match) => normalizeReferenceLabel(match[1] ?? ''))
-    const missing = [...new Set(used)].filter((label) => !own.has(label) && definitions.has(label))
-    if (missing.length === 0) continue
-    block.text = `${block.text}\n\n${missing.map((label) => definitions.get(label) ?? '').join('\n')}`
-    if (block.text.length > DOCUMENT_MAX_TEXT_LENGTH) fits = false
-  }
-  return fits
-}
 
 /**
  * Clamps a shifted heading level to the levels a page supports.

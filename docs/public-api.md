@@ -198,8 +198,8 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   閲覧できなければ `404`、閲覧だけなら `403`、`expectedRevision` が古ければ `409 conflict` です。
   Markdown は行頭の fenced code（`mermaid` は diagram）、記号を含まない見出し・task list・pipe table を block に変え、
   それ以外は書いたままの Markdown として paragraph に残します。先頭にただ 1 つある `#` 見出しは、export が title を
-  書く場所なので、記号を含んでいても本文から除きます。参照 link の定義は、見出しなどの block で分かれた段落のうち
-  その label を使う段落にも写します。1 ページに収まらない Markdown（block が 500 を超える、空行のない段落や code が
+  書く場所なので、記号を含んでいても本文から除きます。参照 link や脚注の定義を含む Markdown は、どの参照も
+  定義を引けるよう全体を 1 つの paragraph に残します。1 ページに収まらない Markdown（block が 500 を超える、空行のない段落や code が
   50,000 文字を超える）は `422 validation_failed` です。本文を置き換えると block の ID が新しくなり、block に付いた
   コメントは位置を失い、block が持つ link は消えます。Document 全体の link は残ります（ADR 0106）。
 - Work Item の添付ファイルは `GET /api/v1/work-items/{workItemId}/attachments?teamId={teamId}` で
