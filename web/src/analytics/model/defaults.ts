@@ -24,6 +24,9 @@ const metricLabelKeys: Readonly<Record<AnalyticsMetricKey, MessageKey>> = {
   'milestone-trend': 'analytics.metric.milestoneTrend',
   'agent-tokens': 'analytics.metric.agentTokens',
   'agent-cost': 'analytics.metric.agentCost',
+  'evm-spi': 'analytics.metric.evmSpi',
+  'evm-cpi': 'analytics.metric.evmCpi',
+  'evm-eac': 'analytics.metric.evmEac',
 }
 
 /**

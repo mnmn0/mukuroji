@@ -19,6 +19,9 @@ export type AnalyticsMetricKey =
   | 'milestone-trend'
   | 'agent-tokens'
   | 'agent-cost'
+  | 'evm-spi'
+  | 'evm-cpi'
+  | 'evm-eac'
 
 /**
  * How throughput, velocity, and forecast count completed and remaining work.
@@ -307,7 +310,7 @@ export type AnalyticsMetricDefinition = {
   /** Metric の表示名です。 */
   label: string
   /** Metric value の単位です。 */
-  unit: 'count' | 'hours' | 'items-per-week' | 'hours-per-week' | 'percent' | 'tokens' | 'usd'
+  unit: 'count' | 'hours' | 'items-per-week' | 'hours-per-week' | 'percent' | 'tokens' | 'usd' | 'index'
   /** Metric 算出規則の短い説明です。 */
   description: string
 }
@@ -735,8 +738,14 @@ export function resolveAnalyticsGroupLabel(
   switch (groupBy?.dimension) {
     case 'team':
       return lookup.team?.(group.key) ?? group.label
-    case 'project':
+    case 'project': {
+      // Earned value groups key a Project by `teamId\0projectId`, since a Project ID can repeat across Teams.
+      const separator = group.key.indexOf('\0')
+      if (separator > 0) {
+        return lookup.project?.(group.key.slice(separator + 1), group.key.slice(0, separator)) ?? group.label
+      }
       return lookup.project?.(group.key) ?? group.label
+    }
     case 'assignee':
       return lookup.member?.(group.key) ?? group.label
     case 'status':

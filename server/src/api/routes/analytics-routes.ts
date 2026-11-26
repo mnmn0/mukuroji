@@ -63,6 +63,11 @@ import {
   analyticsSnapshotReadAgentCost,
 } from '../../modules/analytics/analytics-agent-usage'
 import {
+  analyticsQueryReadsEarnedValue,
+  analyticsSnapshotReadEarnedValue,
+  createAnalyticsEarnedValueProjectKey,
+} from '../../modules/analytics/analytics-earned-value'
+import {
   readAnalyticsWorkItemHistoryEvents,
   type AnalyticsWorkItemHistoryReader,
 } from '../../modules/analytics/analytics-history-reader'
@@ -89,6 +94,10 @@ import {
   readAnalyticsAgentCostTeamIds,
   readAuthorizedAnalyticsAgentUsage,
 } from '../shared/analytics-agent-usage'
+import {
+  readAnalyticsEarnedValueProjects,
+  readAuthorizedAnalyticsEarnedValue,
+} from '../shared/analytics-earned-value'
 import {
   readAuthorizedAnalyticsMilestones,
   readAuthorizedAnalyticsPlanningGroups,
@@ -568,12 +577,15 @@ async function listAnalyticsHttpSnapshots(
       const readsMilestones = analyticsSnapshotReadMilestones(record.snapshot)
       const readsPlanningGroups = analyticsSnapshotReadPlanningGroups(record.query, record.snapshot)
       const readsAgentCost = analyticsSnapshotReadAgentCost(record.snapshot)
-      // A scheduled snapshot of the same query leaves the Milestones, Cycles, and cost Teams out of its hash.
+      const readsEarnedValue = analyticsSnapshotReadEarnedValue(record.snapshot)
+      // A scheduled snapshot of the same query leaves the Milestones, Cycles, cost Teams, and managed
+      // Projects out of its hash.
       const queryCacheKey = [
         record.snapshot.queryHash,
         readsMilestones ? 'milestones' : '',
         readsPlanningGroups ? 'planning-groups' : '',
         readsAgentCost ? 'agent-cost' : '',
+        readsEarnedValue ? 'earned-value' : '',
       ].join('\0')
       let pendingPermissionScopeHash = permissionScopeHashCache.get(queryCacheKey)
       if (!pendingPermissionScopeHash) {
@@ -584,6 +596,7 @@ async function listAnalyticsHttpSnapshots(
           scopeCache,
           readsPlanningGroups,
           readsAgentCost,
+          readsEarnedValue,
         )
         permissionScopeHashCache.set(queryCacheKey, pendingPermissionScopeHash)
       }
@@ -827,12 +840,26 @@ async function executeNormalizedAnalyticsQuery(
         analyticsQueryReadsAgentCost(normalizedQuery),
       )
     : undefined
+  const earnedValue = analyticsQueryReadsEarnedValue(normalizedQuery)
+    ? await readAuthorizedAnalyticsEarnedValue(
+        principal,
+        // Earned value measures whole Projects, so a Work Item list does not narrow them (ADR 0110).
+        normalizedQuery.filter.workItems === undefined
+          ? authorized.workItems
+          : (await readAccessibleAnalyticsWorkItems(principal, withoutAnalyticsWorkItemList(normalizedQuery.filter))).workItems,
+        authorized.authorizedProjectIds,
+        normalizedQuery.filter.projectIds,
+        normalizedQuery.asOf,
+        normalizedQuery.timeZone,
+      )
+    : undefined
   return {
     snapshot: createAnalyticsSnapshot({
       ...authorized,
       ...(milestones === undefined ? {} : { milestones }),
       ...(planningGroups === undefined ? {} : { planningGroups }),
       ...(agentUsage === undefined ? {} : { agentUsage }),
+      ...(earnedValue === undefined ? {} : { earnedValue }),
       query: normalizedQuery,
     }),
     query: normalizedQuery,
@@ -1212,6 +1239,8 @@ function createAnalyticsHistoryLimitExceededError() {
  *   of its Cycle or Milestone grouped widgets.
  * @param readsAgentCost - Whether the stored snapshot fixed the Teams whose Agent Run cost the
  *   viewer could see.
+ * @param readsEarnedValue - Whether the stored snapshot fixed the Projects whose earned value the
+ *   viewer could see.
  * @returns The current permission scope hash.
  */
 async function readCurrentAnalyticsPermissionScopeHash(
@@ -1221,20 +1250,10 @@ async function readCurrentAnalyticsPermissionScopeHash(
   cache: AnalyticsPermissionScopeReadCache = createAnalyticsPermissionScopeReadCache(),
   readsPlanningGroups = false,
   readsAgentCost = false,
+  readsEarnedValue = false,
 ) {
   const normalized = normalizeAnalyticsQueryInput(query)
-  const cacheKey = JSON.stringify({
-    teamIds: normalized.filter.teamIds ?? null,
-    projectIds: normalized.filter.projectIds ?? null,
-    includeArchived: normalized.filter.includeArchived === true,
-    workItems: normalized.filter.workItems ?? null,
-  })
-  let accessible = cache.workItems.get(cacheKey)
-  if (!accessible) {
-    accessible = readAccessibleAnalyticsWorkItems(principal, normalized.filter)
-    cache.workItems.set(cacheKey, accessible)
-  }
-  const current = await accessible
+  const current = await readCachedAccessibleAnalyticsWorkItems(principal, normalized.filter, cache)
   if (readsMilestones && !cache.milestones) {
     cache.milestones = readReadableAnalyticsMilestones(principal)
   }
@@ -1256,6 +1275,27 @@ async function readCurrentAnalyticsPermissionScopeHash(
       throw error
     }
   }
+  let earnedValueProjectKeys: string[] | undefined
+  if (readsEarnedValue) {
+    // The same Team and Project scope as the query, without its Work Item list (ADR 0110).
+    const projectScope = normalized.filter.workItems === undefined
+      ? current
+      : await readCachedAccessibleAnalyticsWorkItems(principal, withoutAnalyticsWorkItemList(normalized.filter), cache)
+    try {
+      earnedValueProjectKeys = (await readAnalyticsEarnedValueProjects(
+        principal,
+        projectScope.workItems,
+        current.authorizedProjectIds,
+        normalized.filter.projectIds,
+      )).managed.map((project) => createAnalyticsEarnedValueProjectKey(project.teamId, project.projectId))
+    } catch (error) {
+      // A scope that grew past the Project limit can no longer match the saved one.
+      if (error instanceof AnalyticsError && error.code === 'AnalyticsEarnedValueLimitExceeded') {
+        return ANALYTICS_UNMATCHED_PERMISSION_SCOPE_HASH
+      }
+      throw error
+    }
+  }
   return createAnalyticsPermissionScopeHash(
     current.workItems,
     Date.parse(normalized.asOf),
@@ -1265,7 +1305,48 @@ async function readCurrentAnalyticsPermissionScopeHash(
       ? (await readAuthorizedAnalyticsPlanningGroups(principal, current.workItems)).entityScopeKeys
       : undefined,
     readsAgentCost ? await readAnalyticsAgentCostTeamIds(principal, current.workItems) : undefined,
+    earnedValueProjectKeys,
   )
+}
+
+/**
+ * Reads the accessible Work Items of a filter scope once for the snapshots of one response.
+ *
+ * @param principal - Viewer.
+ * @param filter - Normalized query filter.
+ * @param cache - Reads shared by the snapshots of one response.
+ * @returns The accessible Work Items and readable Project IDs.
+ */
+async function readCachedAccessibleAnalyticsWorkItems(
+  principal: WorkspacePrincipal,
+  filter: AnalyticsQueryInput['filter'],
+  cache: AnalyticsPermissionScopeReadCache,
+): Promise<Awaited<ReturnType<typeof readAccessibleAnalyticsWorkItems>>> {
+  const cacheKey = JSON.stringify({
+    teamIds: filter.teamIds ?? null,
+    projectIds: filter.projectIds ?? null,
+    includeArchived: filter.includeArchived === true,
+    workItems: filter.workItems ?? null,
+  })
+  let accessible = cache.workItems.get(cacheKey)
+  if (!accessible) {
+    accessible = readAccessibleAnalyticsWorkItems(principal, filter)
+    cache.workItems.set(cacheKey, accessible)
+  }
+  return await accessible
+}
+
+/**
+ * Returns the filter without its Work Item list, the Team and Project scope that earned value
+ * measures whole Projects in.
+ *
+ * @param filter - Normalized query filter.
+ * @returns The filter without `workItems`.
+ */
+function withoutAnalyticsWorkItemList(filter: AnalyticsQueryInput['filter']): AnalyticsQueryInput['filter'] {
+  const { workItems: listed, ...scope } = filter
+  void listed
+  return scope
 }
 
 /** Permission scope hash that no saved snapshot has. */
@@ -1361,6 +1442,7 @@ async function resolveAnalyticsExportSnapshot(
     undefined,
     analyticsSnapshotReadPlanningGroups(stored.query, stored.snapshot),
     analyticsSnapshotReadAgentCost(stored.snapshot),
+    analyticsSnapshotReadEarnedValue(stored.snapshot),
   )
   if (currentPermissionScopeHash !== stored.snapshot.permissionScopeHash) {
     throw new AnalyticsError(

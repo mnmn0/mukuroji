@@ -84,6 +84,43 @@ const DAY_MS = 86_400_000
  * @returns The report.
  */
 export function createProjectBudgetReport(input: ProjectBudgetReportInput): ProjectBudgetReport {
+  return measureProjectBudget(input, true).report
+}
+
+/** Earned value figures in minutes before any rounding, for callers that add Projects up. */
+export type ProjectEarnedValueMinutes = {
+  /** Budget at completion: the planned effort of the baseline Work Items that are not canceled. */
+  budgetAtCompletionMinutes: number
+  /** Planned value at the as-of date, not rounded. */
+  plannedValueMinutes: number
+  /** Earned value, not rounded. */
+  earnedValueMinutes: number
+  /** Minutes recorded on the Project from the report start through the as-of date. */
+  actualMinutes: number
+}
+
+/**
+ * Calculates the exact earned value figures of one Project the same way as the budget report,
+ * without building the series, so an Analytics query can add Projects up before it rounds.
+ *
+ * @param input - Report inputs; `interval` is ignored.
+ * @returns The figures, or `null` without a baseline that plans any effort.
+ */
+export function measureProjectEarnedValueMinutes(input: ProjectBudgetReportInput): ProjectEarnedValueMinutes | null {
+  return measureProjectBudget(input, false).exact
+}
+
+/**
+ * Calculates the budget report and the exact earned value figures it rounds.
+ *
+ * @param input - Report inputs.
+ * @param withSeries - Whether to build the cumulative series; without it `points` is empty.
+ * @returns The report and the exact figures, `null` without baseline effort.
+ */
+function measureProjectBudget(
+  input: ProjectBudgetReportInput,
+  withSeries: boolean,
+): { report: ProjectBudgetReport; exact: ProjectEarnedValueMinutes | null } {
   const asOf = input.today < input.to ? (input.today < input.from ? input.from : input.today) : input.to
   const measured = input.today >= input.from
   const planned: PlannedEffort[] = []
@@ -146,12 +183,12 @@ export function createProjectBudgetReport(input: ProjectBudgetReportInput): Proj
     actualByDate.set(expense.date, day)
   }
 
-  const points = createSeries(input, asOf, measured, planned, actualByDate, minorPerMinute)
+  const points = withSeries ? createSeries(input, asOf, measured, planned, actualByDate, minorPerMinute) : []
   const plannedValueMinutes = plannedValueAt(planned, asOf)
   const actualCostMinor = currency === undefined
     ? 0
     : (actualCostByCurrency[currency] ?? 0) + (approvedExpenseByCurrency[currency] ?? 0)
-  return {
+  const report: ProjectBudgetReport = {
     teamId: input.teamId,
     projectId: input.projectId,
     from: input.from,
@@ -193,6 +230,12 @@ export function createProjectBudgetReport(input: ProjectBudgetReportInput): Proj
         )
       : null,
     points,
+  }
+  return {
+    report,
+    exact: budgetAtCompletionMinutes > 0
+      ? { budgetAtCompletionMinutes, plannedValueMinutes, earnedValueMinutes, actualMinutes }
+      : null,
   }
 }
 

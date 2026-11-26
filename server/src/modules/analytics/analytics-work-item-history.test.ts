@@ -384,7 +384,9 @@ const query: AnalyticsQueryInput = {
     includeArchived: true,
   },
   widgets: [
+    // Earned value is measured per Project at the as-of date, so it has no calendar chart.
     ...(Object.keys(ANALYTICS_METRIC_DEFINITIONS) as Array<keyof typeof ANALYTICS_METRIC_DEFINITIONS>)
+      .filter((metric) => !metric.startsWith('evm-'))
       .map((metric) => ({
         id: `chart-${metric}`,
         title: metric,

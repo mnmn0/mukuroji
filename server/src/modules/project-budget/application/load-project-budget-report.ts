@@ -12,6 +12,9 @@ import {
 import { splitTimeEntryByLocalDate } from '../../time-tracking'
 import {
   createProjectBudgetReport,
+  measureProjectEarnedValueMinutes,
+  type ProjectBudgetReportInput,
+  type ProjectEarnedValueMinutes,
   type ProjectBudgetTimeEntry,
   type ProjectBudgetWorkItemProgress,
 } from '../project-budget-report'
@@ -131,10 +134,100 @@ export async function loadProjectBudgetReport(
   ports: ProjectBudgetReportPorts,
   workItemLimit: number,
 ): Promise<ProjectBudgetReport> {
-  const { workspaceId, teamId, projectId, timeZone } = request
-  const [budget, baseline, progressMode, entries, expenses] = await Promise.all([
+  const { workspaceId, teamId, projectId } = request
+  const [budget, baseline] = await Promise.all([
     ports.getBudget(workspaceId, teamId, projectId),
     ports.getBaseline(workspaceId, teamId, projectId),
+  ])
+  return createProjectBudgetReport(
+    await readReportInput(request, ports, workItemLimit, budget ?? null, baseline, ports.now().getTime(), true),
+  )
+}
+
+/** A validated earned value request of a caller already authorized to manage the Project. */
+export type ProjectEarnedValueRequest = {
+  /** Workspace directory ID. */
+  workspaceId: string
+  /** Team that owns the Project. */
+  teamId: string
+  /** Project ID within the Team. */
+  projectId: string
+  /** IANA timezone the as-of date is taken in. */
+  timeZone: string
+  /** Instant the figures are measured at, epoch milliseconds. */
+  asOf: number
+}
+
+/**
+ * First local date the earned value of a Project counts recorded time from: in practice every
+ * entry the Project has, so actual time is the Project's total to date.
+ */
+const PROJECT_TO_DATE_FROM = '2000-01-01'
+
+/**
+ * Loads the exact earned value figures of a Project at an instant, the same way the budget report
+ * calculates them, so a caller can add Projects up before it rounds.
+ *
+ * Actual time is every minute recorded on the Project through the as-of date. Earned value reads
+ * the Work Items' current progress, so the caller measures only at a recent as-of instant
+ * (ADR 0110). Expenses are not read, because the figures are in effort. The caller must already
+ * have checked that the principal manages the Project.
+ *
+ * @param request - Validated request.
+ * @param ports - Team-scoped reads.
+ * @param workItemLimit - Most Work Items one Project may evaluate.
+ * @returns The figures, or `null` without a baseline that plans any effort.
+ * @throws ProjectBudgetReportError when the Team has too many Work Items or a page read stalls.
+ */
+export async function loadProjectEarnedValue(
+  request: ProjectEarnedValueRequest,
+  ports: ProjectBudgetReportPorts,
+  workItemLimit: number,
+): Promise<ProjectEarnedValueMinutes | null> {
+  const { workspaceId, teamId, projectId, timeZone } = request
+  const [budget, baseline] = await Promise.all([
+    ports.getBudget(workspaceId, teamId, projectId),
+    ports.getBaseline(workspaceId, teamId, projectId),
+  ])
+  if (baseline === null || !baseline.entries.some((entry) => (entry.plannedEffortMinutes ?? 0) > 0)) return null
+  const asOfDate = localDateAt(request.asOf, timeZone)
+  const from = asOfDate < PROJECT_TO_DATE_FROM ? asOfDate : PROJECT_TO_DATE_FROM
+  return measureProjectEarnedValueMinutes(await readReportInput(
+    { workspaceId, teamId, projectId, from, to: asOfDate, timeZone, interval: 'week' },
+    ports,
+    workItemLimit,
+    budget ?? null,
+    baseline,
+    request.asOf,
+    false,
+  ))
+}
+
+/**
+ * Reads the progress, time, and expenses of a Project and assembles the budget report input from
+ * the budget and baseline already read.
+ *
+ * @param request - Validated request.
+ * @param ports - Team-scoped reads.
+ * @param workItemLimit - Most Work Items one report may evaluate.
+ * @param budget - Project budget, or `null`.
+ * @param baseline - Active schedule baseline, or `null`.
+ * @param now - Instant whose local date is the report's today, epoch milliseconds.
+ * @param includeExpenses - Whether to read the Project expenses; without them none count.
+ * @returns The report input.
+ * @throws ProjectBudgetReportError when the Team has too many Work Items or a page read stalls.
+ */
+async function readReportInput(
+  request: ProjectBudgetReportRequest,
+  ports: ProjectBudgetReportPorts,
+  workItemLimit: number,
+  budget: TimeBudget | null,
+  baseline: ProjectScheduleBaseline | null,
+  now: number,
+  includeExpenses: boolean,
+): Promise<ProjectBudgetReportInput> {
+  const { workspaceId, teamId, projectId, timeZone } = request
+  const [progressMode, entries, expenses] = await Promise.all([
     ports.getProgressMode(workspaceId, teamId),
     ports.listEntries({
       workspaceId,
@@ -143,26 +236,26 @@ export async function loadProjectBudgetReport(
       from: new Date(Date.parse(`${request.from}T00:00:00Z`) - MAX_TIMEZONE_OFFSET_MS).toISOString(),
       to: new Date(Date.parse(`${request.to}T00:00:00Z`) + DAY_MS + MAX_TIMEZONE_OFFSET_MS).toISOString(),
     }),
-    ports.listExpenses(workspaceId, teamId, projectId),
+    includeExpenses ? ports.listExpenses(workspaceId, teamId, projectId) : Promise.resolve([]),
   ])
   const baselineIds = new Set((baseline?.entries ?? []).map((entry) => entry.workItemId))
   const workItems = baselineIds.size === 0
     ? new Map<string, ProjectBudgetWorkItemProgress>()
     : await readWorkItemProgress(request, ports, baselineIds, progressMode, workItemLimit)
-  return createProjectBudgetReport({
+  return {
     teamId,
     projectId,
     from: request.from,
     to: request.to,
     timeZone,
     interval: request.interval,
-    today: localDateAt(ports.now().getTime(), timeZone),
-    budget: budget ?? null,
+    today: localDateAt(now, timeZone),
+    budget,
     baseline,
     workItems,
     entries: entries.flatMap((entry) => toBudgetEntries(entry, timeZone)),
     expenses,
-  })
+  }
 }
 
 /**

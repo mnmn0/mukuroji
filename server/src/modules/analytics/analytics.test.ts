@@ -577,6 +577,10 @@ describe('Analytics metric engine', () => {
       'milestone-trend': null,
       'agent-tokens': null,
       'agent-cost': null,
+      // Earned value is read by the API per Project; without it the widgets carry only a warning.
+      'evm-spi': null,
+      'evm-cpi': null,
+      'evm-eac': null,
     })
     expect(snapshot.generatedAt).toBe(period.to)
     expect(snapshot.queryHash).toHaveLength(64)
@@ -1790,9 +1794,10 @@ describe('Analytics metric engine', () => {
       to: '2026-03-31T23:59:59.999Z',
     }
     const asOf = '2026-03-24T09:30:00.000Z'
-    const metrics = Object.keys(ANALYTICS_METRIC_DEFINITIONS) as Array<
+    // Earned value is measured per Project at the as-of date, so it has no calendar chart.
+    const metrics = (Object.keys(ANALYTICS_METRIC_DEFINITIONS) as Array<
       keyof typeof ANALYTICS_METRIC_DEFINITIONS
-    >
+    >).filter((metric) => !metric.startsWith('evm-'))
     const query = createQuery([
       ...metrics.map((metric) => ({
         id: `chart-${metric}`,

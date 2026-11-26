@@ -76,6 +76,9 @@ describe('Analytics group labels', () => {
       createTranslator('en'),
     )
     expect(shared.project('web', 'team-b')).toBe('Admin console')
+    // Earned value groups key a Project by Team and Project.
+    expect(resolveAnalyticsGroupLabel({ dimension: 'project' }, { key: 'team-b\0web', label: 'web' }, { ...lookup, project: shared.project }))
+      .toBe('Admin console')
     expect(shared.project('web')).toBe('Storefront (Team A) / Admin console (Team B)')
   })
 })

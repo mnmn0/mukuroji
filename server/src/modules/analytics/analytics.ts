@@ -76,6 +76,13 @@ import {
   isAnalyticsAgentUsageMetric,
   type AnalyticsAgentUsage,
 } from './analytics-agent-usage'
+import {
+  ANALYTICS_EARNED_VALUE_UNAVAILABLE_WARNING,
+  analyticsQueryReadsEarnedValue,
+  createAnalyticsEarnedValueWidgetParts,
+  isAnalyticsEarnedValueMetric,
+  type AnalyticsEarnedValue,
+} from './analytics-earned-value'
 
 const REPORT_RECORD_PREFIX = 'REPORT#'
 const SNAPSHOT_RECORD_PREFIX = 'SNAPSHOT#'
@@ -169,6 +176,9 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       'milestone-trend': 'Milestone trend',
       'agent-tokens': 'Agent tokens',
       'agent-cost': 'Agent estimated cost',
+      'evm-spi': 'Schedule performance index (SPI)',
+      'evm-cpi': 'Cost performance index (CPI)',
+      'evm-eac': 'Estimate at completion (EAC)',
     }),
     unitLabels: Object.freeze({
       count: 'items',
@@ -178,6 +188,7 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       percent: '%',
       tokens: 'tokens',
       usd: 'USD',
+      index: '',
     }),
     riskLabels: Object.freeze({
       unknown: 'Unknown',
@@ -276,6 +287,9 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       'milestone-trend': 'Milestone trend',
       'agent-tokens': 'エージェントのトークン',
       'agent-cost': 'エージェントの推定費用',
+      'evm-spi': 'スケジュール効率指数（SPI）',
+      'evm-cpi': 'コスト効率指数（CPI）',
+      'evm-eac': '完了時総見積（EAC）',
     }),
     unitLabels: Object.freeze({
       count: '件',
@@ -285,6 +299,7 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       percent: '%',
       tokens: 'トークン',
       usd: 'USD',
+      index: '',
     }),
     riskLabels: Object.freeze({
       unknown: '不明',
@@ -431,6 +446,11 @@ export type AnalyticsEngineInput = {
    * だけを返します。
    */
   agentUsage?: AnalyticsAgentUsage
+  /**
+   * Earned value of the Projects in the query scope that the viewer manages (ADR 0110).
+   * Earned value widget を含む query で渡します。省略時、その widget は warning だけを返します。
+   */
+  earnedValue?: AnalyticsEarnedValue
   /** Snapshot を再現する query です。 */
   query: AnalyticsQueryInput
 }
@@ -785,6 +805,30 @@ export const ANALYTICS_METRIC_DEFINITIONS: Readonly<Record<
     unit: 'usd',
     description:
       'Adds up the estimated cost in US dollars that the agent runtime reported for the Agent Runs that finished in the period, counting only Teams the viewer manages.',
+  }),
+  'evm-spi': Object.freeze({
+    key: 'evm-spi',
+    version: 1,
+    label: 'Schedule performance index (SPI)',
+    unit: 'index',
+    description:
+      'Earned value divided by planned value at the as-of date, in baseline effort, over the Projects the viewer manages that have a baseline with planned effort.',
+  }),
+  'evm-cpi': Object.freeze({
+    key: 'evm-cpi',
+    version: 1,
+    label: 'Cost performance index (CPI)',
+    unit: 'index',
+    description:
+      'Earned value divided by the minutes recorded on the Project through the as-of date, over the Projects the viewer manages that have a baseline with planned effort.',
+  }),
+  'evm-eac': Object.freeze({
+    key: 'evm-eac',
+    version: 1,
+    label: 'Estimate at completion (EAC)',
+    unit: 'hours',
+    description:
+      'Baseline effort divided by the cost performance index, in hours, over the Projects the viewer manages that have a baseline with planned effort.',
   }),
 })
 
@@ -1214,6 +1258,8 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
   const widgets = normalized.query.widgets.map((widget) =>
     widget.metric === 'milestone-trend'
       ? createMilestoneTrendWidgetResult(widget, input.milestones, normalized)
+      : isAnalyticsEarnedValueMetric(widget.metric)
+        ? createEarnedValueWidgetResult(widget, input.earnedValue)
       // Checked before the Planning groups so every Agent usage widget of a run without usage carries
       // the warning that tells the snapshot permission check its hash has no cost Teams. A widget
       // that also misses its Planning groups keeps that warning too, for the same reason.
@@ -1260,6 +1306,9 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
       : undefined,
     input.agentUsage !== undefined && analyticsQueryReadsAgentCost(normalized.query)
       ? input.agentUsage.costTeamIds ?? []
+      : undefined,
+    input.earnedValue !== undefined && analyticsQueryReadsEarnedValue(normalized.query)
+      ? input.earnedValue.managedProjectKeys
       : undefined,
   )
 
@@ -2361,6 +2410,18 @@ function normalizeWidgets(value: unknown): AnalyticsWidget[] {
         'Milestone trend widgets group by Milestone and accept only a day, week, or month bucket.',
       )
     }
+    if (
+      isAnalyticsEarnedValueMetric(metric) &&
+      (
+        (groupBy !== undefined && groupBy.dimension !== 'team' && groupBy.dimension !== 'project') ||
+        (type === 'chart' && groupBy === undefined)
+      )
+    ) {
+      throw invalid(
+        'AnalyticsGroupByInvalid',
+        'Earned value widgets are measured at the as-of date, so they group only by Team or Project and a chart must group by one of them.',
+      )
+    }
     const slaTargetHours = candidate.slaTargetHours === undefined
       ? undefined
       : readPositiveNumber(candidate.slaTargetHours, 'Analytics SLA target hours')
@@ -3076,6 +3137,29 @@ function createPlanningGroupsUnavailableWidgetResult(widget: AnalyticsWidget): A
 }
 
 /**
+ * Computes an earned value widget from the Projects the API measured (ADR 0110).
+ *
+ * @param widget - `evm-spi`, `evm-cpi`, or `evm-eac` widget.
+ * @param earnedValue - Earned value the API read, or `undefined` when the run cannot read it.
+ * @returns The widget result; a run without earned value returns only the unavailable warning.
+ */
+function createEarnedValueWidgetResult(
+  widget: AnalyticsWidget,
+  earnedValue: AnalyticsEarnedValue | undefined,
+): AnalyticsWidgetResult {
+  const base = {
+    widgetId: widget.id,
+    metric: widget.metric,
+    definition: resolveAnalyticsMetricDefinition(widget.metric, widget.weighting),
+    series: [],
+  }
+  if (earnedValue === undefined || !isAnalyticsEarnedValueMetric(widget.metric)) {
+    return { ...base, value: null, sampleSize: 0, groups: [], rows: [], warnings: [ANALYTICS_EARNED_VALUE_UNAVAILABLE_WARNING] }
+  }
+  return { ...base, ...createAnalyticsEarnedValueWidgetParts({ ...widget, metric: widget.metric }, earnedValue) }
+}
+
+/**
  * Computes a `milestone-trend` widget from the authorized Milestones.
  *
  * @param widget - Milestone trend widget.
@@ -3538,6 +3622,10 @@ function calculateMetric(
 ): MetricComputation {
   if (metric === 'milestone-trend') {
     // Milestones are Planning entities, not Work Items, so they add no Work Item evidence.
+    return { value: null, sampleSize: 0, evidence: [], warnings: [] }
+  }
+  if (isAnalyticsEarnedValueMetric(metric)) {
+    // Earned value is measured per Project, not per Work Item, so it adds no Work Item evidence.
     return { value: null, sampleSize: 0, evidence: [], warnings: [] }
   }
   if (isAnalyticsAgentUsageMetric(metric)) {
@@ -6592,7 +6680,10 @@ function readMetricKey(value: unknown): AnalyticsMetricKey {
     value === 'cumulative-flow' ||
     value === 'milestone-trend' ||
     value === 'agent-tokens' ||
-    value === 'agent-cost'
+    value === 'agent-cost' ||
+    value === 'evm-spi' ||
+    value === 'evm-cpi' ||
+    value === 'evm-eac'
   ) return value
   throw invalid('AnalyticsMetricInvalid', 'Analytics metric key is invalid.')
 }
@@ -6695,6 +6786,7 @@ export function createAnalyticsPermissionScopeHash(
   milestoneIds?: readonly string[],
   planningEntityKeys?: readonly string[],
   agentCostTeamIds?: readonly string[],
+  earnedValueProjectKeys?: readonly string[],
 ) {
   if (!Number.isFinite(asOf)) {
     throw invalid('AnalyticsPermissionScopeInvalid', 'Analytics permission scope as-of time is invalid.')
@@ -6718,6 +6810,9 @@ export function createAnalyticsPermissionScopeHash(
       ...(agentCostTeamIds === undefined
         ? {}
         : { agentCostTeamIds: [...new Set(agentCostTeamIds)].sort() }),
+      ...(earnedValueProjectKeys === undefined
+        ? {}
+        : { earnedValueProjectKeys: [...new Set(earnedValueProjectKeys)].sort() }),
     },
   )
 }
