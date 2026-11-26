@@ -22,6 +22,9 @@ const CHECK_RUNS_PAGE_SIZE = 50
 /** Reviews read; a pull request rarely has more, and later ones are read only when it does. */
 const REVIEWS_PAGE_SIZE = 100
 
+/** Review pages read before the history is treated as too long to aggregate. */
+const MAXIMUM_REVIEW_PAGES = 10
+
 /** Check run conclusions that fail the head commit. */
 const FAILING_CONCLUSIONS = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale'])
 
@@ -124,13 +127,16 @@ async function readHeadChecks(
  * @param pullPath - `repos/{owner}/{repo}/pulls/{number}` path.
  * @returns `changes-requested` when any reviewer's latest decision requests changes, `approved`
  * when at least one approves, and `none` otherwise.
+ * @throws ConnectorRuntimeError ConnectorProviderResponseMalformed when the history is longer than
+ * {@link MAXIMUM_REVIEW_PAGES} pages, since a partial history could show an outdated decision.
  */
 async function readReviewState(
   request: ConnectorProviderRequester,
   pullPath: string,
 ): Promise<AgentRunPullRequestReviewState> {
   const decisions = new Map<string, 'approved' | 'changes-requested'>()
-  for (let page = 1; page <= 3; page += 1) {
+  let complete = false
+  for (let page = 1; page <= MAXIMUM_REVIEW_PAGES; page += 1) {
     const response = await request({
       method: 'GET',
       path: `${pullPath}/reviews`,
@@ -149,8 +155,12 @@ async function readReviewState(
       else if (review.state === 'CHANGES_REQUESTED') decisions.set(reviewer, 'changes-requested')
       else if (review.state === 'DISMISSED') decisions.delete(reviewer)
     }
-    if (response.payload.length < REVIEWS_PAGE_SIZE) break
+    if (response.payload.length < REVIEWS_PAGE_SIZE) {
+      complete = true
+      break
+    }
   }
+  if (!complete) throw malformed('GitHub review history is too long to read in full.')
   const values = [...decisions.values()]
   if (values.includes('changes-requested')) return 'changes-requested'
   return values.includes('approved') ? 'approved' : 'none'

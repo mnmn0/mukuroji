@@ -82,3 +82,19 @@ test('a hidden pull request, a bad reference, or a malformed payload fails with 
     { repository: 'org/repo', number: 7 },
   )).rejects.toMatchObject({ code: 'ConnectorProviderResponseMalformed' })
 })
+
+test('reads the review history to its end, and refuses to judge one too long to read in full', async () => {
+  const page = (state: string) => Array.from({ length: 100 }, (_, index) => ({ user: { id: index }, state }))
+  /** Answers review pages from a list; other paths come from the open pull request. */
+  const paged = (pages: unknown[][]) => async (request: ConnectorProviderRequest): Promise<ConnectorProviderResponse> => {
+    if (request.path !== 'repos/org/repo/pulls/7/reviews') return requester(openResponses)(request)
+    return { status: 200, payload: pages[Number(request.query?.page) - 1] ?? [] }
+  }
+  // A change request on the fifth page replaces the approvals before it.
+  expect((await readGitHubPullRequest(paged([
+    page('APPROVED'), page('APPROVED'), page('APPROVED'), page('APPROVED'), [{ user: { id: 3 }, state: 'CHANGES_REQUESTED' }],
+  ]), { repository: 'org/repo', number: 7 })).review).toBe('changes-requested')
+
+  await expect(readGitHubPullRequest(paged(Array.from({ length: 10 }, () => page('APPROVED'))), { repository: 'org/repo', number: 7 }))
+    .rejects.toMatchObject({ code: 'ConnectorProviderResponseMalformed' })
+})

@@ -118,6 +118,24 @@ test('does not read a repository outside the Team allowlist, and never reads a m
   expect(reads).toEqual(['org/allowed', 'org/other'])
 })
 
+test('saves the reads that finish within the time budget and leaves the rest for a later view', async () => {
+  const deps = {
+    ...dependencies([report(1, ['https://github.com/org/fast/pull/1', 'https://github.com/org/slow/pull/2'])], (_workspaceId, reference) =>
+      reference.repository === 'org/fast'
+        ? Promise.resolve({ kind: 'verified' as const, pullRequest: openPullRequest })
+        : new Promise<never>(() => {})),
+    refreshBudgetMs: 20,
+  }
+  const now = new Date('2026-11-26T01:00:00.000Z')
+
+  const result = await readWorkItemArtifactStatuses(target, deps, now)
+  expect(result.items.map((item) => [item.repository, item.verification, item.unverifiedReason])).toEqual([
+    ['org/fast', 'verified', undefined],
+    ['org/slow', 'unverified', 'unavailable'],
+  ])
+  expect([...(deps.statuses.statuses.values().next().value?.keys() ?? [])]).toEqual(['https://github.com/org/fast/pull/1'])
+})
+
 test('keeps a verified status through a short provider outage', async () => {
   let available = true
   const deps = dependencies([report(1, ['https://github.com/org/repo/pull/1'])], async () => available

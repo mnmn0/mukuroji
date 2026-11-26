@@ -24,6 +24,12 @@ export const ARTIFACT_STATUS_STALE_AFTER_MS = 2 * 60_000
 /** Shortest interval between two provider refreshes of one Work Item's artifacts. */
 export const ARTIFACT_STATUS_REFRESH_INTERVAL_MS = 60_000
 
+/**
+ * Longest time one read spends on provider refreshes. The API Lambda stops at 20 seconds and one
+ * provider request may take 10, so reads still running at this point are left for a later view.
+ */
+export const ARTIFACT_STATUS_REFRESH_BUDGET_MS = 8_000
+
 /** Report pages read to find a Work Item's newest pull request artifacts. */
 const maximumReportPages = 5
 
@@ -38,6 +44,8 @@ export type ArtifactStatusDependencies = {
   statuses: AgentRunArtifactStatusStore
   /** Provider reader of the Workspace's connectors. */
   reader: PullRequestStatusReader
+  /** Time budget of provider refreshes; {@link ARTIFACT_STATUS_REFRESH_BUDGET_MS} when omitted. */
+  refreshBudgetMs?: number
 }
 
 /** Work Item whose artifact statuses are read; the caller has already authorized the viewer. */
@@ -78,11 +86,11 @@ export async function readWorkItemArtifactStatuses(
   const stale = allowed.filter((reference) => needsRefresh(stored.get(reference.url), now))
   if (stale.length > 0 &&
       await dependencies.statuses.claimRefresh(target.directoryId, target.teamId, target.workItemId, now, ARTIFACT_STATUS_REFRESH_INTERVAL_MS)) {
-    const refreshed: AgentRunArtifactStatus[] = []
-    for (let index = 0; index < stale.length; index += readConcurrency) {
-      refreshed.push(...await Promise.all(stale.slice(index, index + readConcurrency).map((reference) =>
-        checkReference(target.directoryId, reference, stored.get(reference.url), dependencies.reader, now))))
-    }
+    const refreshed = await refreshWithinBudget(
+      stale,
+      (reference) => checkReference(target.directoryId, reference, stored.get(reference.url), dependencies.reader, now),
+      dependencies.refreshBudgetMs ?? ARTIFACT_STATUS_REFRESH_BUDGET_MS,
+    )
     await dependencies.statuses.saveStatuses(target.directoryId, target.teamId, target.workItemId, refreshed)
     for (const status of refreshed) stored.set(status.url, status)
   }
@@ -96,6 +104,47 @@ export async function readWorkItemArtifactStatuses(
       return stored.get(reference.url) ?? createUnverifiedArtifactStatus(reference, 'unavailable', now)
     }),
   }
+}
+
+/**
+ * Checks references a few at a time until all are done or the budget runs out. Checks still
+ * running at the deadline are dropped, so the read keeps the stored or unverified status for them
+ * and the finished ones are still saved.
+ *
+ * @param references - References to check.
+ * @param check - Check of one reference.
+ * @param budgetMs - Time budget.
+ * @returns The statuses of the checks that finished in time.
+ */
+async function refreshWithinBudget(
+  references: readonly PullRequestArtifactReference[],
+  check: (reference: PullRequestArtifactReference) => Promise<AgentRunArtifactStatus>,
+  budgetMs: number,
+): Promise<AgentRunArtifactStatus[]> {
+  const deadline = Date.now() + budgetMs
+  const finished: AgentRunArtifactStatus[] = []
+  let next = 0
+  /** Takes the next reference until none are left or the deadline passes. */
+  const worker = async () => {
+    while (next < references.length && Date.now() < deadline) {
+      const reference = references[next]
+      next += 1
+      if (reference !== undefined) finished.push(await check(reference))
+    }
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      Promise.all(Array.from({ length: Math.min(readConcurrency, references.length) }, worker)),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, budgetMs)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+  // A copy, so a check that finishes after the deadline is not saved with this read.
+  return [...finished]
 }
 
 /**
