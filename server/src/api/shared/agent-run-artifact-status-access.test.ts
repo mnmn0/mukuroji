@@ -288,3 +288,24 @@ test('reads report pages until a pull request is found, and flags a read that st
   const truncated = await readWorkItemArtifactStatuses(target, { ...dependencies([], reader), agentRuns: paged(tooMany, []) }, now)
   expect(truncated).toMatchObject({ items: [], incomplete: true })
 })
+
+test('the connector reader reaches an eleventh account on a later interval, and does not call the pull request inaccessible before', async () => {
+  const reference = { url: 'https://github.com/org/repo/pull/1', provider: 'github' as const, repository: 'org/repo', number: 1 }
+  const accounts = Array.from({ length: 11 }, (_, index) => installation(`account-${index + 1}`))
+  // Interval 0 starts at the first account.
+  let clock = new Date(0)
+  const reader = createConnectorPullRequestStatusReader({
+    listConnectors: async () => accounts,
+    getEngine: async () => ({
+      readPullRequest: async (_workspaceId, installationId) => {
+        if (installationId !== 'account-11') throw new ConnectorRuntimeError('ConnectorExternalResourceMissing', 'Missing.')
+        return openPullRequest
+      },
+    }),
+  }, () => clock)
+
+  // The first interval tries ten accounts; the eleventh is left, so the result is not final.
+  expect(await reader('workspace', reference)).toEqual({ kind: 'unverified', reason: 'unavailable' })
+  clock = new Date(clock.getTime() + ARTIFACT_STATUS_REFRESH_INTERVAL_MS)
+  expect(await reader('workspace', reference)).toEqual({ kind: 'verified', pullRequest: openPullRequest })
+})

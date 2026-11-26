@@ -280,19 +280,31 @@ export type PullRequestReaderConnectors = {
  * Each connected GitHub installation is tried in turn until one can read the pull request, so the
  * result never shows a repository that none of the Workspace's accounts can read.
  *
+ * When the Workspace has more accounts than one read tries, each refresh interval starts at a
+ * different one, and an unread pull request is reported as `unavailable` rather than
+ * `not-accessible`, since an untried account might read it.
+ *
  * @param connectors - Installation list and engine loader.
+ * @param now - Clock that picks the accounts a read tries.
  * @returns The reader.
  */
-export function createConnectorPullRequestStatusReader(connectors: PullRequestReaderConnectors): PullRequestStatusReader {
+export function createConnectorPullRequestStatusReader(
+  connectors: PullRequestReaderConnectors,
+  now: () => Date = () => new Date(),
+): PullRequestStatusReader {
   return async (workspaceId, reference) => {
     if (reference.provider !== 'github') return { kind: 'unverified', reason: 'unsupported-provider' }
     let installations: ConnectorInstallation[]
+    let untried = false
     try {
-      installations = orderInstallationsForRepository(
+      const candidates = orderInstallationsForRepository(
         (await connectors.listConnectors(workspaceId)).filter((installation) => installation.provider === 'github' &&
           (installation.status === 'connected' || installation.status === 'degraded')),
         reference.repository,
-      ).slice(0, maximumInstallationsPerRead)
+        Math.floor(now().getTime() / ARTIFACT_STATUS_REFRESH_INTERVAL_MS),
+      )
+      installations = candidates.slice(0, maximumInstallationsPerRead)
+      untried = candidates.length > installations.length
     } catch (error) {
       console.error(error)
       return { kind: 'unverified', reason: 'unavailable' }
@@ -308,7 +320,7 @@ export function createConnectorPullRequestStatusReader(connectors: PullRequestRe
       console.error(error)
       return { kind: 'unverified', reason: 'unavailable' }
     }
-    let result: PullRequestStatusReadResult = { kind: 'unverified', reason: 'not-accessible' }
+    let result: PullRequestStatusReadResult = { kind: 'unverified', reason: untried ? 'unavailable' : 'not-accessible' }
     for (const installation of installations) {
       try {
         return {
@@ -327,20 +339,27 @@ export function createConnectorPullRequestStatusReader(connectors: PullRequestRe
 }
 
 /**
- * Orders installations so the ones whose account is named like the repository owner come first;
- * the others keep their order.
+ * Orders installations so the ones whose account is named like the repository owner come first.
+ * When the others do not all fit in one read, they start at a position that moves with each
+ * refresh interval, so every account is reached in turn.
  *
  * @param installations - Connected GitHub installations.
  * @param repository - Lowercase `owner/repo` path.
+ * @param interval - Refresh interval number of the read.
  * @returns The installations in the order to try.
  */
 function orderInstallationsForRepository(
   installations: ConnectorInstallation[],
   repository: string,
+  interval: number,
 ): ConnectorInstallation[] {
   const owner = repository.split('/')[0]
   const ownsRepository = (installation: ConnectorInstallation) => installation.externalAccountName?.toLowerCase() === owner
-  return [...installations.filter(ownsRepository), ...installations.filter((installation) => !ownsRepository(installation))]
+  const owners = installations.filter(ownsRepository)
+  const others = installations.filter((installation) => !ownsRepository(installation))
+  if (owners.length + others.length <= maximumInstallationsPerRead) return [...owners, ...others]
+  const start = (interval * Math.max(1, maximumInstallationsPerRead - owners.length)) % others.length
+  return [...owners, ...others.slice(start), ...others.slice(0, start)]
 }
 
 /**
