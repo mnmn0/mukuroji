@@ -51,8 +51,9 @@ function dependencies(
   reports: StoredAgentRunReport[],
   reader: PullRequestStatusReader,
   settings: Partial<AgentSettings> = {},
-): ArtifactStatusDependencies & { statuses: InMemoryAgentRunArtifactStatusStore } {
+): ArtifactStatusDependencies & { statuses: InMemoryAgentRunArtifactStatusStore, settings: Partial<AgentSettings> } {
   return {
+    settings,
     agentRuns: {
       listWorkItemReports: async () => ({ reports }),
       getSettings: async () => ({ ...createDefaultAgentSettings('team'), ...settings }),
@@ -106,6 +107,15 @@ test('does not read a repository outside the Team allowlist, and never reads a m
   ])
   await readWorkItemArtifactStatuses(target, deps, new Date(now.getTime() + 10 * ARTIFACT_STATUS_REFRESH_INTERVAL_MS))
   expect(reads).toEqual(['org/allowed'])
+
+  // Removing the repository from the allowlist takes effect at once, even for the stored merged status.
+  deps.settings.artifactRepositories = ['org/other']
+  const narrowed = await readWorkItemArtifactStatuses(target, deps, new Date(now.getTime() + 11 * ARTIFACT_STATUS_REFRESH_INTERVAL_MS))
+  expect(narrowed.items.map((item) => [item.repository, item.verification, item.unverifiedReason])).toEqual([
+    ['org/allowed', 'unverified', 'repository-not-allowed'],
+    ['org/other', 'verified', undefined],
+  ])
+  expect(reads).toEqual(['org/allowed', 'org/other'])
 })
 
 test('keeps a verified status through a short provider outage', async () => {

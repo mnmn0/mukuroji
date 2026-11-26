@@ -9,9 +9,12 @@ export class InMemoryAgentRunArtifactStatusStore implements AgentRunArtifactStat
   readonly #refreshedAt = new Map<string, number>()
 
   /** @inheritdoc */
-  async listStatuses(directoryId: string, teamId: string, workItemId: string): Promise<AgentRunArtifactStatus[]> {
-    return [...(this.statuses.get(workItemKey(directoryId, teamId, workItemId))?.values() ?? [])]
-      .map((status) => structuredClone(status))
+  async getStatuses(directoryId: string, teamId: string, workItemId: string, urls: readonly string[]): Promise<AgentRunArtifactStatus[]> {
+    const saved = this.statuses.get(workItemKey(directoryId, teamId, workItemId))
+    return [...new Set(urls)].flatMap((url) => {
+      const status = saved?.get(url)
+      return status === undefined ? [] : [structuredClone(status)]
+    })
   }
 
   /** @inheritdoc */

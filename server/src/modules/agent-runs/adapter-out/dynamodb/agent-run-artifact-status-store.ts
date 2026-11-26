@@ -1,12 +1,11 @@
 import { createHash } from 'node:crypto'
-import { QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb'
+import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb'
 import {
   AGENT_RUN_ARTIFACT_PROVIDERS,
   AGENT_RUN_ARTIFACT_UNVERIFIED_REASONS,
   AGENT_RUN_PULL_REQUEST_CHECK_STATES,
   AGENT_RUN_PULL_REQUEST_REVIEW_STATES,
   AGENT_RUN_PULL_REQUEST_STATES,
-  WORK_ITEM_ARTIFACT_STATUS_MAX_ITEMS,
   type AgentRunArtifactStatus,
   type AgentRunPullRequestStatus,
 } from '@mukuroji/contracts'
@@ -18,24 +17,26 @@ export const AGENT_RUN_ARTIFACT_STATUS_SCHEMA_VERSION = 1
 
 /** Minimal DynamoDB command boundary used by the artifact status store. */
 export type AgentRunArtifactStatusDocumentClient = {
-  /** Sends one query or conditional update. */
-  send(command: QueryCommand | UpdateCommand): Promise<{
-    /** Query page. */
-    Items?: Record<string, unknown>[]
+  /** Sends one read or conditional update. */
+  send(command: GetCommand | UpdateCommand): Promise<{
+    /** Row a read found. */
+    Item?: Record<string, unknown>
   }>
 }
 
 /** Persistence of the verified state of pull request artifacts (ADR 0103). */
 export interface AgentRunArtifactStatusStore {
   /**
-   * Lists the stored statuses of one Work Item's pull request artifacts.
+   * Reads the stored statuses of the given pull request artifacts of one Work Item. Rows of URLs
+   * that are no longer reported stay stored, so only the URLs asked for are read.
    *
    * @param directoryId - Workspace ID.
    * @param teamId - Team ID.
    * @param workItemId - Work Item ID.
-   * @returns Stored statuses in no particular order.
+   * @param urls - Artifact URLs to read.
+   * @returns The stored statuses, in no particular order; a URL with no row is left out.
    */
-  listStatuses(directoryId: string, teamId: string, workItemId: string): Promise<AgentRunArtifactStatus[]>
+  getStatuses(directoryId: string, teamId: string, workItemId: string, urls: readonly string[]): Promise<AgentRunArtifactStatus[]>
   /**
    * Saves statuses. A status checked earlier than the stored one never replaces it, so a slow
    * refresh cannot bring back an older state.
@@ -111,21 +112,17 @@ export class DynamoDbAgentRunArtifactStatusStore implements AgentRunArtifactStat
   }
 
   /** @inheritdoc */
-  async listStatuses(directoryId: string, teamId: string, workItemId: string): Promise<AgentRunArtifactStatus[]> {
-    // A Work Item keeps at most one row per verified URL, and refreshes save at most
-    // WORK_ITEM_ARTIFACT_STATUS_MAX_ITEMS of them, so one bounded page holds them.
-    const response = await this.#client.send(new QueryCommand({
+  async getStatuses(directoryId: string, teamId: string, workItemId: string, urls: readonly string[]): Promise<AgentRunArtifactStatus[]> {
+    // The caller asks for at most WORK_ITEM_ARTIFACT_STATUS_MAX_ITEMS URLs.
+    const items = await Promise.all([...new Set(urls)].map(async (url) => (await this.#client.send(new GetCommand({
       TableName: this.#tableName,
-      KeyConditionExpression: '#directoryTeamId = :partition AND begins_with(#recordKey, :prefix)',
-      ExpressionAttributeNames: { '#directoryTeamId': 'directoryTeamId', '#recordKey': 'recordKey' },
-      ExpressionAttributeValues: {
-        ':partition': createAgentRunPartition(directoryId, teamId),
-        ':prefix': artifactStatusRecordKeyPrefix(workItemId),
+      Key: {
+        directoryTeamId: createAgentRunPartition(directoryId, teamId),
+        recordKey: artifactStatusRecordKey(workItemId, url),
       },
       ConsistentRead: true,
-      Limit: WORK_ITEM_ARTIFACT_STATUS_MAX_ITEMS * 5,
-    }))
-    return (response.Items ?? []).map((item) => parseArtifactStatus(item, workItemId))
+    }))).Item))
+    return items.flatMap((item) => item === undefined ? [] : [parseArtifactStatus(item, workItemId)])
   }
 
   /** @inheritdoc */

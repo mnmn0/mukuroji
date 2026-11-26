@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import type { QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb'
+import { GetCommand, type UpdateCommand } from '@aws-sdk/lib-dynamodb'
 import {
   AGENT_RUN_ARTIFACT_STATUS_SCHEMA_VERSION,
   DynamoDbAgentRunArtifactStatusStore,
@@ -58,18 +58,25 @@ test('status rows are keyed under the Work Item, saved only when newer, and pars
   expect(() => parseArtifactStatus({ ...row, workItemId: 'other' }, 'item')).toThrow()
   expect(() => parseArtifactStatus({ ...row, artifactStatus: { ...status, pullRequest: { ...status.pullRequest, checks: 'green' } } }, 'item')).toThrow()
 
-  const sent: Array<QueryCommand | UpdateCommand> = []
+  const sent: Array<GetCommand | UpdateCommand> = []
   let conflict = false
   const store = new DynamoDbAgentRunArtifactStatusStore({
     send: async (command) => {
       sent.push(command)
       if (conflict) throw Object.assign(new Error('Condition failed'), { name: 'ConditionalCheckFailedException' })
-      return { Items: [row] }
+      if (!(command instanceof GetCommand)) return {}
+      return command.input.Key?.recordKey === key ? { Item: row } : {}
     },
   }, 'table')
-  expect(await store.listStatuses('workspace', 'team', 'item')).toEqual([status])
+  // Only the URLs asked for are read, each by its own key, so old rows never crowd out current ones.
+  expect(await store.getStatuses('workspace', 'team', 'item', [url, 'https://github.com/org/repo/pull/2', url]))
+    .toEqual([status])
+  expect(sent.map((command) => command.input)).toMatchObject([
+    { Key: { recordKey: key }, ConsistentRead: true },
+    { Key: { recordKey: artifactStatusRecordKey('item', 'https://github.com/org/repo/pull/2') } },
+  ])
   await store.saveStatuses('workspace', 'team', 'item', [status])
-  expect(sent[1]?.input).toMatchObject({ ConditionExpression: 'attribute_not_exists(#recordKey) OR #checkedAt < :checkedAt' })
+  expect(sent[2]?.input).toMatchObject({ ConditionExpression: 'attribute_not_exists(#recordKey) OR #checkedAt < :checkedAt' })
   expect(await store.claimRefresh('workspace', 'team', 'item', new Date('2026-11-26T00:00:00.000Z'), 60_000)).toBeTrue()
   conflict = true
   await store.saveStatuses('workspace', 'team', 'item', [status])

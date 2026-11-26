@@ -24,15 +24,18 @@ credential の復号・更新と、失敗時の degraded / needs-reauth の扱�
   最大 20 件。GitLab は形だけ認識し、`unsupported-provider` として未確認にする。
 - Team の Agent settings に `artifactRepositories`（`owner/repo` の一覧、最大 50）を足す。
   空なら connector が読める repository をすべて照会し、指定があればそれ以外は照会せず
-  `repository-not-allowed` とする。既存の設定は空として読むので、移行は要らない。
+  `repository-not-allowed` とする。一覧は閲覧のたびに当てるので、外した repository は保存済みの
+  状態（merge 済みも含む）があっても、すぐに `repository-not-allowed` になる。既存の設定は空として読むので、移行は要らない。
 - 照会結果は Agent Runs table の Work Item の partition に保存する。
   - 状態の row: `recordKey = agent-run-artifact#<sha256(workItemId)>#<sha256(url)>`。
-    `checkedAt` が新しいときだけ上書きする条件付き書き込みにする。
+    `checkedAt` が新しいときだけ上書きする条件付き書き込みにする。読むときは、今の report にある URL の row
+    だけを key で読む（最大 20 件）。報告されなくなった URL の row は残るが、読み取りの件数には入らない。
   - 照会の claim の row: `recordKey = agent-run-artifact-refresh#<sha256(workItemId)>`。
     同じ Work Item の照会は 1 分に 1 回までにし、複数の閲覧者が同時に開いても provider への呼び出しを増やさない。
 - 照会は Web の `GET /api/teams/:teamId/work-items/:workItemId/artifact-statuses` を開いたときに行う。
   閲覧権限は Work Item の viewer と同じ。保存した状態が 2 分より古い open の pull request だけを読み直し、
   merge 済みは読み直さない。provider が一時的に読めないときは、前回確認できた状態を残す。
+  一時的な失敗で degraded になった installation も読むので、provider が戻れば次の照会で確かめ直せる。
 - 未確認の理由は `repository-not-allowed`、`no-connector`、`not-accessible`、`unsupported-provider`、
   `unavailable` の 5 つ。Web は未確認の pull request に「未確認」と理由を出し、確認済みのものと区別する。
 

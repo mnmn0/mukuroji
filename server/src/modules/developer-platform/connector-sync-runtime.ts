@@ -1396,7 +1396,9 @@ export class ConnectorSyncEngine {
     installationId: string,
     reference: ConnectorPullRequestReference,
   ): Promise<AgentRunPullRequestStatus> {
-    const snapshot = await this.requireInstallationSnapshot(workspaceId, installationId)
+    // A retryable provider failure marks the installation degraded, so a degraded one is read too;
+    // otherwise the status could not notice that the provider has recovered.
+    const snapshot = await this.requireInstallationSnapshot(workspaceId, installationId, { allowDegraded: true })
     return this.withConnectorCredential(
       workspaceId,
       snapshot.installation,
@@ -1410,16 +1412,26 @@ export class ConnectorSyncEngine {
     )
   }
 
-  /** Installation と lifecycle revision を検証します。 */
+  /**
+   * Installation と lifecycle revision を検証します。
+   *
+   * @param workspaceId - Workspace of the installation.
+   * @param installationId - Installation ID.
+   * @param options - `allowDegraded` also accepts a degraded installation, for a read-only check.
+   * @returns The lifecycle snapshot.
+   * @throws ConnectorRuntimeError ConnectorNotConnected when the installation cannot be used.
+   */
   private async requireInstallationSnapshot(
     workspaceId: string,
     installationId: string,
+    options: { allowDegraded?: boolean } = {},
   ): Promise<ConnectorLifecycleSnapshot> {
     const snapshot = await this.platform.readConnectorLifecycleSnapshot({
       workspaceId,
       installationId,
     })
-    if (snapshot.installation.status !== 'connected') {
+    const { status } = snapshot.installation
+    if (status !== 'connected' && !(options.allowDegraded === true && status === 'degraded')) {
       throw new ConnectorRuntimeError(
         'ConnectorNotConnected',
         'Connector installation is not connected.',

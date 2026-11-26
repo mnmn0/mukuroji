@@ -55,6 +55,7 @@ export type ArtifactStatusTarget = {
  * returned as they are while fresh; a missing status, or an open pull request's status older than
  * {@link ARTIFACT_STATUS_STALE_AFTER_MS}, is read again from the provider, at most once per
  * {@link ARTIFACT_STATUS_REFRESH_INTERVAL_MS} for the Work Item. Merged pull requests are not read again.
+ * A repository outside the Team's current allowlist is reported as not allowed, whatever is stored.
  *
  * @param target - Authorized Work Item.
  * @param dependencies - Stores and reader.
@@ -67,25 +68,33 @@ export async function readWorkItemArtifactStatuses(
   now: Date = new Date(),
 ): Promise<WorkItemArtifactStatusesResponse> {
   const references = collectPullRequestArtifacts(await readNewestReports(target, dependencies.agentRuns))
-  const stored = new Map((await dependencies.statuses.listStatuses(target.directoryId, target.teamId, target.workItemId))
-    .map((status) => [status.url, status]))
-  const stale = references.filter((reference) => needsRefresh(stored.get(reference.url), now))
+  // The allowlist is applied to every read, so a repository removed from it stops showing as
+  // verified at once, even for a merged pull request that is never read again.
+  const { artifactRepositories } = await dependencies.agentRuns.getSettings(target.directoryId, target.teamId)
+  const allowed = references.filter((reference) => isArtifactRepositoryAllowed(artifactRepositories, reference.repository))
+  const stored = new Map((await dependencies.statuses.getStatuses(
+    target.directoryId, target.teamId, target.workItemId, allowed.map((reference) => reference.url),
+  )).map((status) => [status.url, status]))
+  const stale = allowed.filter((reference) => needsRefresh(stored.get(reference.url), now))
   if (stale.length > 0 &&
       await dependencies.statuses.claimRefresh(target.directoryId, target.teamId, target.workItemId, now, ARTIFACT_STATUS_REFRESH_INTERVAL_MS)) {
-    const settings = await dependencies.agentRuns.getSettings(target.directoryId, target.teamId)
     const refreshed: AgentRunArtifactStatus[] = []
     for (let index = 0; index < stale.length; index += readConcurrency) {
       refreshed.push(...await Promise.all(stale.slice(index, index + readConcurrency).map((reference) =>
-        checkReference(target.directoryId, reference, settings.artifactRepositories, stored.get(reference.url), dependencies.reader, now))))
+        checkReference(target.directoryId, reference, stored.get(reference.url), dependencies.reader, now))))
     }
     await dependencies.statuses.saveStatuses(target.directoryId, target.teamId, target.workItemId, refreshed)
     for (const status of refreshed) stored.set(status.url, status)
   }
+  const allowedUrls = new Set(allowed.map((reference) => reference.url))
   return {
     teamId: target.teamId,
     workItemId: target.workItemId,
-    // A reference another viewer is refreshing for the first time shows as unavailable until then.
-    items: references.map((reference) => stored.get(reference.url) ?? createUnverifiedArtifactStatus(reference, 'unavailable', now)),
+    items: references.map((reference) => {
+      if (!allowedUrls.has(reference.url)) return createUnverifiedArtifactStatus(reference, 'repository-not-allowed', now)
+      // A reference another viewer is refreshing for the first time shows as unavailable until then.
+      return stored.get(reference.url) ?? createUnverifiedArtifactStatus(reference, 'unavailable', now)
+    }),
   }
 }
 
@@ -125,13 +134,12 @@ function needsRefresh(status: AgentRunArtifactStatus | undefined, now: Date): bo
 }
 
 /**
- * Checks one reference against the allowlist and the provider. When the provider cannot be read
+ * Checks one allowed reference against the provider. When the provider cannot be read
  * for a moment, a previously verified status is kept with its old check time, so a short outage
  * does not turn a verified pull request into an unverified one.
  *
  * @param workspaceId - Workspace ID.
- * @param reference - Pull request reference.
- * @param allowlist - Team's artifact repositories.
+ * @param reference - Pull request reference the Team's allowlist permits.
  * @param previous - Stored status, if any.
  * @param reader - Provider reader.
  * @param now - Check time.
@@ -140,14 +148,10 @@ function needsRefresh(status: AgentRunArtifactStatus | undefined, now: Date): bo
 async function checkReference(
   workspaceId: string,
   reference: PullRequestArtifactReference,
-  allowlist: readonly string[],
   previous: AgentRunArtifactStatus | undefined,
   reader: PullRequestStatusReader,
   now: Date,
 ): Promise<AgentRunArtifactStatus> {
-  if (!isArtifactRepositoryAllowed(allowlist, reference.repository)) {
-    return createUnverifiedArtifactStatus(reference, 'repository-not-allowed', now)
-  }
   const result = await reader(workspaceId, reference)
   if (result.kind === 'unverified') {
     if (result.reason === 'unavailable' && previous?.verification === 'verified') return previous
