@@ -102,6 +102,10 @@ function usePlanning(): InMemoryPlanningClient {
   planning.publishUpdate = (...input) => completePrepared(() => publishUpdate(...input))
   const update = planning.update.bind(planning)
   planning.update = (...input) => completePrepared(() => update(...input))
+  const putWorkItemLink = planning.putWorkItemLink.bind(planning)
+  planning.putWorkItemLink = (...input) => completePrepared(() => putWorkItemLink(...input))
+  const deleteWorkItemLink = planning.deleteWorkItemLink.bind(planning)
+  planning.deleteWorkItemLink = (...input) => completePrepared(() => deleteWorkItemLink(...input))
   setTestAppDependencies({
     planning,
     idempotency: platform.idempotency,
@@ -168,7 +172,7 @@ describe('Public API Planning', () => {
     const updated = await runWithTestAppDependencies(() => service.updateMilestone(
       credential,
       created.item.id,
-      { health: 'at-risk', targetDate: '2026-09-04' },
+      { health: 'at-risk', status: 'completed', targetDate: '2026-09-04' },
       context('key-2'),
       reservation,
     ))
@@ -209,29 +213,38 @@ describe('Public API Planning', () => {
     await planning.create(workspaceId, createCyclePlanningInput('cycle-1', 0), workItemState)
     const service = createCanonicalPublicPlanningService()
 
+    const putKey = await token('key-8')
     const inCycle = await runWithTestAppDependencies(() => service.updateWorkItemPlanning(
       credential,
       'core-team',
       'onboarding-friction',
       { cycleId: 'cycle-1' },
+      putKey,
     ))
     expect(inCycle).toMatchObject({ teamId: 'core-team', workItemId: 'onboarding-friction', cycleId: 'cycle-1', goalIds: [] })
+    // The receipt committed with the link, so a retry after a lost response replays it.
+    expect(await reserve('key-8')).toEqual({ replay: { status: 200, body: inCycle } })
     expect(await runWithTestAppDependencies(() => service.getWorkItemPlanning(credential, 'core-team', 'onboarding-friction')))
       .toMatchObject({ cycleId: 'cycle-1' })
 
+    const deleteKey = await token('key-9')
     const outOfCycle = await runWithTestAppDependencies(() => service.updateWorkItemPlanning(
       credential,
       'core-team',
       'onboarding-friction',
       { cycleId: null },
+      deleteKey,
     ))
     expect(outOfCycle.cycleId).toBeUndefined()
+    expect(await reserve('key-9')).toEqual({ replay: { status: 200, body: outOfCycle } })
 
+    const staleKey = await token('key-10')
     await expect(runWithTestAppDependencies(() => service.updateWorkItemPlanning(
       credential,
       'core-team',
       'onboarding-friction',
       { cycleId: 'cycle-1', expectedRevision: 0 },
+      staleKey,
     ))).rejects.toMatchObject({ status: 409 })
   })
 

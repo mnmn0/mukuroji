@@ -79,6 +79,7 @@ import {
   type PlanningEntityCreationWithAssignedIdOutcome,
   type PlanningEntityDuplication,
   type PlanningEntityTransactionResult,
+  type PlanningWorkItemLinkTransactionResult,
   type PlanningUpdateCadenceTransactionResult,
   type PlanningMutationTransaction,
   type PlanningUpdateAnnotationTransactionResult,
@@ -3509,11 +3510,13 @@ export async function updatePlanningEntityAsPrincipal(
  *
  * @param principal - Authenticated Workspace principal.
  * @param input - The whole new link and the Planning revision the caller read.
+ * @param receipt - Idempotency receipt to commit in the same transaction as the link.
  * @returns The mutation response with the unfiltered snapshot.
  */
 export async function putPlanningWorkItemLinkAsPrincipal(
   principal: WorkspacePrincipal,
   input: PlanningWorkItemLinkInput,
+  receipt?: PlanningMutationTransaction<PlanningWorkItemLinkTransactionResult>,
 ) {
   requireWorkspaceBusinessWrite(principal)
   const { teamId, workItemId } = input
@@ -3553,7 +3556,7 @@ export async function putPlanningWorkItemLinkAsPrincipal(
     workItemId,
     detail.issue.revision,
   )
-  return workItemDependencies.planning.putWorkItemLink(principal.directoryId, input, workItemState)
+  return workItemDependencies.planning.putWorkItemLink(principal.directoryId, input, workItemState, receipt)
 }
 
 /**
@@ -3564,6 +3567,7 @@ export async function putPlanningWorkItemLinkAsPrincipal(
  * @param teamId - Team of the Work Item.
  * @param workItemId - Work Item ID.
  * @param input - Planning revision the caller read.
+ * @param receipt - Idempotency receipt to commit in the same transaction as the removal.
  * @returns The mutation response with the unfiltered snapshot.
  */
 export async function deletePlanningWorkItemLinkAsPrincipal(
@@ -3571,6 +3575,7 @@ export async function deletePlanningWorkItemLinkAsPrincipal(
   teamId: string,
   workItemId: string,
   input: PlanningRevisionInput,
+  receipt?: PlanningMutationTransaction<PlanningWorkItemLinkTransactionResult>,
 ) {
   requireWorkspaceBusinessWrite(principal)
   const workItemState = await readPlanningWorkItemState(principal)
@@ -3591,6 +3596,7 @@ export async function deletePlanningWorkItemLinkAsPrincipal(
     workItemId,
     input,
     workItemState,
+    receipt,
   )
 }
 

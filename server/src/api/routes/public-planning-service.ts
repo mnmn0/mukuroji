@@ -30,6 +30,7 @@ import {
   PlanningError,
   type PlanningEntityTransactionResult,
   type PlanningMutationTransaction,
+  type PlanningWorkItemLinkTransactionResult,
 } from '../../modules/planning'
 import { workItemDependencies } from '../shared/app-dependencies'
 import { resolveDeveloperCredentialPrincipal } from '../shared/developer-platform-access'
@@ -208,6 +209,30 @@ async function resolveRevision(principal: WorkspacePrincipal, expectedRevision: 
 }
 
 /**
+ * Reads the Planning revision a write with a durable receipt applies to. A receipt is prepared for
+ * one exact revision, so the store does not rebase such a write over Work Item changes; this reads
+ * the latest revision instead when only Work Item changes moved it past the one the client sent,
+ * which the Web routes accept.
+ *
+ * @param principal - Credential owner.
+ * @param expectedRevision - Revision the client sent, if any.
+ * @param current - Revision of the state the write was built from.
+ * @returns The revision to send to the Planning write; a revision Planning changes moved past
+ *   stays as sent, so the write still fails.
+ */
+async function resolveReceiptRevision(
+  principal: WorkspacePrincipal,
+  expectedRevision: number | undefined,
+  current: number,
+): Promise<number> {
+  if (expectedRevision === undefined || expectedRevision === current) return current
+  return expectedRevision < current &&
+      await workItemDependencies.planning.isWorkItemOnlyRevisionAdvance(principal.directoryId, expectedRevision, current)
+    ? current
+    : expectedRevision
+}
+
+/**
  * Builds the one-day date range a Milestone holds.
  *
  * @param date - Date as `YYYY-MM-DD`.
@@ -315,8 +340,8 @@ async function requireChangeableMilestone(principal: WorkspacePrincipal, milesto
  * Creates the transaction that stores a Milestone update's Public API response with the change,
  * so a retry after a lost response replays it instead of applying the patch to a newer revision.
  *
- * The stored Milestone is the committed entity; its computed progress and linked Work Item count
- * are the ones read before the patch, which a field patch does not change.
+ * The stored Milestone is the committed entity with the progress, linked Work Item count, and
+ * rollup health the committed graph computes for it.
  *
  * @param workspaceId - Workspace ID of the credential.
  * @param token - Public API idempotency reservation.
@@ -335,15 +360,64 @@ function createMilestoneUpdateReceipt(
       const body: PublicPlanningEntityMutation = {
         schemaVersion: 1,
         revision: result.revision,
-        item: toPublicPlanningEntity({
-          ...result.entity,
-          progress: before.progress,
-          linkedWorkItemCount: before.linkedWorkItemCount,
-          rollupHealth: before.rollupHealth,
-        }),
+        item: toPublicPlanningEntity({ ...result.entity, ...(result.rollup ?? before) }),
       }
       return transaction.prepare({ status: 200, body })
     },
+  }
+}
+
+/**
+ * Projects a Work Item link to its Public API shape, leaving out the entities the principal
+ * cannot see.
+ *
+ * @param teamId - Team of the Work Item.
+ * @param workItemId - Work Item ID.
+ * @param revision - Planning revision of the read or write.
+ * @param link - The link; absent when the Work Item has none.
+ * @param visible - IDs of the entities the principal can see.
+ * @returns The Public API Work Item planning.
+ */
+function toPublicWorkItemPlanning(
+  teamId: string,
+  workItemId: string,
+  revision: number,
+  link: { cycleId?: string, milestoneId?: string, goalIds: readonly string[] } | undefined,
+  visible: ReadonlySet<string>,
+): PublicWorkItemPlanning {
+  return {
+    schemaVersion: 1,
+    revision,
+    teamId,
+    workItemId,
+    ...(link?.cycleId !== undefined && visible.has(link.cycleId) ? { cycleId: link.cycleId } : {}),
+    ...(link?.milestoneId !== undefined && visible.has(link.milestoneId) ? { milestoneId: link.milestoneId } : {}),
+    goalIds: (link?.goalIds ?? []).filter((goalId) => visible.has(goalId)),
+  }
+}
+
+/**
+ * Creates the transaction that stores a Work Item planning change's Public API response with the
+ * link write, so a retry after a lost response replays it instead of writing the link again.
+ *
+ * @param workspaceId - Workspace ID of the credential.
+ * @param token - Public API idempotency reservation.
+ * @param visible - IDs of the entities the principal could see before the write; the link names
+ *   only those, since the write requires access to each of them.
+ * @returns The receipt transaction, or undefined without a transactional idempotency store.
+ */
+function createWorkItemPlanningReceipt(
+  workspaceId: string,
+  token: IdempotencyMutationToken,
+  visible: ReadonlySet<string>,
+): PlanningMutationTransaction<PlanningWorkItemLinkTransactionResult> | undefined {
+  const transaction = createWorkItemIdempotencyTransaction(workspaceId, token)
+  if (!transaction) return undefined
+  return {
+    prepare: (result) => transaction.prepare({
+      status: 200,
+      body: toPublicWorkItemPlanning(result.teamId, result.workItemId, result.revision, result.link, visible),
+    }),
   }
 }
 
@@ -390,18 +464,18 @@ async function readWorkItemPlanning(
   const link = state.workItemLinks.find((candidate) =>
     candidate.teamId === teamId && candidate.workItemId === workItemId
   )
-  const visible = link === undefined
-    ? new Set<string>()
-    : new Set((await readPlanningSnapshotAsPrincipal(principal)).entities.map((entity) => entity.id))
-  return {
-    schemaVersion: 1,
-    revision: state.revision,
-    teamId,
-    workItemId,
-    ...(link?.cycleId !== undefined && visible.has(link.cycleId) ? { cycleId: link.cycleId } : {}),
-    ...(link?.milestoneId !== undefined && visible.has(link.milestoneId) ? { milestoneId: link.milestoneId } : {}),
-    goalIds: (link?.goalIds ?? []).filter((goalId) => visible.has(goalId)),
-  }
+  const visible = link === undefined ? new Set<string>() : await readVisibleEntityIds(principal)
+  return toPublicWorkItemPlanning(teamId, workItemId, state.revision, link, visible)
+}
+
+/**
+ * Reads the IDs of the Planning entities the principal can see.
+ *
+ * @param principal - Credential owner.
+ * @returns The visible entity IDs.
+ */
+async function readVisibleEntityIds(principal: WorkspacePrincipal): Promise<Set<string>> {
+  return new Set((await readPlanningSnapshotAsPrincipal(principal)).entities.map((entity) => entity.id))
 }
 
 /**
@@ -541,7 +615,11 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
         ...(input.targetDate === undefined ? {} : { forecast: singleDay(input.targetDate) }),
         ...(input.baselineDate === undefined ? {} : { baseline: singleDay(input.baselineDate) }),
       }
-      const expectedRevision = await resolveRevision(principal, input.expectedRevision)
+      const expectedRevision = await resolveReceiptRevision(
+        principal,
+        input.expectedRevision,
+        (await workItemDependencies.planning.getAuthorizationState(principal.directoryId)).revision,
+      )
       const response = await updatePlanningEntityAsPrincipal(
         principal,
         milestoneId,
@@ -569,7 +647,7 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
       await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
     },
 
-    async updateWorkItemPlanning(credential, teamId, workItemId, input) {
+    async updateWorkItemPlanning(credential, teamId, workItemId, input, idempotency) {
       const principal = await resolvePlanningPrincipal(
         credential,
         'planning.write',
@@ -586,21 +664,31 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
         ...(cycleId === undefined ? {} : { cycleId }),
         ...(milestoneId === undefined ? {} : { milestoneId }),
         goalIds: [...(current?.goalIds ?? [])],
-        // Without a revision the link is merged into the state just read, so the write still fails
-        // if anything changed it in between.
-        expectedRevision: input.expectedRevision ?? state.revision,
+        // The link is merged into the state just read, so the write still fails if Planning changed
+        // it in between.
+        expectedRevision: await resolveReceiptRevision(principal, input.expectedRevision, state.revision),
       }
       if (link.cycleId === undefined && link.milestoneId === undefined && link.goalIds.length === 0) {
         // A link must name a Cycle, Milestone, or Goal, so taking the last one out removes the link.
         if (current) {
-          await deletePlanningWorkItemLinkAsPrincipal(principal, teamId, workItemId, { expectedRevision: link.expectedRevision })
+          await deletePlanningWorkItemLinkAsPrincipal(
+            principal,
+            teamId,
+            workItemId,
+            { expectedRevision: link.expectedRevision },
+            createWorkItemPlanningReceipt(credential.workspaceId, idempotency, await readVisibleEntityIds(principal)),
+          )
         } else {
           // Nothing to remove; still answer only for a Work Item the owner may change.
           requireWorkspaceBusinessWrite(principal)
           await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
         }
       } else {
-        await putPlanningWorkItemLinkAsPrincipal(principal, link)
+        await putPlanningWorkItemLinkAsPrincipal(
+          principal,
+          link,
+          createWorkItemPlanningReceipt(credential.workspaceId, idempotency, await readVisibleEntityIds(principal)),
+        )
       }
       return readWorkItemPlanning(principal, teamId, workItemId)
     },

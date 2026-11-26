@@ -824,6 +824,8 @@ export interface PublicPlanningService {
    * @param teamId - Team of the Work Item.
    * @param workItemId - Work Item ID.
    * @param input - Cycle and Milestone changes.
+   * @param idempotency - Reservation whose receipt commits with the link change, so a retry after a
+   *   lost response replays it instead of writing the link again.
    * @returns The Planning link after the write.
    */
   updateWorkItemPlanning(
@@ -831,6 +833,7 @@ export interface PublicPlanningService {
     teamId: string,
     workItemId: string,
     input: UpdatePublicWorkItemPlanningRequest,
+    idempotency: IdempotencyMutationToken,
   ): Promise<PublicWorkItemPlanning>
   /**
    * Lists one page of a target's health updates, newest first.
@@ -1884,9 +1887,9 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
     const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
     const body = readUpdatePublicWorkItemPlanningRequest(await readJson(c))
-    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, ...body }, async () => ({
+    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, ...body }, async (_context, idempotency) => ({
       status: 200,
-      body: await planning.updateWorkItemPlanning(credential, teamId, workItemId, body),
+      body: await planning.updateWorkItemPlanning(credential, teamId, workItemId, body, idempotency),
     }), {
       authorizeReplay: () => planning.authorizeWorkItemPlanningChange(credential, teamId, workItemId),
     })
