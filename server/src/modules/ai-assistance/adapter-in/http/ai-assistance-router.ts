@@ -102,6 +102,18 @@ export function createAiAssistanceRouter<Principal>(
     }
   })
 
+  router.get('/api/ai-assistance/usage', async (context) => {
+    try {
+      const { actor } = await authenticateRequest(context, dependencies)
+      requireAiAssistancePolicyManager(actor)
+      const month = context.req.query('month')
+      context.header('Cache-Control', 'private, no-store')
+      return context.json(await dependencies.service.getUsage(actor, month))
+    } catch (error) {
+      return mapRouterError(context, error, dependencies.mapError)
+    }
+  })
+
   router.put('/api/ai-assistance/policy', async (context) => {
     try {
       const { actor, policyAuthorization } = await authenticateRequest(context, dependencies)

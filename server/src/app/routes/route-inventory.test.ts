@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(667)
-  expect(new Set(inventory).size).toBe(663)
+  expect(inventory).toHaveLength(668)
+  expect(new Set(inventory).size).toBe(664)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -42,6 +42,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/ai-assistance/provider-credentials')
   expect(inventory).toContain('PUT /api/ai-assistance/provider-credentials/:provider')
   expect(inventory).toContain('DELETE /api/ai-assistance/provider-credentials/:provider')
+  // Monthly AI usage for Workspace administrators (#414).
+  expect(inventory).toContain('GET /api/ai-assistance/usage')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
   expect(inventory).toContain('GET /api/planning/updates/template')
   expect(inventory).toContain('PATCH /api/teams/:teamId/workload/profiles/:memberId/time-off/:timeOffId')
@@ -221,6 +223,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '9c8f64c183f114ac4935828b5ed4536ee479769184224f2ad086c16c56818d51',
+    '935ebb1b14234d9e22ef52bb13b12bf1e7f6ed1616c4a279e26c18dc5925e078',
   )
 })
