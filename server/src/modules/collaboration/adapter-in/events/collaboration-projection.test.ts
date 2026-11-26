@@ -3202,6 +3202,94 @@ describe('collaboration projection pure helpers', () => {
     }
   })
 
+  test('projects a budget alert to a manager only while their Enterprise role still manages the Project (ADR 0105)', async () => {
+    const keys = [
+      'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',
+      'WORK_ITEMS_TABLE_NAME', 'COLLABORATION_TABLE_NAME', 'PROJECT_DIRECTORY_TABLE_NAME',
+      'PLANNING_TABLE_NAME', 'SYSTEM_ADMIN_GROUPS', 'COGNITO_USER_POOL_ID',
+    ]
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const notifications: Array<Record<string, unknown>> = []
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (command instanceof GetCommand) {
+        if (command.input.TableName === 'WORKSPACE_ACCESS_TABLE_NAME') {
+          const recordKey = String(command.input.Key?.recordKey)
+          return { Item: { entryType: 'workspace-member', memberKey: recordKey.slice('MEMBER#'.length), role: 'member', status: 'active' }, $metadata: {} }
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof QueryCommand) {
+        if (command.input.TableName === 'COLLABORATION_TABLE_NAME') return { Items: [], $metadata: {} }
+        if (command.input.TableName === 'PROJECT_DIRECTORY_TABLE_NAME') {
+          // The legacy row still says manager, whatever the Enterprise role says now.
+          return { Items: [
+            { entryType: 'team', teamId: 'core' },
+            { entryType: 'project', teamId: 'core', projectId: 'platform' },
+            { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'lead@example.com', role: 'manager' },
+          ], $metadata: {} }
+        }
+      }
+      if (command instanceof TransactWriteCommand) {
+        for (const item of command.input.TransactItems ?? []) {
+          if (item.Put?.TableName === 'NOTIFICATIONS_TABLE_NAME' && item.Put.Item) notifications.push(item.Put.Item)
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof PutCommand) return { $metadata: {} }
+      throw new Error('Unexpected projection command')
+    })
+    let roleId: 'project:manager' | 'custom:work-item-reader' | undefined = 'custom:work-item-reader'
+    const snapshot = () => createRealtimeEnterpriseSnapshot({
+      customRoles: [{ workspaceId: 'workspace-1', roleId: 'custom:work-item-reader', name: 'Work Item reader',
+        permissions: ['work-items.read'], guestAssignable: false, revision: 1,
+        createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z' }],
+      roleAssignments: roleId ? [{ workspaceId: 'workspace-1', assignmentId: 'lead', principalKind: 'member',
+        principalId: 'lead@example.com', roleId, source: 'direct',
+        scope: { workspaceId: 'workspace-1', kind: 'project', targetId: 'platform', parentTeamId: 'core' } }] : [],
+    })
+    const dependencies = {
+      deletedFileCleanup: { readFile: async () => undefined, queryRows: async () => [], tagDeletedObjectVersion: async () => {}, expireMetadata: async () => {} },
+      curatedContextSearch: { upsertCurrent: async () => {}, deleteCurrent: async () => {} }, realtime: { publish: async () => {} },
+      enterpriseIdentity: { getSnapshot: async () => snapshot() },
+    }
+    const record = (eventId: string) => ({
+      eventName: 'INSERT', dynamodb: { SequenceNumber: eventId, NewImage: {
+        eventId: { S: eventId }, eventType: { S: 'project-budget.threshold-reached' }, workspaceId: { S: 'workspace-1' },
+        entityType: { S: 'project-budget' }, entityId: { S: 'team/core/project/platform/budget' },
+        occurredAt: { S: '2026-07-12T00:00:00.000Z' }, outboxStatus: { S: 'pending' },
+        metadata: { M: {
+          actorMemberKey: { S: 'system:notification-schedule' }, teamId: { S: 'core' }, projectId: { S: 'platform' },
+          deepLink: { S: '/projects/platform/overview?teamId=core' },
+          budgetThresholdPercent: { N: '90' }, budgetConsumedPercent: { N: '91.5' },
+          notificationCandidates: { L: [{ M: { memberKey: { S: 'lead@example.com' }, reason: { S: 'budget-threshold' } } }] },
+        } },
+      } },
+    })
+    try {
+      // An Enterprise role that no longer manages the Project wins over the stale manager row.
+      expect(await processCollaborationProjectionBatch({ Records: [record('reader-role')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      expect(notifications.some((item) => item.eventId === 'reader-role')).toBe(false)
+
+      roleId = 'project:manager'
+      expect(await processCollaborationProjectionBatch({ Records: [record('manager-role')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      expect(notifications.map((item) => [item.eventId, item.recipientMemberKey])).toEqual([['manager-role', 'lead@example.com']])
+
+      // Without any Enterprise role, the manager row decides.
+      roleId = undefined
+      expect(await processCollaborationProjectionBatch({ Records: [record('legacy')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      expect(notifications.some((item) => item.eventId === 'legacy')).toBe(true)
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+
   test('drops an access expiry notice whose expiry was cleared or moved after the scan (ADR 0095)', async () => {
     const keys = [
       'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',

@@ -28,6 +28,8 @@ Issue #345 は「予算 90%（設定値）到達時に責任者へ通知」と�
    `projects.manage` を持つ member も含める。directory group への割り当ては、group の所属がその member の
    sign-in 時にしか分からず、毎朝の判定では読めないので含めない。このため notification schedule job は
    Enterprise identity table を読み取り専用で読む。
+   受信者に Enterprise role が効いている Workspace では、配信時にも外部 channel の送信前にも、その role が今も Project の
+   `projects.manage` を持つかを確かめ、古い manager member 行だけでは届けない（予算レポートと経費の API と同じ判定）。
 5. Automation に `budget-threshold` trigger を足す。この event で動き、Team の rule は自分の Team の Project の event でだけ
    動く。event に Work Item はないので、Work Item を変える action はこの trigger では対象がなく失敗する（form・webhook
    trigger と同じ）。通知・作成・webhook の action は使える。

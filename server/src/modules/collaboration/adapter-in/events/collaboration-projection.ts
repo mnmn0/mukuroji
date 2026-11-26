@@ -2814,8 +2814,11 @@ async function isEligibleRecipient(
         ? candidate.reason === REQUEST_REQUESTER_NOTIFICATION_REASON
         : candidate.reason === 'automation'
     ))
-  const contentPermission = selectedWorkspaceRecipient ? 'workspace.read'
-    : event.eventType.startsWith('approval.') ? 'files.read' : 'work-items.read'
+  // Budget use is confidential to Project managers, so an Enterprise role must still manage the
+  // Project, as the budget report and expense endpoints require (ADR 0105).
+  const contentPermission: EnterprisePermissionId = selectedWorkspaceRecipient ? 'workspace.read'
+    : event.eventType.startsWith('approval.') ? 'files.read'
+      : event.eventType === BUDGET_THRESHOLD_REACHED_EVENT_TYPE ? 'projects.manage' : 'work-items.read'
   if (enforceContentAuthorization) {
     const role = readWorkspaceNotificationRole(member.role)
     if (!enterpriseIdentity || !role) return false
@@ -2860,6 +2863,8 @@ async function isEligibleRecipient(
       event.eventType === analyticsReportDeliveredEventType ||
       // A Team workload event is readable through an Enterprise Project grant in the Team as well.
       event.eventType.startsWith(workloadEventTypePrefix) ||
+      // A budget alert follows the Enterprise role that manages the Project, not a stale member row.
+      event.eventType === BUDGET_THRESHOLD_REACHED_EVENT_TYPE ||
       enforceContentAuthorization
     ) &&
     (event.projectId !== undefined || event.teamId !== undefined || enforceContentAuthorization)
