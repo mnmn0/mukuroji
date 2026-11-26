@@ -218,6 +218,7 @@ import {
 } from '../shared/work-item-access'
 import { createCanonicalPublicAttachmentService } from '../shared/public-attachment-access'
 import { createCanonicalPublicDocumentService } from '../shared/public-document-access'
+import { createCanonicalPublicRelationService } from '../shared/public-relation-access'
 import { createCanonicalPublicAgentTelemetryService } from './public-agent-telemetry-service'
 import { createCanonicalPublicDirectoryService } from '../shared/public-directory-access'
 import { readTeamWorkItemHierarchy, readWorkItemHierarchyLinks } from '../shared/work-item-hierarchy'
@@ -4170,6 +4171,7 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       agentRuns: createForwardingClient(() => developerPlatformDependencies.publicAgentRuns),
       agentTelemetry: createCanonicalPublicAgentTelemetryService(),
       documents: createCanonicalPublicDocumentService(),
+      workItemRelations: createCanonicalPublicRelationService(),
       attachments: createCanonicalPublicAttachmentService(),
       directory: createCanonicalPublicDirectoryService(),
       openApiDocument: PUBLIC_API_OPENAPI_DOCUMENT,

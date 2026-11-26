@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(661)
-  expect(new Set(inventory).size).toBe(657)
+  expect(inventory).toHaveLength(665)
+  expect(new Set(inventory).size).toBe(661)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -84,6 +84,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).not.toContain('GET /api/teams/:teamId/issues/hierarchy')
   expect(inventory).toContain('GET /api/teams/:teamId/issues/:issueId/children/open-count')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/hierarchy')
+  expect(inventory).toContain('GET /api/v1/work-items/:workItemId/relations')
+  expect(inventory).toContain('POST /api/v1/work-items/:workItemId/relations')
+  expect(inventory).toContain('POST /api/v1/work-items/:workItemId/subtask-batches')
+  expect(inventory).toContain('DELETE /api/v1/work-items/:workItemId/relations/:targetWorkItemId/:relationType')
   expect(inventory).toContain('POST /api/auth/refresh')
   expect(inventory).toContain('POST /api/auth/logout')
   expect(inventory).toContain('POST /api/auth/password-reset/request')
@@ -219,6 +223,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '8b95a8b2e38b7c4de638d654fec94eddefd0a6433ad72396e1a3850be943369b',
+    '590c1368f683098667dadaa36fc5f5c6dc95400c7c96a73b53a1990fdb980f39',
   )
 })
