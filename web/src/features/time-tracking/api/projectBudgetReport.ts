@@ -100,11 +100,15 @@ export async function downloadProjectBudgetReportCsv(
  */
 export function readProjectBudgetReport(value: unknown): ProjectBudgetReport | undefined {
   if (!isRecord(value)) return undefined
-  const { teamId, projectId, from, to, timeZone, interval, asOf, actualMinutes, uncostedMinutes, actualCostByCurrency } = value
+  const {
+    teamId, projectId, from, to, timeZone, interval, asOf, actualMinutes, uncostedMinutes, actualCostByCurrency,
+    approvedExpenseByCurrency, pendingExpenseByCurrency,
+  } = value
   if (
     typeof teamId !== 'string' || typeof projectId !== 'string' || typeof from !== 'string' || typeof to !== 'string' ||
     typeof timeZone !== 'string' || !isProjectBudgetReportInterval(interval) || typeof asOf !== 'string' ||
     !isNonnegativeSafeInteger(actualMinutes) || !isNonnegativeSafeInteger(uncostedMinutes) || !isNumberRecord(actualCostByCurrency) ||
+    !isNumberRecord(approvedExpenseByCurrency) || !isNumberRecord(pendingExpenseByCurrency) ||
     !Array.isArray(value.points)
   ) {
     return undefined
@@ -136,6 +140,8 @@ export function readProjectBudgetReport(value: unknown): ProjectBudgetReport | u
     actualMinutes,
     uncostedMinutes,
     actualCostByCurrency,
+    approvedExpenseByCurrency,
+    pendingExpenseByCurrency,
     ...(budgetConsumedPercent === undefined ? {} : { budgetConsumedPercent }),
     ...(effortConsumedPercent === undefined ? {} : { effortConsumedPercent }),
     earnedValue,

@@ -1,4 +1,5 @@
 import {
+  PROJECT_BUDGET_THRESHOLD_REACHED_EVENT_TYPE,
   type AutomationRule,
   crossesWorkItemBaselineSlipThreshold,
   parseWorkItemBaselineSlipChange,
@@ -96,6 +97,8 @@ export function matchesAutomationTrigger(
       return slip !== undefined &&
         crossesWorkItemBaselineSlipThreshold(slip, trigger.minDelayDays ?? 1)
     }
+    case 'budget-threshold':
+      return event.eventType === PROJECT_BUDGET_THRESHOLD_REACHED_EVENT_TYPE
     case 'custom-field':
       return event.changes.some((change) =>
         change.field === `customFieldValues.${trigger.fieldId}` ||

@@ -209,6 +209,27 @@ export type WorkspaceTimePeriodResult = {
   partialFailure: boolean
 }
 
+/** Budget consumption percentage that notifies a Project budget's owner when no other is set (ADR 0105). */
+export const TIME_BUDGET_ALERT_PERCENT_DEFAULT = 90
+
+/** Lowest budget alert percentage. */
+export const TIME_BUDGET_ALERT_PERCENT_MIN = 1
+
+/** Highest budget alert percentage. */
+export const TIME_BUDGET_ALERT_PERCENT_MAX = 1000
+
+/**
+ * Reports whether a value is a valid budget alert percentage: a whole number from
+ * {@link TIME_BUDGET_ALERT_PERCENT_MIN} to {@link TIME_BUDGET_ALERT_PERCENT_MAX}.
+ *
+ * @param value - Candidate value.
+ * @returns Whether it is a valid alert percentage.
+ */
+export function isTimeBudgetAlertPercent(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) &&
+    value >= TIME_BUDGET_ALERT_PERCENT_MIN && value <= TIME_BUDGET_ALERT_PERCENT_MAX
+}
+
 /** A budget for a Team or Project and optional local-date period. */
 export type TimeBudget = {
   /** Contract schema version. */
@@ -234,6 +255,12 @@ export type TimeBudget = {
    * dates; absent for the scope's default budget.
    */
   periodBudget?: true
+  /**
+   * Consumption percentage of a Project budget that notifies the Project's owner and fires the
+   * `budget-threshold` Automation trigger (ADR 0105); absent means
+   * {@link TIME_BUDGET_ALERT_PERCENT_DEFAULT}. Team budgets keep it but do not notify.
+   */
+  alertPercent?: number
   /** Optimistic concurrency revision. */
   revision: number
   /** Last update timestamp. */

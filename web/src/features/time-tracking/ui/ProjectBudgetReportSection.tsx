@@ -13,6 +13,7 @@ import type { TimeReportRange } from '../model/timeReport'
 import { useProjectBudgetReportExport } from '../mutations/useProjectBudgetReportExport'
 import { useProjectBudgetReport } from '../queries/useProjectBudgetReport'
 import { ProjectBudgetReportPanel } from './ProjectBudgetReportPanel'
+import { ProjectExpensesSection } from './ProjectExpensesSection'
 
 /** Props of {@link ProjectBudgetReportSection}. */
 export type ProjectBudgetReportSectionProps = {
@@ -37,7 +38,7 @@ type ScopedRange = {
 }
 
 /**
- * Connects the Project budget report panel to its API.
+ * Connects the Project budget report panel and the Project expenses below it to their APIs.
  *
  * The first read uses the 90 days up to today; when the Project budget has a period, the section
  * then shows that period until the viewer picks a range. The report is for Project managers
@@ -74,20 +75,31 @@ export function ProjectBudgetReportSection({ accessToken, enabled, locale, proje
   if (!teamId || !projectId) return null
   if (report.error instanceof TimeTrackingApiError && (report.error.status === 403 || report.error.status === 404)) return null
   return (
-    <ProjectBudgetReportPanel
-      budgetEditPath={createTeamTimeTrackingPath(teamId, 'report', undefined, { ...range, groupBy: 'project' })}
-      hasExportError={csvExport.hasExportError}
-      hasLoadError={Boolean(report.error)}
-      isExporting={csvExport.isExporting}
-      isLoading={report.isLoading}
-      locale={locale}
-      onChangeRange={(next) => setPickedState({ scope, range: next })}
-      onExport={() => csvExport.exportCsv(input)}
-      onRetry={() => { void report.mutate().catch(() => undefined) }}
-      range={range}
-      renderLink={(path, children) => <Link className="workbench-button-secondary inline-flex min-h-9 items-center px-3" to={path}>{children}</Link>}
-      t={t}
-      {...(report.data ? { report: report.data } : {})}
-    />
+    <>
+      <ProjectBudgetReportPanel
+        budgetEditPath={createTeamTimeTrackingPath(teamId, 'report', undefined, { ...range, groupBy: 'project' })}
+        hasExportError={csvExport.hasExportError}
+        hasLoadError={Boolean(report.error)}
+        isExporting={csvExport.isExporting}
+        isLoading={report.isLoading}
+        locale={locale}
+        onChangeRange={(next) => setPickedState({ scope, range: next })}
+        onExport={() => csvExport.exportCsv(input)}
+        onRetry={() => { void report.mutate().catch(() => undefined) }}
+        range={range}
+        renderLink={(path, children) => <Link className="workbench-button-secondary inline-flex min-h-9 items-center px-3" to={path}>{children}</Link>}
+        t={t}
+        {...(report.data ? { report: report.data } : {})}
+      />
+      <ProjectExpensesSection
+        {...(accessToken ? { accessToken } : {})}
+        defaultCurrency={report.data?.budget?.currency ?? 'JPY'}
+        enabled={enabled}
+        locale={locale}
+        projectId={projectId}
+        t={t}
+        teamId={teamId}
+      />
+    </>
   )
 }

@@ -14,3 +14,25 @@ export {
   type ProjectBudgetWorkItem,
   type ProjectBudgetWorkItemPage,
 } from './application/load-project-budget-report'
+export {
+  createProjectExpenseUseCase,
+  decideProjectExpenseUseCase,
+  deleteProjectExpenseUseCase,
+  listProjectExpensesUseCase,
+  updateProjectExpenseUseCase,
+  type ProjectExpenseReferences,
+  type ProjectExpenseScope,
+} from './application/project-expense-use-cases'
+export {
+  DynamoDbProjectExpenseStore,
+  InMemoryProjectExpenseStore,
+  type ProjectExpenseCallerAuthorizationCheck,
+  type ProjectExpenseStore,
+} from './adapter-out/dynamodb/project-expense-store'
+export {
+  loadProjectBudgetConsumption,
+  sumApprovedProjectExpenses,
+  type ApprovedProjectExpenseTotal,
+  type ProjectBudgetConsumption,
+  type ProjectBudgetConsumptionPorts,
+} from './application/project-budget-consumption'

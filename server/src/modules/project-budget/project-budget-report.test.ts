@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { ProjectScheduleBaseline, TimeBudget } from '@mukuroji/contracts'
+import type { ProjectExpense, ProjectScheduleBaseline, TimeBudget } from '@mukuroji/contracts'
 import { createProjectBudgetReport, type ProjectBudgetReportInput } from './project-budget-report'
 
 const budget: TimeBudget = {
@@ -58,11 +58,66 @@ function input(overrides: Partial<ProjectBudgetReportInput> = {}): ProjectBudget
       { localDate: '2026-01-08', durationMinutes: 60, currency: 'JPY', actualCostMinor: 6_000 },
       { localDate: '2026-01-04', durationMinutes: 60, currency: 'JPY', actualCostMinor: 6_000 },
     ],
+    expenses: [],
+    ...overrides,
+  }
+}
+
+/**
+ * Builds an expense of the shared Project.
+ *
+ * @param overrides - Fields to replace.
+ * @returns The expense.
+ */
+function expense(overrides: Partial<ProjectExpense>): ProjectExpense {
+  return {
+    id: 'expense-1',
+    teamId: 'team-1',
+    projectId: 'project-1',
+    date: '2026-01-06',
+    category: '外注費',
+    amountMinor: 50_000,
+    currency: 'JPY',
+    receiptFileIds: [],
+    status: 'approved',
+    submittedByMemberId: 'pm-1',
+    submittedAt: '2026-01-06T00:00:00.000Z',
+    decision: { outcome: 'approved', decidedByMemberId: 'pm-2', decidedAt: '2026-01-06T01:00:00.000Z' },
+    revision: 2,
+    createdAt: '2026-01-06T00:00:00.000Z',
+    updatedAt: '2026-01-06T01:00:00.000Z',
     ...overrides,
   }
 }
 
 describe('createProjectBudgetReport', () => {
+  test('adds approved expenses in the budget currency to the actual cost and reports the rest apart', () => {
+    const report = createProjectBudgetReport(input({
+      expenses: [
+        expense({ id: 'approved' }),
+        expense({ id: 'usd', currency: 'USD', amountMinor: 1_000 }),
+        expense({ id: 'pending', status: 'submitted', amountMinor: 7_000, revision: 1 }),
+        expense({ id: 'rejected', status: 'rejected', amountMinor: 9_000, decision: { outcome: 'rejected', decidedByMemberId: 'pm-2', decidedAt: '2026-01-06T01:00:00.000Z' } }),
+        expense({ id: 'later', date: '2026-01-08', amountMinor: 3_000 }),
+        expense({ id: 'earlier', date: '2026-01-04', amountMinor: 4_000 }),
+      ],
+    }))
+
+    expect(report.actualCostByCurrency).toEqual({ JPY: 12_000, USD: 500 })
+    expect(report.approvedExpenseByCurrency).toEqual({ JPY: 50_000, USD: 1_000 })
+    expect(report.pendingExpenseByCurrency).toEqual({ JPY: 7_000 })
+    expect(report.budgetConsumedPercent).toBe(6.9)
+    expect(report.earnedValue?.money?.actualCostMinor).toBe(62_000)
+    expect(report.points.map((point) => point.actualCostMinor)).toEqual([12_000, 62_000, 62_000, undefined, undefined])
+  })
+
+  test('counts no expense before the report starts', () => {
+    const report = createProjectBudgetReport(input({ today: '2026-01-01', expenses: [expense({ date: '2026-01-05' })] }))
+
+    expect(report.approvedExpenseByCurrency).toEqual({})
+    expect(report.pendingExpenseByCurrency).toEqual({})
+  })
+
   test('calculates earned value in minutes and in the budget currency', () => {
     const report = createProjectBudgetReport(input())
 

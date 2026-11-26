@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import type { AutomationAction } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   AutomationRuleEditor,
@@ -14,6 +15,7 @@ import {
   isAutomationTriggerConfigurationValid,
   readAutomationDueDaysBefore,
   parseAutomationTemplatePayload,
+  readAutomationActionTypesForTrigger,
 } from '../src/automation/model/editorValidation'
 
 describe('Automation editors', () => {
@@ -49,6 +51,25 @@ describe('Automation editors', () => {
     for (const value of ['0', '366', '1.5', 'three']) {
       expect(isAutomationTriggerConfigurationValid('baseline-slip', value)).toBe(false)
     }
+  })
+
+  test('builds a budget-threshold trigger that takes no configuration', () => {
+    expect(createAutomationTrigger('budget-threshold', 'ignored')).toEqual({ type: 'budget-threshold' })
+    expect(isAutomationTriggerConfigurationValid('budget-threshold', '')).toBe(true)
+    const html = renderToStaticMarkup(
+      <AutomationRuleEditor
+        initialTriggerType="budget-threshold"
+        locale="ja"
+        onCreate={async () => undefined}
+      />,
+    )
+    expect(html).toContain('予算消化率が閾値に到達')
+  })
+
+  test('offers a budget-threshold rule only actions that need no Work Item', () => {
+    const all: AutomationAction['type'][] = ['assign', 'move', 'update', 'create', 'comment', 'notify', 'approval', 'webhook']
+    expect(readAutomationActionTypesForTrigger(all, 'budget-threshold')).toEqual(['create', 'notify', 'webhook'])
+    expect(readAutomationActionTypesForTrigger(all, 'status')).toEqual(all)
   })
 
   test('renders the baseline-slip day field', () => {
@@ -91,6 +112,14 @@ describe('Automation editors', () => {
     expect(html).toContain('data-testid="automation-rule-trigger-type-direction"')
     expect(html).toContain('value="from"')
     expect(html).toContain('value="both"')
+  })
+
+  test('starts a budget-threshold rule on an action it can run', () => {
+    const html = renderToStaticMarkup(
+      <AutomationRuleEditor initialTriggerType="budget-threshold" locale="en" onCreate={async () => undefined} />,
+    )
+    expect(html).toMatch(/<option value="notify" selected="">/u)
+    expect(html).not.toContain('<option value="move"')
   })
 
   test('hides the form and webhook options from a Team rule', () => {
