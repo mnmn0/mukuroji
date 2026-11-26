@@ -205,6 +205,21 @@ test('fails with 413 instead of a partial total when the period holds too many r
   expect(throughput.status).toBe(200)
 })
 
+test('bounds the index pages it reads when other Work Items fill them', async () => {
+  const { runs } = await configure('manager')
+  let pages = 0
+  runs.listFinishedRunsByTime = async () => {
+    pages += 1
+    return {
+      runs: [{ runId: `run-${pages}`, workItemId: 'hidden-work-item', outcome: 'completed', finishedAt: '2026-07-15T00:00:00.000Z' }],
+      nextCursor: `page-${pages}`,
+    }
+  }
+  const response = await analyticsApiRequest('/api/analytics/query', createQuery([usageWidgets[0]!]))
+  expect(response.status).toBe(413)
+  expect(pages).toBe(100)
+})
+
 test('returns the unavailable warning when the deployment has no Software factory', async () => {
   await configure('manager')
   process.env.SOFTWARE_FACTORY = 'disabled'

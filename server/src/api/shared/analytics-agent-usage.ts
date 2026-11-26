@@ -16,6 +16,12 @@ import { requireTeamPermission, type WorkspacePrincipal } from './project-access
 /** Largest page the finished-run index returns. */
 const AGENT_USAGE_INDEX_PAGE_SIZE = 100
 
+/**
+ * Most finished-run index pages one query reads, across Teams and groups. Runs of Work Items the
+ * viewer cannot see still fill index pages, so the pages are bounded on their own.
+ */
+const MAX_AGENT_USAGE_INDEX_PAGES = 100
+
 /** Concurrent run and usage reads while the usage is assembled. */
 const AGENT_USAGE_READ_CONCURRENCY = 10
 
@@ -39,7 +45,7 @@ function createAgentUsageLimitExceededError() {
   return new AnalyticsError(
     413,
     'AnalyticsAgentUsageLimitExceeded',
-    `Analytics query has more than ${MAX_ANALYTICS_AGENT_USAGE_RUNS} finished Agent Runs in its period. Shorten the period or narrow the report scope.`,
+    `Analytics query has more finished Agent Runs in its period than one query reads (${MAX_ANALYTICS_AGENT_USAGE_RUNS}). Shorten the period or narrow the report scope.`,
   )
 }
 
@@ -54,6 +60,7 @@ function createAgentUsageLimitExceededError() {
  * @param since - Period start, ISO instant.
  * @param until - Period end, ISO instant.
  * @param collected - Runs collected so far across Teams; the Team's runs are appended.
+ * @param budget - Index pages left for the whole query; decremented per page read.
  */
 async function collectTeamFinishedRuns(
   directoryId: string,
@@ -62,12 +69,15 @@ async function collectTeamFinishedRuns(
   since: string,
   until: string,
   collected: AgentUsageRunReference[],
+  budget: { indexPages: number },
 ) {
   const sinceAt = Date.parse(since)
   const untilAt = Date.parse(until)
   for (const group of AGENT_RUN_FINISHED_GROUPS) {
     let cursor: string | undefined
     do {
+      if (budget.indexPages <= 0) throw createAgentUsageLimitExceededError()
+      budget.indexPages -= 1
       const page = await workItemDependencies.agentRuns.listFinishedRunsByTime(
         directoryId,
         teamId,
@@ -114,12 +124,13 @@ export async function readAuthorizedAnalyticsAgentUsage(
     ids.add(item.id)
     workItemIdsByTeam.set(item.teamId, ids)
   }
-  const teamIds = [...workItemIdsByTeam.keys()].sort()
+  const teams = [...workItemIdsByTeam.entries()].sort(([left], [right]) => left.localeCompare(right))
   const since = new Date(Date.parse(period.from)).toISOString()
   const until = new Date(Date.parse(period.to)).toISOString()
   const references: AgentUsageRunReference[] = []
-  for (const teamId of teamIds) {
-    await collectTeamFinishedRuns(principal.directoryId, teamId, workItemIdsByTeam.get(teamId)!, since, until, references)
+  const budget = { indexPages: MAX_AGENT_USAGE_INDEX_PAGES }
+  for (const [teamId, workItemIds] of teams) {
+    await collectTeamFinishedRuns(principal.directoryId, teamId, workItemIds, since, until, references, budget)
   }
   const costTeamIds = includeCost ? await readAnalyticsAgentCostTeamIds(principal, workItems) : undefined
   const costTeams = new Set(costTeamIds ?? [])

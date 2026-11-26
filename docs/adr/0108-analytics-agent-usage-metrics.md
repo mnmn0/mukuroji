@@ -21,8 +21,8 @@ Analytics は Work Item の canonical row と audit event を同じ認可境界�
   Work Item の state で分ける。Evidence は Run ごとに 1 件。
 - **読み方**：該当 widget を含む query のときだけ、API が認可済み Work Item の Team ごとに終了済み Run の index
   （ADR 0006）を期間の両端で読み、認可済み Work Item の Run だけを残す。Run を強整合で読み直し、ADR 0061 と同じ
-  割り当てで usage 行を読む。1 query で 500 Run を超えたら部分集計を返さず `413`（`AnalyticsAgentUsageLimitExceeded`）
-  にする。usage のない Run は数えない。新しい保存 row・index・事前集計は作らない。
+  割り当てで usage 行を読む。1 query で 500 Run を超えるか、index を 100 page 読んでも終わらなければ、部分集計を返さず `413`
+  （`AnalyticsAgentUsageLimitExceeded`）にする。usage のない Run は数えない。新しい保存 row・index・事前集計は作らない。
 - **費用の権限**：`agent-cost` を含む query では、Work Item の Team のうち閲覧者が manager である Team を読み、
   その Team の Run だけを数える。それ以外の Run は件数を warning で知らせ、数えられる Run がない group の値は
   `null` にする。Manager である Team の集合を snapshot の permission scope hash に加え、manager でなくなった人には
