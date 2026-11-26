@@ -40,6 +40,10 @@ export type WorkItemAgentRunsLabels = {
   resumed: string
   /** Explanation of the resumed badge. */
   resumedHint: string
+  /** Label of the credential that started a run, shown to Team managers. */
+  startedByCredential: string
+  /** Label of the agent instance hash that started a run, shown to Team managers. */
+  startedByInstance: string
   /** Heading of the Work Item's token total. */
   usageTotal: string
   /** Note shown when the usage read stopped at its limit. */
@@ -107,6 +111,8 @@ export function createWorkItemAgentRunsLabels(locale: Locale): WorkItemAgentRuns
     stalledHint: t('workItems.agentRuns.stalledHint'),
     resumed: t('workItems.agentRuns.resumed'),
     resumedHint: t('workItems.agentRuns.resumedHint'),
+    startedByCredential: t('workItems.agentRuns.startedByCredential'),
+    startedByInstance: t('workItems.agentRuns.startedByInstance'),
     usageTotal: t('workItems.agentRuns.usageTotal'),
     usagePartial: t('workItems.agentRuns.usagePartial'),
     usageHint: t('workItems.agentRuns.usageHint'),
