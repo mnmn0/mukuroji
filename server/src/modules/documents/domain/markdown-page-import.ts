@@ -188,7 +188,8 @@ function findLeadingTitle(lines: readonly string[]): { text: string, next: numbe
       if (closesFence(line.replace(/^ {0,3}/u, ''), fence)) fence = undefined
       continue
     }
-    const open = FENCE_OPEN.exec(line)
+    // A fence may be indented by up to three spaces.
+    const open = FENCE_OPEN.exec(line.replace(/^ {0,3}/u, ''))
     if (open?.[1] !== undefined && !(open[1].startsWith('`') && (open[2] ?? '').includes('`'))) {
       fence = open[1]
       continue

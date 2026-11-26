@@ -213,6 +213,11 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(convert('Text\n\n---\n\n## Heading').blocks.map(({ type }) => type)).toEqual(['paragraph', 'heading'])
   })
 
+  test('finds the exported title past an indented fence with a heading line inside', () => {
+    const result = convertMarkdownToPageBlocks('# Page\n\n ```text\n# literal\n ```', (prefix) => prefix)
+    expect(result).toEqual({ ok: true, leadingTitle: 'Page', blocks: [expect.objectContaining({ type: 'paragraph' })] })
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])
