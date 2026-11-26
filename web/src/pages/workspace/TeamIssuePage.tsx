@@ -1086,6 +1086,7 @@ export function TeamIssuePage() {
   return (
     <TeamIssueScreen
       aiAssistanceEnabled={workspaceRouteContext?.isAiAssistanceTaskEnabled?.('summary') ?? aiAssistanceUiEnabled}
+      aiPlanningAssistanceEnabled={workspaceRouteContext?.isAiAssistanceTaskEnabled?.('planning') ?? aiAssistanceUiEnabled}
       softwareFactoryEnabled={workspaceRouteContext?.softwareFactoryEnabled ?? true}
       activeTaskViewId={taskViewController.activeSavedView?.id}
       accessToken={accessToken}

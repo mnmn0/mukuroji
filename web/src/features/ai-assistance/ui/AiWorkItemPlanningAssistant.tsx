@@ -15,6 +15,11 @@ import {
 } from '../mutations/useAiAssistanceController'
 import { AiAssistanceReview } from './AiAssistanceReview'
 import { AiPlanningDraftReview } from './AiPlanningDraftReview'
+import {
+  AiPlanningStructureAdoptionContainer,
+  type AiPlanningStructureAdoptionContext,
+} from './AiPlanningStructureAdoption'
+import { useAiGenerationExpiryRerender } from './useAiGenerationExpiryRerender'
 
 /** Props for explicit Work Item planning assistance. */
 export type AiWorkItemPlanningAssistantProps = {
@@ -44,6 +49,8 @@ export type AiWorkItemPlanningAssistantProps = {
   requireAdoptionConfirmation?: boolean
   /** Revision-fenced Work Item source re-authorized by the server. */
   source: AiWorkItemSource
+  /** Parent and allowed child types for creating proposed children and dependencies; omit for read-only routes. */
+  structureAdoption?: AiPlanningStructureAdoptionContext
   /** Localized message resolver. */
   t: (key: MessageKey) => string
 }
@@ -68,6 +75,7 @@ export function AiWorkItemPlanningAssistant({
   resolveWorkItemLabel,
   requireAdoptionConfirmation,
   source,
+  structureAdoption,
   t,
 }: AiWorkItemPlanningAssistantProps) {
   const liveController = useAiAssistanceController({
@@ -79,6 +87,7 @@ export function AiWorkItemPlanningAssistant({
 
   return (
     <AiWorkItemPlanningAssistantView
+      accessToken={accessToken}
       canGenerate={Boolean(accessToken || controller)}
       error={activeController.error}
       feedbackRating={activeController.feedbackRating}
@@ -100,6 +109,7 @@ export function AiWorkItemPlanningAssistant({
       resolveStatusLabel={resolveStatusLabel}
       resolveWorkItemLabel={resolveWorkItemLabel}
       requireAdoptionConfirmation={requireAdoptionConfirmation}
+      structureAdoption={structureAdoption}
       t={t}
     />
   )
@@ -107,6 +117,8 @@ export function AiWorkItemPlanningAssistant({
 
 /** Props for the pure Work Item planning assistant view. */
 export type AiWorkItemPlanningAssistantViewProps = {
+  /** Bearer token used to create adopted children and dependencies. */
+  accessToken?: string
   /** Whether the active session can issue a generation request. */
   canGenerate?: boolean
   /** Safe controller failure classification. */
@@ -149,6 +161,8 @@ export type AiWorkItemPlanningAssistantViewProps = {
   resolveWorkItemLabel?: (endpoint: WorkItemDependencyEndpoint) => string
   /** Whether adoption must first confirm replacement of manual supported-field edits. */
   requireAdoptionConfirmation?: boolean
+  /** Parent and allowed child types for creating proposed children and dependencies. */
+  structureAdoption?: AiPlanningStructureAdoptionContext
   /** Localized message resolver. */
   t: (key: MessageKey) => string
 }
@@ -160,6 +174,7 @@ export type AiWorkItemPlanningAssistantViewProps = {
  * @returns A flat review rail safe to mount inside an existing Work Item form.
  */
 export function AiWorkItemPlanningAssistantView({
+  accessToken,
   canGenerate = true,
   error,
   feedbackRating,
@@ -181,16 +196,25 @@ export function AiWorkItemPlanningAssistantView({
   resolveStatusLabel,
   resolveWorkItemLabel,
   requireAdoptionConfirmation = false,
+  structureAdoption,
   t,
 }: AiWorkItemPlanningAssistantViewProps) {
   const [confirmationGenerationId, setConfirmationGenerationId] = useState<string>()
   const confirmationRef = useRef<HTMLDivElement>(null)
+  // The structure adoption section shows the draft outside the review, so it must be withdrawn at
+  // the same expiry time as the review's own content.
+  useAiGenerationExpiryRerender(generation)
   const availableDraft = getAvailableWorkItemPlanningDraft(generation)
   const hasInvalidAvailableDraft = generation?.content.availability === 'available' &&
     !availableDraft
   const hasAdoptableDraft = availableDraft !== undefined &&
     (canAdoptDraft?.(availableDraft) ?? hasSupportedWorkItemPlanningFields(availableDraft))
-  const isOperationPending = isGenerating || isDecisionPending || isFeedbackPending || isMutationPending
+  const [isStructureAdoptionPending, setIsStructureAdoptionPending] = useState(false)
+  // The generation whose children or dependencies this screen already wrote. Those writes move the
+  // revisions an approval checks, so applying its fields afterwards does not ask the server again.
+  const [structureWrittenGenerationId, setStructureWrittenGenerationId] = useState<string>()
+  const isOperationPending = isGenerating || isDecisionPending || isFeedbackPending || isMutationPending ||
+    isStructureAdoptionPending
   const isAdoptionConfirmationVisible = confirmationGenerationId !== undefined &&
     confirmationGenerationId === generation?.id &&
     hasAdoptableDraft
@@ -235,10 +259,36 @@ export function AiWorkItemPlanningAssistantView({
       }
     : undefined
 
+  /**
+   * Approves the visible draft before its children and dependencies are created. The decision is
+   * sent even when the draft is already approved, so the server checks again that the source, its
+   * revision, and the member's access did not change since generation. The adoption holds the
+   * Work Item save guard for its whole run, so this call does not take or release it.
+   */
+  const approveForStructureAdoption = async (): Promise<boolean> => {
+    const reviewed = await onDecide('approved')
+    return reviewed?.decision?.outcome === 'approved' &&
+      getAvailableWorkItemPlanningDraft(reviewed) !== undefined
+  }
+
+  /**
+   * Holds the Work Item save guard and disables a new draft while children and dependencies are
+   * created, so neither a save nor a new generation remounts the section mid-way.
+   *
+   * @param pending - Whether the adoption is running.
+   */
+  const handleStructureAdoptionPendingChange = (pending: boolean) => {
+    setIsStructureAdoptionPending(pending)
+    onOperationPendingChange?.(pending)
+  }
+
   /** Records approval before copying any supported value into local editor state. */
   const approveAndAdoptDraft = async (replacementConfirmed = false) => {
     if (!onAdopt || !hasAdoptableDraft || isOperationPending) return
-    const reviewedGeneration = await handleDecide('approved')
+    const reviewedGeneration = generation?.decision?.outcome === 'approved' &&
+      generation.id === structureWrittenGenerationId
+      ? generation
+      : await handleDecide('approved')
     const reviewedDraft = getAvailableWorkItemPlanningDraft(reviewedGeneration)
     if (
       reviewedGeneration?.decision?.outcome !== 'approved' ||
@@ -300,6 +350,7 @@ export function AiWorkItemPlanningAssistantView({
         />
       ) : generation && (availableDraft || generation.content.availability === 'withheld') ? (
         <AiAssistanceReview
+          adoptAfterApproval={structureAdoption !== undefined}
           adoptLabel={t('ai.planning.workItem.adopt')}
           errorKind={error?.kind}
           feedbackRating={feedbackRating}
@@ -339,6 +390,23 @@ export function AiWorkItemPlanningAssistantView({
           t={t}
         />
       )}
+
+      {availableDraft && generation && structureAdoption && !hasInvalidAvailableDraft &&
+        generation.decision?.outcome !== 'rejected' ? (
+          <AiPlanningStructureAdoptionContainer
+            accessToken={accessToken}
+            approve={approveForStructureAdoption}
+            context={structureAdoption}
+            disabled={isOperationPending && !isStructureAdoptionPending}
+            draft={availableDraft}
+            generationId={generation.id}
+            key={generation.id}
+            onPendingChange={handleStructureAdoptionPendingChange}
+            onWritten={() => setStructureWrittenGenerationId(generation.id)}
+            resolveWorkItemLabel={resolveWorkItemLabel}
+            t={t}
+          />
+        ) : null}
 
       {isAdoptionConfirmationVisible ? (
         <div
@@ -390,8 +458,8 @@ function getAvailableWorkItemPlanningDraft(
 /**
  * Identifies the Work Item fields that this assistant can copy into the existing editor.
  *
- * Planning estimates, child items, dependencies, and target status updates remain
- * review-only because they use separate mutation boundaries.
+ * Planning estimates and target status updates stay out of the form. Child items and
+ * dependencies are created through the separate structure adoption section.
  *
  * @param draft - Authorized Work Item Planning draft.
  * @returns Whether at least one supported Work Item field is proposed.

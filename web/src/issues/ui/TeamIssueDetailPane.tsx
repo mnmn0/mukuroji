@@ -23,6 +23,8 @@ import {
 } from 'react'
 import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
 import { AiSummaryAssistant } from '../../features/ai-assistance/ui/AiSummaryAssistant'
+import { AiWorkItemPlanningAssistant } from '../../features/ai-assistance/ui/AiWorkItemPlanningAssistant'
+import { resolveAllowedChildWorkItemTypes } from '../../features/ai-assistance/mutations/useAiPlanningStructureAdoption'
 import { IssueArtifactsPanel } from '../../files/ui/IssueArtifactsPanel'
 import { type FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { type Locale, type MessageKey } from '../../shared/i18n/i18n'
@@ -112,6 +114,7 @@ import { usePromoteProjectRisk } from '../../projects/mutations/usePromoteProjec
  */
 export function IssueDetailPane({
   aiAssistanceEnabled = true,
+  aiPlanningAssistanceEnabled = false,
   softwareFactoryEnabled = true,
   accessToken,
   assigneeOptions,
@@ -151,6 +154,8 @@ export function IssueDetailPane({
 }: {
   /** Whether the saved Workspace AI policy permits the Summary workflow. */
   aiAssistanceEnabled?: boolean
+  /** Whether the saved Workspace AI policy permits the Planning workflow. */
+  aiPlanningAssistanceEnabled?: boolean
   /** Whether the deployment serves Software factory: agent handoff, Agent Run history, and report chips. */
   softwareFactoryEnabled?: boolean
   accessToken?: string
@@ -212,6 +217,7 @@ export function IssueDetailPane({
   return (
     <IssueDetailContent
       aiAssistanceEnabled={aiAssistanceEnabled}
+      aiPlanningAssistanceEnabled={aiPlanningAssistanceEnabled}
       softwareFactoryEnabled={softwareFactoryEnabled}
       accessToken={accessToken}
       assigneeOptions={assigneeOptions}
@@ -255,6 +261,7 @@ export function IssueDetailPane({
 
 function IssueDetailContent({
   aiAssistanceEnabled = true,
+  aiPlanningAssistanceEnabled = false,
   softwareFactoryEnabled = true,
   accessToken,
   assigneeOptions,
@@ -294,6 +301,8 @@ function IssueDetailContent({
 }: {
   /** Whether the saved Workspace AI policy permits the Summary workflow. */
   aiAssistanceEnabled?: boolean
+  /** Whether the saved Workspace AI policy permits the Planning workflow. */
+  aiPlanningAssistanceEnabled?: boolean
   /** Whether the deployment serves Software factory: agent handoff, Agent Run history, and report chips. */
   softwareFactoryEnabled?: boolean
   /** Related Documents を取得する access token です。 */
@@ -375,6 +384,23 @@ function IssueDetailContent({
   })
   const workItemKeyPrefixes = useWorkItemKeyPrefixes()
   const commentDraftDirtyRef = useRef(false)
+  // Each assistant of this Work Item reports its own pending state; the shared save guard stays on
+  // while any of them is in flight, so one finishing cannot release another's guard.
+  const aiOperationPendingRef = useRef(new Set<string>())
+  /**
+   * Records one assistant's pending state and reports whether any assistant is still in flight.
+   *
+   * @param operation - Assistant that changed state.
+   * @param pending - Whether that assistant is in flight.
+   */
+  const reportAiOperationPending = (operation: 'brief' | 'collaboration' | 'planning', pending: boolean) => {
+    if (pending) aiOperationPendingRef.current.add(operation)
+    else aiOperationPendingRef.current.delete(operation)
+    onAiSummaryOperationPendingChange?.(
+      createTaskViewItemKey(issue.teamId, issue.id),
+      aiOperationPendingRef.current.size > 0,
+    )
+  }
   const [isCommentDraftDirty, setIsCommentDraftDirty] = useState(false)
   /** Reports this Team Issue's comment dirtiness to the owning screen. */
   const handleCommentDraftDirtyChange = useCallback((isDirty: boolean) => {
@@ -412,10 +438,7 @@ function IssueDetailContent({
             onAdopt={onAdopt}
             onAuthenticatedApiError={onAuthenticatedApiError}
             onOperationPendingChange={(pending) => {
-              onAiSummaryOperationPendingChange?.(
-                createTaskViewItemKey(issue.teamId, issue.id),
-                pending,
-              )
+              reportAiOperationPending('brief', pending)
               onOperationPendingChange?.(createAiAssistantSessionKey(aiSummarySource), pending)
             }}
             sources={[aiSummarySource]}
@@ -1223,12 +1246,7 @@ function IssueDetailContent({
             focusedRootCommentId={focusedRootCommentId}
             locale={locale}
             members={workspaceMembers}
-            onAiSummaryOperationPendingChange={(pending) => {
-              onAiSummaryOperationPendingChange?.(
-                createTaskViewItemKey(issue.teamId, issue.id),
-                pending,
-              )
-            }}
+            onAiSummaryOperationPendingChange={(pending) => reportAiOperationPending('collaboration', pending)}
             onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
             onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
             readOnlyMessage={collaborationReadOnlyMessage}
@@ -1298,6 +1316,36 @@ function IssueDetailContent({
             onMoveToStatus={onUpdateIssue && !isIssueUpdatePending && !isAiSummaryOperationPending ? moveToWorkflowStatus : undefined}
             t={t}
             task={issue}
+          />
+        ) : null}
+        {aiPlanningAssistanceEnabled && accessToken ? (
+          <AiWorkItemPlanningAssistant
+            accessToken={accessToken}
+            isMutationPending={isIssueUpdatePending || isAiSummaryOperationPending}
+            key={createAiAssistantSessionKey(aiSummarySource)}
+            locale={locale}
+            onAuthenticatedApiError={onAuthenticatedApiError}
+            // Decisions and structure adoption hold the same save guard as the Summary assistant,
+            // so a save cannot change the source revision and remount this assistant mid-way.
+            onOperationPendingChange={(pending) => reportAiOperationPending('planning', pending)}
+            resolveWorkItemLabel={(endpoint) => planningSnapshot?.workItems.find(
+              (workItem) => workItem.teamId === endpoint.teamId && workItem.id === endpoint.workItemId,
+            )?.title ?? `${endpoint.teamId} / ${endpoint.workItemId}`}
+            source={aiSummarySource}
+            structureAdoption={isIssueReadOnly
+              ? undefined
+              : {
+                  childTypes: resolveAllowedChildWorkItemTypes(workItemTypes, currentWorkItemTypeId)
+                    .map((type) => ({ id: type.id, name: type.name })),
+                  parent: {
+                    ...(issue.assignedProjectId ? { assignedProjectId: issue.assignedProjectId } : {}),
+                    assigneeUserId: issue.assigneeUserId,
+                    teamId: issue.teamId,
+                    workItemId: issue.id,
+                    workItemTypeId: currentWorkItemTypeId,
+                  },
+                }}
+            t={t}
           />
         ) : null}
         <div className="grid min-w-0 gap-4">
