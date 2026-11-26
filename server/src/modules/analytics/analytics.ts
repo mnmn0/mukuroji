@@ -1215,9 +1215,13 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
     widget.metric === 'milestone-trend'
       ? createMilestoneTrendWidgetResult(widget, input.milestones, normalized)
       // Checked before the Planning groups so every Agent usage widget of a run without usage carries
-      // the warning that tells the snapshot permission check its hash has no cost Teams.
+      // the warning that tells the snapshot permission check its hash has no cost Teams. A widget
+      // that also misses its Planning groups keeps that warning too, for the same reason.
       : input.agentUsage === undefined && isAnalyticsAgentUsageMetric(widget.metric)
-        ? createAgentUsageUnavailableWidgetResult(widget)
+        ? createAgentUsageUnavailableWidgetResult(
+            widget,
+            input.planningGroups === undefined && analyticsWidgetReadsPlanningGroups(widget),
+          )
         : input.planningGroups === undefined && analyticsWidgetReadsPlanningGroups(widget)
           ? createPlanningGroupsUnavailableWidgetResult(widget)
           : createWidgetResult(
@@ -2968,9 +2972,14 @@ function withAnalyticsAgentUsage(
  * scheduled delivery.
  *
  * @param widget - `agent-tokens` or `agent-cost` widget.
- * @returns A result with no value and the unavailable warning.
+ * @param planningGroupsUnavailable - Whether the widget groups by Cycle or Milestone and the run
+ *   could not read them either.
+ * @returns A result with no value and the unavailable warnings.
  */
-function createAgentUsageUnavailableWidgetResult(widget: AnalyticsWidget): AnalyticsWidgetResult {
+function createAgentUsageUnavailableWidgetResult(
+  widget: AnalyticsWidget,
+  planningGroupsUnavailable: boolean,
+): AnalyticsWidgetResult {
   return {
     widgetId: widget.id,
     metric: widget.metric,
@@ -2980,7 +2989,10 @@ function createAgentUsageUnavailableWidgetResult(widget: AnalyticsWidget): Analy
     series: [],
     groups: [],
     rows: [],
-    warnings: [ANALYTICS_AGENT_USAGE_UNAVAILABLE_WARNING],
+    warnings: [
+      ANALYTICS_AGENT_USAGE_UNAVAILABLE_WARNING,
+      ...(planningGroupsUnavailable ? [ANALYTICS_PLANNING_GROUPS_UNAVAILABLE_WARNING] : []),
+    ],
   }
 }
 

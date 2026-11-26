@@ -11,6 +11,8 @@ import {
   type CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import {
+  ANALYTICS_PLANNING_GROUPS_UNAVAILABLE_WARNING,
+  analyticsSnapshotReadPlanningGroups,
   createAnalyticsCsv,
   createAnalyticsPdf,
   createAnalyticsPermissionScopeHash,
@@ -234,15 +236,18 @@ describe('Agent usage metrics', () => {
     )
   })
 
-  test('marks a cost widget grouped by Cycle as unavailable when the run reads neither usage nor Planning', () => {
-    const snapshot = createAnalyticsSnapshot({
-      workItems,
-      events: [],
-      authorizedProjectIds,
-      query: createQuery([{ id: 'cost', title: 'Cost', type: 'metric', metric: 'agent-cost', groupBy: { dimension: 'cycle' } }]),
-    })
-    expect(snapshot.widgets[0]?.warnings).toEqual([ANALYTICS_AGENT_USAGE_UNAVAILABLE_WARNING])
+  test('keeps both unavailable warnings on a cost widget grouped by Cycle when the run reads neither usage nor Planning', () => {
+    const query = createQuery([{ id: 'cost', title: 'Cost', type: 'metric', metric: 'agent-cost', groupBy: { dimension: 'cycle' } }])
+    const snapshot = createAnalyticsSnapshot({ workItems, events: [], authorizedProjectIds, query })
+    expect(snapshot.widgets[0]?.warnings).toEqual([
+      ANALYTICS_AGENT_USAGE_UNAVAILABLE_WARNING,
+      ANALYTICS_PLANNING_GROUPS_UNAVAILABLE_WARNING,
+    ])
     expect(analyticsSnapshotReadAgentCost(snapshot)).toBe(false)
+    expect(analyticsSnapshotReadPlanningGroups(query, snapshot)).toBe(false)
+    expect(snapshot.permissionScopeHash).toBe(
+      createAnalyticsPermissionScopeHash(workItems, Date.parse(period.to), authorizedProjectIds),
+    )
   })
 
   test('fixes the Teams whose cost the viewer could see in the permission scope', () => {
