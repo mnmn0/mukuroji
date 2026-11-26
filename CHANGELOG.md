@@ -106,6 +106,9 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Changed
 
+- server API: `GET /api/v1/agent-context` の `brief` は、Team に自分の brief がないとき Workspace の既定 brief を返します。
+  Team が Agent settings を保存していないときの `requireAcceptanceCriteria` と、`GET /api/v1/agent-settings` の
+  `leaseMinutes`・`allowTakeoverAfterLeaseExpiry` は Workspace の既定値です。MCP と応答の形は変わりません（#412）。
 - MCP API revision を 2 に上げました。server は revision 1〜2 を受け付けます。revision 1 の server に
   接続した新しい MCP は server が古いと警告し、Document を読むツールは使えません。
 - `create_task` が `schedule` を送らず、Workspace の稼働カレンダーで Work Item を作るようにしました。

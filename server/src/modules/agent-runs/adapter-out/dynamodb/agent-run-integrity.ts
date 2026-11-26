@@ -4,6 +4,7 @@ import {
   claimRecordKey,
   createAgentRunPartition,
   finishedRunIndexKeys,
+  isWorkspaceAgentPartition,
   latestRunRecordKey,
   parseRun,
   revocationRecordKey,
@@ -853,6 +854,8 @@ async function discoverTeams(input: {
     if (typeof partition === 'string' && parseAgentRunPartition(partition) !== undefined) partitions.add(partition)
     // Usage rows and export receipts share the table but belong to members, not Teams.
     else if (typeof partition === 'string' && isAgentUsagePartition(partition)) continue
+    // The Workspace agent defaults belong to the Workspace, not to a Team.
+    else if (typeof partition === 'string' && isWorkspaceAgentPartition(partition)) continue
     else unresolved.add(partition)
   }
   // One finding per partition key, not per row; the key itself is not reported.
