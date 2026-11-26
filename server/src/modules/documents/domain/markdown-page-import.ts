@@ -238,7 +238,7 @@ const HTML_RAW_BLOCK_START = /^ {0,3}<(pre|script|style|textarea)(?:[\s>]|$)/iu
  * may start on the next line, so nothing after the colon is required; a false match only keeps
  * more Markdown together.
  */
-const REFERENCE_DEFINITION = /^ {0,3}\[([^\]]+)\]:/u
+const REFERENCE_DEFINITION = /^ {0,3}\[(?:[^\]\\]|\\.)+\]:/u
 
 /**
  * Start of a raw HTML block, such as `<pre>`, `<div>`, `</p>`, `<?php`, or `<![CDATA[`. Its lines

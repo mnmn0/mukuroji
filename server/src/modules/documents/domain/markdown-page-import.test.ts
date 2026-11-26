@@ -333,6 +333,11 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(JSON.stringify(blocks)).toContain('[mukuroji-block-boundary]: #')
   })
 
+  test('keeps a body whole when a reference label escapes a closing bracket', () => {
+    const source = 'See [docs][a\\]b].\n\n## Details\n\n[a\\]b]: https://example.com'
+    expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])
