@@ -24,6 +24,16 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Added
 
+- Workspace profile の `list_issues` で `teamId` を省くと、読める Team を順に 1 Team ずつ読みます。`nextCursor` が次の Team へ進み、
+  Project・status・Type の絞り込みは `teamId` と一緒に渡します（#705）。
+- Workspace profile の `list_issues` に `query`（タイトルの語。すべてを含む Work Item だけ、大文字小文字と全角半角を区別しない）を追加しました（#705）。
+- Workspace profile に `get_project`（Project と charter。charter を読めない場合は `charterReadable: false`）を追加しました（#705）。
+- Workspace profile の `save_issue` に `customFields`（field ID ごとの値、更新では `null` で消す）を、`list_issue_statuses` の各 Type に
+  custom field の定義を追加しました（#705）。
+- server API: `GET /api/v1/work-items` に `query`（1〜200 文字のタイトルの語）を追加しました。page ごとに絞るため、空の page でも
+  `hasMore: true` になることがあります（#705）。
+- MCP API revision を 6 に上げました。`query` を知らない server は語を無視して全件を返すため、新しい MCP は revision 6 未満の
+  server を古いと判定します（#705）。
 - Workspace profile に `list_relations`（親・子・WBS 番号と blocks / blockedBy / related / duplicate の link）、
   `save_relation`（同じ Team の Work Item を link、`remove: true` で解除）、`create_subtasks`（親の下に親の Project で最大 20 件の
   子を作る。途中で失敗したら同じ引数と `idempotencyKey` の再試行で残りだけを作る）を追加しました（#360）。

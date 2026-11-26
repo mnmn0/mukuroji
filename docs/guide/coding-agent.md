@@ -71,7 +71,7 @@ Workspace profile は `1.0.0` より後に公開される `mcp.mjs` から使え
 `MUKUROJI_MCP_PROFILE` を知らず、Team ID と member ID がないため起動しません。対応版が GitHub Release に
 出るまでは、リポジトリを手元に置いて `bun server/src/handlers/coding-agent-mcp.ts` で起動してください。必要なのは
 `MUKUROJI_MCP_URL` と `MUKUROJI_MCP_TOKEN` だけです。agent に「`ABC-123` を読んで」「自分の担当を一覧して」の
-ように頼むと、`get_issue` や `list_issues` で読みます。「タスクを作って」「`ABC-123` の優先度を上げて」「コメントを書いて」と頼むと、
+ように頼むと、`get_issue` や `list_issues` で読みます。「全 Team から『ログイン』を含むタスクを探して」と頼むと、Team を指定せずタイトルで探します。「タスクを作って」「`ABC-123` の優先度を上げて」「`ABC-123` の重要度（custom field）を高にして」「コメントを書いて」と頼むと、
 `save_issue` と `save_comment` で書き込みます。「`ABC-123` を 3 つの子タスクに分けて」「`ABC-5` が `ABC-4` を止めていると記録して」と
 頼むと、`create_subtasks` と `save_relation` で親子と依存を付けます。分け方は先に agent に案を出させ、確認してから作らせてください。
 読むだけにしたい場合は `MUKUROJI_MCP_READ_ONLY=true` を足します。

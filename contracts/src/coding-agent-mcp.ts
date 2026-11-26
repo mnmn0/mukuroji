@@ -5,7 +5,7 @@
  * Increase it when the server adds an endpoint or field that a new MCP build needs, and record the
  * change in `CHANGELOG.md`.
  */
-export const CODING_AGENT_MCP_API_REVISION = 5
+export const CODING_AGENT_MCP_API_REVISION = 6
 
 /**
  * Oldest MCP API revision that a server build still serves.

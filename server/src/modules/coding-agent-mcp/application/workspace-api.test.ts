@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { createWorkItemTitleMatcher } from '@mukuroji/contracts'
 import { AgentTaskError, type AgentTask } from './work-item-api'
 import { createWorkspaceIssues, type WorkspaceApi } from './workspace-api'
 
@@ -24,6 +25,7 @@ function apiWithFailingKeyRead() {
     me: async () => ({ schemaVersion: 1, workspaceId: 'workspace', memberId: 'owner', email: 'owner@example.com' }),
     teams: unexpected,
     projectMembers: unexpected,
+    projectCharter: unexpected,
     lookupKey: async (key) => ({ schemaVersion: 1, key, teamId: 'team', workItemId: 'task' }),
     catalog: unexpected,
     listIssues: unexpected,
@@ -209,4 +211,126 @@ test('save_issue returns the saved Work Item with a warning when the key cannot 
   const updated = await issues.saveIssue({ id: 'ABC-1', expectedRevision: 3, priority: 'high', idempotencyKey: 'update-key' })
   expect(updated).toMatchObject({ id: 'task', revision: 4, warning: expect.stringContaining('get_issue') })
   expect(writes).toEqual(['create:create-key', 'update:update-key'])
+})
+
+/**
+ * Builds a Workspace API with two readable Teams whose Work Item lists have the given pages.
+ * @param pages - Pages per Team, in order; each page's cursor is its index.
+ * @returns The API and the list calls it received.
+ */
+function apiWithTeams(pages: Record<string, AgentTask[][]>) {
+  const calls: Array<{ teamId: string, query?: string, cursor?: string }> = []
+  const { api: base } = apiWithFailingKeyRead()
+  const api: WorkspaceApi = {
+    ...base,
+    teams: async () => ({
+      schemaVersion: 1,
+      items: [
+        { id: 'alpha', name: 'Alpha', projects: [{ id: 'web', name: 'Web', lifecycleState: 'active' }] },
+        { id: 'beta', name: 'Beta', projects: [{ id: 'web', name: 'Web too', lifecycleState: 'active' }, { id: 'ops', name: 'Ops', lifecycleState: 'active' }] },
+      ],
+    }),
+    listIssues: async (teamId, filters, cursor) => {
+      calls.push({ teamId, ...(filters.query === undefined ? {} : { query: filters.query }), ...(cursor === undefined ? {} : { cursor }) })
+      const teamPages = pages[teamId] ?? [[]]
+      const index = cursor === undefined ? 0 : Number(cursor)
+      const hasMore = index + 1 < teamPages.length
+      return { items: teamPages[index] ?? [], hasMore, ...(hasMore ? { nextCursor: String(index + 1) } : {}) }
+    },
+  }
+  return { api, calls }
+}
+
+test('list_issues without a Team walks every readable Team with a cursor of its own', async () => {
+  const { api, calls } = apiWithTeams({
+    alpha: [[task({ id: 'a1', teamId: 'alpha', title: 'Fix login' })], [task({ id: 'a2', teamId: 'alpha', title: 'LOGIN copy' })]],
+    // A server older than `query` returns every Work Item; the MCP keeps only the matching ones.
+    beta: [[task({ id: 'b1', teamId: 'beta', title: 'Login timeout' }), task({ id: 'b2', teamId: 'beta', title: 'Billing' })]],
+  })
+  const issues = createWorkspaceIssues(api)
+  const seen: string[] = []
+  let cursor: string | undefined
+  do {
+    const page = await issues.listIssues(undefined, { query: 'login' }, cursor)
+    seen.push(...page.items.map((item) => item.id))
+    cursor = page.nextCursor
+    expect(page.hasMore).toBe(cursor !== undefined)
+  } while (cursor !== undefined)
+
+  expect(seen).toEqual(['a1', 'a2', 'b1'])
+  expect(calls).toEqual([
+    { teamId: 'alpha', query: 'login' },
+    { teamId: 'alpha', query: 'login', cursor: '1' },
+    { teamId: 'beta', query: 'login' },
+  ])
+})
+
+test('list_issues without a Team refuses Team-scoped filters and foreign cursors', async () => {
+  const issues = createWorkspaceIssues(apiWithTeams({}).api)
+  for (const filters of [{ assignedProjectId: 'web' }, { workflowStatusId: 'todo' }, { workItemTypeId: 'bug' }]) {
+    await expect(issues.listIssues(undefined, filters)).rejects.toMatchObject({ code: 'invalid_request' })
+  }
+  await expect(issues.listIssues(undefined, {}, 'server-cursor')).rejects.toMatchObject({ code: 'invalid_request' })
+  const gone = `t1.${Buffer.from(JSON.stringify({ teamId: 'removed' })).toString('base64url')}`
+  await expect(issues.listIssues(undefined, {}, gone)).rejects.toMatchObject({ code: 'invalid_request' })
+})
+
+test('get_project returns the charter, or the Project alone when the charter is not readable', async () => {
+  const { api: base } = apiWithTeams({})
+  const charters: string[] = []
+  let charterError: AgentTaskError | undefined
+  const api: WorkspaceApi = {
+    ...base,
+    projectCharter: async (teamId, projectId) => {
+      charters.push(`${teamId}/${projectId}`)
+      if (charterError) throw charterError
+      return {
+        schemaVersion: 1, teamId, projectId, lifecycleState: 'active', revision: 4,
+        purpose: 'Run the service', tags: ['ops'], repositoryUrls: ['https://github.com/example/ops'],
+      }
+    },
+  }
+  const issues = createWorkspaceIssues(api)
+
+  expect(await issues.getProject('ops')).toMatchObject({
+    id: 'ops', teamId: 'beta', teamName: 'Beta', charterReadable: true, revision: 4, purpose: 'Run the service', tags: ['ops'],
+  })
+  await expect(issues.getProject('web')).rejects.toMatchObject({ code: 'invalid_request' })
+  expect(await issues.getProject('web', 'alpha')).toMatchObject({ teamId: 'alpha', name: 'Web' })
+  await expect(issues.getProject('missing')).rejects.toMatchObject({ code: 'not_found' })
+  charterError = new AgentTaskError('forbidden', 'Guests cannot read charters.')
+  expect(await issues.getProject('ops')).toEqual({ id: 'ops', name: 'Ops', lifecycleState: 'active', teamId: 'beta', teamName: 'Beta', charterReadable: false })
+  charterError = new AgentTaskError('unavailable', 'Timed out.', true)
+  await expect(issues.getProject('ops')).rejects.toMatchObject({ code: 'unavailable' })
+  expect(charters).toEqual(['beta/ops', 'alpha/web', 'beta/ops', 'beta/ops'])
+})
+
+test('save_issue sends custom field values and refuses to clear one on a new Work Item', async () => {
+  const sent: unknown[] = []
+  const { api: base } = apiWithFailingKeyRead()
+  const api: WorkspaceApi = {
+    ...base,
+    getKey: async () => undefined,
+    createIssue: async (input) => { sent.push(input.customFieldValues); return task() },
+    updateIssue: async (_teamId, _workItemId, input) => { sent.push(input.customFieldValues); return task() },
+  }
+  const issues = createWorkspaceIssues(api)
+  const key = '00000000-0000-4000-8000-000000000001'
+
+  await issues.saveIssue({ teamId: 'team', title: 'New', customFields: { severity: 'sev-1', labels: ['ui'] }, idempotencyKey: key })
+  await issues.saveIssue({ id: 'task', teamId: 'team', expectedRevision: 3, customFields: { severity: null }, idempotencyKey: key })
+  await expect(issues.saveIssue({ teamId: 'team', title: 'New', customFields: { severity: null }, idempotencyKey: key }))
+    .rejects.toMatchObject({ code: 'invalid_request' })
+  await expect(issues.saveIssue({ id: 'task', teamId: 'team', expectedRevision: 3, customFields: {}, idempotencyKey: key }))
+    .rejects.toMatchObject({ code: 'invalid_request' })
+
+  expect(sent).toEqual([{ severity: 'sev-1', labels: ['ui'] }, { severity: null }])
+})
+
+test('the title matcher needs every word regardless of case, width, and order', () => {
+  const matches = createWorkItemTitleMatcher('ｌｏｇｉｎ　失敗')
+  expect(matches('Login 時の認証失敗を直す')).toBe(true)
+  expect(matches('失敗した LOGIN を再試行する')).toBe(true)
+  expect(matches('Login 画面の文言')).toBe(false)
+  expect(createWorkItemTitleMatcher('board')(' Onboarding を改善する')).toBe(true)
 })

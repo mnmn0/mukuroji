@@ -14,7 +14,7 @@ import {
 import { AgentTaskError, type AgentTask } from '../../application/work-item-api'
 import type { WorkspaceApi } from '../../application/workspace-api'
 import { createPublicApiRequest, pageSchema } from './public-api-request'
-import { catalogSchema, commentSchema, identifier, keySchema, taskSchema } from './work-item-api'
+import { catalogSchema, commentSchema, identifier, keySchema, projectCharterSchema, taskSchema } from './work-item-api'
 
 const ownerSchema: z.ZodType<PublicCredentialOwner> = z.object({
   schemaVersion: z.literal(1), workspaceId: identifier, memberId: identifier,
@@ -131,6 +131,14 @@ export function createWorkspaceApi(
         throw new AgentTaskError('invalid_response', 'The API returned the members of another Project.')
       }
       return members
+    },
+    /** Reads a Project charter and rejects one of another Team or Project; see {@link WorkspaceApi.projectCharter}. */
+    async projectCharter(teamId, projectId) {
+      const charter = await request(`projects/${encodeURIComponent(id(projectId, 'projectId'))}/charter`, projectCharterSchema, 'GET', undefined, undefined, { teamId: id(teamId, 'teamId') })
+      if (charter.teamId !== teamId || charter.projectId !== projectId) {
+        throw new AgentTaskError('invalid_response', 'The API returned the charter of another Project.')
+      }
+      return charter
     },
     /** Resolves a key and rejects a response that names another key; see {@link WorkspaceApi.lookupKey}. */
     async lookupKey(key) {

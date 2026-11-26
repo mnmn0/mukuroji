@@ -56,7 +56,7 @@ function startFakeApi() {
     // Liveness is public, so the MCP must read it without the API credential.
     if (new URL(request.url).pathname === '/api/health') {
       if (request.headers.get('Authorization') !== null) return Response.json({}, { status: 400 })
-      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 5, minimumApiRevision: 1 } })
+      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 6, minimumApiRevision: 1 } })
     }
     if (request.headers.get('Authorization') !== 'Bearer isolated-test-token') return Response.json({}, { status: 401 })
     const url = new URL(request.url)
@@ -263,7 +263,7 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     expect((await client.listTools()).tools).toHaveLength(22)
     expect((await call(client, 'get_configuration')).content).toMatchObject({ data: {
       runtime: 'claude-code', agentSettings: { leaseMinutes: 30, readyStatusIds: [] }, brief: 'Run bun test.',
-      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 5, serverCompatibility: { status: 'compatible', server: { apiRevision: 5, minimumApiRevision: 1 } } },
+      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 6, serverCompatibility: { status: 'compatible', server: { apiRevision: 6, minimumApiRevision: 1 } } },
     } })
     expect(client.getServerVersion()).toMatchObject({ name: 'mukuroji-tasks', version: CODING_AGENT_MCP_VERSION })
     expect((await call(client, 'get_next_task')).content).toMatchObject({ data: { action: 'start', task: { id: 'task' }, ownRuns: [] } })
@@ -478,7 +478,7 @@ test('reuses a known server compatibility and retries an unknown one', async () 
     healthRequests += 1
     // The first read fails as a transient outage would; later reads report the range.
     return healthRequests === 1 ? Response.json({}, { status: 503 })
-      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 5, minimumApiRevision: 1 } })
+      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 6, minimumApiRevision: 1 } })
   } })
   try {
     const factory = composeCodingAgentMcp({ MUKUROJI_MCP_URL: `http://127.0.0.1:${api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token',
@@ -541,7 +541,7 @@ function startFakeWorkspaceApi() {
     createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z', relationIds: [], customFieldValues: {} }
   const api = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
     const url = new URL(request.url)
-    if (url.pathname === '/api/health') return Response.json({ ok: true, codingAgentMcp: { apiRevision: 5, minimumApiRevision: 1 } })
+    if (url.pathname === '/api/health') return Response.json({ ok: true, codingAgentMcp: { apiRevision: 6, minimumApiRevision: 1 } })
     if (request.headers.get('Authorization') !== 'Bearer isolated-test-token') return Response.json({}, { status: 401 })
     requests.push(`${url.pathname}${url.search}`)
     const teamId = url.searchParams.get('teamId')
@@ -594,6 +594,10 @@ function startFakeWorkspaceApi() {
         return Response.json({ items: [{ id: 'comment', actorUserId: 'owner', body: 'Imported', createdAt: issue.createdAt }], hasMore: false })
       case '/api/v1/work-items':
         return Response.json({ items: teamId === 'team' ? [issue] : [], hasMore: false })
+      case '/api/v1/projects/project/charter':
+        return teamId === 'team'
+          ? Response.json({ schemaVersion: 1, teamId: 'team', projectId: 'project', lifecycleState: 'active', revision: 2, code: 'WBS', purpose: 'Plan work', tags: [], repositoryUrls: [] })
+          : Response.json({}, { status: 404 })
       case '/api/v1/projects/project/members':
         return Response.json({ schemaVersion: 1, teamId: 'team', projectId: 'project', items: [{ id: 'owner', email: 'owner@example.com', role: 'manager' }] })
       case '/api/v1/work-item-types':
@@ -621,7 +625,7 @@ test('the workspace profile reads Teams, members, statuses, and Work Items by ke
     }))
     const tools = (await client.listTools()).tools.map((tool) => tool.name).sort()
     expect(tools).toEqual([
-      'create_subtasks', 'get_issue', 'list_comments', 'list_issue_statuses', 'list_issues', 'list_projects', 'list_relations', 'list_teams',
+      'create_subtasks', 'get_issue', 'get_project', 'list_comments', 'list_issue_statuses', 'list_issues', 'list_projects', 'list_relations', 'list_teams',
       'list_users', 'save_comment', 'save_issue', 'save_relation', 'whoami',
     ])
 
@@ -633,9 +637,19 @@ test('the workspace profile reads Teams, members, statuses, and Work Items by ke
       data: { teamId: 'team', workItemId: 'task', items: [{ id: 'comment', body: 'Imported' }], hasMore: false },
     })
     expect((await call(client, 'list_issues', { teamId: 'team', assigneeId: 'me' })).content).toMatchObject({ data: { items: [{ id: 'task' }] } })
+    expect((await call(client, 'get_project', { projectId: 'project' })).content).toMatchObject({
+      data: { id: 'project', teamId: 'team', teamName: 'Platform', charterReadable: true, purpose: 'Plan work', revision: 2 },
+    })
+    // Without a Team the list reads one Team per page and hands back a cursor for the next Team.
+    const firstTeam = await call(client, 'list_issues', { query: 'github  IMPORT' })
+    expect(firstTeam.content).toMatchObject({ data: { items: [{ id: 'task' }], hasMore: true } })
+    const firstData: unknown = typeof firstTeam.content !== 'object' || firstTeam.content === null ? undefined : Reflect.get(firstTeam.content, 'data')
+    const nextCursor: unknown = typeof firstData === 'object' && firstData !== null ? Reflect.get(firstData, 'nextCursor') : undefined
+    expect(typeof nextCursor).toBe('string')
+    expect((await call(client, 'list_issues', { query: 'github  IMPORT', cursor: nextCursor })).content).toEqual({ data: { items: [], hasMore: false } })
     expect((await call(client, 'list_users', { teamId: 'team', projectId: 'project' })).content).toMatchObject({ data: { items: [{ id: 'owner' }] } })
     expect((await call(client, 'list_issue_statuses', { teamId: 'team' })).content).toEqual({ data: { teamId: 'team', workItemTypes: [{
-      id: 'task-type', name: 'Task', statuses: [
+      id: 'task-type', name: 'Task', customFields: [], statuses: [
         { id: 'todo', name: 'To do', category: 'unstarted', initial: true },
         { id: 'done', name: 'Done', category: 'completed', initial: false },
       ],
@@ -649,6 +663,8 @@ test('the workspace profile reads Teams, members, statuses, and Work Items by ke
     expect(withoutTeam.content).toMatchObject({ error: { code: 'invalid_request' } })
 
     expect(fake.requests).toContain('/api/v1/work-items?teamId=team&assigneeUserId=owner&limit=50')
+    expect(fake.requests).toContain('/api/v1/work-items?teamId=team&query=github++IMPORT&limit=50')
+    expect(fake.requests).toContain('/api/v1/work-items?teamId=other&query=github++IMPORT&limit=50')
     expect(fake.requests.some((path) => path.startsWith('/api/v1/agent-'))).toBe(false)
   } finally {
     await client.close()

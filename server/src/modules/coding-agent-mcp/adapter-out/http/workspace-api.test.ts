@@ -32,6 +32,29 @@ test('rejects Work Items, members, and keys of another scope than the one asked 
     schemaVersion: 1, key: 'ABC-2', teamId: 'team', workItemId: 'task',
   }))
   await expect(otherKey.lookupKey('ABC-1')).rejects.toMatchObject({ code: 'invalid_response' })
+
+  const otherCharter = createWorkspaceApi(config, async () => Response.json({
+    schemaVersion: 1, teamId: 'other', projectId: 'project', lifecycleState: 'active', revision: 1, tags: [], repositoryUrls: [],
+  }))
+  await expect(otherCharter.projectCharter('team', 'project')).rejects.toMatchObject({ code: 'invalid_response' })
+})
+
+test('reads a Project charter of the named Team and lists Work Items by title words', async () => {
+  const seen: string[] = []
+  const api = createWorkspaceApi(config, async (url) => {
+    seen.push(`${url.pathname}${url.search}`)
+    return url.pathname.endsWith('/charter')
+      ? Response.json({ schemaVersion: 1, teamId: 'team', projectId: 'project', lifecycleState: 'active', revision: 1, tags: [], repositoryUrls: [] })
+      : Response.json({ items: [], hasMore: false })
+  })
+
+  expect(await api.projectCharter('team', 'project')).toMatchObject({ projectId: 'project', revision: 1 })
+  await api.listIssues('team', { query: 'ログイン 失敗' })
+
+  expect(seen).toEqual([
+    '/api/v1/projects/project/charter?teamId=team',
+    `/api/v1/work-items?teamId=team&query=${encodeURIComponent('ログイン 失敗').replaceAll('%20', '+')}&limit=50`,
+  ])
 })
 
 test('reports a missing key endpoint as no key and keeps other failures', async () => {

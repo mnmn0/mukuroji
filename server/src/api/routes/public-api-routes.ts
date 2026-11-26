@@ -23,6 +23,7 @@ import {
   type UpdatePublicWorkItemRequest,
   type WorkItemSchedule,
   type WorkItemScheduleCalendarPolicy,
+  createWorkItemTitleMatcher,
   haveSameWorkCalendarRules,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
@@ -1631,8 +1632,15 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           ...(accessibleProjectIds ? { accessibleProjectIds } : {}),
         },
       )
+      // A title keyword narrows each stored page after current RBAC, so a page can be empty while
+      // hasMore stays true, as with the other filters.
+      const matchesTitle = typeof filters.query === 'string'
+        ? createWorkItemTitleMatcher(filters.query)
+        : undefined
       return {
-        items: page.issues.map(projectPublicWorkItem),
+        items: page.issues
+          .filter((issue) => matchesTitle === undefined || matchesTitle(issue.title))
+          .map(projectPublicWorkItem),
         hasMore: page.nextCursor !== undefined,
         ...(page.nextCursor ? { nextContinuation: page.nextCursor } : {}),
       }

@@ -91,6 +91,7 @@ import {
   type ResumeAgentRunResponse,
   type TakeOverAgentRunResponse,
   type TeamIssueCommentResponseItem,
+  WORK_ITEM_TITLE_QUERY_MAX_LENGTH,
 } from '@mukuroji/contracts'
 import { Hono, type Context } from 'hono'
 import {
@@ -5404,10 +5405,36 @@ function readPageLimit(value: string | undefined) {
 }
 
 function readWorkItemFilters(c: Context) {
+  const query = c.req.query('query')
   return {
     teamId: readRequiredQuery(c.req.query('teamId'), 'teamId'),
     ...readWorkItemFieldFilters(c),
+    ...(query === undefined ? {} : { query: readWorkItemTitleQuery(query) }),
   }
+}
+
+/**
+ * Reads the title keyword of a Work Item list. Blank text, control characters, and overlong
+ * keywords are rejected rather than ignored, so a client never mistakes an unfiltered page for
+ * search results.
+ *
+ * @param value - Untrusted `query` parameter.
+ * @returns The trimmed keyword.
+ */
+function readWorkItemTitleQuery(value: string): string {
+  const query = value.trim()
+  if (
+    query.length === 0 ||
+    query.length > WORK_ITEM_TITLE_QUERY_MAX_LENGTH ||
+    /\p{Cc}/u.test(query)
+  ) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      `query must be 1 to ${WORK_ITEM_TITLE_QUERY_MAX_LENGTH} characters without control characters.`,
+    )
+  }
+  return query
 }
 
 /**

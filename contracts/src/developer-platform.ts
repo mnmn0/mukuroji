@@ -1582,6 +1582,12 @@ export type ListPublicWorkItemsRequest = {
    */
   updatedAfter?: string
   /**
+   * Title keyword of up to 200 characters. Only Work Items whose title contains every
+   * whitespace-separated word are returned, ignoring letter case and full-width or half-width forms.
+   * A page can be empty while `hasMore` is true.
+   */
+  query?: string
+  /**
    * 前 response の opaque nextCursor です。
    */
   cursor?: string

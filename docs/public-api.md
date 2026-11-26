@@ -270,6 +270,7 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
 - 一覧の途中で resource が更新される可能性があるため、client は ID で重複排除し、完全な snapshot が必要なら最初から走査し直す。
 - In-memory pagination を行う一覧は作成・検出・接続日時の降順、同時刻では resource ID の降順に固定する。Downstream store の continuation を使う一覧も、外側の署名 cursor で同じ request scope を検証する。
 - Work Item 一覧で actor が参照できる Project が 90 件を超える場合、DynamoDB から取得した page を application 側で権限 filter する。このため読み取り量が増え、`items` が `limit` 未満または空でも `hasMore: true` と `nextCursor` を返すことがある。Client は page の件数で走査完了を判断せず、`hasMore: false` になるまで `nextCursor` を辿る。
+- `GET /api/v1/work-items` の `query`（1〜200 文字）はタイトルの語で絞り込む。空白（全角を含む）で区切った語をすべて含む Work Item だけを返し、大文字小文字と全角半角を区別しない。DynamoDB から取得した page を権限 filter の後に絞るため、空の page でも `hasMore: true` になることがある。`query` は cursor の filter に含まれ、途中で変えると `400 invalid_request` になる。
 
 ## Idempotency
 

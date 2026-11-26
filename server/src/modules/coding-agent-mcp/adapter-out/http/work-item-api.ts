@@ -38,7 +38,8 @@ const scheduleSchema = z.discriminatedUnion('mode', [
   }),
 ])
 const charterPersonSchema = z.object({ memberId: identifier, displayName: z.string() })
-const projectCharterSchema: z.ZodType<PublicProjectCharter> = z.object({
+/** Validates the response of `GET /api/v1/projects/{projectId}/charter`. */
+export const projectCharterSchema: z.ZodType<PublicProjectCharter> = z.object({
   schemaVersion: z.literal(1), teamId: identifier, projectId: identifier,
   lifecycleState: z.enum(['proposed', 'approved', 'active', 'on-hold', 'closed', 'archived']),
   revision: z.number().int().nonnegative(), updatedAt: z.iso.datetime().optional(),

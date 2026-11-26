@@ -1635,6 +1635,31 @@ describe('public API router', () => {
     expect(secondBody.hasMore).toBe(false)
   })
 
+  test('passes a trimmed title keyword to the Work Item list and rejects blank or overlong ones', async () => {
+    const receivedFilters: Array<Record<string, string | number | undefined>> = []
+    const workItems = createDefaultWorkItemService({
+      async list(_credential, filters) {
+        receivedFilters.push(filters)
+        return { items: [], hasMore: false }
+      },
+    })
+    const { platform, router } = createTestRouter({ workItems })
+    const apiKey = await createApiKey(platform, ['work-items:read'])
+    const list = (query: string) => router.request(
+      `http://localhost/v1/work-items?teamId=team-1&query=${encodeURIComponent(query)}`,
+      { headers: { Authorization: `Bearer ${apiKey.secret}` } },
+    )
+
+    expect((await list('  login 失敗 ')).status).toBe(200)
+    expect(receivedFilters).toEqual([{ teamId: 'team-1', query: 'login 失敗' }])
+    for (const invalid of ['   ', 'a'.repeat(201), 'line\nbreak']) {
+      const response = await list(invalid)
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ type: 'https://docs.mukuroji.app/problems/validation_failed' })
+    }
+    expect(receivedFilters).toHaveLength(1)
+  })
+
   test('rejects impossible schedule dates while accepting leap and month-end dates', async () => {
     const receivedDueDates: string[] = []
     const workItems = createDefaultWorkItemService({
