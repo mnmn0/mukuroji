@@ -40,6 +40,10 @@ export const agentSettingsMessages = {
   'agentSettings.triage.description': '人の判断が必要な Run を、Team の Triage に Agent Run の entry として起票します。entry は Run ごとに 1 件です。',
   'agentSettings.triage.failed': 'failed で終わった Run を起票する',
   'agentSettings.triage.stalled': 'lease が切れて停滞した Run を起票する',
+  'agentSettings.notifications.title': '通知',
+  'agentSettings.notifications.assignee': 'Run が人の判断を必要とするとき担当者に通知する',
+  'agentSettings.notifications.help':
+    'Run が blocker や引き継ぎを報告したとき、失敗したとき、lease が切れて停滞したときに、担当者の Inbox と有効にしている channel へ通知します。停滞の通知は Run ごとに 1 回です。',
   'agentSettings.criteria.field': '受け入れ条件として扱うカスタムフィールド',
   'agentSettings.criteria.fieldNone': 'なし',
   'agentSettings.criteria.fieldMissing': '{field}（利用できなくなりました）',

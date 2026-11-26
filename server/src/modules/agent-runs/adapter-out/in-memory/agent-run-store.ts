@@ -260,7 +260,7 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   async listTriageTeams(cursor: string | undefined, limit: number, from?: AgentRunTriageTeam): Promise<AgentRunTriageTeamPage> {
     const fromKey = cursor === undefined && from !== undefined ? `${from.directoryId}|${from.teamId}` : undefined
     const teams = [...this.state.settings.entries()]
-      .filter(([, settings]) => settings.fileFailedRunsToTriage || settings.fileStalledRunsToTriage)
+      .filter(([, settings]) => settings.fileFailedRunsToTriage || settings.fileStalledRunsToTriage || settings.notifyAssigneeOfRunEvents)
       .map(([settingsKey, settings]) => ({ directoryId: settingsKey.slice(0, settingsKey.lastIndexOf('|')), teamId: settings.teamId }))
       .sort((left, right) => `${left.directoryId}|${left.teamId}`.localeCompare(`${right.directoryId}|${right.teamId}`))
       .filter((team) => fromKey === undefined || `${team.directoryId}|${team.teamId}` >= fromKey)

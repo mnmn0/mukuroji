@@ -108,6 +108,11 @@ export type ConnectorExternalRecord = {
   description?: string
   /** Provider status の normalized value です。 */
   status?: string
+  /**
+   * Open or closed state of a resource whose provider has only those two states, such as a GitHub
+   * issue. The sync maps it to the status category of the Work Item instead of a workflow status ID.
+   */
+  state?: 'open' | 'closed'
   /** Calendar event dates; only `calendar-event` records carry them. */
   schedule?: ConnectorEventSchedule
   /** Provider payload の non-secret metadata です。 */
@@ -130,6 +135,8 @@ export type ConnectorOutboundMutation = {
   description?: string
   /** Provider へ反映する normalized status です。 */
   status?: string
+  /** Status category of the Work Item, for providers that store only open or closed. */
+  statusCategory?: string
   /** Dates written to a `calendar-event` resource. */
   schedule?: ConnectorEventSchedule
   /** Echo webhook を識別する loop guard です。 */
@@ -241,7 +248,11 @@ export class ConnectorAdapterError extends Error {
   }
 }
 
-/** Source control/chat/email/calendar/storage の built-in catalog です。 */
+/**
+ * Built-in catalog of the providers a runtime can configure: source control, chat, and calendar.
+ * Mail and cloud storage are left out because no sync is planned for them; their provider IDs stay
+ * valid for manual external links.
+ */
 export const BUILT_IN_CONNECTOR_CATALOG: readonly ConnectorDefinition[] = [
   {
     id: 'github',
@@ -272,20 +283,6 @@ export const BUILT_IN_CONNECTOR_CATALOG: readonly ConnectorDefinition[] = [
     resourceTypes: ['message'],
   },
   {
-    id: 'gmail',
-    category: 'email',
-    name: 'Gmail',
-    usesOAuthPkce: true,
-    resourceTypes: ['email'],
-  },
-  {
-    id: 'outlook',
-    category: 'email',
-    name: 'Outlook',
-    usesOAuthPkce: true,
-    resourceTypes: ['email'],
-  },
-  {
     id: 'google-calendar',
     category: 'calendar',
     name: 'Google Calendar',
@@ -298,27 +295,6 @@ export const BUILT_IN_CONNECTOR_CATALOG: readonly ConnectorDefinition[] = [
     name: 'Outlook Calendar',
     usesOAuthPkce: true,
     resourceTypes: ['calendar-event'],
-  },
-  {
-    id: 'google-drive',
-    category: 'cloud-storage',
-    name: 'Google Drive',
-    usesOAuthPkce: true,
-    resourceTypes: ['file'],
-  },
-  {
-    id: 'onedrive',
-    category: 'cloud-storage',
-    name: 'OneDrive',
-    usesOAuthPkce: true,
-    resourceTypes: ['file'],
-  },
-  {
-    id: 'dropbox',
-    category: 'cloud-storage',
-    name: 'Dropbox',
-    usesOAuthPkce: true,
-    resourceTypes: ['file'],
   },
 ] as const
 

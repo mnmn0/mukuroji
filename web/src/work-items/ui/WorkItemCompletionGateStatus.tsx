@@ -1,4 +1,5 @@
 import {
+  WORK_ITEM_COMPLETION_GATE_OVERRIDE_REASON_MAX_LENGTH,
   describeWorkItemCompletionGate,
   type ApprovalSummary,
   type WorkItemAcceptanceCriterion,
@@ -9,6 +10,7 @@ import {
 } from '@mukuroji/contracts'
 import { useId } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
+import { COMPLETION_GATE_OVERRIDE_REASON_FORM_FIELD } from '../model/completionGateOverride'
 
 /** Label of each completion Gate condition. */
 const conditionLabelKeys = {
@@ -34,7 +36,7 @@ const stateLabelKeys = {
 export type WorkItemCompletionGateStatusProps = {
   /** Team completion Gate, if any. */
   policy: WorkItemCompletionGatePolicy | undefined
-  /** Acceptance criteria stored on the Work Item. */
+  /** Acceptance criteria to evaluate: the open draft while one is edited, else the saved list. */
   acceptanceCriteria: readonly WorkItemAcceptanceCriterion[] | undefined
   /**
    * Approval counts of the Work Item. The API leaves the summary out when the Work Item has no
@@ -43,6 +45,12 @@ export type WorkItemCompletionGateStatusProps = {
   approvalSummary: ApprovalSummary | undefined
   /** Display locale. */
   locale: Locale
+  /**
+   * Editor form that submits an override reason with the Work Item's other changes. Pass it only
+   * when the viewer manages the Work Item; the reason field is shown while a required condition is
+   * unmet.
+   */
+  overrideFormId?: string
 }
 
 /**
@@ -56,6 +64,7 @@ export function WorkItemCompletionGateStatus({
   acceptanceCriteria,
   approvalSummary,
   locale,
+  overrideFormId,
   policy,
 }: WorkItemCompletionGateStatusProps) {
   const t = createTranslator(locale)
@@ -66,6 +75,7 @@ export function WorkItemCompletionGateStatus({
   })
   if (statuses.length === 0) return null
   const met = statuses.filter((status) => status.state === 'met').length
+  const blocksCompletion = statuses.some((status) => status.requirement === 'required' && status.state !== 'met')
 
   return (
     <section
@@ -108,6 +118,24 @@ export function WorkItemCompletionGateStatus({
           </li>
         ))}
       </ul>
+      {overrideFormId !== undefined && blocksCompletion ? (
+        <div className="grid min-w-0 gap-1.5">
+          <label className="text-sm font-semibold text-[var(--workbench-text)]" htmlFor={`${headingId}-override`}>
+            {t('workItems.completionGate.override.label')}
+          </label>
+          <textarea
+            aria-describedby={`${headingId}-override-help`}
+            className="workbench-input min-h-16 w-full min-w-0 px-3 py-2 font-normal"
+            form={overrideFormId}
+            id={`${headingId}-override`}
+            maxLength={WORK_ITEM_COMPLETION_GATE_OVERRIDE_REASON_MAX_LENGTH}
+            name={COMPLETION_GATE_OVERRIDE_REASON_FORM_FIELD}
+          />
+          <span className="text-xs font-medium text-[var(--workbench-muted)]" id={`${headingId}-override-help`}>
+            {t('workItems.completionGate.override.help')}
+          </span>
+        </div>
+      ) : null}
     </section>
   )
 }

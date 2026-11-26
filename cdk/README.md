@@ -462,6 +462,18 @@ Secret JSON は string value の object とし、次の key だけを許可し�
 
 `MUKUROJI_CONNECTOR_PROVIDERS_JSON` 自体は JSON array を文字列化した値です。各 provider entry の `clientSecretEnvironmentVariable` は同じ secret object 内の `MUKUROJI_CONNECTOR_<NAME>` を参照させます。Signing secret はそれぞれ独立した十分に長い random value を使います。Warm runtime も約1分の TTL 後に secret を再取得するため、更新は cold start を待たずに反映されます。
 
+`github` の entry は、`resources` を書かなければ同梱の issue 同期を使い、`provider`・`clientId`・
+`clientSecretEnvironmentVariable`・`redirectUri` の 4 項目だけで動きます。GitHub OAuth App の endpoint、token と
+account の対応（`access_token`、`/user` の `id` と `login`）、scope `repo`、許可 host（`github.com`、`api.github.com`、
+`redirectUri` の host）は省略時に補われ、書いた値が優先されます。例:
+
+```json
+[{"provider":"github","clientId":"Iv1.xxxx","clientSecretEnvironmentVariable":"MUKUROJI_CONNECTOR_GITHUB_SECRET","redirectUri":"https://<domain>/api/developer/connector-oauth/callback"}]
+```
+
+GitHub の OAuth App では Authorization callback URL に同じ `redirectUri` を登録します。`resources` を書いた `github`
+entry は従来どおり REST の対応付けで動きます。
+
 `google-calendar` と `outlook-calendar` の entry には `resources` を書きません。予定の読み書きは組み込みの処理が
 行い、`resources` があると起動時に拒否します。`apiBaseUrl` は Google なら `https://www.googleapis.com/calendar/v3/`、
 Outlook なら `https://graph.microsoft.com/v1.0/` とし、scope には予定の読み書き

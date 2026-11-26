@@ -3,6 +3,7 @@ import type {
   AiAssistanceProjectionObservability,
   AiAssistanceProviderAttemptObservation,
   AiAssistanceDecisionObservation,
+  AiAssistanceUsageAccountingFailureObservation,
 } from '../../application/ports/ai-assistance-ports'
 
 /** Destination for one serialized, content-free AI assistance EMF record. */
@@ -60,6 +61,14 @@ export function createAiAssistanceEmfObservability(
     },
     recordDecision(observation) {
       recordDecision(
+        observation,
+        applicationCommitSha,
+        nowMilliseconds(),
+        sink,
+      )
+    },
+    recordUsageAccountingFailure(observation) {
+      recordUsageAccountingFailure(
         observation,
         applicationCommitSha,
         nowMilliseconds(),
@@ -264,6 +273,36 @@ function recordDecision(
     DecisionCount: 1,
     DecisionApprovedCount: observation.outcome === 'approved' ? 1 : 0,
     DecisionRejectedCount: observation.outcome === 'rejected' ? 1 : 0,
+  }))
+}
+
+/** Writes one count for an attempt the monthly usage counters missed. */
+function recordUsageAccountingFailure(
+  observation: AiAssistanceUsageAccountingFailureObservation,
+  applicationCommitSha: string,
+  observedAtMilliseconds: number,
+  sink: StructuredAiAssistanceLogSink,
+): void {
+  sink(JSON.stringify({
+    _aws: {
+      Timestamp: readTimestamp(observedAtMilliseconds),
+      CloudWatchMetrics: [{
+        Namespace: AI_ASSISTANCE_METRIC_NAMESPACE,
+        Dimensions: [
+          ['Service'],
+          ['Service', 'ApplicationCommitSha'],
+          ['Service', 'Task'],
+        ],
+        Metrics: [{ Name: 'UsageAccountingFailureCount', Unit: 'Count' }],
+      }],
+    },
+    event: 'ai-assistance.usage.accounting-failed',
+    service: AI_ASSISTANCE_SERVICE,
+    Service: AI_ASSISTANCE_SERVICE,
+    ApplicationCommitSha: applicationCommitSha,
+    task: observation.task,
+    Task: observation.task,
+    UsageAccountingFailureCount: 1,
   }))
 }
 

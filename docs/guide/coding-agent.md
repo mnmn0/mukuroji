@@ -72,7 +72,9 @@ Workspace profile は `1.0.0` より後に公開される `mcp.mjs` から使え
 出るまでは、リポジトリを手元に置いて `bun server/src/handlers/coding-agent-mcp.ts` で起動してください。必要なのは
 `MUKUROJI_MCP_URL` と `MUKUROJI_MCP_TOKEN` だけです。agent に「`ABC-123` を読んで」「自分の担当を一覧して」の
 ように頼むと、`get_issue` や `list_issues` で読みます。「タスクを作って」「`ABC-123` の優先度を上げて」「コメントを書いて」と頼むと、
-`save_issue` と `save_comment` で書き込みます。読むだけにしたい場合は `MUKUROJI_MCP_READ_ONLY=true` を足します。
+`save_issue` と `save_comment` で書き込みます。「`ABC-123` を 3 つの子タスクに分けて」「`ABC-5` が `ABC-4` を止めていると記録して」と
+頼むと、`create_subtasks` と `save_relation` で親子と依存を付けます。分け方は先に agent に案を出させ、確認してから作らせてください。
+読むだけにしたい場合は `MUKUROJI_MCP_READ_ONLY=true` を足します。
 読み書きできる範囲は token の持ち主が Web で扱える範囲と同じです。Software factory が off の環境では、
 **agent を接続** の設定例がはじめからこの profile になります。
 
@@ -93,6 +95,10 @@ Team のワークフローで実行できる役割を限った遷移（例: 「�
 `move_task` や `complete_task` が拒否されたら、人に状態の変更を頼みます。状態ごとの必須項目が空で拒否されたときは、
 足りない項目（`/schedule`、`/acceptanceCriteria`、`/customFieldValues/<ID>`）がエラーに示されるので、
 `update_task` で埋めてから新しい `idempotencyKey` でやり直します。
+
+Team に完了 Gate を設定していると、`get_task` の `completionGate` に条件ごとの達成状況が出ます。
+`blocksCompletion` が `true` の間は `complete_task` が拒否されるので、agent は足りない条件
+（例: 承認がまだない）を人に伝えます。受け入れ条件は agent が満たしたと記録できますが、承認は人が行います。
 
 仕様書や設計書は、タスク詳細の **関連 Document** でタスクに link しておくと agent が読めます。
 `get_task` が link された Document の一覧の最初のページを返し、続きは `list_task_documents` で取得します。
@@ -205,9 +211,11 @@ Team の **Factory board**（`/teams/:teamId/factory`）で、agent の作業状
 管理者だけに表示）。Run や使用量が読み込み上限に達したときは、合計に含まれていない分があることを表示します。
 
 「停滞」は、リース時間内に `heartbeat` が届かなかった Run です。自動では止まらず、担当も変わりません。
+Claude Code などで hooks を設定すると、agent が MCP tool を呼ばずに長く作業している間も heartbeat が届き、停滞と表示されにくくなります（設定は [MCP の説明](../coding-agent-mcp.md) の「hooks からの heartbeat」）。
 Run を開いて状況を確認し、続けられない場合は **解放** してタスクを人や別の agent に戻します。
 解放できるのは Team の管理者、その Run を始めた人、現在の担当者です。失敗・停滞した Run を
-Triage に自動で起票する設定もあります。
+Triage に自動で起票する設定もあります。Team のエージェント設定で「通知」を有効にすると、blocker や引き継ぎの
+report、失敗、停滞があったときに担当者の Inbox と有効な通知先に届きます。
 
 ### Run 履歴
 

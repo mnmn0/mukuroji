@@ -29,7 +29,33 @@ export const NOTIFICATION_REASON_LABELS = {
   'weekly-report-escalation': { en: 'Member weekly report unsubmitted', ja: 'メンバーの週報が未提出' },
   'approval-requested': { en: 'Approval requested', ja: '承認の依頼' },
   automation: { en: 'Automation', ja: 'Automation' },
+  'agent-run-blocker': { en: 'Agent blocked', ja: 'エージェントが blocker を報告' },
+  'agent-run-handoff': { en: 'Agent handoff', ja: 'エージェントから引き継ぎ' },
+  'agent-run-failed': { en: 'Agent run failed', ja: 'エージェントの Run が失敗' },
+  'agent-run-stalled': { en: 'Agent run stalled', ja: 'エージェントの Run が停滞' },
 } as const satisfies Record<string, Record<NotificationMessageLocale, string>>
+
+/**
+ * Reasons of the notifications an Agent Run sends to the Work Item assignee. The agent acts with
+ * the assignee's credential, so these reach the assignee even though the event's actor is the
+ * assignee.
+ */
+export const AGENT_RUN_NOTIFICATION_REASONS = [
+  'agent-run-blocker', 'agent-run-handoff', 'agent-run-failed', 'agent-run-stalled',
+] as const
+
+/** Reason of a notification an Agent Run sends to the Work Item assignee. */
+export type AgentRunNotificationReason = (typeof AGENT_RUN_NOTIFICATION_REASONS)[number]
+
+/**
+ * Reports whether a reason is one an Agent Run sends to the Work Item assignee.
+ *
+ * @param reason - Stored reason key.
+ * @returns True for a reason in {@link AGENT_RUN_NOTIFICATION_REASONS}.
+ */
+export function isAgentRunNotificationReason(reason: string): reason is AgentRunNotificationReason {
+  return AGENT_RUN_NOTIFICATION_REASONS.some((value) => value === reason)
+}
 
 /** Reason key that has a translated label. */
 export type NotificationReasonLabelKey = keyof typeof NOTIFICATION_REASON_LABELS

@@ -795,6 +795,8 @@ export const workItemsMessages = {
   'workItems.completionGate.state.met': 'Met',
   'workItems.completionGate.state.unmet': 'Not met',
   'workItems.completionGate.state.unavailable': 'Cannot be checked',
+  'workItems.completionGate.override.label': 'Reason to override the Gate and complete (managers)',
+  'workItems.completionGate.override.help': 'Write a reason and save with a completed status to complete the Work Item although a condition is unmet. The reason and who overrode are kept in the audit log and the activity history.',
   'workItems.configuration.jobRoles.eyebrow': 'Job roles',
   'workItems.configuration.jobRoles.title': 'Job roles',
   'workItems.configuration.jobRoles.description': 'Roles used to plan contributors before a member is chosen. Archive roles you no longer use instead of removing them.',

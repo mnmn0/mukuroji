@@ -1124,6 +1124,7 @@ export function isSameSettingsSave(saved: AgentSettings, update: ValidatedAgentS
     saved.requireAcceptanceCriteria === update.requireAcceptanceCriteria &&
     saved.fileFailedRunsToTriage === update.fileFailedRunsToTriage &&
     saved.fileStalledRunsToTriage === update.fileStalledRunsToTriage &&
+    saved.notifyAssigneeOfRunEvents === update.notifyAssigneeOfRunEvents &&
     saved.acceptNewRuns === update.acceptNewRuns &&
     saved.acceptanceCriteriaFieldId === update.acceptanceCriteriaFieldId &&
     saved.brief === update.brief &&
@@ -1203,6 +1204,7 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
     (item.requireAcceptanceCriteria !== undefined && typeof item.requireAcceptanceCriteria !== 'boolean') ||
     (item.fileFailedRunsToTriage !== undefined && typeof item.fileFailedRunsToTriage !== 'boolean') ||
     (item.fileStalledRunsToTriage !== undefined && typeof item.fileStalledRunsToTriage !== 'boolean') ||
+    (item.notifyAssigneeOfRunEvents !== undefined && typeof item.notifyAssigneeOfRunEvents !== 'boolean') ||
     (item.acceptNewRuns !== undefined && typeof item.acceptNewRuns !== 'boolean') ||
     (item.acceptanceCriteriaFieldId !== undefined &&
       (typeof item.acceptanceCriteriaFieldId !== 'string' || item.acceptanceCriteriaFieldId === '')) ||
@@ -1231,6 +1233,7 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
     projectBriefs: briefs,
     fileFailedRunsToTriage: item.fileFailedRunsToTriage === true,
     fileStalledRunsToTriage: item.fileStalledRunsToTriage === true,
+    notifyAssigneeOfRunEvents: item.notifyAssigneeOfRunEvents === true,
     updatedAt: storedTimestamp(item, 'updatedAt'),
     updatedBy: storedString(item, 'updatedBy'),
   }
@@ -1461,8 +1464,8 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
                 entityType: 'agent-settings',
                 workspaceId: directoryId,
                 ...settings,
-                // Lists the Team for the Triage worker only while it files runs.
-                ...(settings.fileFailedRunsToTriage || settings.fileStalledRunsToTriage
+                // Lists the Team for the Triage worker only while it files runs or notifies of stalls.
+                ...(settings.fileFailedRunsToTriage || settings.fileStalledRunsToTriage || settings.notifyAssigneeOfRunEvents
                   ? { triageIndexPartition: triageTeamPartition, triageIndexSortKey: partition }
                   : {}),
               },

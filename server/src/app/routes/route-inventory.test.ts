@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(661)
-  expect(new Set(inventory).size).toBe(657)
+  expect(inventory).toHaveLength(667)
+  expect(new Set(inventory).size).toBe(663)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -41,6 +41,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/ai-assistance/provider-credentials')
   expect(inventory).toContain('PUT /api/ai-assistance/provider-credentials/:provider')
   expect(inventory).toContain('DELETE /api/ai-assistance/provider-credentials/:provider')
+  // Monthly AI usage for Workspace administrators (#414).
+  expect(inventory).toContain('GET /api/ai-assistance/usage')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
   expect(inventory).toContain('GET /api/planning/updates/template')
   expect(inventory).toContain('PATCH /api/teams/:teamId/workload/profiles/:memberId/time-off/:timeOffId')
@@ -84,6 +86,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).not.toContain('GET /api/teams/:teamId/issues/hierarchy')
   expect(inventory).toContain('GET /api/teams/:teamId/issues/:issueId/children/open-count')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/hierarchy')
+  expect(inventory).toContain('GET /api/v1/work-items/:workItemId/relations')
+  expect(inventory).toContain('POST /api/v1/work-items/:workItemId/relations')
+  expect(inventory).toContain('POST /api/v1/work-items/:workItemId/subtask-batches')
+  expect(inventory).toContain('DELETE /api/v1/work-items/:workItemId/relations/:targetWorkItemId/:relationType')
   expect(inventory).toContain('POST /api/auth/refresh')
   expect(inventory).toContain('POST /api/auth/logout')
   expect(inventory).toContain('POST /api/auth/password-reset/request')
@@ -219,6 +225,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'aa64e9b7f75d17e0049c453bc081ff5ce7cccb193550dae4e0e6320abaed27a9',
+    '0b0b54b7859d3aa1478e09aa7d1824121437e267237f65dc295ab4373e4b1053',
   )
 })

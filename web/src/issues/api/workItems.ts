@@ -85,7 +85,7 @@ export type CreateTeamIssueInput = CreateWorkItemInput
 /**
  * 画面で編集する Work Item patch です。API 呼び出し時に expectedRevision を付与します。
  */
-export type UpdateTeamIssueInput = WorkItemPatch
+export type UpdateTeamIssueInput = WorkItemPatch & Pick<UpdateWorkItemInput, 'completionGateOverride'>
 
 /**
  * optimistic concurrency を伴う Work Item 更新 request です。

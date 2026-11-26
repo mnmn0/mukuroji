@@ -76,6 +76,7 @@ function createAiService(
   return {
     getPolicy: unsupported,
     updatePolicy: unsupported,
+    getUsage: unsupported,
     getPreference: unsupported,
     updatePreference: unsupported,
     generate,

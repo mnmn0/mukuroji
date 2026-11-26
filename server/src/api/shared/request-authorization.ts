@@ -849,6 +849,12 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/ai-assistance/policy',
     permission: 'workspace.manage',
   },
+  // Monthly AI usage lists spending by member, so only Workspace administrators read it.
+  {
+    method: 'GET',
+    pathPattern: '/api/ai-assistance/usage',
+    permission: 'workspace.manage',
+  },
   // Registering or removing an external AI provider API key is Workspace administration.
   {
     method: 'PUT',

@@ -126,6 +126,7 @@ export {
   AGENT_RUN_TRIAGE_STALLED_BATCH,
   createAgentRunTriageFiling,
   runAgentRunTriageSweep,
+  type AgentRunStallNotifier,
   type AgentRunTriageFiler,
   type AgentRunTriageFiling,
   type AgentRunTriageReason,
@@ -135,3 +136,9 @@ export {
   type AgentRunTriageWorkItem,
   type AgentRunTriageWorkItemReader,
 } from './adapter-in/schedules/agent-run-triage-sweep'
+export {
+  createAgentRunNotificationMetadata,
+  selectAgentRunFinishNotification,
+  selectAgentRunReportNotification,
+  type AgentRunAssigneeNotification,
+} from './domain/agent-run-notification'
