@@ -44,7 +44,7 @@ Markdown として表示する。一方で Documents の operation は 1 回に 
   残し、消えた block が持っていた relation は一緒に消す。version は通常の編集（`edit`）として残る。
 - MCP の Workspace profile に `list_documents`（`issueId` を渡すとその Work Item に link された Document）、
   `get_document`、`save_document` を足す。`save_document` は読み取り専用の設定では出さない。MCP API revision を 6 に上げる。
-- #708 の作業中に、新しい scope と既存 scope の案を並べて Shinji に判断を仰いだ（新 scope は互換性検査が落ちるため管理者マージが要る）。
+- scope は #708 の作業中に新しい scope と既存 scope の案を並べて Shinji に判断を仰ぎ、2026-11-26 に既存の `work-items:read` / `work-items:write` を使うと決まった（新 scope は互換性検査が落ちるため管理者マージが要る）。
 
 ## 検討した選択肢
 
