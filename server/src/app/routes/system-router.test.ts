@@ -17,7 +17,7 @@ test('keeps liveness independent from dependency readiness', async () => {
 
   expect(response.status).toBe(200)
   expect(await response.json()).toEqual({
-    codingAgentMcp: { apiRevision: 5, minimumApiRevision: 1 },
+    codingAgentMcp: { apiRevision: 6, minimumApiRevision: 1 },
     ok: true,
     status: 'alive',
   })
@@ -39,7 +39,7 @@ test('exposes only validated deployment provenance with liveness', async () => {
   expect(response.headers.get('Cache-Control')).toBe('no-store')
   expect(await response.json()).toEqual({
     applicationCommitSha: '0123456789abcdef0123456789abcdef01234567',
-    codingAgentMcp: { apiRevision: 5, minimumApiRevision: 1 },
+    codingAgentMcp: { apiRevision: 6, minimumApiRevision: 1 },
     ok: true,
     status: 'alive',
   })

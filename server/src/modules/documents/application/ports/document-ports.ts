@@ -40,6 +40,7 @@ import type {
   UpdateDocumentCommentRequest,
   DeleteDocumentCommentRequest,
   ResolveDocumentSearchAccessRequest,
+  ReplaceDocumentContentRequest,
   RestoreDocumentVersionRequest,
   StoredDocumentComment,
   StoredDocumentPresence,
@@ -198,6 +199,14 @@ export interface DocumentOperationsPort {
   applyOperations(
     input: ApplyDocumentOperationsRequest,
   ): Promise<ApplyDocumentOperationsResponse>
+  /**
+   * Replaces the title and whole body of a page or template in one revision. Relations owned by
+   * blocks that no longer exist are removed with them.
+   *
+   * @param input - Page, expected revision, and new title or blocks.
+   * @returns Current Document detail after the change.
+   */
+  replaceContent(input: ReplaceDocumentContentRequest): Promise<DocumentDetail>
 }
 
 /** Reads and restores immutable document versions. */

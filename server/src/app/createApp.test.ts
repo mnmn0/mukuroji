@@ -118,7 +118,7 @@ test('keeps liveness independent from the runtime-control provider', async () =>
 
   expect(response.status).toBe(200)
   expect(await response.json()).toEqual({
-    codingAgentMcp: { apiRevision: 5, minimumApiRevision: 1 },
+    codingAgentMcp: { apiRevision: 6, minimumApiRevision: 1 },
     ok: true,
     status: 'alive',
   })
@@ -139,7 +139,7 @@ test('wires deployment commit provenance into liveness', async () => {
   expect(response.status).toBe(200)
   expect(await response.json()).toEqual({
     applicationCommitSha: '0123456789abcdef0123456789abcdef01234567',
-    codingAgentMcp: { apiRevision: 5, minimumApiRevision: 1 },
+    codingAgentMcp: { apiRevision: 6, minimumApiRevision: 1 },
     ok: true,
     status: 'alive',
   })
