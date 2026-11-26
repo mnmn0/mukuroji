@@ -337,15 +337,7 @@ function scanBlocks(
  * @returns Whether a comment is open after the line.
  */
 function opensHtmlComment(line: string, open: boolean): boolean {
-  let inside = open
-  let position = 0
-  while (position < line.length) {
-    const next = inside ? line.indexOf('-->', position) : line.indexOf('<!--', position)
-    if (next < 0) break
-    position = next + (inside ? 3 : 4)
-    inside = !inside
-  }
-  return inside
+  return removeHtmlComments(line, open).open
 }
 
 /**
@@ -386,8 +378,9 @@ function splitLongParagraph(text: string): string[] {
 }
 
 /**
- * Returns the lines of paragraph Markdown that are outside fenced code, including fences nested
- * in lists or quotes, so code that looks like Markdown is never read as Markdown.
+ * Returns the lines of paragraph Markdown that are outside fenced code (including fences nested
+ * in lists or quotes) and outside HTML comments, so text that is not shown as Markdown is never
+ * read as Markdown.
  *
  * @param text - Paragraph Markdown.
  * @returns Lines outside fenced code, in order.
@@ -395,20 +388,47 @@ function splitLongParagraph(text: string): string[] {
 function linesOutsideFences(text: string): string[] {
   const lines: string[] = []
   let fence: string | undefined
+  let comment = false
   for (const line of text.split('\n')) {
     const content = stripContainerMarkers(line)
-    if (fence !== undefined) {
+    if (!comment && fence !== undefined) {
       if (closesFence(content, fence)) fence = undefined
       continue
     }
-    const open = /^(`{3,}|~{3,})/u.exec(content)
+    const open = comment ? null : /^(`{3,}|~{3,})/u.exec(content)
     if (open?.[1] !== undefined) {
       fence = open[1]
       continue
     }
-    lines.push(line)
+    const visible = removeHtmlComments(line, comment)
+    comment = visible.open
+    if (visible.text.trim() !== '' || line.trim() === '') lines.push(visible.text)
   }
   return lines
+}
+
+/**
+ * Removes the parts of a line inside HTML comments.
+ *
+ * @param line - Source line.
+ * @param open - Whether a comment was open before the line.
+ * @returns The text outside comments and whether a comment is open after the line.
+ */
+function removeHtmlComments(line: string, open: boolean): { text: string, open: boolean } {
+  let inside = open
+  let text = ''
+  let position = 0
+  while (position < line.length) {
+    const next = inside ? line.indexOf('-->', position) : line.indexOf('<!--', position)
+    if (next < 0) {
+      if (!inside) text += line.slice(position)
+      break
+    }
+    if (!inside) text += line.slice(position, next)
+    position = next + (inside ? 3 : 4)
+    inside = !inside
+  }
+  return { text, open: inside }
 }
 
 /**
