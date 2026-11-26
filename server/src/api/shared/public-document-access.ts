@@ -22,6 +22,7 @@ import {
   type DocumentApiPrincipal,
 } from '../../modules/documents/adapter-in/http/document-api'
 import type { AuthenticatedDeveloperCredential } from '../../modules/developer-platform/application/ports'
+import { readCredentialPrincipalKey } from '../../modules/developer-platform/credential-principal'
 import { WorkspaceAccessError } from '../../modules/workspace-access'
 import {
   PublicApiServiceError,
@@ -221,7 +222,8 @@ function createDocumentWriteAudit(
 }
 
 /**
- * Digests one Public API write of one credential, so a retry of it maps to the same value.
+ * Digests one Public API write of one caller, so a retry of it maps to the same value. The caller
+ * is the stable principal, so a retry after an OAuth token refresh maps to the same value too.
  *
  * @param credential - Authenticated developer credential.
  * @param method - HTTP method.
@@ -236,7 +238,7 @@ function hashPublicWrite(
   idempotencyKey: string,
 ): string {
   return createHash('sha256')
-    .update(`${credential.workspaceId}\0${credential.credentialId}\0${method}\0${path}\0${idempotencyKey}`)
+    .update(`${credential.workspaceId}\0${readCredentialPrincipalKey(credential)}\0${method}\0${path}\0${idempotencyKey}`)
     .digest('hex')
 }
 

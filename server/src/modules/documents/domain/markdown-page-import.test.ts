@@ -139,6 +139,14 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(convert('- [ ] task\n- plain').blocks.map(({ type }) => type)).toEqual(['paragraph'])
   })
 
+  test('keeps a table or task list nested in a list item in the paragraph Markdown', () => {
+    const nestedTable = '- item\n\n  | Name |\n  | --- |\n  | value |'
+    expect(convert(nestedTable).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: nestedTable }])
+    const nestedTasks = '1. step\n\n   - [ ] task'
+    expect(convert(nestedTasks).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: nestedTasks }])
+    expect(convert('- item\n\n| Name |\n| --- |\n| value |').blocks.map(({ type }) => type)).toEqual(['paragraph', 'table'])
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])

@@ -212,9 +212,14 @@ function scanBlocks(
 
   /**
    * Tells whether the line starts a new top-level block: at the start of the file, after a blank
-   * line, or right after a block that is not paragraph Markdown.
+   * line, or right after a block that is not paragraph Markdown. An indented line after paragraph
+   * Markdown may continue a list item or quote there, so it stays in that paragraph.
    */
-  const atBlockStart = (index: number) => index === 0 || lines[index - 1]?.trim() === '' || paragraph.length === 0
+  const atBlockStart = (index: number) => {
+    if (paragraph.length === 0) return true
+    if (/^[ \t]/u.test(lines[index] ?? '')) return false
+    return index === 0 || lines[index - 1]?.trim() === ''
+  }
 
   /** Whether an HTML comment in the open paragraph is still open. */
   let paragraphComment = false
