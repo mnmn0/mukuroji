@@ -1,8 +1,9 @@
-import type {
-  AgentRunArtifactStatus,
-  AgentRunPullRequestStatus,
-  ConnectorInstallation,
-  WorkItemArtifactStatusesResponse,
+import {
+  WORK_ITEM_ARTIFACT_STATUS_MAX_ITEMS,
+  type AgentRunArtifactStatus,
+  type AgentRunPullRequestStatus,
+  type ConnectorInstallation,
+  type WorkItemArtifactStatusesResponse,
 } from '@mukuroji/contracts'
 import { ConnectorRuntimeError } from '../../modules/developer-platform/connector-oauth'
 import {
@@ -30,8 +31,11 @@ export const ARTIFACT_STATUS_REFRESH_INTERVAL_MS = 60_000
  */
 export const ARTIFACT_STATUS_REFRESH_BUDGET_MS = 8_000
 
-/** Report pages read to find a Work Item's newest pull request artifacts. */
-const maximumReportPages = 5
+/**
+ * Report pages read to find a Work Item's newest pull request artifacts. Reading stops sooner once
+ * {@link WORK_ITEM_ARTIFACT_STATUS_MAX_ITEMS} are found.
+ */
+const maximumReportPages = 20
 
 /** Pull requests read from the provider at once. */
 const readConcurrency = 5
@@ -75,7 +79,7 @@ export async function readWorkItemArtifactStatuses(
   dependencies: ArtifactStatusDependencies,
   now: Date = new Date(),
 ): Promise<WorkItemArtifactStatusesResponse> {
-  const references = collectPullRequestArtifacts(await readNewestReports(target, dependencies.agentRuns))
+  const { references, complete } = await readNewestReferences(target, dependencies.agentRuns)
   // The allowlist is applied to every read, so a repository removed from it stops showing as
   // verified at once, even for a merged pull request that is never read again.
   const { artifactRepositories } = await dependencies.agentRuns.getSettings(target.directoryId, target.teamId)
@@ -103,6 +107,7 @@ export async function readWorkItemArtifactStatuses(
       // A reference another viewer is refreshing for the first time shows as unavailable until then.
       return stored.get(reference.url) ?? createUnverifiedArtifactStatus(reference, 'unavailable', now)
     }),
+    ...(complete ? {} : { incomplete: true as const }),
   }
 }
 
@@ -164,25 +169,29 @@ async function refreshWithinBudget(
 }
 
 /**
- * Reads the Work Item's newest reports, enough to find its newest pull request artifacts.
+ * Reads the Work Item's newest reports until they name enough pull requests, or none are left.
  *
  * @param target - Work Item.
  * @param agentRuns - Report store.
- * @returns Reports, newest first.
+ * @returns The newest distinct pull request references, newest report first, and whether every
+ * report that could name another one was read.
  */
-async function readNewestReports(
+async function readNewestReferences(
   target: ArtifactStatusTarget,
   agentRuns: Pick<AgentRunStore, 'listWorkItemReports'>,
-): Promise<StoredAgentRunReport[]> {
+): Promise<{ references: PullRequestArtifactReference[], complete: boolean }> {
   const reports: StoredAgentRunReport[] = []
   let cursor: string | undefined
   for (let page = 0; page < maximumReportPages; page += 1) {
     const result = await agentRuns.listWorkItemReports(target.directoryId, target.teamId, target.workItemId, cursor, 100)
     reports.push(...result.reports)
-    if (result.nextCursor === undefined) break
+    const references = collectPullRequestArtifacts(reports)
+    if (result.nextCursor === undefined || references.length >= WORK_ITEM_ARTIFACT_STATUS_MAX_ITEMS) {
+      return { references, complete: true }
+    }
     cursor = result.nextCursor
   }
-  return reports
+  return { references: collectPullRequestArtifacts(reports), complete: false }
 }
 
 /**
@@ -233,8 +242,12 @@ async function checkReference(
   }
 }
 
-/** Connected installations tried for one pull request, so a Workspace with many accounts stays bounded. */
-const maximumInstallationsPerRead = 3
+/**
+ * Connected installations tried for one pull request, so a Workspace with many accounts stays
+ * bounded. The account named like the repository owner is tried first, so the cap rarely matters,
+ * and the read's time budget stops the rest.
+ */
+const maximumInstallationsPerRead = 10
 
 /** Connector engine method the pull request reader uses. */
 export type PullRequestConnectorEngine = {
@@ -275,10 +288,11 @@ export function createConnectorPullRequestStatusReader(connectors: PullRequestRe
     if (reference.provider !== 'github') return { kind: 'unverified', reason: 'unsupported-provider' }
     let installations: ConnectorInstallation[]
     try {
-      installations = (await connectors.listConnectors(workspaceId))
-        .filter((installation) => installation.provider === 'github' &&
-          (installation.status === 'connected' || installation.status === 'degraded'))
-        .slice(0, maximumInstallationsPerRead)
+      installations = orderInstallationsForRepository(
+        (await connectors.listConnectors(workspaceId)).filter((installation) => installation.provider === 'github' &&
+          (installation.status === 'connected' || installation.status === 'degraded')),
+        reference.repository,
+      ).slice(0, maximumInstallationsPerRead)
     } catch (error) {
       console.error(error)
       return { kind: 'unverified', reason: 'unavailable' }
@@ -310,6 +324,23 @@ export function createConnectorPullRequestStatusReader(connectors: PullRequestRe
     }
     return result
   }
+}
+
+/**
+ * Orders installations so the ones whose account is named like the repository owner come first;
+ * the others keep their order.
+ *
+ * @param installations - Connected GitHub installations.
+ * @param repository - Lowercase `owner/repo` path.
+ * @returns The installations in the order to try.
+ */
+function orderInstallationsForRepository(
+  installations: ConnectorInstallation[],
+  repository: string,
+): ConnectorInstallation[] {
+  const owner = repository.split('/')[0]
+  const ownsRepository = (installation: ConnectorInstallation) => installation.externalAccountName?.toLowerCase() === owner
+  return [...installations.filter(ownsRepository), ...installations.filter((installation) => !ownsRepository(installation))]
 }
 
 /**

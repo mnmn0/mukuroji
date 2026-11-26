@@ -72,6 +72,31 @@ test('a failed status or a running check wins over passing runs, and a merge rep
   })
 })
 
+test('reads check runs past the first page, and fails rather than show a partial list', async () => {
+  /**
+   * Builds a requester whose check runs span pages.
+   *
+   * @param pages - Check runs of each page.
+   * @returns The requester.
+   */
+  function pagedRuns(pages: Array<Array<Record<string, unknown>>>) {
+    const total = pages.reduce((count, page) => count + page.length, 0)
+    return async (request: ConnectorProviderRequest): Promise<ConnectorProviderResponse> => {
+      if (request.path !== `repos/org/repo/commits/${sha}/check-runs`) return requester(openResponses)(request)
+      const page = Number(request.query?.page ?? '1')
+      return { status: 200, payload: { total_count: total, check_runs: pages[page - 1] ?? [] } }
+    }
+  }
+  const passed = { status: 'completed', conclusion: 'success' }
+  const fiftyOnePassed = [Array.from({ length: 50 }, () => passed), [passed]]
+  expect((await readGitHubPullRequest(pagedRuns(fiftyOnePassed), { repository: 'org/repo', number: 7 })).checks).toBe('success')
+  const failedOnSecondPage = [Array.from({ length: 50 }, () => passed), [{ status: 'completed', conclusion: 'failure' }]]
+  expect((await readGitHubPullRequest(pagedRuns(failedOnSecondPage), { repository: 'org/repo', number: 7 })).checks).toBe('failure')
+  const tooMany = Array.from({ length: 11 }, () => Array.from({ length: 50 }, () => passed))
+  await expect(readGitHubPullRequest(pagedRuns(tooMany), { repository: 'org/repo', number: 7 }))
+    .rejects.toMatchObject({ code: 'ConnectorProviderResponseMalformed' })
+})
+
 test('a hidden pull request, a bad reference, or a malformed payload fails with a connector error', async () => {
   await expect(readGitHubPullRequest(requester({ 'repos/org/repo/pulls/7': { status: 404, payload: undefined } }), { repository: 'org/repo', number: 7 }))
     .rejects.toMatchObject({ code: 'ConnectorExternalResourceMissing' })

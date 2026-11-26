@@ -2,12 +2,12 @@ import {
   AGENT_RUN_MAX_LEASE_MINUTES,
   AGENT_RUN_MIN_LEASE_MINUTES,
   AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX,
-  AGENT_SETTINGS_ARTIFACT_REPOSITORY_PATTERN,
   AGENT_SETTINGS_BRIEF_MAX_BYTES,
   AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES,
   AGENT_SETTINGS_MAX_PROJECT_BRIEFS,
   AGENT_SETTINGS_MAX_READY_STATUSES,
   AGENT_SETTINGS_MAX_RESUMABLE_STATUSES,
+  isArtifactRepositoryPath,
   type AgentSettings,
   type CustomFieldType,
   type UpdateAgentSettingsRequest,
@@ -194,7 +194,7 @@ export function validateAgentSettingsDraft(draft: AgentSettingsDraft): AgentSett
   const leaseMinutesValid = leaseMinutes !== undefined
   const artifactRepositories = readArtifactRepositoryLines(draft.artifactRepositories)
   const invalidArtifactRepositories = artifactRepositories.filter((repository) =>
-    !AGENT_SETTINGS_ARTIFACT_REPOSITORY_PATTERN.test(repository))
+    !isArtifactRepositoryPath(repository))
   const tooManyArtifactRepositories = artifactRepositories.length > AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX
   return {
     leaseMinutesValid,

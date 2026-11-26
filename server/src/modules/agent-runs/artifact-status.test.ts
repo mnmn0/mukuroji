@@ -53,10 +53,13 @@ test('status rows are keyed under the Work Item, saved only when newer, and pars
     url, provider: 'github', repository: 'org/repo', number: 1, verification: 'verified', checkedAt: '2026-11-26T00:00:00.000Z',
     pullRequest: { state: 'open', draft: false, headSha: 'a'.repeat(40), checks: 'pending', review: 'none' },
   } as const
-  const row = { schemaVersion: AGENT_RUN_ARTIFACT_STATUS_SCHEMA_VERSION, workItemId: 'item', recordKey: key, artifactStatus: status }
-  expect(parseArtifactStatus(row, 'item')).toEqual(status)
-  expect(() => parseArtifactStatus({ ...row, workItemId: 'other' }, 'item')).toThrow()
-  expect(() => parseArtifactStatus({ ...row, artifactStatus: { ...status, pullRequest: { ...status.pullRequest, checks: 'green' } } }, 'item')).toThrow()
+  const row = { schemaVersion: AGENT_RUN_ARTIFACT_STATUS_SCHEMA_VERSION, workspaceId: 'workspace', workItemId: 'item', recordKey: key, artifactStatus: status }
+  expect(parseArtifactStatus(row, 'workspace', 'item')).toEqual(status)
+  expect(() => parseArtifactStatus({ ...row, workItemId: 'other' }, 'workspace', 'item')).toThrow()
+  // A row naming another Workspace, or none, is corrupt.
+  expect(() => parseArtifactStatus({ ...row, workspaceId: 'other' }, 'workspace', 'item')).toThrow()
+  expect(() => parseArtifactStatus({ ...row, workspaceId: undefined }, 'workspace', 'item')).toThrow()
+  expect(() => parseArtifactStatus({ ...row, artifactStatus: { ...status, pullRequest: { ...status.pullRequest, checks: 'green' } } }, 'workspace', 'item')).toThrow()
 
   const sent: Array<GetCommand | UpdateCommand> = []
   let conflict = false

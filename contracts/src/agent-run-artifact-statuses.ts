@@ -88,6 +88,11 @@ export type WorkItemArtifactStatusesResponse = {
   workItemId: string
   /** One entry per distinct reported pull request URL, newest report first. */
   items: AgentRunArtifactStatus[]
+  /**
+   * Present when the Work Item has more reports than one read scans, so an older reported pull
+   * request may be missing from `items`.
+   */
+  incomplete?: true
 }
 
 /** Most pull request artifacts of one Work Item that Mukuroji verifies. */
@@ -98,3 +103,20 @@ export const AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX = 50
 
 /** Pattern of one allowlisted repository: `owner/repo`, or a GitLab group path ending in the project. */
 export const AGENT_SETTINGS_ARTIFACT_REPOSITORY_PATTERN = /^[a-z0-9_.-]+(?:\/[a-z0-9_.-]+){1,8}$/
+
+/** Longest allowlisted repository path, in characters. */
+export const AGENT_SETTINGS_ARTIFACT_REPOSITORY_MAX_LENGTH = 256
+
+/**
+ * Checks that a value is one normalized allowlisted repository path: lowercase, within
+ * {@link AGENT_SETTINGS_ARTIFACT_REPOSITORY_MAX_LENGTH}, and matching
+ * {@link AGENT_SETTINGS_ARTIFACT_REPOSITORY_PATTERN}.
+ *
+ * @param value - Untrusted value.
+ * @returns True for a repository path the Team allowlist may hold.
+ */
+export function isArtifactRepositoryPath(value: unknown): value is string {
+  return typeof value === 'string' &&
+    value.length <= AGENT_SETTINGS_ARTIFACT_REPOSITORY_MAX_LENGTH &&
+    AGENT_SETTINGS_ARTIFACT_REPOSITORY_PATTERN.test(value)
+}

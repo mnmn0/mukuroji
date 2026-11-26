@@ -230,3 +230,61 @@ test('the connector reader tries each connected GitHub account and maps failures
   })
   expect(await outage('workspace', reference)).toEqual({ kind: 'unverified', reason: 'unavailable' })
 })
+
+test('the connector reader tries the repository owner\'s account first and reaches accounts past the third', async () => {
+  const reference = { url: 'https://github.com/org/repo/pull/1', provider: 'github' as const, repository: 'org/repo', number: 1 }
+  const tried: string[] = []
+  const reader = createConnectorPullRequestStatusReader({
+    listConnectors: async () => [
+      installation('a'), installation('b'), installation('c'), installation('d'),
+      installation('owner', { externalAccountName: 'Org' }),
+    ],
+    getEngine: async () => ({
+      readPullRequest: async (_workspaceId, installationId) => {
+        tried.push(installationId)
+        if (installationId !== 'd') throw new ConnectorRuntimeError('ConnectorExternalResourceMissing', 'Missing.')
+        return openPullRequest
+      },
+    }),
+  })
+
+  expect(await reader('workspace', reference)).toEqual({ kind: 'verified', pullRequest: openPullRequest })
+  // The owner's account goes first; the fourth other account is still tried.
+  expect(tried).toEqual(['owner', 'a', 'b', 'c', 'd'])
+})
+
+test('reads report pages until a pull request is found, and flags a read that stops before the oldest report', async () => {
+  /**
+   * Serves reports 100 at a time, newest first.
+   *
+   * @param all - Every report, newest first.
+   * @param pages - Receives the cursor of each page read.
+   * @returns The report store.
+   */
+  function paged(all: StoredAgentRunReport[], pages: Array<string | undefined>): ArtifactStatusDependencies['agentRuns'] {
+    return {
+      listWorkItemReports: async (_directoryId, _teamId, _workItemId, cursor) => {
+        pages.push(cursor)
+        const start = cursor === undefined ? 0 : Number(cursor)
+        const end = start + 100
+        return { reports: all.slice(start, end), ...(end < all.length ? { nextCursor: String(end) } : {}) }
+      },
+      getSettings: async () => ({ ...createDefaultAgentSettings('team'), workspaceDefaultsRevision: 0 }),
+    }
+  }
+  const reader: PullRequestStatusReader = async () => ({ kind: 'verified', pullRequest: openPullRequest })
+  const now = new Date('2026-11-26T01:00:00.000Z')
+  // 600 reports without a pull request come after the one that names it.
+  const older = [...Array.from({ length: 600 }, (_, index) => report(700 - index, [])), report(1, ['https://github.com/org/repo/pull/1'])]
+  const olderPages: Array<string | undefined> = []
+  const found = await readWorkItemArtifactStatuses(
+    target, { ...dependencies([], reader), agentRuns: paged(older, olderPages) }, now,
+  )
+  expect(found.items.map((item) => item.number)).toEqual([1])
+  expect(found.incomplete).toBeUndefined()
+  expect(olderPages).toHaveLength(7)
+
+  const tooMany = Array.from({ length: 2_100 }, (_, index) => report(3_000 - index, []))
+  const truncated = await readWorkItemArtifactStatuses(target, { ...dependencies([], reader), agentRuns: paged(tooMany, []) }, now)
+  expect(truncated).toMatchObject({ items: [], incomplete: true })
+})

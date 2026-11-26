@@ -122,7 +122,7 @@ export class DynamoDbAgentRunArtifactStatusStore implements AgentRunArtifactStat
       },
       ConsistentRead: true,
     }))).Item))
-    return items.flatMap((item) => item === undefined ? [] : [parseArtifactStatus(item, workItemId)])
+    return items.flatMap((item) => item === undefined ? [] : [parseArtifactStatus(item, directoryId, workItemId)])
   }
 
   /** @inheritdoc */
@@ -204,14 +204,17 @@ function isConditionalCheckFailure(error: unknown): boolean {
  * Parses one stored artifact status row, refusing a row that does not match its key.
  *
  * @param item - Stored row.
+ * @param directoryId - Workspace whose partition the row was read from.
  * @param workItemId - Work Item the row was queried for.
  * @returns The status.
- * @throws AgentRunError temporarily_unavailable for a corrupt row.
+ * @throws AgentRunError temporarily_unavailable for a corrupt row, including one that names
+ * another Workspace, since tenant export and deletion find rows by that attribute.
  */
-export function parseArtifactStatus(item: Record<string, unknown>, workItemId: string): AgentRunArtifactStatus {
+export function parseArtifactStatus(item: Record<string, unknown>, directoryId: string, workItemId: string): AgentRunArtifactStatus {
   const status = readArtifactStatus(item.artifactStatus)
   if (
     item.schemaVersion !== AGENT_RUN_ARTIFACT_STATUS_SCHEMA_VERSION ||
+    item.workspaceId !== directoryId ||
     item.workItemId !== workItemId ||
     status === undefined ||
     item.recordKey !== artifactStatusRecordKey(workItemId, status.url)

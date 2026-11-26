@@ -336,6 +336,10 @@ describe('checkAgentRunPartition', () => {
     expect(result.counts.artifactStatuses).toBe(2)
     expect(codes([...healthyRows(), { ...statusRow, workItemId: 'task-2' }])).toEqual(['AGENT_RUN_ROW_MALFORMED'])
     expect(codes([...healthyRows(), { ...refreshRow, refreshedAt: 'soon' }])).toEqual(['AGENT_RUN_ROW_MALFORMED'])
+    // Tenant export and deletion find rows by Workspace, so a row naming another one, or none, is malformed.
+    expect(codes([...healthyRows(), { ...statusRow, workspaceId: 'other-workspace' }])).toEqual(['AGENT_RUN_ROW_MALFORMED'])
+    expect(codes([...healthyRows(), { ...refreshRow, workspaceId: 'other-workspace' }])).toEqual(['AGENT_RUN_ROW_MALFORMED'])
+    expect(codes([...healthyRows(), { ...refreshRow, workspaceId: undefined }])).toEqual(['AGENT_RUN_ROW_MALFORMED'])
   })
 
   test('never reports a member ID or an instance hash', () => {

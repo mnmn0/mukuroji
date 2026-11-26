@@ -19,6 +19,9 @@ const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
  */
 const CHECK_RUNS_PAGE_SIZE = 50
 
+/** Check run pages read before the runs are treated as too many to aggregate. */
+const MAXIMUM_CHECK_RUN_PAGES = 10
+
 /** Reviews read; a pull request rarely has more, and later ones are read only when it does. */
 const REVIEWS_PAGE_SIZE = 100
 
@@ -78,32 +81,25 @@ export async function readGitHubPullRequest(
  * @param request - Authenticated provider requester.
  * @param repositoryPath - `repos/{owner}/{repo}` path.
  * @param sha - Head commit SHA.
- * @returns `failure` when any failed, `pending` while any runs or more exist than one page shows,
- * `success` when all passed, and `none` when the commit has neither.
+ * @returns `failure` when any failed, `pending` while any runs, `success` when all passed, and
+ * `none` when the commit has neither.
+ * @throws ConnectorRuntimeError ConnectorProviderResponseMalformed when the check runs fill more
+ * than {@link MAXIMUM_CHECK_RUN_PAGES} pages, since a partial list could hide a failed run.
  */
 async function readHeadChecks(
   request: ConnectorProviderRequester,
   repositoryPath: string,
   sha: string,
 ): Promise<AgentRunPullRequestCheckState> {
-  const [runsResponse, statusResponse] = await Promise.all([
-    request({
-      method: 'GET',
-      path: `${repositoryPath}/commits/${sha}/check-runs`,
-      query: { per_page: String(CHECK_RUNS_PAGE_SIZE), filter: 'latest' },
-      allowedStatuses: [404, 410],
-    }),
+  const [{ runs, total: totalRuns }, statusResponse] = await Promise.all([
+    readCheckRuns(request, repositoryPath, sha),
     request({ method: 'GET', path: `${repositoryPath}/commits/${sha}/status`, allowedStatuses: [404, 410] }),
   ])
-  if (runsResponse.status === 404 || runsResponse.status === 410 || statusResponse.status === 404 || statusResponse.status === 410) {
-    throw missingPullRequest()
-  }
-  const runsPayload = requireObject(runsResponse.payload, 'GitHub check runs')
-  const runs = Array.isArray(runsPayload.check_runs) ? runsPayload.check_runs : []
-  const totalRuns = typeof runsPayload.total_count === 'number' ? runsPayload.total_count : runs.length
+  if (statusResponse.status === 404 || statusResponse.status === 410) throw missingPullRequest()
   const statusPayload = requireObject(statusResponse.payload, 'GitHub combined status')
   const totalStatuses = typeof statusPayload.total_count === 'number' ? statusPayload.total_count : 0
   let failed = false
+  // GitHub counting more runs than it listed means some are still being created.
   let pending = totalRuns > runs.length
   for (const run of runs) {
     if (!isObject(run)) throw malformed('GitHub check run is invalid.')
@@ -117,6 +113,39 @@ async function readHeadChecks(
   if (failed) return 'failure'
   if (pending) return 'pending'
   return totalRuns + totalStatuses === 0 ? 'none' : 'success'
+}
+
+/**
+ * Reads every latest check run of a commit, page by page.
+ *
+ * @param request - Authenticated provider requester.
+ * @param repositoryPath - `repos/{owner}/{repo}` path.
+ * @param sha - Commit SHA.
+ * @returns The check runs, unvalidated, and the count GitHub reports.
+ * @throws ConnectorRuntimeError ConnectorProviderResponseMalformed when more than
+ * {@link MAXIMUM_CHECK_RUN_PAGES} pages exist.
+ */
+async function readCheckRuns(
+  request: ConnectorProviderRequester,
+  repositoryPath: string,
+  sha: string,
+): Promise<{ runs: unknown[], total: number }> {
+  const runs: unknown[] = []
+  for (let page = 1; page <= MAXIMUM_CHECK_RUN_PAGES; page += 1) {
+    const response = await request({
+      method: 'GET',
+      path: `${repositoryPath}/commits/${sha}/check-runs`,
+      query: { per_page: String(CHECK_RUNS_PAGE_SIZE), filter: 'latest', page: String(page) },
+      allowedStatuses: [404, 410],
+    })
+    if (response.status === 404 || response.status === 410) throw missingPullRequest()
+    const payload = requireObject(response.payload, 'GitHub check runs')
+    const pageRuns = Array.isArray(payload.check_runs) ? payload.check_runs : []
+    runs.push(...pageRuns)
+    const total = typeof payload.total_count === 'number' ? payload.total_count : runs.length
+    if (runs.length >= total || pageRuns.length < CHECK_RUNS_PAGE_SIZE) return { runs, total }
+  }
+  throw malformed('GitHub check runs are too many to read in full.')
 }
 
 /**

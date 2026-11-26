@@ -371,16 +371,23 @@ function classifyRecordKey(recordKey: unknown): AgentRunIntegrityRecordKind {
  *
  * @param item - Stored row.
  * @param kind - Kind the sort key names.
+ * @param directoryId - Workspace whose partition the row was read from; the row must name it.
  * @returns True when the row matches its key and holds a valid value.
  */
-function isArtifactRowValid(item: Record<string, unknown>, kind: 'artifact-status' | 'artifact-refresh'): boolean {
+function isArtifactRowValid(
+  item: Record<string, unknown>,
+  kind: 'artifact-status' | 'artifact-refresh',
+  directoryId: string,
+): boolean {
   const { workItemId } = item
   if (!isNonEmptyString(workItemId)) return false
   if (kind === 'artifact-refresh') {
-    return item.recordKey === artifactRefreshRecordKey(workItemId) && isTimestamp(item.refreshedAt)
+    return item.recordKey === artifactRefreshRecordKey(workItemId) &&
+      item.workspaceId === directoryId &&
+      isTimestamp(item.refreshedAt)
   }
   try {
-    parseArtifactStatus(item, workItemId)
+    parseArtifactStatus(item, directoryId, workItemId)
     return true
   } catch {
     return false
@@ -628,7 +635,7 @@ export function checkAgentRunPartition(team: AgentRunIntegrityTeam, rows: readon
       case 'artifact-status':
       case 'artifact-refresh':
         counts.artifactStatuses += 1
-        if (!isArtifactRowValid(item, kind)) findings.push({ code: 'AGENT_RUN_ROW_MALFORMED', sample: at({ recordKind: kind }) })
+        if (!isArtifactRowValid(item, kind, team.directoryId)) findings.push({ code: 'AGENT_RUN_ROW_MALFORMED', sample: at({ recordKind: kind }) })
         break
       case 'unknown':
         findings.push({ code: 'AGENT_RUN_ROW_UNRECOGNIZED', sample: at({ recordKind: kind }) })

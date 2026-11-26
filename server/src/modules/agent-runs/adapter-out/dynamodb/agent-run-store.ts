@@ -12,6 +12,8 @@ import {
   AGENT_RUN_SCHEMA_VERSION,
   AGENT_SETTINGS_SCHEMA_VERSION,
   AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS,
+  AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX,
+  isArtifactRepositoryPath,
   type AgentRunOutcome,
   type AgentRunReportAnswer,
   type AgentSettings,
@@ -1201,7 +1203,9 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
   const artifactRepositories = item.artifactRepositories === undefined ? [] : item.artifactRepositories
   if (
     !Array.isArray(artifactRepositories) ||
-    !artifactRepositories.every((repository): repository is string => typeof repository === 'string' && repository !== '') ||
+    artifactRepositories.length > AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX ||
+    !artifactRepositories.every(isArtifactRepositoryPath) ||
+    new Set(artifactRepositories).size !== artifactRepositories.length ||
     !Array.isArray(readyStatusIds) ||
     !readyStatusIds.every((id): id is string => typeof id === 'string' && id !== '') ||
     !Array.isArray(resumableStatusIds) ||

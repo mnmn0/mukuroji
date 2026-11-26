@@ -12,10 +12,10 @@ import {
   AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES,
   AGENT_SETTINGS_MAX_PROJECT_BRIEFS,
   AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX,
-  AGENT_SETTINGS_ARTIFACT_REPOSITORY_PATTERN,
   AGENT_SETTINGS_MAX_READY_STATUSES,
   AGENT_SETTINGS_MAX_RESUMABLE_STATUSES,
   AGENT_SETTINGS_SCHEMA_VERSION,
+  isArtifactRepositoryPath,
   type AgentRun,
   type AgentRunFinishOutcome,
   type AgentRunOutcome,
@@ -790,7 +790,7 @@ function readArtifactRepositories(value: unknown): string[] {
   }
   const repositories = value.map((entry, index) => {
     const repository = typeof entry === 'string' ? entry.trim().toLowerCase() : ''
-    if (repository.length > 256 || !AGENT_SETTINGS_ARTIFACT_REPOSITORY_PATTERN.test(repository)) {
+    if (!isArtifactRepositoryPath(repository)) {
       throw new AgentRunError(
         'validation_failed',
         'Each artifact repository must be an owner/repo path.',

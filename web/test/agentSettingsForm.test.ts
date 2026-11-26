@@ -183,6 +183,10 @@ describe('Agent settings options', () => {
 
     expect(validateAgentSettingsDraft({ ...draft, artifactRepositories: 'https://github.com/org/repo\nrepo' }))
       .toMatchObject({ valid: false, invalidArtifactRepositories: ['https://github.com/org/repo', 'repo'] })
+    // The server's length limit applies while typing too, not only on save.
+    const long = `org/${'a'.repeat(253)}`
+    expect(validateAgentSettingsDraft({ ...draft, artifactRepositories: long }))
+      .toMatchObject({ valid: false, invalidArtifactRepositories: [long] })
     const many = Array.from({ length: AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX + 1 }, (_, index) => `org/repo-${index}`).join('\n')
     expect(validateAgentSettingsDraft({ ...draft, artifactRepositories: many }))
       .toMatchObject({ valid: false, tooManyArtifactRepositories: true })
