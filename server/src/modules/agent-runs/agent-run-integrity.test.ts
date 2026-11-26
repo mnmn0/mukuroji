@@ -398,6 +398,8 @@ describe('runAgentRunsIntegrityCheck', () => {
       // Agent usage rows and export receipts belong to members and are not Team partitions.
       'workspace-1#agent-usage#member#demo@example.com': [{ directoryTeamId: 'workspace-1#agent-usage#member#demo@example.com', recordKey: 'bucket' }],
       'workspace-1#agent-usage-batch#member#demo@example.com': [{ directoryTeamId: 'workspace-1#agent-usage-batch#member#demo@example.com', recordKey: 'batch#0' }],
+      // The Workspace agent defaults belong to the Workspace.
+      'workspace-1#workspace': [{ directoryTeamId: 'workspace-1#workspace', recordKey: 'agent-defaults' }],
     })
     const evidence = await runAgentRunsIntegrityCheck({ client, tableName: 'agent-runs', bounds, correlationId: 'corr-1', now })
     expect(evidence).toMatchObject({

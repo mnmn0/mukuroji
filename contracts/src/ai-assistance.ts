@@ -461,6 +461,10 @@ export type AiAssistancePolicy = {
   enabledTasks: AiAssistanceTask[]
   /** Audit record retention in whole days. */
   retentionDays: number
+  /** Optional monthly cap on provider-reported tokens; new generations stop once it is reached. */
+  monthlyTokenLimit?: number
+  /** Optional monthly cap on the estimated cost in USD; new generations stop once it is reached. */
+  monthlyCostLimitUsd?: number
   /** Optimistic-concurrency revision. */
   revision: number
   /** ISO 8601 timestamp of the latest policy mutation. */
@@ -481,8 +485,71 @@ export type UpdateAiAssistancePolicyRequest = {
   enabledTasks: AiAssistanceTask[]
   /** Audit record retention in whole days. */
   retentionDays: number
+  /** Optional monthly token cap; omit for no cap. */
+  monthlyTokenLimit?: number
+  /** Optional monthly estimated-cost cap in USD; omit for no cap. */
+  monthlyCostLimitUsd?: number
   /** Policy revision observed before editing. */
   expectedRevision: number
+}
+
+/** Largest monthly token cap a policy may set. */
+export const AI_ASSISTANCE_MAX_MONTHLY_TOKEN_LIMIT = 1_000_000_000_000
+
+/** Largest monthly estimated-cost cap in USD a policy may set. */
+export const AI_ASSISTANCE_MAX_MONTHLY_COST_LIMIT_USD = 1_000_000
+
+/** Share of a monthly cap at which managers are warned. */
+export const AI_ASSISTANCE_MONTHLY_WARNING_RATIO = 0.8
+
+/** Usage recorded for one scope of a calendar month (UTC). */
+export type AiAssistanceUsageTotals = {
+  /** Generations whose provider usage was recorded. */
+  generations: number
+  /** Provider-reported prompt tokens. */
+  inputTokens: number
+  /** Provider-reported completion tokens. */
+  outputTokens: number
+  /** Sum of the estimated cost in USD of generations that had one. */
+  costUsd: number
+  /** Generations recorded without a trustworthy cost estimate. */
+  costUnavailableGenerations: number
+}
+
+/** Usage of one AI workflow in a month. */
+export type AiAssistanceTaskUsage = AiAssistanceUsageTotals & {
+  /** Workflow the generations served. */
+  task: AiAssistanceTask
+}
+
+/** Usage of one Workspace member in a month. */
+export type AiAssistanceMemberUsage = AiAssistanceUsageTotals & {
+  /** Workspace member who requested the generations. */
+  memberId: string
+}
+
+/** Monthly AI usage and caps shown to Workspace AI policy managers. */
+export type AiAssistanceUsageSummary = {
+  /** Public schema version. */
+  schemaVersion: typeof AI_ASSISTANCE_SCHEMA_VERSION
+  /** Calendar month in UTC, as `YYYY-MM`. */
+  month: string
+  /** Usage of the whole Workspace. */
+  totals: AiAssistanceUsageTotals
+  /** Usage by workflow, largest estimated cost first. */
+  tasks: AiAssistanceTaskUsage[]
+  /** Usage by member, largest estimated cost first. */
+  members: AiAssistanceMemberUsage[]
+  /** Monthly token cap from the Workspace policy, when set. */
+  monthlyTokenLimit?: number
+  /** Monthly estimated-cost cap in USD from the Workspace policy, when set. */
+  monthlyCostLimitUsd?: number
+  /** Whether usage reached the warning share of a cap. */
+  warning: boolean
+  /** Whether usage reached a cap, so new generations are refused. */
+  exhausted: boolean
+  /** Whether the deployment-wide AI switch currently stops every generation. */
+  deploymentPaused: boolean
 }
 
 /** Per-member preference that can opt out of AI processing. */

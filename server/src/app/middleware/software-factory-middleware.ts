@@ -41,6 +41,7 @@ const SOFTWARE_FACTORY_ROUTES: readonly SoftwareFactoryRoute[] = [
       '/api/teams/:teamId/agent-runs/*',
       '/api/teams/:teamId/agent-settings',
       '/api/teams/:teamId/agent-settings/*',
+      '/api/workspace/agent-defaults',
       '/api/v1/work-items/:workItemId/agent-runs',
       '/api/v1/work-items/:workItemId/agent-runs/*',
       '/api/v1/work-items/:workItemId/agent-run-questions',

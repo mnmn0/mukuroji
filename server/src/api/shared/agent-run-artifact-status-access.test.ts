@@ -56,7 +56,7 @@ function dependencies(
     settings,
     agentRuns: {
       listWorkItemReports: async () => ({ reports }),
-      getSettings: async () => ({ ...createDefaultAgentSettings('team'), ...settings }),
+      getSettings: async () => ({ ...createDefaultAgentSettings('team'), ...settings, workspaceDefaultsRevision: 0 }),
     },
     statuses: new InMemoryAgentRunArtifactStatusStore(),
     reader,

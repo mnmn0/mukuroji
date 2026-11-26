@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(665)
-  expect(new Set(inventory).size).toBe(661)
+  expect(inventory).toHaveLength(669)
+  expect(new Set(inventory).size).toBe(665)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -41,6 +41,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/ai-assistance/provider-credentials')
   expect(inventory).toContain('PUT /api/ai-assistance/provider-credentials/:provider')
   expect(inventory).toContain('DELETE /api/ai-assistance/provider-credentials/:provider')
+  // Monthly AI usage for Workspace administrators (#414).
+  expect(inventory).toContain('GET /api/ai-assistance/usage')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
   expect(inventory).toContain('GET /api/planning/updates/template')
   expect(inventory).toContain('PATCH /api/teams/:teamId/workload/profiles/:memberId/time-off/:timeOffId')
@@ -162,6 +164,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('POST /api/teams/:teamId/agent-runs/:runId/release')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-settings')
   expect(inventory).toContain('PUT /api/teams/:teamId/agent-settings')
+  expect(inventory).toContain('GET /api/workspace/agent-defaults')
+  expect(inventory).toContain('PUT /api/workspace/agent-defaults')
   expect(inventory).toContain('GET /api/developer/me/agent-connection')
   expect(inventory).toContain('POST /api/developer/me/api-keys')
   expect(inventory).toContain('POST /api/developer/me/api-keys/:apiKeyId/rotate')
@@ -211,6 +215,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/v1/agent-runs/*')
   expect(inventory).toContain('ALL /api/v1/agent-telemetry/*')
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
+  expect(inventory).toContain('ALL /api/workspace/agent-defaults')
   // Reported pull request status (#353, ADR 0103) is part of Software factory.
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/artifact-statuses')
   expect(inventory).toContain('ALL /api/teams/:teamId/work-items/:workItemId/artifact-statuses')
@@ -223,6 +228,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '590c1368f683098667dadaa36fc5f5c6dc95400c7c96a73b53a1990fdb980f39',
+    '2acd34a185efe4fb84ed6fdcdf438a5a9aeeb003f54248b5845c6c5be6f42010',
   )
 })

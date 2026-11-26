@@ -18,6 +18,7 @@ export function createDisabledAiAssistanceService(): AiAssistanceService {
   return {
     getPolicy: rejectDisabled,
     updatePolicy: rejectDisabled,
+    getUsage: rejectDisabled,
     /** Returns an effective opt-out so workflow controls remain hidden. */
     async getPreference() {
       return {

@@ -11,7 +11,9 @@ import {
   type AgentSettings,
   type CustomFieldType,
   type UpdateAgentSettingsRequest,
+  type UpdateWorkspaceAgentDefaultsRequest,
   type WorkflowDefinition,
+  type WorkspaceAgentDefaults,
   type WorkflowStatusCategory,
   type WorkItemConfiguration,
 } from '@mukuroji/contracts'
@@ -257,6 +259,101 @@ export function createUpdateAgentSettingsRequest(
  */
 export function isAgentSettingsDraftChanged(settings: AgentSettings, draft: AgentSettingsDraft): boolean {
   return createDraftComparisonKey(draft) !== createDraftComparisonKey(createAgentSettingsDraft(settings))
+}
+
+/** Form values of the Workspace agent defaults. */
+export type WorkspaceAgentDefaultsDraft = {
+  /** Lease length as typed. */
+  leaseMinutes: string
+  /** Whether another instance of the same assignee may take over a stalled run. */
+  allowTakeoverAfterLeaseExpiry: boolean
+  /** Whether only Work Items with acceptance criteria are ready. */
+  requireAcceptanceCriteria: boolean
+  /** Default brief in Markdown; blank means none. */
+  brief: string
+}
+
+/** Validation result of a Workspace agent defaults draft. */
+export type WorkspaceAgentDefaultsDraftValidation = {
+  /** Whether the lease is a whole number in range. */
+  leaseMinutesValid: boolean
+  /** UTF-8 size of the brief. */
+  briefBytes: number
+  /** Whether the brief exceeds the per-brief limit. */
+  briefOverLimit: boolean
+  /** Whether the draft can be saved. */
+  valid: boolean
+}
+
+/**
+ * Creates the form values for loaded Workspace agent defaults.
+ *
+ * @param defaults - Defaults as the server returned them.
+ * @returns Draft with every value of the defaults.
+ */
+export function createWorkspaceAgentDefaultsDraft(defaults: WorkspaceAgentDefaults): WorkspaceAgentDefaultsDraft {
+  return {
+    leaseMinutes: String(defaults.leaseMinutes),
+    allowTakeoverAfterLeaseExpiry: defaults.allowTakeoverAfterLeaseExpiry,
+    requireAcceptanceCriteria: defaults.requireAcceptanceCriteria,
+    brief: defaults.brief ?? '',
+  }
+}
+
+/**
+ * Checks a Workspace agent defaults draft against the limits the server enforces.
+ *
+ * @param draft - Form values.
+ * @returns Validation result.
+ */
+export function validateWorkspaceAgentDefaultsDraft(
+  draft: WorkspaceAgentDefaultsDraft,
+): WorkspaceAgentDefaultsDraftValidation {
+  const leaseMinutesValid = readLeaseMinutes(draft.leaseMinutes) !== undefined
+  const briefBytes = measureUtf8Bytes(draft.brief)
+  const briefOverLimit = briefBytes > AGENT_SETTINGS_BRIEF_MAX_BYTES
+  return { leaseMinutesValid, briefBytes, briefOverLimit, valid: leaseMinutesValid && !briefOverLimit }
+}
+
+/**
+ * Builds the full-replacement request for a Workspace agent defaults draft. A blank brief is
+ * omitted, which clears it on the server.
+ *
+ * @param draft - Form values; the lease must be valid.
+ * @param expectedRevision - Revision the draft was edited from.
+ * @returns Request body, or undefined when the lease is not valid.
+ */
+export function createUpdateWorkspaceAgentDefaultsRequest(
+  draft: WorkspaceAgentDefaultsDraft,
+  expectedRevision: number,
+): UpdateWorkspaceAgentDefaultsRequest | undefined {
+  const leaseMinutes = readLeaseMinutes(draft.leaseMinutes)
+  if (leaseMinutes === undefined) return undefined
+  return {
+    expectedRevision,
+    leaseMinutes,
+    allowTakeoverAfterLeaseExpiry: draft.allowTakeoverAfterLeaseExpiry,
+    requireAcceptanceCriteria: draft.requireAcceptanceCriteria,
+    ...(isBlank(draft.brief) ? {} : { brief: draft.brief }),
+  }
+}
+
+/**
+ * Returns whether a Workspace agent defaults draft would save something different.
+ *
+ * @param defaults - Loaded defaults.
+ * @param draft - Form values.
+ * @returns Whether the draft differs in a saved value.
+ */
+export function isWorkspaceAgentDefaultsDraftChanged(
+  defaults: WorkspaceAgentDefaults,
+  draft: WorkspaceAgentDefaultsDraft,
+): boolean {
+  const saved = createWorkspaceAgentDefaultsDraft(defaults)
+  return draft.leaseMinutes.trim() !== saved.leaseMinutes ||
+    draft.allowTakeoverAfterLeaseExpiry !== saved.allowTakeoverAfterLeaseExpiry ||
+    draft.requireAcceptanceCriteria !== saved.requireAcceptanceCriteria ||
+    (isBlank(draft.brief) ? '' : draft.brief) !== saved.brief
 }
 
 /**

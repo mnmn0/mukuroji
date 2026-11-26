@@ -58,6 +58,18 @@ function createService(): AiAssistanceService {
         updatedAt: '1970-01-01T00:00:00.000Z',
       }
     },
+    async getUsage(_actor, month) {
+      return {
+        schemaVersion: AI_ASSISTANCE_SCHEMA_VERSION,
+        month: month ?? '2026-11',
+        totals: { generations: 1, inputTokens: 10, outputTokens: 5, costUsd: 0.01, costUnavailableGenerations: 0 },
+        tasks: [],
+        members: [],
+        warning: false,
+        exhausted: false,
+        deploymentPaused: false,
+      }
+    },
     async updatePolicy(_actor, request) {
       return {
         schemaVersion: AI_ASSISTANCE_SCHEMA_VERSION,
@@ -236,6 +248,31 @@ describe('createAiAssistanceRouter', () => {
 
     expect(response.status).toBe(403)
     expect(policyReadCount).toBe(0)
+  })
+
+  test('serves monthly usage only to a policy manager and passes the month', async () => {
+    let requestedMonth: string | undefined
+    const service: AiAssistanceService = {
+      ...createService(),
+      async getUsage(actor, month) {
+        requestedMonth = month
+        return createService().getUsage(actor, month)
+      },
+    }
+    const denied = await createHarness(false, service).router.request('/api/ai-assistance/usage', {
+      headers: { Authorization: 'Bearer token-1' },
+    })
+    expect(denied.status).toBe(403)
+    expect(requestedMonth).toBeUndefined()
+
+    const response = await createHarness(false, service, true).router.request(
+      '/api/ai-assistance/usage?month=2026-10',
+      { headers: { Authorization: 'Bearer token-1' } },
+    )
+    expect(response.status).toBe(200)
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(requestedMonth).toBe('2026-10')
+    expect(await response.json()).toMatchObject({ month: '2026-10', deploymentPaused: false })
   })
 
   test('prevents caching authenticated policy and preference responses', async () => {

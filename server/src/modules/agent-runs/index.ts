@@ -11,7 +11,10 @@ export {
 export {
   calculateLeaseExpiry,
   createActiveAgentRun,
+  applyWorkspaceAgentDefaults,
   createDefaultAgentSettings,
+  createDefaultWorkspaceAgentDefaults,
+  createSavedWorkspaceAgentDefaults,
   describeHoldingRun,
   finishAgentRun,
   hashAgentInstanceId,
@@ -26,6 +29,8 @@ export {
   readStartAgentRunRequest,
   readTakeOverAgentRunRequest,
   readUpdateAgentSettingsRequest,
+  readUpdateWorkspaceAgentDefaultsRequest,
+  resolveTeamAgentBrief,
   assertAgentSettingsBriefLimits,
   splitAgentRunMutationFence,
   toAgentRun,
@@ -37,6 +42,8 @@ export {
   type ValidatedAgentRunStart,
   type ValidatedAgentRunTakeOver,
   type ValidatedAgentSettingsUpdate,
+  type ResolvedAgentSettings,
+  type ValidatedWorkspaceAgentDefaultsUpdate,
 } from './domain/agent-run'
 export {
   calculateFactoryAnalytics,

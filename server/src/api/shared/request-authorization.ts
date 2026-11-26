@@ -314,6 +314,8 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/workspace/work-calendar/*',
     permission: 'workspace.manage',
   },
+  // Workspace agent defaults are Workspace administration.
+  { method: '*', pathPattern: '/api/workspace/agent-defaults', permission: 'workspace.manage' },
   { method: 'GET', pathPattern: '/api/workspace/*', permission: 'members.read' },
   { method: '*', pathPattern: '/api/workspace/*', permission: 'members.manage' },
   // Closing or reopening a month for every Team is Workspace administration (ADR 0076).
@@ -845,6 +847,12 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'PUT',
     pathPattern: '/api/ai-assistance/policy',
+    permission: 'workspace.manage',
+  },
+  // Monthly AI usage lists spending by member, so only Workspace administrators read it.
+  {
+    method: 'GET',
+    pathPattern: '/api/ai-assistance/usage',
     permission: 'workspace.manage',
   },
   // Registering or removing an external AI provider API key is Workspace administration.

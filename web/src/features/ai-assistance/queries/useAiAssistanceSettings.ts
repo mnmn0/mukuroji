@@ -1,12 +1,14 @@
 import type {
   AiAssistancePolicy,
   AiAssistancePreference,
+  AiAssistanceUsageSummary,
 } from '@mukuroji/contracts'
 import useSWR, { type SWRConfiguration } from 'swr'
 import { AiAssistanceApiError } from '../api/errors'
 import {
   getAiAssistancePolicy,
   getAiAssistancePreference,
+  getAiAssistanceUsage,
 } from '../api/settings'
 
 /**
@@ -44,6 +46,13 @@ type AiAssistancePreferenceQueryKey = readonly [
 /** Stable cache key for the Workspace AI policy. */
 type AiAssistancePolicyQueryKey = readonly [
   'ai-assistance-policy',
+  string,
+  string,
+]
+
+/** Stable cache key for the current month's Workspace AI usage. */
+type AiAssistanceUsageQueryKey = readonly [
+  'ai-assistance-usage',
   string,
   string,
 ]
@@ -109,6 +118,39 @@ export function useAiAssistancePolicy(
     key,
     () => {
       const request = getAiAssistancePolicy(token)
+      return guardRequest ? guardRequest(request) : request
+    },
+    aiAssistanceSettingsQueryConfig,
+  )
+
+  return { ...query, key }
+}
+
+/**
+ * Loads the current month's Workspace AI usage only for an authorized settings administrator.
+ *
+ * @param accessToken - Bearer token for the active Workspace administrator.
+ * @param enabled - Whether management permission allows this resource to load.
+ * @param guardRequest - Optional session guard for authenticated failures.
+ * @param cacheScope - Stable member scope used for the client cache key; never use the bearer token.
+ * @param workspaceId - Stable Workspace scope used for the client cache key.
+ * @returns SWR state and its owned cache key.
+ */
+export function useAiAssistanceUsage(
+  accessToken?: string,
+  enabled = true,
+  guardRequest?: AuthenticatedRequestGuard,
+  cacheScope?: string,
+  workspaceId?: string,
+) {
+  const token = accessToken ?? ''
+  const key: AiAssistanceUsageQueryKey | null = token && enabled && cacheScope && workspaceId
+    ? ['ai-assistance-usage', workspaceId, cacheScope]
+    : null
+  const query = useSWR<AiAssistanceUsageSummary>(
+    key,
+    () => {
+      const request = getAiAssistanceUsage(token)
       return guardRequest ? guardRequest(request) : request
     },
     aiAssistanceSettingsQueryConfig,
