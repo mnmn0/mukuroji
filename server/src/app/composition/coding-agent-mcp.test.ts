@@ -56,7 +56,7 @@ function startFakeApi() {
     // Liveness is public, so the MCP must read it without the API credential.
     if (new URL(request.url).pathname === '/api/health') {
       if (request.headers.get('Authorization') !== null) return Response.json({}, { status: 400 })
-      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 6, minimumApiRevision: 1 } })
+      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 7, minimumApiRevision: 1 } })
     }
     if (request.headers.get('Authorization') !== 'Bearer isolated-test-token') return Response.json({}, { status: 401 })
     const url = new URL(request.url)
@@ -263,7 +263,7 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     expect((await client.listTools()).tools).toHaveLength(22)
     expect((await call(client, 'get_configuration')).content).toMatchObject({ data: {
       runtime: 'claude-code', agentSettings: { leaseMinutes: 30, readyStatusIds: [] }, brief: 'Run bun test.',
-      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 6, serverCompatibility: { status: 'compatible', server: { apiRevision: 6, minimumApiRevision: 1 } } },
+      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 7, serverCompatibility: { status: 'compatible', server: { apiRevision: 7, minimumApiRevision: 1 } } },
     } })
     expect(client.getServerVersion()).toMatchObject({ name: 'mukuroji-tasks', version: CODING_AGENT_MCP_VERSION })
     expect((await call(client, 'get_next_task')).content).toMatchObject({ data: { action: 'start', task: { id: 'task' }, ownRuns: [] } })
@@ -478,7 +478,7 @@ test('reuses a known server compatibility and retries an unknown one', async () 
     healthRequests += 1
     // The first read fails as a transient outage would; later reads report the range.
     return healthRequests === 1 ? Response.json({}, { status: 503 })
-      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 6, minimumApiRevision: 1 } })
+      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 7, minimumApiRevision: 1 } })
   } })
   try {
     const factory = composeCodingAgentMcp({ MUKUROJI_MCP_URL: `http://127.0.0.1:${api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token',
@@ -539,11 +539,19 @@ function startFakeWorkspaceApi() {
     workflowStatusId: 'todo', statusCategory: 'unstarted', priority: 'medium', dueDate: '',
     schedule: { mode: 'unscheduled', calendarPolicy: { timeZone: 'UTC', workingWeekdays: ['monday'], holidays: [] } },
     createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z', relationIds: [], customFieldValues: {} }
+  const milestone = { id: 'ms-1', type: 'milestone', title: 'Alpha', teamId: 'team', ownerMemberId: 'owner', status: 'planned',
+    health: 'unknown', risk: 'none', progress: 0, linkedWorkItemCount: 0,
+    baseline: { startDate: '2026-12-01', endDate: '2026-12-10' }, forecast: { startDate: '2026-12-01', endDate: '2026-12-10' },
+    createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z' }
+  const statusUpdate = { id: 'pu-1', version: 1, target: { type: 'project', teamId: 'team', projectId: 'project' }, health: 'on-track',
+    risk: 'none', summary: 'On plan.', riskSummary: '', decisionSummary: '', helpNeeded: '', nextAction: '',
+    progress: { percent: 40, linkedWorkItemCount: 5 }, authorMemberId: 'owner', coveredDueAt: '2026-09-04T00:00:00.000Z',
+    createdAt: '2026-09-01T00:00:00.000Z' }
   const documentContent = { schemaVersion: 1, id: 'doc-1', kind: 'page', title: 'Spec', revision: 4,
     updatedAt: '2026-09-01T00:00:00.000Z', format: 'markdown', content: '# Spec\n\nShip it.\n' }
   const api = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
     const url = new URL(request.url)
-    if (url.pathname === '/api/health') return Response.json({ ok: true, codingAgentMcp: { apiRevision: 6, minimumApiRevision: 1 } })
+    if (url.pathname === '/api/health') return Response.json({ ok: true, codingAgentMcp: { apiRevision: 7, minimumApiRevision: 1 } })
     if (request.headers.get('Authorization') !== 'Bearer isolated-test-token') return Response.json({}, { status: 401 })
     requests.push(`${url.pathname}${url.search}`)
     const teamId = url.searchParams.get('teamId')
@@ -574,9 +582,24 @@ function startFakeWorkspaceApi() {
       if (request.method === 'POST' && url.pathname === '/api/v1/work-items/task/comments' && teamId === 'team') {
         return Response.json({ id: 'new-comment', actorUserId: 'owner', body: 'Linked to PR', createdAt: issue.createdAt }, { status: 201 })
       }
+      if (request.method === 'POST' && url.pathname === '/api/v1/planning/milestones') {
+        return Response.json({ schemaVersion: 1, revision: 8, item: { ...milestone, title: 'Beta' } }, { status: 201 })
+      }
+      if (request.method === 'PUT' && url.pathname === '/api/v1/work-items/created/planning' && teamId === 'team') {
+        return Response.json({ schemaVersion: 1, revision: 9, teamId: 'team', workItemId: 'created', cycleId: 'cycle-1', goalIds: [] })
+      }
+      if (request.method === 'POST' && url.pathname === '/api/v1/planning/status-updates') {
+        return Response.json({ schemaVersion: 1, revision: 10, item: statusUpdate }, { status: 201 })
+      }
       return Response.json({}, { status: 404 })
     }
     switch (url.pathname) {
+      case '/api/v1/planning/entities':
+        return url.searchParams.get('type') === 'milestone'
+          ? Response.json({ schemaVersion: 1, revision: 7, items: [milestone] })
+          : Response.json({ schemaVersion: 1, revision: 7, items: [] })
+      case '/api/v1/planning/status-updates':
+        return Response.json({ schemaVersion: 1, revision: 7, items: [statusUpdate], hasMore: false })
       case '/api/v1/documents':
         return Response.json({ items: [{ id: 'doc-1', kind: 'page', title: 'Spec', scope: { type: 'project', projectId: 'project' }, revision: 4 }], hasMore: false })
       case '/api/v1/documents/doc-1':
@@ -635,8 +658,9 @@ test('the workspace profile reads Teams, members, statuses, and Work Items by ke
     }))
     const tools = (await client.listTools()).tools.map((tool) => tool.name).sort()
     expect(tools).toEqual([
-      'create_subtasks', 'get_document', 'get_issue', 'list_comments', 'list_documents', 'list_issue_statuses', 'list_issues', 'list_projects',
-      'list_relations', 'list_teams', 'list_users', 'save_comment', 'save_document', 'save_issue', 'save_relation', 'whoami',
+      'create_subtasks', 'get_document', 'get_issue', 'get_status_updates', 'list_comments', 'list_cycles', 'list_documents', 'list_issue_statuses', 'list_issues',
+      'list_milestones', 'list_planning_entities', 'list_projects', 'list_relations', 'list_teams', 'list_users', 'save_comment', 'save_document', 'save_issue', 'save_milestone',
+      'save_relation', 'save_status_update', 'whoami',
     ])
 
     expect((await call(client, 'list_projects', { teamId: 'team' })).content).toEqual({
@@ -767,6 +791,50 @@ test('the workspace profile breaks a Work Item down into subtasks and links Work
   }
 })
 
+test('the workspace profile reads and writes Milestones, Cycles, and health updates', async () => {
+  const fake = startFakeWorkspaceApi()
+  const client = new Client({ name: 'mukuroji-integration-test', version: '1.0.0' })
+  const keys = ['00000000-0000-4000-8000-000000000021', '00000000-0000-4000-8000-000000000022', '00000000-0000-4000-8000-000000000023']
+  const target = { type: 'project', teamId: 'team', projectId: 'project' }
+  try {
+    await client.connect(new StdioClientTransport({
+      command: process.execPath,
+      args: [handlerPath],
+      env: { MUKUROJI_MCP_URL: `http://127.0.0.1:${fake.api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token', MUKUROJI_MCP_PROFILE: 'workspace' },
+      stderr: 'pipe',
+    }))
+    expect((await call(client, 'list_milestones', { teamId: 'team' })).content).toMatchObject({ data: { revision: 7, items: [{ id: 'ms-1' }] } })
+    expect((await call(client, 'get_status_updates', { target })).content).toMatchObject({ data: { items: [{ id: 'pu-1', health: 'on-track' }] } })
+    expect((await call(client, 'save_milestone', {
+      title: 'Beta', parentId: 'initiative', teamId: 'team', targetDate: '2026-12-20', idempotencyKey: keys[0],
+    })).content).toMatchObject({ data: { revision: 8, item: { title: 'Beta' } } })
+    expect((await call(client, 'save_issue', {
+      teamId: 'team', title: 'Track imports', cycleId: 'cycle-1', idempotencyKey: keys[1],
+    })).content).toMatchObject({ data: { id: 'created', cycleId: 'cycle-1' } })
+    expect((await call(client, 'save_status_update', {
+      target, health: 'on-track', summary: 'On plan.', idempotencyKey: keys[2],
+    })).content).toMatchObject({ data: { item: { id: 'pu-1' } } })
+
+    expect((await call(client, 'list_planning_entities', { type: 'initiative' })).content).toMatchObject({ data: { items: [] } })
+    expect(fake.requests).toContain('/api/v1/planning/entities?type=milestone&teamId=team')
+    expect(fake.requests).toContain('/api/v1/planning/entities?type=initiative')
+    expect(fake.requests).toContain('/api/v1/planning/status-updates?targetType=project&teamId=team&projectId=project&limit=20')
+    expect(fake.writes).toEqual([
+      { method: 'POST', path: '/api/v1/planning/milestones', key: keys[0], body: {
+        title: 'Beta', parentId: 'initiative', teamId: 'team', targetDate: '2026-12-20',
+      } },
+      { method: 'POST', path: '/api/v1/work-items', key: keys[1], body: {
+        teamId: 'team', title: 'Track imports', assigneeUserId: 'owner', priority: 'medium',
+      } },
+      { method: 'PUT', path: '/api/v1/work-items/created/planning?teamId=team', key: `${keys[1]}.planning`, body: { cycleId: 'cycle-1' } },
+      { method: 'POST', path: '/api/v1/planning/status-updates', key: keys[2], body: { target, health: 'on-track', summary: 'On plan.' } },
+    ])
+  } finally {
+    await client.close()
+    await fake.api.stop(true)
+  }
+})
+
 test('the workspace profile lists, reads, creates, and updates Documents as Markdown', async () => {
   const fake = startFakeWorkspaceApi()
   const client = new Client({ name: 'mukuroji-integration-test', version: '1.0.0' })
@@ -824,11 +892,15 @@ test('the read-only workspace profile leaves out the write tools', async () => {
     expect(tools).not.toContain('save_comment')
     expect(tools).not.toContain('save_relation')
     expect(tools).not.toContain('create_subtasks')
+    expect(tools).not.toContain('save_milestone')
+    expect(tools).not.toContain('save_status_update')
     expect(tools).not.toContain('save_document')
     expect(tools).toContain('get_issue')
     expect(tools).toContain('list_documents')
     expect(tools).toContain('get_document')
     expect(tools).toContain('list_relations')
+    expect(tools).toContain('list_milestones')
+    expect(tools).toContain('get_status_updates')
   } finally {
     await client.close()
     await fake.api.stop(true)

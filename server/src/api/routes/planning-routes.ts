@@ -21,6 +21,8 @@ import {
   type CycleRolloverInput,
   type CycleWorkItemsInput,
   type DuplicatePlanningEntityInput,
+  type ListPlanningUpdatesInput,
+  type PlanningUpdateHistoryPage,
   type MovePlanningEntityInput,
   type PlanningEntity,
   type PlanningReadScope,
@@ -45,7 +47,7 @@ import {
   type PlanningUpdateTemplateResponse,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
-import type { AuditEventV1 } from '../../modules/audit/audit'
+import type { AuditEventV1, MutationAuditContext } from '../../modules/audit/audit'
 import type { Context } from 'hono'
 import { type Locale, ProjectDataError, type ProjectAccessEntry, type ProjectRole } from '../../modules/directory'
 import {
@@ -76,6 +78,8 @@ import {
   type PlanningEntityCreation,
   type PlanningEntityCreationWithAssignedIdOutcome,
   type PlanningEntityDuplication,
+  type PlanningEntityTransactionResult,
+  type PlanningWorkItemLinkTransactionResult,
   type PlanningUpdateCadenceTransactionResult,
   type PlanningMutationTransaction,
   type PlanningUpdateAnnotationTransactionResult,
@@ -1734,7 +1738,7 @@ type PlanningUpdatePublishReceiptExpectation = {
   /** Authenticated member key that published the update. */
   authorMemberKey: string
   /** Exact request body bound to the idempotency fingerprint. */
-  request: PublishPlanningUpdateInput
+  request: unknown
 }
 
 /** Canonical request identity retained by a durable Planning cadence receipt. */
@@ -3377,6 +3381,489 @@ function readPlanningReadScopeQuery(c: Context): PlanningReadScope | undefined {
 }
 
 /**
+ * Reads the Planning snapshot the principal may see, as `GET /api/planning` returns it.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param readScope - Team, Project, or Portfolio to read; the whole Workspace when omitted.
+ * @returns Snapshot filtered to the principal's readable scopes.
+ * @throws PlanningError 404 when the Portfolio of a Portfolio read is missing or unreadable.
+ */
+export async function readPlanningSnapshotAsPrincipal(
+  principal: WorkspacePrincipal,
+  readScope?: PlanningReadScope,
+): Promise<PlanningSnapshot> {
+  if (readScope === undefined) {
+    const workItemState = await readPlanningWorkItemState(principal)
+    return filterPlanningSnapshotForPrincipal(
+      principal,
+      await workItemDependencies.planning.get(principal.directoryId, workItemState),
+    )
+  }
+  const snapshot = filterPlanningSnapshotForPrincipal(
+    principal,
+    await workItemDependencies.planning.getScoped(
+      principal.directoryId,
+      readScope,
+      (envelope) => readPlanningWorkItemState(principal, envelope),
+    ),
+  )
+  // An unreadable Portfolio answers like a missing one, so its existence does not leak.
+  if (
+    readScope.type === 'portfolio' &&
+    !snapshot.entities.some((entity) => entity.id === readScope.portfolioId)
+  ) {
+    throw new PlanningError(
+      404,
+      'PlanningEntityNotFound',
+      `Portfolio "${readScope.portfolioId}" was not found.`,
+    )
+  }
+  return snapshot
+}
+
+/**
+ * Authorizes and commits one Planning entity creation with a given ID, as the Web create route does.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param input - Creation input, including the Planning revision the caller read.
+ * @param entityId - ID of the new entity, sent by the caller or assigned by the server.
+ * @param createAuditContext - Builds the audit context of the creation from the recorded values.
+ * @returns The mutation response with the unfiltered snapshot.
+ */
+export async function createPlanningEntityAsPrincipal(
+  principal: WorkspacePrincipal,
+  input: CreatePlanningEntityInput,
+  entityId: string,
+  createAuditContext: (creation: PlanningEntityCreation) => MutationAuditContext,
+) {
+  requireWorkspaceBusinessWrite(principal)
+  const workItemState = await readPlanningWorkItemState(principal)
+  const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+  await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
+  await requirePlanningScopePermission(principal, input, 'member')
+  if (isRecord(input) && input.automation !== undefined) {
+    await requirePlanningAutomationManagement(principal, input)
+  }
+  if (input.parentId) {
+    await requirePlanningEntityPermission(
+      principal,
+      snapshot.entities,
+      input.parentId,
+      'member',
+    )
+  }
+  await requirePlanningActiveOwner(principal, input.ownerMemberKey)
+  const creation: PlanningEntityCreation = { ...input, id: entityId }
+  return workItemDependencies.planning.create(
+    principal.directoryId,
+    creation,
+    workItemState,
+    createPlanningEntityAuditTransaction(
+      principal.directoryId,
+      createAuditContext(creation),
+      principal.userKey,
+    ),
+  )
+}
+
+/**
+ * Authorizes and commits a field patch of one Planning entity, as the Web patch route does.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param entityId - Entity to change.
+ * @param input - Patch and the Planning revision the caller read.
+ * @param auditContext - Audit context of the change.
+ * @param receipt - Idempotency receipt to commit in the same transaction as the change.
+ * @returns The mutation response with the unfiltered snapshot.
+ */
+export async function updatePlanningEntityAsPrincipal(
+  principal: WorkspacePrincipal,
+  entityId: string,
+  input: UpdatePlanningEntityInput,
+  auditContext: MutationAuditContext,
+  receipt?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
+) {
+  requireWorkspaceBusinessWrite(principal)
+  const workItemState = await readPlanningWorkItemState(principal)
+  const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+  await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
+  const entity = await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'member')
+  if (isRecord(input.patch) && input.patch.automation !== undefined) {
+    await requirePlanningAutomationManagement(principal, entity)
+  }
+  if (isRecord(input.patch) && input.patch.ownerMemberKey !== undefined) {
+    await requirePlanningActiveOwner(principal, input.patch.ownerMemberKey)
+  }
+  return workItemDependencies.planning.update(
+    principal.directoryId,
+    entityId,
+    input,
+    workItemState,
+    createPlanningEntityAuditTransaction(principal.directoryId, auditContext, principal.userKey, receipt),
+  )
+}
+
+/**
+ * Authorizes and replaces a Work Item's Planning link (Cycle, Milestone, and Goals), as the Web
+ * link route does: the caller needs member access to the Work Item and to every entity of the
+ * current and the new link.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param input - The whole new link and the Planning revision the caller read.
+ * @param receipt - Idempotency receipt to commit in the same transaction as the link.
+ * @returns The mutation response with the unfiltered snapshot.
+ */
+export async function putPlanningWorkItemLinkAsPrincipal(
+  principal: WorkspacePrincipal,
+  input: PlanningWorkItemLinkInput,
+  receipt?: PlanningMutationTransaction<PlanningWorkItemLinkTransactionResult>,
+) {
+  requireWorkspaceBusinessWrite(principal)
+  const { teamId, workItemId } = input
+  const projectId = input.projectId === undefined
+    ? undefined
+    : readPlanningIdentifier(input.projectId, 'Project ID')
+  const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+  if (
+    projectId !== undefined &&
+    projectId !== detail.issue.assignedProjectId
+  ) {
+    throw new PlanningError(
+      409,
+      'PlanningWorkItemProjectMismatch',
+      'Work Item link Project does not match the canonical Work Item.',
+    )
+  }
+  const workItemState = await readPlanningWorkItemState(principal)
+  const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+  await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
+  const current = await workItemDependencies.planning.getWorkItemLinkForAuthorization(
+    principal.directoryId,
+    teamId,
+    workItemId,
+  )
+  if (current) {
+    await requirePlanningLinkEntityPermissions(
+      principal,
+      snapshot.entities,
+      current,
+    )
+  }
+  await requirePlanningLinkEntityPermissions(principal, snapshot.entities, input)
+  requireAuthorizedPlanningWorkItemRevision(
+    workItemState,
+    teamId,
+    workItemId,
+    detail.issue.revision,
+  )
+  return workItemDependencies.planning.putWorkItemLink(principal.directoryId, input, workItemState, receipt)
+}
+
+/**
+ * Authorizes and removes a Work Item's Planning link, as the Web link route does: the caller needs
+ * member access to the Work Item and to every entity of the link.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team of the Work Item.
+ * @param workItemId - Work Item ID.
+ * @param input - Planning revision the caller read.
+ * @param receipt - Idempotency receipt to commit in the same transaction as the removal.
+ * @returns The mutation response with the unfiltered snapshot.
+ */
+export async function deletePlanningWorkItemLinkAsPrincipal(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  workItemId: string,
+  input: PlanningRevisionInput,
+  receipt?: PlanningMutationTransaction<PlanningWorkItemLinkTransactionResult>,
+) {
+  requireWorkspaceBusinessWrite(principal)
+  const workItemState = await readPlanningWorkItemState(principal)
+  const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+  requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+  const current = snapshot.workItemLinks.find((link) =>
+    link.teamId === teamId && link.workItemId === workItemId,
+  )
+  if (current) {
+    await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+    await requirePlanningLinkEntityPermissions(principal, snapshot.entities, current)
+  } else if (!principal.isSystemAdmin) {
+    requireWorkspaceAdministration(principal)
+  }
+  return workItemDependencies.planning.deleteWorkItemLink(
+    principal.directoryId,
+    teamId,
+    workItemId,
+    input,
+    workItemState,
+    receipt,
+  )
+}
+
+/** Request facts of one Planning update publish. */
+export type PlanningUpdatePublishRequest = {
+  /** Caller's idempotency key; the publish is not replayable without one. */
+  idempotencyKey?: string
+  /** HTTP method the key is bound to. */
+  method: string
+  /** Canonical API path the key is bound to. */
+  path: string
+  /**
+   * Request the key is bound to, when it differs from the publish input; the Public API binds the
+   * client body, so a retry that resolves another latest revision still replays.
+   */
+  fingerprint?: unknown
+  /** Builds the audit context of the publish from the validated input. */
+  createAuditContext: (input: PublishPlanningUpdateInput) => MutationAuditContext
+}
+
+/** Result of one Planning update publish. */
+export type PlanningUpdatePublishOutcome = {
+  /** Whether an earlier publish with the same idempotency key answered. */
+  replayed: boolean
+  /** Snapshot after the publish, filtered to the principal's readable scopes. */
+  planning: PlanningSnapshot
+  /** The immutable update. */
+  update: PlanningUpdate
+}
+
+/**
+ * Authorizes and publishes one immutable Planning update (health update), as the Web publish
+ * route does. With an idempotency key the receipt commits with the update, so a retry replays it.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param candidate - Untrusted publish input.
+ * @param request - Idempotency and audit facts of the request.
+ * @returns The published or replayed update with the filtered snapshot.
+ */
+export async function publishPlanningUpdateAsPrincipal(
+  principal: WorkspacePrincipal,
+  candidate: PublishPlanningUpdateInput,
+  request: PlanningUpdatePublishRequest,
+): Promise<PlanningUpdatePublishOutcome> {
+  requireWorkspaceBusinessWrite(principal)
+  let reservationToRelease: ReleaseIdempotencyRequest | undefined
+  let mutationCommitted = false
+  try {
+      const input: PublishPlanningUpdateInput = {
+        ...candidate,
+        target: readPlanningUpdateTarget(candidate.target),
+      }
+      const { snapshot, targetScope } = await readPlanningPublishState(principal, input.target)
+      const visibleSnapshot = filterPlanningSnapshotForPrincipal(principal, snapshot)
+      const idempotencyKey = request.idempotencyKey?.trim()
+      let publishTransaction: PlanningMutationTransaction<PlanningUpdatePublishTransactionResult> | undefined
+      if (idempotencyKey) {
+        const validatedKey = readRequiredPlanningUpdatePublishIdempotencyKey(idempotencyKey)
+        const expectation: PlanningUpdatePublishReceiptExpectation = {
+          target: input.target,
+          id: input.id,
+          authorMemberKey: principal.userKey.toLowerCase(),
+          request: request.fingerprint ?? input,
+        }
+        const reservationRequest = createPlanningUpdatePublishReservationRequest(
+          principal,
+          validatedKey,
+          request.method,
+          request.path,
+          expectation,
+        )
+        const reservation = await reservePlanningUpdatePublishMutation(reservationRequest)
+        if (reservation.status === 'in-progress') {
+          throw new PlanningError(
+            409,
+            'PlanningUpdatePublishIdempotencyInProgress',
+            'The same Planning update publish is still in progress.',
+          )
+        }
+        if (reservation.status === 'replay') {
+          await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, input.target, 'member')
+          const replay = readStoredPlanningUpdatePublishMutationReceipt(
+            reservation.response,
+            reservationRequest.workspaceId,
+            expectation,
+          )
+          const update = await readPlanningUpdateByVersion(
+            principal.directoryId,
+            replay.target,
+            replay.version,
+          )
+          if (!update || update.id !== replay.id) {
+            throw planningUpdatePublishIdempotencyUnavailable()
+          }
+          await requirePlanningUpdateCapturedScopePermission(
+            principal,
+            update.contextSnapshot.scope,
+          )
+          return {
+            replayed: true,
+            planning: filterPlanningSnapshotForPrincipal(principal, snapshot),
+            update,
+          }
+        }
+        reservationToRelease = { ...reservationRequest, reservationId: reservation.reservationId }
+        publishTransaction = createPlanningUpdatePublishIdempotencyTransaction(
+          reservationRequest.workspaceId,
+          {
+            credentialId: reservationRequest.credentialId,
+            idempotencyKey: validatedKey,
+            requestFingerprint: reservationRequest.requestFingerprint,
+            reservationId: reservation.reservationId,
+          },
+          expectation,
+        )
+        if (!publishTransaction) throw planningUpdatePublishIdempotencyUnavailable()
+      }
+      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+      await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, input.target, 'member')
+      const configuredTarget = findPlanningUpdateTargetSummary(snapshot, input.target)
+      if (!configuredTarget?.cadence) {
+        throw new PlanningError(
+          409,
+          'PlanningUpdateCadenceNotConfigured',
+          'Configure an update cadence before publishing.',
+        )
+      }
+      if (configuredTarget.cadence.updateOwnerMemberKey !== principal.userKey.toLowerCase()) {
+        await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, input.target, 'manager')
+      }
+      requirePlanningUpdateRequiredFields(
+        await readPlanningUpdateTemplateSettingsOf(principal.directoryId),
+        candidate,
+      )
+      const evidenceConditionChecks = await createPlanningUpdateEvidenceConditionChecks(
+        principal,
+        snapshot,
+        visibleSnapshot,
+        input,
+      )
+      const canonicalWorkItemState = await readCanonicalPlanningWorkItemState(
+        principal,
+        targetScope,
+      )
+      const response = await workItemDependencies.planning.publishUpdate(
+        principal.directoryId,
+        input,
+        principal.userKey,
+        canonicalWorkItemState,
+        [
+          ...createPlanningCallerAuthorizationConditionChecks(principal),
+          ...evidenceConditionChecks,
+        ],
+        withPlanningAuditOutbox(
+          publishTransaction,
+          request.createAuditContext(input),
+          (result) => createPlanningUpdatePublishAuditEvent({
+            workspaceId: principal.directoryId,
+            update: result.update,
+            notification: result.notification,
+          }),
+        ),
+      )
+      mutationCommitted = true
+      return {
+        replayed: false,
+        planning: filterPlanningSnapshotForPrincipal(principal, response.planning),
+        update: response.update,
+      }
+  } catch (error) {
+    if (reservationToRelease && !mutationCommitted) {
+      await releasePlanningUpdatePublishReservation(reservationToRelease)
+    }
+    throw error
+  }
+}
+
+/**
+ * Authorizes the replay of an update published earlier, as the Web publish replay does: the caller
+ * needs member access to the target and read access to the scope the update captured, which stays
+ * the same when the target later moves.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param target - Project, Team, or Initiative of the update.
+ * @param id - Update ID.
+ * @param version - Update version within the target.
+ */
+export async function authorizePlanningUpdateReplayAsPrincipal(
+  principal: WorkspacePrincipal,
+  target: PlanningUpdateTarget,
+  id: string,
+  version: number,
+): Promise<void> {
+  requireWorkspaceBusinessWrite(principal)
+  const { snapshot } = await readPlanningPublishState(principal, readPlanningUpdateTarget(target))
+  await requirePlanningUpdateTargetPermission(principal, filterPlanningSnapshotForPrincipal(principal, snapshot), target, 'member')
+  const update = await readPlanningUpdateByVersion(principal.directoryId, target, version)
+  if (!update || update.id !== id) throw planningUpdatePublishIdempotencyUnavailable()
+  await requirePlanningUpdateCapturedScopePermission(principal, update.contextSnapshot.scope)
+}
+
+/**
+ * Reads one page of a target's immutable update history, newest first, leaving out updates whose
+ * captured Team or Project the principal can no longer read, as the Web history route does.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param input - Target, page size, and cursor.
+ * @returns The page of visible updates and the Planning revision the authorization read.
+ */
+export async function listPlanningUpdatesAsPrincipal(
+  principal: WorkspacePrincipal,
+  input: ListPlanningUpdatesInput,
+): Promise<{ page: PlanningUpdateHistoryPage, revision: number }> {
+  const { target, limit } = input
+  const snapshot = await workItemDependencies.planning.get(
+    principal.directoryId,
+    await readPlanningWorkItemState(principal),
+  )
+  await requirePlanningUpdateTargetPermission(
+    principal,
+    filterPlanningSnapshotForPrincipal(principal, snapshot),
+    target,
+    'viewer',
+  )
+  const capturedScopeAuthorizationCache = new Map<string, Promise<void>>()
+  let page = await workItemDependencies.planning.listUpdates(principal.directoryId, {
+    target,
+    ...(limit === undefined ? {} : { limit }),
+    ...(input.cursor ? { cursor: input.cursor } : {}),
+  })
+  const visibleUpdates = await filterPlanningUpdatesByCapturedScope(
+    principal,
+    page.updates,
+    capturedScopeAuthorizationCache,
+  )
+  while (limit !== undefined && visibleUpdates.length < limit && page.nextCursor) {
+    const remaining = limit - visibleUpdates.length
+    page = await workItemDependencies.planning.listUpdates(principal.directoryId, {
+      target,
+      limit: remaining,
+      cursor: page.nextCursor,
+    })
+    visibleUpdates.push(
+      ...(await filterPlanningUpdatesByCapturedScope(
+        principal,
+        page.updates,
+        capturedScopeAuthorizationCache,
+      )).slice(0, remaining),
+    )
+  }
+  return {
+    page: { ...page, updates: visibleUpdates },
+    revision: snapshot.revision,
+  }
+}
+
+/**
+ * Validates an untrusted update target, as the Web publish route reads it.
+ *
+ * @param value - Candidate target.
+ * @returns The normalized target.
+ */
+export function readPlanningUpdateTargetInput(value: unknown): PlanningUpdateTarget {
+  return readPlanningUpdateTarget(value)
+}
+
+/**
  * Registers the planning HTTP routes on the shared route application.
  *
  * @param routeApp - Hono application that receives the routes.
@@ -3391,33 +3878,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
 
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-      const readScope = readPlanningReadScopeQuery(c)
-      if (readScope === undefined) {
-        const workItemState = await readPlanningWorkItemState(principal)
-        return c.json(filterPlanningSnapshotForPrincipal(
-          principal,
-          await workItemDependencies.planning.get(principal.directoryId, workItemState),
-        ))
-      }
-      const snapshot = filterPlanningSnapshotForPrincipal(
-        principal,
-        await workItemDependencies.planning.getScoped(
-          principal.directoryId,
-          readScope,
-          (envelope) => readPlanningWorkItemState(principal, envelope),
-        ),
-      )
-      // An unreadable Portfolio answers like a missing one, so its existence does not leak.
-      if (
-        readScope.type === 'portfolio' &&
-        !snapshot.entities.some((entity) => entity.id === readScope.portfolioId)
-      ) {
-        return c.json({
-          code: 'PlanningEntityNotFound',
-          message: `Portfolio "${readScope.portfolioId}" was not found.`,
-        }, 404)
-      }
-      return c.json(snapshot)
+      return c.json(await readPlanningSnapshotAsPrincipal(principal, readPlanningReadScopeQuery(c)))
     } catch (error) {
       return toPlanningErrorResponse(c, error)
     }
@@ -3741,140 +4202,22 @@ export function registerPlanningRoutes(routeApp: Hono): void {
 
   routeApp.post('/api/planning/updates', async (c) => {
     const accessToken = readBearerAccessToken(c)
-    let reservationToRelease: ReleaseIdempotencyRequest | undefined
-    let mutationCommitted = false
     if (!accessToken) {
       return c.json({ message: 'Bearer token is required.' }, 401)
     }
 
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-      requireWorkspaceBusinessWrite(principal)
       const candidate = await readPlanningJson<PublishPlanningUpdateInput>(c.req)
-      const input: PublishPlanningUpdateInput = {
-        ...candidate,
-        target: readPlanningUpdateTarget(candidate.target),
-      }
-      const { snapshot, targetScope } = await readPlanningPublishState(principal, input.target)
-      const visibleSnapshot = filterPlanningSnapshotForPrincipal(principal, snapshot)
-      const idempotencyKey = c.req.header('Idempotency-Key')?.trim()
-      let publishTransaction: PlanningMutationTransaction<PlanningUpdatePublishTransactionResult> | undefined
-      if (idempotencyKey) {
-        const validatedKey = readRequiredPlanningUpdatePublishIdempotencyKey(idempotencyKey)
-        const expectation: PlanningUpdatePublishReceiptExpectation = {
-          target: input.target,
-          id: input.id,
-          authorMemberKey: principal.userKey.toLowerCase(),
-          request: input,
-        }
-        const reservationRequest = createPlanningUpdatePublishReservationRequest(
-          principal,
-          validatedKey,
-          c.req.method,
-          '/api/planning/updates',
-          expectation,
-        )
-        const reservation = await reservePlanningUpdatePublishMutation(reservationRequest)
-        if (reservation.status === 'in-progress') {
-          throw new PlanningError(
-            409,
-            'PlanningUpdatePublishIdempotencyInProgress',
-            'The same Planning update publish is still in progress.',
-          )
-        }
-        if (reservation.status === 'replay') {
-          await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, input.target, 'member')
-          const replay = readStoredPlanningUpdatePublishMutationReceipt(
-            reservation.response,
-            reservationRequest.workspaceId,
-            expectation,
-          )
-          const update = await readPlanningUpdateByVersion(
-            principal.directoryId,
-            replay.target,
-            replay.version,
-          )
-          if (!update || update.id !== replay.id) {
-            throw planningUpdatePublishIdempotencyUnavailable()
-          }
-          await requirePlanningUpdateCapturedScopePermission(
-            principal,
-            update.contextSnapshot.scope,
-          )
-          c.header('Idempotency-Replayed', 'true')
-          return c.json({
-            planning: filterPlanningSnapshotForPrincipal(principal, snapshot),
-            update,
-          }, 201)
-        }
-        reservationToRelease = { ...reservationRequest, reservationId: reservation.reservationId }
-        publishTransaction = createPlanningUpdatePublishIdempotencyTransaction(
-          reservationRequest.workspaceId,
-          {
-            credentialId: reservationRequest.credentialId,
-            idempotencyKey: validatedKey,
-            requestFingerprint: reservationRequest.requestFingerprint,
-            reservationId: reservation.reservationId,
-          },
-          expectation,
-        )
-        if (!publishTransaction) throw planningUpdatePublishIdempotencyUnavailable()
-      }
-      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
-      await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, input.target, 'member')
-      const configuredTarget = findPlanningUpdateTargetSummary(snapshot, input.target)
-      if (!configuredTarget?.cadence) {
-        throw new PlanningError(
-          409,
-          'PlanningUpdateCadenceNotConfigured',
-          'Configure an update cadence before publishing.',
-        )
-      }
-      if (configuredTarget.cadence.updateOwnerMemberKey !== principal.userKey.toLowerCase()) {
-        await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, input.target, 'manager')
-      }
-      requirePlanningUpdateRequiredFields(
-        await readPlanningUpdateTemplateSettingsOf(principal.directoryId),
-        candidate,
-      )
-      const evidenceConditionChecks = await createPlanningUpdateEvidenceConditionChecks(
-        principal,
-        snapshot,
-        visibleSnapshot,
-        input,
-      )
-      const canonicalWorkItemState = await readCanonicalPlanningWorkItemState(
-        principal,
-        targetScope,
-      )
-      const response = await workItemDependencies.planning.publishUpdate(
-        principal.directoryId,
-        input,
-        principal.userKey,
-        canonicalWorkItemState,
-        [
-          ...createPlanningCallerAuthorizationConditionChecks(principal),
-          ...evidenceConditionChecks,
-        ],
-        withPlanningAuditOutbox(
-          publishTransaction,
-          createApiMutationContext(c, principal, input),
-          (result) => createPlanningUpdatePublishAuditEvent({
-            workspaceId: principal.directoryId,
-            update: result.update,
-            notification: result.notification,
-          }),
-        ),
-      )
-      mutationCommitted = true
-      return c.json({
-        ...response,
-        planning: filterPlanningSnapshotForPrincipal(principal, response.planning),
-      }, 201)
+      const outcome = await publishPlanningUpdateAsPrincipal(principal, candidate, {
+        idempotencyKey: c.req.header('Idempotency-Key'),
+        method: c.req.method,
+        path: '/api/planning/updates',
+        createAuditContext: (input) => createApiMutationContext(c, principal, input),
+      })
+      if (outcome.replayed) c.header('Idempotency-Replayed', 'true')
+      return c.json({ planning: outcome.planning, update: outcome.update }, 201)
     } catch (error) {
-      if (reservationToRelease && !mutationCommitted) {
-        await releasePlanningUpdatePublishReservation(reservationToRelease)
-      }
       return toPlanningErrorResponse(c, error)
     }
   })
@@ -3894,47 +4237,14 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         c.req.query('projectId'),
         c.req.query('entityId'),
       )
-      const snapshot = await workItemDependencies.planning.get(
-        principal.directoryId,
-        await readPlanningWorkItemState(principal),
-      )
-      await requirePlanningUpdateTargetPermission(
-        principal,
-        filterPlanningSnapshotForPrincipal(principal, snapshot),
-        target,
-        'viewer',
-      )
       const limit = readPlanningUpdateHistoryLimit(c.req.query('limit'))
-      const capturedScopeAuthorizationCache = new Map<string, Promise<void>>()
-      let page = await workItemDependencies.planning.listUpdates(principal.directoryId, {
+      const cursor = c.req.query('cursor')
+      const { page } = await listPlanningUpdatesAsPrincipal(principal, {
         target,
         ...(limit === undefined ? {} : { limit }),
-        ...(c.req.query('cursor') ? { cursor: c.req.query('cursor') } : {}),
+        ...(cursor ? { cursor } : {}),
       })
-      const visibleUpdates = await filterPlanningUpdatesByCapturedScope(
-        principal,
-        page.updates,
-        capturedScopeAuthorizationCache,
-      )
-      while (limit !== undefined && visibleUpdates.length < limit && page.nextCursor) {
-        const remaining = limit - visibleUpdates.length
-        page = await workItemDependencies.planning.listUpdates(principal.directoryId, {
-          target,
-          limit: remaining,
-          cursor: page.nextCursor,
-        })
-        visibleUpdates.push(
-          ...(await filterPlanningUpdatesByCapturedScope(
-            principal,
-            page.updates,
-            capturedScopeAuthorizationCache,
-          )).slice(0, remaining),
-        )
-      }
-      return c.json({
-        ...page,
-        updates: visibleUpdates,
-      })
+      return c.json(page)
     } catch (error) {
       return toPlanningErrorResponse(c, error)
     }
@@ -4476,31 +4786,12 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       requireWorkspaceBusinessWrite(principal)
       const input = await readPlanningJson<CreatePlanningEntityInput>(c.req)
       /** Authorizes the creation against the current graph and commits it with the given ID. */
-      const create = async (entityId: string) => {
-        const workItemState = await readPlanningWorkItemState(principal)
-        const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-        await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
-        await requirePlanningScopePermission(principal, input, 'member')
-        if (isRecord(input) && input.automation !== undefined) {
-          await requirePlanningAutomationManagement(principal, input)
-        }
-        if (input.parentId) {
-          await requirePlanningEntityPermission(
-            principal,
-            snapshot.entities,
-            input.parentId,
-            'member',
-          )
-        }
-        await requirePlanningActiveOwner(principal, input.ownerMemberKey)
-        const creation: PlanningEntityCreation = { ...input, id: entityId }
-        return workItemDependencies.planning.create(
-          principal.directoryId,
-          creation,
-          workItemState,
-          createPlanningEntityRouteAuditTransaction(c, principal, creation),
-        )
-      }
+      const create = (entityId: string) => createPlanningEntityAsPrincipal(
+        principal,
+        input,
+        entityId,
+        (creation) => createApiMutationContext(c, principal, creation),
+      )
       if (input.id !== undefined) {
         const response = await create(input.id)
         c.header('Location', createPlanningEntityLocation(input.id))
@@ -4533,22 +4824,11 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       requireWorkspaceBusinessWrite(principal)
       const entityId = readPlanningRouteId(c.req.param('entityId'), 'Planning entity ID')
       const input = await readPlanningJson<UpdatePlanningEntityInput>(c.req)
-      const workItemState = await readPlanningWorkItemState(principal)
-      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-      await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
-      const entity = await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'member')
-      if (isRecord(input.patch) && input.patch.automation !== undefined) {
-        await requirePlanningAutomationManagement(principal, entity)
-      }
-      if (isRecord(input.patch) && input.patch.ownerMemberKey !== undefined) {
-        await requirePlanningActiveOwner(principal, input.patch.ownerMemberKey)
-      }
-      const response = await workItemDependencies.planning.update(
-        principal.directoryId,
+      const response = await updatePlanningEntityAsPrincipal(
+        principal,
         entityId,
         input,
-        workItemState,
-        createPlanningEntityRouteAuditTransaction(c, principal, { entityId, ...input }),
+        createApiMutationContext(c, principal, { entityId, ...input }),
       )
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
     } catch (error) {
@@ -5286,43 +5566,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           'Work Item link path and request body IDs must match.',
         )
       }
-      const projectId = input.projectId === undefined
-        ? undefined
-        : readPlanningIdentifier(input.projectId, 'Project ID')
-      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
-      if (
-        projectId !== undefined &&
-        projectId !== detail.issue.assignedProjectId
-      ) {
-        throw new PlanningError(
-          409,
-          'PlanningWorkItemProjectMismatch',
-          'Work Item link Project does not match the canonical Work Item.',
-        )
-      }
-      const workItemState = await readPlanningWorkItemState(principal)
-      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-      await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
-      const current = await workItemDependencies.planning.getWorkItemLinkForAuthorization(
-        principal.directoryId,
-        teamId,
-        workItemId,
-      )
-      if (current) {
-        await requirePlanningLinkEntityPermissions(
-          principal,
-          snapshot.entities,
-          current,
-        )
-      }
-      await requirePlanningLinkEntityPermissions(principal, snapshot.entities, input)
-      requireAuthorizedPlanningWorkItemRevision(
-        workItemState,
-        teamId,
-        workItemId,
-        detail.issue.revision,
-      )
-      const response = await workItemDependencies.planning.putWorkItemLink(principal.directoryId, input, workItemState)
+      const response = await putPlanningWorkItemLinkAsPrincipal(principal, input)
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
     } catch (error) {
       return toPlanningErrorResponse(c, error)
@@ -5342,25 +5586,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const teamId = readPlanningRouteId(c.req.param('teamId'), 'Team ID')
       const workItemId = readPlanningRouteId(c.req.param('workItemId'), 'Work Item ID')
       const input = await readPlanningJson<PlanningRevisionInput>(c.req)
-      const workItemState = await readPlanningWorkItemState(principal)
-      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
-      const current = snapshot.workItemLinks.find((link) =>
-        link.teamId === teamId && link.workItemId === workItemId,
-      )
-      if (current) {
-        await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
-        await requirePlanningLinkEntityPermissions(principal, snapshot.entities, current)
-      } else if (!principal.isSystemAdmin) {
-        requireWorkspaceAdministration(principal)
-      }
-      const response = await workItemDependencies.planning.deleteWorkItemLink(
-        principal.directoryId,
-        teamId,
-        workItemId,
-        input,
-        workItemState,
-      )
+      const response = await deletePlanningWorkItemLinkAsPrincipal(principal, teamId, workItemId, input)
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
     } catch (error) {
       return toPlanningErrorResponse(c, error)

@@ -756,6 +756,20 @@ describe('planning domain', () => {
         projectId: 'project-1',
       }),
     ]))
+
+    // A link keeps a target that closed after it was linked, but cannot gain a closed one.
+    await client.update('workspace-1', 'goal-1', { expectedRevision: 8, patch: { status: 'completed' } }, workItemState)
+    const kept = await client.putWorkItemLink('workspace-1', {
+      teamId: 'team-1', workItemId: 'work-started', goalIds: ['goal-1'], expectedRevision: 9,
+    }, workItemState)
+    expect(kept.planning.workItemLinks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ workItemId: 'work-started', goalIds: ['goal-1'] }),
+    ]))
+    expect(kept.planning.workItemLinks.find((link) => link.workItemId === 'work-started')?.milestoneId).toBeUndefined()
+    await client.update('workspace-1', 'milestone-1', { expectedRevision: 10, patch: { status: 'completed' } }, workItemState)
+    await expect(client.putWorkItemLink('workspace-1', {
+      teamId: 'team-1', workItemId: 'work-started', milestoneId: 'milestone-1', goalIds: ['goal-1'], expectedRevision: 11,
+    }, workItemState)).rejects.toMatchObject({ code: 'PlanningEntityClosed' })
   })
 
   test('calculates a dependency critical path and rejects a transitive cycle', async () => {
@@ -3329,6 +3343,45 @@ describe('planning persistence', () => {
       recordKey: 'ENTITY#portfolio-1',
       id: 'portfolio-1',
     })
+  })
+
+  test('commits a prepared receipt in the same DynamoDB transaction as the Planning write, and nothing when it is rejected', async () => {
+    const transactions: Array<Record<string, unknown>> = []
+    let reject = true
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
+      }) {
+        if (command.constructor.name === 'QueryCommand') return { Items: [] }
+        if (command.constructor.name === 'TransactWriteCommand') {
+          transactions.push(command.input)
+          if (reject) {
+            reject = false
+            throw { name: 'TransactionCanceledException', CancellationReasons: [{ Code: 'None' }, { Code: 'None' }, { Code: 'ConditionalCheckFailed' }] }
+          }
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient('PlanningTable', documentClient, {} as DynamoDBClient, false, () => NOW)
+    const receipt = { Put: { TableName: 'DeveloperPlatformTable', Item: { entryType: 'idempotency' }, ConditionExpression: 'attribute_exists(reservationId)' } }
+    const transaction = { prepare: async () => ({ transactWriteItem: receipt }) }
+
+    await expect(client.create('workspace-1', createEntityInput('portfolio-1', 'portfolio', 0), EMPTY_WORK_ITEMS, transaction))
+      .rejects.toBeDefined()
+    const created = await client.create('workspace-1', createEntityInput('portfolio-1', 'portfolio', 0), EMPTY_WORK_ITEMS, transaction)
+
+    expect(created.planning.revision).toBe(1)
+    expect(transactions).toHaveLength(2)
+    for (const input of transactions) {
+      const items = input.TransactItems as unknown[]
+      // The fence and entity rows and the receipt go in one TransactWriteCommand.
+      expect(items).toHaveLength(3)
+      expect(items.at(-1)).toEqual(receipt)
+    }
   })
 
   test('uses one global Planning revision fence while publishing an immutable UPDATE row', async () => {

@@ -426,6 +426,22 @@ export type PlanningEntityTransactionResult = {
   previousCycleId?: string
   /** Active descendants whose Team / Project scope followed a move. */
   movedDescendantCount?: number
+  /** Progress, linked Work Item count, and rollup health the committed graph computes for the entity. */
+  rollup?: Pick<PlanningEntity, 'progress' | 'linkedWorkItemCount' | 'rollupHealth'>
+}
+
+/** Result exposed while preparing the durable receipt of one Work Item link change. */
+export type PlanningWorkItemLinkTransactionResult = {
+  /** Identifies a Work Item link change. */
+  kind: 'work-item-link'
+  /** Planning revision produced by the change. */
+  revision: number
+  /** Team of the Work Item. */
+  teamId: string
+  /** Work Item ID. */
+  workItemId: string
+  /** The committed link; absent after a deletion. */
+  link?: PlanningWorkItemLink
 }
 
 /** Change of one dependency between Planning entities recorded by its audit events. */
@@ -457,6 +473,7 @@ export type PlanningMutationTransactionResult =
   | PlanningUpdatePublishTransactionResult
   | PlanningEntityTransactionResult
   | PlanningDependencyTransactionResult
+  | PlanningWorkItemLinkTransactionResult
 
 /** One external DynamoDB action prepared for the Planning mutation transaction. */
 type PlanningMutationTransactionContribution = {
@@ -840,6 +857,7 @@ export type PlanningClient = {
     workspaceId: string,
     input: PlanningWorkItemLinkInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningWorkItemLinkTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /** Work Item planning link を削除します。 */
   deleteWorkItemLink(
@@ -848,6 +866,7 @@ export type PlanningClient = {
     workItemId: string,
     input: PlanningRevisionInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningWorkItemLinkTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /** Cycle を完了し、policy に従って未完了 Work Item を rollover します。 */
   rolloverCycle(
@@ -996,6 +1015,8 @@ type PlanningMutationResult = {
   archiveChanges?: PlanningArchiveChange[]
   /** Entity lifecycle change exposed to an audit contribution. */
   entityTransactionSource?: Omit<PlanningEntityTransactionResult, 'kind' | 'revision'>
+  /** Work Item link change used to prepare a durable completion receipt. */
+  workItemLinkTransactionSource?: Omit<PlanningWorkItemLinkTransactionResult, 'kind' | 'revision'>
   /** Dependency change between entities exposed to an audit contribution. */
   dependencyTransactionSource?: Omit<PlanningDependencyTransactionResult, 'kind' | 'revision'>
 }
@@ -1086,7 +1107,22 @@ type PlanningArchiveStep = {
   workItemConditions?: PlanningWorkItemCondition[]
 }
 
-/** Storage 非依存の Planning mutation 実装です。 */
+/**
+ * Reads the computed progress, linked Work Item count, and rollup health of one entity from a
+ * committed snapshot, for the durable receipt of the change.
+ *
+ * @param planning - Snapshot of the committed graph.
+ * @param entityId - Entity ID.
+ * @returns The rollup, or nothing when the entity left the live graph.
+ */
+function readEntityRollup(planning: PlanningSnapshot, entityId: string): { rollup?: PlanningEntityTransactionResult['rollup'] } {
+  const entity = planning.entities.find((candidate) => candidate.id === entityId)
+  return entity === undefined
+    ? {}
+    : { rollup: { progress: entity.progress, linkedWorkItemCount: entity.linkedWorkItemCount, rollupHealth: entity.rollupHealth } }
+}
+
+/** Planning mutations independent of the storage backend. */
 abstract class BasePlanningClient implements PlanningClient {
   /** Reads compact source-owned activity; callers must authorize targets before exposing signals. */
   abstract getUpdateActivities(workspaceId: string): Promise<PlanningUpdateActivity[]>
@@ -2617,6 +2653,7 @@ abstract class BasePlanningClient implements PlanningClient {
     workspaceId: string,
     input: PlanningWorkItemLinkInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningWorkItemLinkTransactionResult>,
   ) {
     return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
       const teamId = readIdentifier(input.teamId, 'Team ID')
@@ -2644,7 +2681,15 @@ abstract class BasePlanningClient implements PlanningClient {
       if ((link.projectId ?? summary.projectId) !== summary.projectId) {
         throw invalid('PlanningWorkItemProjectMismatch', 'Work Item link Project does not match the Work Item.')
       }
-      validateWorkItemLink(state, link, true)
+      // A target the stored link already has may stay after it closed; only new targets must be open.
+      const retained = new Set(current === undefined || current.projectId !== link.projectId
+        ? []
+        : [
+            ...(current.cycleId === link.cycleId && current.cycleId !== undefined ? [current.cycleId] : []),
+            ...(current.milestoneId === link.milestoneId && current.milestoneId !== undefined ? [current.milestoneId] : []),
+            ...current.goalIds.filter((goalId) => link.goalIds.includes(goalId)),
+          ])
+      validateWorkItemLink(state, link, true, retained)
       const next = {
         ...state,
         workItemLinks: [
@@ -2662,8 +2707,9 @@ abstract class BasePlanningClient implements PlanningClient {
           workItemId,
           revision: readRevision(summary.revision),
         }],
+        workItemLinkTransactionSource: { teamId, workItemId, link: structuredClone(link) },
       }
-    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
+    }, [], transaction, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Work Item planning link を削除します。 */
@@ -2673,6 +2719,7 @@ abstract class BasePlanningClient implements PlanningClient {
     workItemId: string,
     input: PlanningRevisionInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningWorkItemLinkTransactionResult>,
   ) {
     return this.mutate(workspaceId, input.expectedRevision, workItemState, (state) => {
       const normalizedTeamId = readIdentifier(teamId, 'Team ID')
@@ -2690,8 +2737,9 @@ abstract class BasePlanningClient implements PlanningClient {
             link.teamId !== normalizedTeamId || link.workItemId !== normalizedWorkItemId,
           ),
         },
+        workItemLinkTransactionSource: { teamId: normalizedTeamId, workItemId: normalizedWorkItemId },
       }
-    })
+    }, [], transaction)
   }
 
   /**
@@ -3146,7 +3194,14 @@ abstract class BasePlanningClient implements PlanningClient {
     }
     const transactionResult: PlanningMutationTransactionResult | undefined =
       result.entityTransactionSource !== undefined
-        ? { ...result.entityTransactionSource, kind: 'entity', revision: after.revision }
+        ? {
+            ...result.entityTransactionSource,
+            kind: 'entity',
+            revision: after.revision,
+            ...readEntityRollup(planning, result.entityTransactionSource.entity.id),
+          }
+        : result.workItemLinkTransactionSource !== undefined
+        ? { ...result.workItemLinkTransactionSource, kind: 'work-item-link', revision: after.revision }
         : result.dependencyTransactionSource !== undefined
         ? { ...result.dependencyTransactionSource, kind: 'dependency', revision: after.revision }
         : result.publishedUpdate === undefined
@@ -5875,10 +5930,20 @@ function validateWorkItemDependencies(
   for (const key of adjacency.keys()) visit(key)
 }
 
+/**
+ * Checks that a Work Item link names existing targets of the right type and scope.
+ *
+ * @param state - Planning state the link belongs to.
+ * @param link - Work Item link.
+ * @param requireActive - Whether targets must be unarchived and open, as a new link requires.
+ * @param retained - Targets the link already had, which may stay even after they were completed or
+ *   canceled, so that another part of the link can still change.
+ */
 function validateWorkItemLink(
   state: PlanningWorkspaceState,
   link: PlanningWorkItemLink,
   requireActive = false,
+  retained: ReadonlySet<string> = new Set(),
 ) {
   const references = [
     ...(link.cycleId ? [[link.cycleId, 'cycle'] as const] : []),
@@ -5901,6 +5966,7 @@ function validateWorkItemLink(
     }
     if (
       requireActive &&
+      !retained.has(entityId) &&
       (entity.status === 'completed' || entity.status === 'canceled')
     ) {
       throw conflict('PlanningEntityClosed', 'Completed or canceled Planning entities cannot receive links.')

@@ -117,6 +117,7 @@ export type PublicApiConnection = {
  * - `body`: JSON body for mutations; omitted for reads.
  * - `key`: `Idempotency-Key` header value, required by the API for mutations.
  * - `query`: query parameters; `undefined` values are left out.
+ * - `maxResponseBytes`: largest response body to read, 2 MiB when omitted.
  * Returns the parsed response body, typed by `schema`.
  */
 export type PublicApiRequest = <T>(
@@ -126,7 +127,11 @@ export type PublicApiRequest = <T>(
   body?: unknown,
   key?: string,
   query?: Record<string, string | number | undefined>,
+  maxResponseBytes?: number,
 ) => Promise<T>
+
+/** Largest successful response body the requester reads by default. */
+const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 /**
  * Builds a bounded public API requester with a fixed origin, deadlines, and safe errors.
@@ -149,7 +154,7 @@ export function createPublicApiRequest(
   }
 
   /** Sends a bounded public API request without following credential-bearing redirects. */
-  return async function request<T>(path: string, schema: z.ZodType<T>, method = 'GET', body?: unknown, key?: string, query: Record<string, string | number | undefined> = {}): Promise<T> {
+  return async function request<T>(path: string, schema: z.ZodType<T>, method = 'GET', body?: unknown, key?: string, query: Record<string, string | number | undefined> = {}, maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES): Promise<T> {
     const url = new URL(`/api/v1/${path}`, origin)
     if (config.teamId !== undefined) url.searchParams.set('teamId', config.teamId)
     for (const [name, value] of Object.entries(query)) {
@@ -187,7 +192,7 @@ export function createPublicApiRequest(
         await response.body?.cancel()
         throw new AgentTaskError('invalid_response', 'The public API did not return JSON.')
       }
-      const parsed = schema.safeParse(JSON.parse(await readBody(response, 2 * 1024 * 1024)))
+      const parsed = schema.safeParse(JSON.parse(await readBody(response, maxResponseBytes)))
       if (!parsed.success) throw new AgentTaskError('invalid_response', 'The public API response did not match the supported contract.')
       return parsed.data
     } catch (error) {
