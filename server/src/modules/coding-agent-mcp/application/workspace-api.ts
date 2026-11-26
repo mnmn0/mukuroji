@@ -552,7 +552,7 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
           if (projectChanged) {
             throw new AgentTaskError(
               'idempotency_conflict',
-              `${done} Subtask ${index + 1} was already created by an earlier attempt with this idempotencyKey, but the parent's Project has changed since then. Move the parent back to its earlier Project and retry with the same arguments and idempotencyKey, or check the parent's subtasks with list_relations before retrying with a new idempotencyKey.`,
+              `${done} Subtask ${index + 1} was already created by an earlier attempt with this idempotencyKey, but the parent's Project (or this subtask's arguments) has changed since then. Move the parent back to its earlier Project and retry with the same arguments and idempotencyKey, or check the parent's subtasks with list_relations before retrying with a new idempotencyKey.`,
               false,
             )
           }

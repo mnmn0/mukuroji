@@ -135,7 +135,7 @@ test('create_subtasks explains a replay conflict after the parent moved to anoth
     .rejects.toMatchObject({
       code: 'idempotency_conflict',
       retryable: false,
-      message: expect.stringContaining("the parent's Project has changed since then. Move the parent back to its earlier Project"),
+      message: expect.stringContaining("the parent's Project (or this subtask's arguments) has changed since then. Move the parent back to its earlier Project"),
     })
 })
 
