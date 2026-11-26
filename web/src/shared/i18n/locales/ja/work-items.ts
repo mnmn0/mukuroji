@@ -795,6 +795,8 @@ export const workItemsMessages = {
   'workItems.completionGate.state.met': '満たしている',
   'workItems.completionGate.state.unmet': '満たしていない',
   'workItems.completionGate.state.unavailable': '確認できない',
+  'workItems.completionGate.override.label': 'Gate を override して完了にする理由（マネージャー）',
+  'workItems.completionGate.override.help': '理由を書いて完了の状態で保存すると、満たしていない条件があっても完了にできます。理由と実行者は監査ログと活動履歴に残ります。',
   'workItems.configuration.jobRoles.eyebrow': 'Job roles',
   'workItems.configuration.jobRoles.title': 'ジョブロール',
   'workItems.configuration.jobRoles.description': '担当者が決まる前の Contributor を計画するための役割です。使わなくなったロールは削除せず archive します。',

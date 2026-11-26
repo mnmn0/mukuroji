@@ -1,6 +1,10 @@
 import { expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { TeamIssuesApiError } from '../src/issues/api/errors'
+import { describeWorkflowRuleRejection } from '../src/issues/model/workflowRuleErrors'
+import { createTranslator } from '../src/shared/i18n/i18n'
 import { workspaceWorkItemConfigurationFixture } from '../src/work-items/fixtures'
+import { readCompletionGateOverrideSubmission } from '../src/work-items/model/completionGateOverride'
 import { CompletionGateConfigurationSection } from '../src/work-items/ui/CompletionGateConfigurationSection'
 import { WorkItemCompletionGateStatus } from '../src/work-items/ui/WorkItemCompletionGateStatus'
 
@@ -59,4 +63,57 @@ test('shows each saved Gate requirement in the configuration section', () => {
   expect(markup).toContain('Completion Gate')
   expect(markup.match(/<option value="required" selected="">/g)?.length).toBe(1)
   expect(markup.match(/<option value="off" selected="">/g)?.length).toBe(2)
+})
+
+test('offers a manager the override reason only while a required condition is unmet', () => {
+  const blocked = renderToStaticMarkup(
+    <WorkItemCompletionGateStatus
+      acceptanceCriteria={[{ id: 'a', text: 'Open', satisfied: false }]}
+      approvalSummary={undefined}
+      locale="en"
+      overrideFormId="editor"
+      policy={{ acceptanceCriteria: 'required' }}
+    />,
+  )
+  expect(blocked).toContain('name="completionGateOverrideReason"')
+  expect(blocked).toContain('form="editor"')
+  expect(blocked).toContain('maxLength="1000"')
+
+  const warnOnly = renderToStaticMarkup(
+    <WorkItemCompletionGateStatus
+      acceptanceCriteria={[{ id: 'a', text: 'Open', satisfied: false }]}
+      approvalSummary={undefined}
+      locale="en"
+      overrideFormId="editor"
+      policy={{ acceptanceCriteria: 'warn' }}
+    />,
+  )
+  expect(warnOnly).not.toContain('completionGateOverrideReason')
+
+  const member = renderToStaticMarkup(
+    <WorkItemCompletionGateStatus
+      acceptanceCriteria={[{ id: 'a', text: 'Open', satisfied: false }]}
+      approvalSummary={undefined}
+      locale="en"
+      policy={{ acceptanceCriteria: 'required' }}
+    />,
+  )
+  expect(member).not.toContain('completionGateOverrideReason')
+})
+
+test('reads a typed override reason from the editor form', () => {
+  const formData = new FormData()
+  expect(readCompletionGateOverrideSubmission(formData)).toBeUndefined()
+  formData.set('completionGateOverrideReason', '   ')
+  expect(readCompletionGateOverrideSubmission(formData)).toBeUndefined()
+  formData.set('completionGateOverrideReason', '  Accepted in review  ')
+  expect(readCompletionGateOverrideSubmission(formData)).toEqual({ reason: 'Accepted in review' })
+})
+
+test('explains a completion Gate rejection', () => {
+  const t = createTranslator('en')
+  const error = new TeamIssuesApiError(409, 'Gate', 'WorkItemCompletionGateNotSatisfied')
+  expect(describeWorkflowRuleRejection(error, t)).toContain('completion Gate is not met')
+  expect(describeWorkflowRuleRejection(new Error('wrapped', { cause: error }), t)).toContain('completion Gate is not met')
+  expect(describeWorkflowRuleRejection(new TeamIssuesApiError(409, 'Other', 'WorkItemRevisionConflict'), t)).toBeUndefined()
 })

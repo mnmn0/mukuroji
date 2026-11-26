@@ -124,6 +124,7 @@ export const issuesMessages = {
   'issues.error.update': 'Issue を更新できませんでした',
   'issues.error.conflict': '別のメンバーが先に更新しました。最新の内容を確認してから、もう一度保存してください。',
   'issues.error.openChildren': '完了かキャンセルになっていない子 Work Item があるため、このチームでは完了にできません。先に子を完了かキャンセルにしてください。',
+  'issues.error.completionGate': 'チームの完了 Gate の条件を満たしていないため完了にできません。詳細の「完了 Gate」で足りない条件を確認してください。',
   'issues.error.workflowRule.actor': 'この状態への変更は {roles} だけが Web から行えます。',
   'issues.error.workflowRule.fields': 'この状態に移すには次の項目を入力してください: {fields}',
   'issues.error.workflowRule.or': '、',

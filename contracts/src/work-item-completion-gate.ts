@@ -81,6 +81,26 @@ export type WorkItemCompletionGateErrorResponse = {
   unmetConditions: WorkItemCompletionGateUnmetCondition[]
 }
 
+/** Longest reason a manager can give when overriding the completion Gate. */
+export const WORK_ITEM_COMPLETION_GATE_OVERRIDE_REASON_MAX_LENGTH = 1000
+
+/**
+ * Manager override sent with a Team Work Item update that completes the Work Item while a required
+ * completion Gate condition is unmet.
+ */
+export type WorkItemCompletionGateOverrideRequest = {
+  /** Why the Work Item is completed without meeting the Gate; required, trimmed, at most 1,000 characters. */
+  reason: string
+}
+
+/** Manager override recorded on the Work Item update that it allowed. */
+export type WorkItemCompletionGateOverrideRecord = {
+  /** Reason the manager gave. */
+  reason: string
+  /** Required conditions that were unmet when the override completed the Work Item. */
+  conditions: WorkItemCompletionGateConditionId[]
+}
+
 /** Approval counts a completion Gate reads; a subset of the Work Item approval summary. */
 export type WorkItemCompletionGateApprovalCounts = {
   /** Approvals waiting for a decision. */
