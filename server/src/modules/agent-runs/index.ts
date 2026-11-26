@@ -63,6 +63,22 @@ export {
   type ValidatedAgentRunReport,
 } from './domain/agent-run-report'
 export {
+  collectPullRequestArtifacts,
+  createUnverifiedArtifactStatus,
+  isArtifactRepositoryAllowed,
+  isFinalArtifactStatus,
+  readPullRequestArtifactReference,
+  type PullRequestArtifactReference,
+  type PullRequestStatusReadResult,
+  type PullRequestStatusReader,
+} from './domain/artifact-status'
+export {
+  DynamoDbAgentRunArtifactStatusStore,
+  type AgentRunArtifactStatusDocumentClient,
+  type AgentRunArtifactStatusStore,
+} from './adapter-out/dynamodb/agent-run-artifact-status-store'
+export { InMemoryAgentRunArtifactStatusStore } from './adapter-out/in-memory/agent-run-artifact-status-store'
+export {
   AGENT_RUN_ACTIVE_INDEX_NAME,
   AGENT_RUN_TRIAGE_INDEX_NAME,
   AGENT_RUN_WORK_ITEM_INDEX_NAME,

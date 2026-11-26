@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
+import type { AgentRunPullRequestStatus } from '@mukuroji/contracts'
 
 /** Connector が接続する外部 service category です。 */
 export type ConnectorCategory =
@@ -164,6 +165,14 @@ export type ConnectorPage<T> = {
   nextCursor?: string
 }
 
+/** Pull request a reported Agent Run artifact names (ADR 0103). */
+export type ConnectorPullRequestReference = {
+  /** Repository path, such as `owner/repo`. */
+  repository: string
+  /** Pull request number. */
+  number: number
+}
+
 /** Connector provider adapter の共通 boundary です。 */
 export interface ConnectorAdapter {
   /** Adapter が実装する provider metadata です。 */
@@ -202,6 +211,15 @@ export interface ConnectorAdapter {
     credential: ConnectorCredential,
     mutation: ConnectorCreateMutation,
   ): Promise<ConnectorExternalRecord>
+  /**
+   * Reads the state, checks, and reviews of a pull request (ADR 0103). Only providers with a
+   * built-in pull request reader implement it; a pull request the account cannot read throws
+   * `ConnectorExternalResourceMissing`.
+   */
+  readPullRequest?(
+    credential: ConnectorCredential,
+    reference: ConnectorPullRequestReference,
+  ): Promise<AgentRunPullRequestStatus>
 }
 
 /** Inbound sync の重複・順序・競合判定に必要な state です。 */

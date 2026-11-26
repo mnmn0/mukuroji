@@ -6,8 +6,10 @@ import type {
 import type {
   ConnectorExternalRecord,
   ConnectorOutboundMutation,
+  ConnectorPullRequestReference,
   ExternalResourceType,
 } from './connectors'
+import { readGitHubPullRequest } from './github-pull-request-reader'
 
 /** Resource types of the GitHub catalog entry; only issues are read and written. */
 const GITHUB_RESOURCE_TYPES: readonly ExternalResourceType[] = ['issue', 'merge-request', 'commit', 'deploy']
@@ -90,6 +92,17 @@ export class GitHubIssueProtocol implements ConnectorResourceProtocol {
       items,
       ...(response.payload.length === PAGE_SIZE ? { nextCursor: String(page + 1) } : {}),
     }
+  }
+
+  /**
+   * Reads a pull request's state, checks, and reviews for Agent Run artifact verification (ADR 0103).
+   *
+   * @param request - Authenticated provider requester.
+   * @param reference - Repository and pull request number.
+   * @returns The pull request status.
+   */
+  readPullRequest(request: ConnectorProviderRequester, reference: ConnectorPullRequestReference) {
+    return readGitHubPullRequest(request, reference)
   }
 
   /**
