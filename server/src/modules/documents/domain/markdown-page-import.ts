@@ -408,7 +408,7 @@ function scanBlocks(
       // An item after a blank line continues a list of the open paragraph that has the same bullet,
       // so it cannot start a checklist of its own.
       const isTask = TASK_ITEM.test(line)
-      const lastText = isTask ? paragraph.findLast((text) => text.trim() !== '') : undefined
+      const lastText = isTask ? lastTopLevelLine(paragraph) : undefined
       const continuesList = lastText !== undefined && /^[-*+][ \t]/u.test(lastText) && lastText[0] === line[0]
       const checklist = !isTask || continuesList ? undefined : readChecklist(lines, index, createId)
       if (checklist) {
@@ -686,7 +686,8 @@ function linesOutsideFences(text: string, skipHtmlBlocks = false): string[] {
     }
     if (skipHtmlBlocks && !comment) {
       const raw = HTML_RAW_BLOCK_START.exec(line)
-      if (raw !== null || HTML_BLOCK_START.test(line)) {
+      // A comment ends at `-->`, not at a blank line, so the comment scan below handles it.
+      if (raw !== null || (HTML_BLOCK_START.test(line) && !/^ {0,3}<!--/u.test(line))) {
         const closing = raw === null ? '' : `</${(raw[1] ?? '').toLowerCase()}>`
         // A raw block whose closing tag is on its first line ends there.
         if (closing === '' || !line.toLowerCase().includes(closing)) html = closing
@@ -698,6 +699,24 @@ function linesOutsideFences(text: string, skipHtmlBlocks = false): string[] {
     if (visible.text.trim() !== '' || line.trim() === '') lines.push(visible.text)
   }
   return lines
+}
+
+/**
+ * Finds the last line of a paragraph that starts a block at the top level, skipping blank lines,
+ * indented continuation lines, and lazy continuation lines that follow a non-blank line.
+ *
+ * @param paragraph - Lines of the open paragraph.
+ * @returns The last top-level block line, or undefined when there is none.
+ */
+function lastTopLevelLine(paragraph: string[]): string | undefined {
+  for (let position = paragraph.length - 1; position >= 0; position -= 1) {
+    const text = paragraph[position] ?? ''
+    if (text.trim() === '' || /^[ \t]/u.test(text)) continue
+    const previous = paragraph[position - 1]
+    const lazy = previous !== undefined && previous.trim() !== '' && !/^[-*+][ \t]/u.test(text)
+    if (!lazy) return text
+  }
+  return undefined
 }
 
 /**

@@ -338,6 +338,19 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
   })
 
+  test('keeps a mixed list whole when an item has continuation lines', () => {
+    const indented = '- [ ] Draft\n\n- Review\n  details\n\n- [x] Publish'
+    const lazy = '- [ ] Draft\n\n- Review\nlazy\n\n- [x] Publish'
+    expect(convert(indented).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: indented }])
+    expect(convert(lazy).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: lazy }])
+  })
+
+  test('sees a heading right after an HTML comment when finding the first heading', () => {
+    const result = convertMarkdownToPageBlocks('# Page\n\n<!-- note -->\n# Other', (prefix) => prefix)
+    expect(result.ok).toBe(true)
+    expect(result).not.toHaveProperty('leadingTitle')
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])
