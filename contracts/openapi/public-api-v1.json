@@ -1633,11 +1633,6 @@
       },
       "CreatePublicMilestoneInput": {
         "additionalProperties": false,
-        "dependentRequired": {
-          "projectId": [
-            "teamId"
-          ]
-        },
         "properties": {
           "baselineDate": {
             "description": "Baseline date; defaults to targetDate.",
@@ -1674,7 +1669,7 @@
             "type": "string"
           },
           "projectId": {
-            "description": "Project scope inside teamId.",
+            "description": "Project scope inside teamId. Requires teamId; a request with projectId but no teamId is rejected with 400.",
             "minLength": 1,
             "type": "string"
           },
