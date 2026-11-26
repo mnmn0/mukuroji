@@ -192,14 +192,16 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   `{ expectedRevision, title?, content? }` で title を変えるか、ページ・テンプレートの本文を `content` で全部置き換えます。
   どちらも `work-items:write` scope と `Idempotency-Key` が要り、応答は作成・更新後の `PublicDocumentSummary`
   （`{ id, kind, title, scope, parentId?, revision }`）です。本文は `GET /api/v1/documents/{documentId}` で読み直します。
-  応答が届かず同じ key で再送した更新は、自分の書き込みを見つけて `409` にせず今の Document を返します。
+  応答が届かず同じ key で再送した更新は、その後に Document が編集されていなければ、自分の書き込みを見つけて
+  `409` にせず今の Document を返します。その後に別の編集で revision が進んでいれば `409 conflict` になるので、
+  Document を読み直してください。
   権限は Web の Documents と同じで、Enterprise RBAC では `documents.write` か `documents.manage`、作成は Project の
   member 以上（Workspace は guest 以外）、link する Work Item は持ち主が閲覧できることが要ります。更新は Document を
   閲覧できなければ `404`、閲覧だけなら `403`、`expectedRevision` が古ければ `409 conflict` です。
   Markdown は行頭の fenced code（`mermaid` は diagram）、記号や URL・メールアドレスを含まない見出し・task list・列の揃え（`:`）のない pipe table を block に変え、
   それ以外は書いたままの Markdown として paragraph に残します。記号を含む見出しも paragraph に残しますが、階層が
   変わらないよう `#` の数はほかの見出しと同じ規則でそろえます。先頭にただ 1 つある `#` 見出しは、export が title を
-  書く場所なので、記号を含んでいても本文から除きます。参照 link や脚注の定義を含む Markdown は、どの参照も
+  書く場所なので、記号を含んでいても本文から除きます。`PATCH` で `title` を省くと、この見出しを新しい title にします。参照 link や脚注の定義を含む Markdown は、どの参照も
   定義を引けるよう全体を 1 つの paragraph に残します。`<pre>` などの生の HTML block を含む Markdown も、中身が
   そのまま表示されるよう全体を 1 つの paragraph に残します。1 ページに収まらない Markdown（block が 500 を超える、空行のない段落や code が
   50,000 文字を超える）は `422 validation_failed` です。本文を置き換えると block の ID が新しくなり、block に付いた

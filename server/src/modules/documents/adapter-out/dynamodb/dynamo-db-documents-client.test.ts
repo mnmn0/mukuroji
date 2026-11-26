@@ -1385,7 +1385,7 @@ test('replaces a page title and body in one revision and drops links owned by re
     access: { memberKey: 'guest@example.com', workspaceRole: 'guest' },
     expectedRevision: 3,
     title: 'Guest edit',
-  })).rejects.toMatchObject({ status: expect.any(Number) })
+  })).rejects.toMatchObject({ status: 403, code: 'DocumentEditDenied' })
 })
 
 test('keeps an editor\'s pending block edit valid across a title-only replacement', async () => {
@@ -1422,6 +1422,42 @@ test('keeps an editor\'s pending block edit valid across a title-only replacemen
       }],
     },
   })).resolves.toMatchObject({ revision: 3 })
+})
+
+test('refuses a pending block edit after a replacement changed that block\'s content', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Plan',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'old' }],
+  })
+  await client.replaceContent({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    expectedRevision: 1,
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'replaced' }],
+  })
+
+  await expect(client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-1',
+      operations: [{
+        operationId: 'pending-edit',
+        type: 'update-block',
+        blockId: 'block-a',
+        block: { id: 'block-a', type: 'paragraph', text: 'edited' },
+      }],
+    },
+  })).rejects.toMatchObject({ status: 409 })
 })
 
 test('returns the saved Document when a keyed content replacement is retried', async () => {

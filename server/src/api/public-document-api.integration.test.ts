@@ -417,6 +417,8 @@ describe('public Document service', () => {
     expect(replaced).toHaveLength(1)
     expect(replaced[0]?.blocks?.map((block) => block.type === 'heading' ? `h${block.level} ${block.text}` : block.type)).toEqual(['h1 Scope', 'paragraph'])
     expect(result).toMatchObject({ id: 'linked', revision: 5 })
+    // Without a title, the leading # heading names the Document instead of being dropped.
+    expect(replaced[0]?.title).toBe('Spec linked')
     expect(replaced[0]?.idempotencyKey).toMatch(/^public-api:[0-9a-f]{64}$/u)
     expect(replaced[0]?.idempotencyFingerprint).toMatch(/^[0-9a-f]{64}$/u)
   })

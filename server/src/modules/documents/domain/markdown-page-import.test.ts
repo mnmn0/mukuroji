@@ -282,6 +282,41 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
   })
 
+  test('ends an unclosed fence with the quote it opened in', () => {
+    const source = 'See [ref].\n\n## Details\n\n> ~~~\n> example\n\n[ref]: /docs'
+    expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
+  })
+
+  test('finds the title past a # line inside a pre block', () => {
+    const result = convertMarkdownToPageBlocks('# Page\n\n<pre>\n# literal\n</pre>', (prefix) => prefix)
+    expect(result).toEqual(expect.objectContaining({ ok: true, leadingTitle: 'Page' }))
+  })
+
+  test('keeps an indented block boundary line as code text', () => {
+    const blocks = convert('Intro\n\n    [mukuroji-block-boundary]: #').blocks
+    expect(JSON.stringify(blocks)).toContain('[mukuroji-block-boundary]: #')
+  })
+
+  test('keeps a list with a plain item after a blank line as Markdown', () => {
+    expect(convert('- [ ] Draft\n\n- Review').blocks).toEqual([
+      { id: expect.any(String), type: 'paragraph', text: '- [ ] Draft\n\n- Review' },
+    ])
+    expect(convert('- [ ] Draft\n\n- [x] Review').blocks).toEqual([{
+      id: expect.any(String),
+      type: 'checklist',
+      items: [
+        { id: expect.any(String), text: 'Draft', checked: false },
+        { id: expect.any(String), text: 'Review', checked: true },
+      ],
+    }])
+  })
+
+  test('refuses to split one long numbered list into two', () => {
+    const item = 'x'.repeat(30_000)
+    expect(convertMarkdownToPageBlocks(`1. ${item}\n\n2. ${item}`, (prefix) => prefix))
+      .toEqual({ ok: false, code: 'block-too-long' })
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])

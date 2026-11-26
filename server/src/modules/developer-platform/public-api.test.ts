@@ -1095,7 +1095,13 @@ describe('public API router', () => {
         },
         async createDocument(_credential, input, context) {
           calls.push(`create ${JSON.stringify(input)} ${context.idempotencyKey}`)
-          return { id: 'document-1', kind: 'page', title: input.title, scope: { type: 'workspace' }, revision: 1 }
+          return {
+            id: 'document-1',
+            kind: 'page',
+            title: input.title,
+            scope: input.projectId === undefined ? { type: 'workspace' } : { type: 'project', projectId: input.projectId },
+            revision: 1,
+          }
         },
         async updateDocument(_credential, documentId, input) {
           calls.push(`update ${documentId} ${JSON.stringify(input)}`)
@@ -1129,7 +1135,9 @@ describe('public API router', () => {
     })
 
     expect(created.status).toBe(201)
-    expect(await created.json()).toEqual({ id: 'document-1', kind: 'page', title: 'Plan', scope: { type: 'workspace' }, revision: 1 })
+    expect(await created.json()).toEqual({
+      id: 'document-1', kind: 'page', title: 'Plan', scope: { type: 'project', projectId: 'project-1' }, revision: 1,
+    })
     expect(replayed.status).toBe(201)
     expect(replayed.headers.get('Idempotency-Replayed')).toBe('true')
     expect(readOnly.status).toBe(403)

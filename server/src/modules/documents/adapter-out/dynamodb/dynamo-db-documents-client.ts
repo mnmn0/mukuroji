@@ -2440,7 +2440,12 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     const savedRevision = receiptKey === undefined
       ? undefined
       : await this.readContentReplaceReceipt(input, receiptKey)
-    if (savedRevision !== undefined) return this.replayContentReplacement(input, row, savedRevision)
+    if (savedRevision !== undefined) {
+      // The row was read before the receipt, so the first write may have saved since; the replay
+      // compares against the row as it is now.
+      const current = await this.requireMutableDocument(input.workspaceId, input.documentId, input.access, 'edit')
+      return this.replayContentReplacement(input, current.documentRow, savedRevision)
+    }
     requireExpectedRevision(row, input.expectedRevision)
     const next = structuredClone(row.document)
     if (next.kind !== 'page' && next.kind !== 'template') {
@@ -2564,8 +2569,9 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
    *
    * @param input - Replacement being retried.
    * @param receiptKey - Receipt sort key derived from the writer and Idempotency-Key.
-   * @returns The revision the same request saved, or undefined when it was not saved.
-   * @throws DocumentError 409 when the key was used for a different request.
+   * @returns The revision the same request saved, or undefined when it was not saved or expired.
+   * @throws DocumentError 409 when the key was used for a different request, or 503 when the
+   *   stored receipt is malformed.
    */
   private async readContentReplaceReceipt(
     input: ReplaceDocumentContentRequest,
@@ -2577,15 +2583,21 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       ConsistentRead: true,
     }))
     const receipt = result.Item
+    if (receipt === undefined) return undefined
+    // A row that is there but not a well-formed receipt is broken data, not a missing receipt.
     if (
       !isRecord(receipt) ||
       receipt.entryType !== 'document-content-replace-receipt' ||
       typeof receipt.expiresAtEpoch !== 'number' ||
-      receipt.expiresAtEpoch <= Math.floor(this.now().getTime() / 1_000)
+      !Number.isSafeInteger(receipt.revision) ||
+      typeof receipt.revision !== 'number' ||
+      typeof receipt.actorKey !== 'string' ||
+      typeof receipt.fingerprint !== 'string'
     ) {
-      return undefined
+      throw invalidStoredDocumentData()
     }
-    if (typeof receipt.revision !== 'number' || receipt.actorKey !== input.access.memberKey || receipt.fingerprint !== input.idempotencyFingerprint) {
+    if (receipt.expiresAtEpoch <= Math.floor(this.now().getTime() / 1_000)) return undefined
+    if (receipt.actorKey !== input.access.memberKey || receipt.fingerprint !== input.idempotencyFingerprint) {
       throw new DocumentError(
         409,
         'IdempotencyKeyReused',
@@ -7796,8 +7808,8 @@ function initialElementRevisions(
 }
 
 /**
- * Advances the element revisions that a content replacement changed: every replaced or new block,
- * and every relation the replacement removed. Untouched relations keep their revisions, and a
+ * Advances the element revisions that a content replacement changed: every removed, new, or
+ * changed block, and every relation the replacement removed. Untouched relations keep their revisions, and a
  * title-only change keeps all of them, so an editor's pending block edits are not refused.
  *
  * @param current - Document before the replacement.
@@ -7815,9 +7827,12 @@ function replacedElementRevisions(
     document.kind === 'page' || document.kind === 'template' ? document.blocks : []
   const nextBlockIds = new Set(blocksOf(next).map(({ id }) => id))
   const currentBlockIds = new Set(blocksOf(current).map(({ id }) => id))
+  const currentBlocks = new Map(blocksOf(current).map((block) => [block.id, stableStringify(block)]))
   const changedBlocks = [
     ...blocksOf(current).filter(({ id }) => !nextBlockIds.has(id)),
-    ...blocksOf(next).filter(({ id }) => !currentBlockIds.has(id)),
+    // A block that keeps its ID but not its content is changed too, so a pending edit made
+    // against the old content is refused instead of overwriting the new one.
+    ...blocksOf(next).filter((block) => !currentBlockIds.has(block.id) || currentBlocks.get(block.id) !== stableStringify(block)),
   ]
   for (const { id } of changedBlocks) revisions[`block:${id}`] = next.revision
   const nextRelationIds = new Set(next.relations.map(({ id }) => id))

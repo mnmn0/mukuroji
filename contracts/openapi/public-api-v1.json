@@ -4369,6 +4369,18 @@
       },
       "UpdatePublicDocumentInput": {
         "additionalProperties": false,
+        "anyOf": [
+          {
+            "required": [
+              "title"
+            ]
+          },
+          {
+            "required": [
+              "content"
+            ]
+          }
+        ],
         "description": "Pass title, content, or both.",
         "properties": {
           "content": {

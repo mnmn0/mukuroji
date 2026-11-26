@@ -5509,7 +5509,7 @@ function assertAllowedFields(
 ) {
   const allowedFields = new Set(allowed)
   const unknownField = Object.keys(value).find((field) => !allowedFields.has(field))
-  if (unknownField) {
+  if (unknownField !== undefined) {
     throw new PublicApiServiceError(
       400,
       'validation_failed',
@@ -6059,6 +6059,7 @@ function readPublicDocumentTitle(value: unknown): string {
     typeof value !== 'string' ||
     !value.trim() ||
     value.length > PUBLIC_DOCUMENT_TITLE_MAX_LENGTH ||
+    /[\u2028\u2029]/u.test(value) ||
     containsAsciiControl(value, false)
   ) {
     throw new PublicApiServiceError(

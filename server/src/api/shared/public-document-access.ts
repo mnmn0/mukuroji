@@ -8,6 +8,7 @@ import type {
   PublicDocumentSummary,
   PublicWorkItemDocument,
 } from '@mukuroji/contracts'
+import { PUBLIC_DOCUMENT_TITLE_MAX_LENGTH } from '@mukuroji/contracts'
 import { createMutationAuditContext, type MutationAuditContext } from '../../modules/audit/audit'
 import {
   convertMarkdownToPageBlocks,
@@ -227,6 +228,8 @@ async function resolveCredentialDocumentWriter(
  * @param context - Request, correlation, and idempotency identifiers.
  * @param method - HTTP method.
  * @param path - Request path.
+ * @param bodyDigest - Digest of the request body, so different writes get different request
+ *   fingerprints while the body itself stays out of the audit event.
  * @returns The audit context recorded with the write.
  */
 function createDocumentWriteAudit(
@@ -235,13 +238,14 @@ function createDocumentWriteAudit(
   context: PublicMutationContext,
   method: string,
   path: string,
+  bodyDigest: string,
 ): MutationAuditContext {
   return createMutationAuditContext({
     workspaceId: principal.workspaceId,
     actor: { id: principal.memberKey, kind: 'user', displayName: principal.displayName },
     idempotencyKey: `document-public-api:${hashPublicWrite(credential, method, path, context.idempotencyKey)}`,
     ...(context.correlationId ? { correlationId: context.correlationId } : {}),
-    request: { method, path, body: { path } },
+    request: { method, path, body: { path, bodyDigest } },
     source: { kind: 'api', requestId: context.requestId, method, route: path },
   })
 }
@@ -296,18 +300,44 @@ function rethrowDocumentFailure(error: unknown): never {
  * Converts Markdown into page blocks with fresh IDs, or reports why it cannot become a page.
  *
  * @param content - Markdown body.
- * @returns Page body blocks.
+ * @returns Page body blocks, and the text of the leading `#` heading an export writes as the title.
  * @throws PublicApiServiceError 422 when the Markdown does not fit in one page.
  */
-function readMarkdownPageBlocks(content: string): DocumentBlock[] {
+function readMarkdownPageBlocks(content: string): { blocks: DocumentBlock[], leadingTitle?: string } {
   const converted = convertMarkdownToPageBlocks(content, (prefix) => `${prefix}-${randomUUID()}`)
-  if (converted.ok) return converted.blocks
+  if (converted.ok) {
+    return {
+      blocks: converted.blocks,
+      ...(converted.leadingTitle === undefined ? {} : { leadingTitle: converted.leadingTitle }),
+    }
+  }
   const reason = converted.code === 'too-many-blocks'
     ? 'The Markdown makes more blocks than one page can hold.'
     : converted.code === 'block-too-long'
       ? 'A code block or a paragraph without blank lines is longer than one block can hold.'
       : 'The Markdown is too large for one page.'
   throw new PublicApiServiceError(422, 'validation_failed', reason)
+}
+
+/**
+ * Reads the leading `#` heading of PATCH content as the new title.
+ *
+ * @param text - Unescaped heading text, when the content has one.
+ * @returns The trimmed title, or undefined when there is no heading.
+ * @throws PublicApiServiceError 422 when the heading cannot be a title.
+ */
+function readLeadingTitle(text: string | undefined): string | undefined {
+  if (text === undefined) return undefined
+  const title = text.trim()
+  // eslint-disable-next-line no-control-regex -- control characters are what this rejects.
+  if (title === '' || title.length > PUBLIC_DOCUMENT_TITLE_MAX_LENGTH || /[\u0000-\u001f\u007f\u2028\u2029]/u.test(title)) {
+    throw new PublicApiServiceError(
+      422,
+      'validation_failed',
+      `The leading # heading is used as the title and must be at most ${PUBLIC_DOCUMENT_TITLE_MAX_LENGTH} characters on one line.`,
+    )
+  }
+  return title
 }
 
 /**
@@ -367,18 +397,44 @@ function toPublicDocumentSummary(document: DocumentDetail): PublicDocumentSummar
  *
  * @param workspaceId - Workspace that owns the Document.
  * @param document - Saved Document.
+ * @param correlationId - Correlation ID of the write, logged with a failure.
  * @returns A promise that resolves when both side effects finished or failed.
  */
-async function reflectDocumentWrite(workspaceId: string, document: DocumentDetail): Promise<void> {
+async function reflectDocumentWrite(
+  workspaceId: string,
+  document: DocumentDetail,
+  correlationId: string | undefined,
+): Promise<void> {
   try {
     await upsertDocumentSearchProjection(workspaceId, document)
   } catch (error) {
-    console.error('Document search projection failed:', error)
+    console.error('Document search projection failed:', describeReflectionFailure(document, correlationId, error))
   }
   try {
     await publishDocumentChange(workspaceId, { documentId: document.id, part: 'document' })
   } catch (error) {
-    console.error('Document change notification failed:', error)
+    console.error('Document change notification failed:', describeReflectionFailure(document, correlationId, error))
+  }
+}
+
+/**
+ * Describes a failed side effect of a Document write for the log, with the write's correlation ID
+ * and only the error's class, so no body, secret, or personal data reaches the log.
+ *
+ * @param document - Saved Document.
+ * @param correlationId - Correlation ID of the write, when the request had one.
+ * @param error - Thrown value.
+ * @returns Log fields.
+ */
+function describeReflectionFailure(
+  document: DocumentDetail,
+  correlationId: string | undefined,
+  error: unknown,
+): { documentId: string, correlationId?: string, errorName: string } {
+  return {
+    documentId: document.id,
+    ...(correlationId === undefined ? {} : { correlationId }),
+    errorName: error instanceof Error ? error.name : typeof error,
   }
 }
 
@@ -489,7 +545,7 @@ export function createCanonicalPublicDocumentService(): PublicDocumentService {
       const scope: DocumentScope = input.projectId === undefined
         ? { type: 'workspace' }
         : { type: 'project', projectId: input.projectId }
-      const blocks = readMarkdownPageBlocks(input.content)
+      const { blocks } = readMarkdownPageBlocks(input.content)
       try {
         requireDocumentCreateCapability(principal, scope)
         const target = input.workItem === undefined
@@ -505,6 +561,7 @@ export function createCanonicalPublicDocumentService(): PublicDocumentService {
           : await validateDocumentRelationTargets(principal, [target])
         const now = new Date().toISOString()
         const keyHash = hashPublicWrite(credential, 'POST', '/api/v1/documents', context.idempotencyKey)
+        const inputDigest = createHash('sha256').update(JSON.stringify(input)).digest('hex')
         const document = await workItemDependencies.documents.create({
           workspaceId: principal.workspaceId,
           access,
@@ -530,8 +587,8 @@ export function createCanonicalPublicDocumentService(): PublicDocumentService {
           // A retry after an uncertain response creates no second page, even when the Public API
           // receipt was not written; the blocks get new IDs, so the request itself is the fingerprint.
           idempotencyKey: `public-api:${keyHash}`,
-          idempotencyFingerprint: createHash('sha256').update(JSON.stringify(input)).digest('hex'),
-          auditContext: createDocumentWriteAudit(credential, principal, context, 'POST', '/api/v1/documents'),
+          idempotencyFingerprint: inputDigest,
+          auditContext: createDocumentWriteAudit(credential, principal, context, 'POST', '/api/v1/documents', inputDigest),
         })
         if (document.revision !== CREATED_DOCUMENT_REVISION) {
           // A retry of a creation that someone has edited since answers with the page as this
@@ -545,7 +602,7 @@ export function createCanonicalPublicDocumentService(): PublicDocumentService {
             revision: CREATED_DOCUMENT_REVISION,
           }
         }
-        await reflectDocumentWrite(principal.workspaceId, document)
+        await reflectDocumentWrite(principal.workspaceId, document, context.correlationId)
         return toPublicDocumentSummary(document)
       } catch (error) {
         rethrowDocumentFailure(error)
@@ -555,24 +612,29 @@ export function createCanonicalPublicDocumentService(): PublicDocumentService {
     /** Changes a page's or template's title, or replaces its body with Markdown. */
     async updateDocument(credential, documentId, input, context) {
       const { principal, access } = await resolveCredentialDocumentWriter(credential)
-      const blocks = input.content === undefined ? undefined : readMarkdownPageBlocks(input.content)
+      const converted = input.content === undefined ? undefined : readMarkdownPageBlocks(input.content)
+      const blocks = converted?.blocks
+      // The leading `#` heading is where an export writes the title, so without a title it names
+      // the Document instead of being dropped.
+      const title = input.title ?? readLeadingTitle(converted?.leadingTitle)
       const path = `/api/v1/documents/${encodeURIComponent(documentId)}`
       // A Document the owner cannot view is reported as missing, not as an edit denial.
       await readVisibleDocument(principal.workspaceId, documentId, access)
+      const inputDigest = createHash('sha256').update(JSON.stringify(input)).digest('hex')
       try {
         const document = await workItemDependencies.documents.replaceContent({
           workspaceId: principal.workspaceId,
           documentId,
           access,
           expectedRevision: input.expectedRevision,
-          ...(input.title === undefined ? {} : { title: input.title }),
+          ...(title === undefined ? {} : { title }),
           ...(blocks === undefined ? {} : { blocks }),
           // A retry after a lost response finds its own write instead of a revision conflict.
           idempotencyKey: `public-api:${hashPublicWrite(credential, 'PATCH', path, context.idempotencyKey)}`,
-          idempotencyFingerprint: createHash('sha256').update(JSON.stringify(input)).digest('hex'),
-          auditContext: createDocumentWriteAudit(credential, principal, context, 'PATCH', path),
+          idempotencyFingerprint: inputDigest,
+          auditContext: createDocumentWriteAudit(credential, principal, context, 'PATCH', path, inputDigest),
         })
-        await reflectDocumentWrite(principal.workspaceId, document)
+        await reflectDocumentWrite(principal.workspaceId, document, context.correlationId)
         return toPublicDocumentSummary(document)
       } catch (error) {
         rethrowDocumentFailure(error)

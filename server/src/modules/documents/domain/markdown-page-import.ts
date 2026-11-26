@@ -225,9 +225,41 @@ function findLeadingTitle(lines: readonly string[]): { text: string, next: numbe
   if (match?.level !== 1 || text === '') return undefined
   // Another `#` heading, outside fenced code and HTML comments and indented by up to three
   // spaces, means the first one is not a title.
-  const rest = linesOutsideFences(lines.slice(first + 1).join('\n'))
+  const rest = linesOutsideHtmlBlocks(linesOutsideFences(lines.slice(first + 1).join('\n')))
   if (rest.some((line) => parseAtxHeading(line.replace(/^ {0,3}/u, ''))?.level === 1)) return undefined
   return { text: text.replace(/\\([!-/:-@[-`{-~])/gu, '$1'), next: first + 1 }
+}
+
+/** Opening tag of a raw HTML block that ends at its closing tag rather than at a blank line. */
+const HTML_RAW_BLOCK_START = /^ {0,3}<(pre|script|style|textarea)(?:[\s>]|$)/iu
+
+/**
+ * Removes the lines inside raw HTML blocks, which show as HTML rather than as Markdown. A `<pre>`,
+ * `<script>`, `<style>`, or `<textarea>` block runs to its closing tag, and any other one to the
+ * next blank line.
+ *
+ * @param lines - Top-level lines, outside fenced code.
+ * @returns The lines outside HTML blocks, in order.
+ */
+function linesOutsideHtmlBlocks(lines: readonly string[]): string[] {
+  const outside: string[] = []
+  /** Closing tag of the open raw block, '' for a block that ends at a blank line. */
+  let closing: string | undefined
+  for (const line of lines) {
+    if (closing === undefined) {
+      const raw = HTML_RAW_BLOCK_START.exec(line)
+      if (raw !== null) {
+        closing = `</${(raw[1] ?? '').toLowerCase()}>`
+      } else if (HTML_BLOCK_START.test(line)) {
+        closing = ''
+      } else {
+        outside.push(line)
+        continue
+      }
+    }
+    if (closing === '' ? line.trim() === '' : line.toLowerCase().includes(closing)) closing = undefined
+  }
+  return outside
 }
 
 /**
@@ -271,8 +303,8 @@ function scanBlocks(
   let paragraph: string[] = []
   /** Whether a nested fence inside the open paragraph is still open, with its marker. */
   let paragraphFence: string | undefined
-  /** Most spaces, after quote markers, that a line closing the open paragraph fence may start with. */
-  let paragraphFenceIndent = 0
+  /** Quotes and list items around the open paragraph fence. */
+  let paragraphFenceContainer: FenceContainer = { quoted: false, column: 0 }
   let tooLong = false
 
   /** Ends the open paragraph Markdown, splitting it at blank lines when it is too long. */
@@ -315,9 +347,11 @@ function scanBlocks(
       continue
     }
     // An indented fence belongs to the list or quote around it, in the paragraph Markdown.
+    // An unclosed fence ends with the quote or list item it opened in.
+    if (paragraphFence !== undefined && leavesFenceContainer(line, paragraphFenceContainer)) paragraphFence = undefined
     if (paragraphFence !== undefined) {
       paragraph.push(line)
-      if (closesNestedFence(line, paragraphFence, paragraphFenceIndent)) paragraphFence = undefined
+      if (closesNestedFence(line, paragraphFence, paragraphFenceContainer)) paragraphFence = undefined
       index += 1
       continue
     }
@@ -417,7 +451,7 @@ function scanBlocks(
     const nestedFence = /^[ \t>*+\-\d.)]+?(`{3,}|~{3,})/u.exec(line)
     if (nestedFence?.[1] !== undefined) {
       paragraphFence = nestedFence[1]
-      paragraphFenceIndent = readNestedFenceCloseIndent(line)
+      paragraphFenceContainer = readFenceContainer(line)
     }
     paragraphComment = opensHtmlComment(line, false)
     paragraph.push(line)
@@ -436,7 +470,8 @@ function scanBlocks(
  * @returns Whether the line is that block boundary.
  */
 function isBlockBoundary(line: string): boolean {
-  return line.trim() === MARKDOWN_BLOCK_BOUNDARY
+  // Only an unindented line is the boundary an export writes; an indented one is code or list text.
+  return line.trimEnd() === MARKDOWN_BLOCK_BOUNDARY
 }
 
 /**
@@ -480,34 +515,102 @@ function readFenceOpening(content: string): string | undefined {
   return marker
 }
 
-/**
- * Reads how far a line closing a fence nested in a list or quote may be indented, after quote
- * markers: the list content column plus the three spaces any fence may be indented by. Deeper
- * lines are code inside the fence.
- *
- * @param line - Line that opens the nested fence.
- * @returns Most leading spaces a closing line may have.
- */
-function readNestedFenceCloseIndent(line: string): number {
-  const prefix = /^((?:[ \t]*(?:>[ \t]?|[*+-][ \t]+|\d+[.)][ \t]+))*)( {0,3})(?:`{3,}|~{3,})/u.exec(line)?.[1]
-  // An opening line this parser does not take apart closes on any indentation, as before.
-  if (prefix === undefined) return Number.POSITIVE_INFINITY
-  return prefix.replace(/>[ \t]?/gu, '').length + 3
+/** Lists and quotes around a fence, which decide where it closes or ends. */
+interface FenceContainer {
+  /** Whether the fence opened inside a quote, so a line without a quote marker ends it. */
+  quoted: boolean
+  /**
+   * List content column, counted after quote markers. A non-blank line indented less ends the
+   * list item and the fence with it; infinite when the opening line was not taken apart.
+   */
+  column: number
 }
 
 /**
- * Tells whether a line closes a fence that may sit in a list or quote, counting indentation after
- * quote markers.
+ * Reads the quotes and list items in front of a line that opens a fence, in one linear pass.
+ *
+ * @param line - Line that opens the fence.
+ * @returns The fence's container.
+ */
+function readFenceContainer(line: string): FenceContainer {
+  let position = 0
+  let column = 0
+  let quoted = false
+  for (;;) {
+    let next = position
+    while (line[next] === ' ' || line[next] === '\t') next += 1
+    const character = line[next] ?? ''
+    if (character === '>') {
+      quoted = true
+      column = 0
+      position = next + 1
+      if (line[position] === ' ' || line[position] === '\t') position += 1
+      continue
+    }
+    let marker = next
+    if (character === '*' || character === '+' || character === '-') {
+      marker += 1
+    } else {
+      while (marker < line.length && /\d/u.test(line[marker] ?? '')) marker += 1
+      if (marker === next || (line[marker] !== '.' && line[marker] !== ')')) break
+      marker += 1
+    }
+    if (line[marker] !== ' ' && line[marker] !== '\t') break
+    let content = marker
+    while (line[content] === ' ' || line[content] === '\t') content += 1
+    column += content - position
+    position = content
+  }
+  if (!/^ {0,3}(?:`{3}|~{3})/u.test(line.slice(position))) return { quoted, column: Number.POSITIVE_INFINITY }
+  return { quoted, column }
+}
+
+/**
+ * Removes the quote markers in front of a line in one linear pass.
+ *
+ * @param line - Source line.
+ * @returns The line after its quote markers.
+ */
+function stripQuoteMarkers(line: string): string {
+  let position = 0
+  for (;;) {
+    let next = position
+    while (line[next] === ' ' || line[next] === '\t') next += 1
+    if (line[next] !== '>') return line.slice(position)
+    position = next + 1
+    if (line[position] === ' ' || line[position] === '\t') position += 1
+  }
+}
+
+/**
+ * Tells whether a line ends the quote or list item a fence opened in, which ends an unclosed fence
+ * too. A false answer only keeps more lines inside the fence.
+ *
+ * @param line - Source line.
+ * @param container - The fence's container.
+ * @returns Whether the line is outside the container.
+ */
+function leavesFenceContainer(line: string, container: FenceContainer): boolean {
+  if (container.quoted && !/^ {0,3}>/u.test(line)) return true
+  const content = stripQuoteMarkers(line)
+  if (content.trim() === '' || !Number.isFinite(container.column) || container.column === 0) return false
+  const indent = /^ */u.exec(content)?.[0].length ?? 0
+  return indent < container.column
+}
+
+/**
+ * Tells whether a line closes a fence that may sit in a list or quote: after quote markers, it is
+ * indented at most three spaces past the list content column. Deeper lines are code inside it.
  *
  * @param line - Source line.
  * @param marker - Opening fence marker.
- * @param maxIndent - Most leading spaces the closing line may have.
+ * @param container - The fence's container.
  * @returns Whether the line closes the fence.
  */
-function closesNestedFence(line: string, marker: string, maxIndent: number): boolean {
-  const unquoted = line.replace(/^(?:[ \t]*>[ \t]?)*/u, '')
+function closesNestedFence(line: string, marker: string, container: FenceContainer): boolean {
+  const unquoted = stripQuoteMarkers(line)
   const indent = /^ */u.exec(unquoted)?.[0].length ?? 0
-  return indent <= maxIndent && closesFence(unquoted.slice(indent), marker)
+  return indent <= container.column + 3 && closesFence(unquoted.slice(indent), marker)
 }
 
 /**
@@ -534,7 +637,7 @@ function splitLongParagraph(text: string): string[] {
   if (text.length <= DOCUMENT_MAX_TEXT_LENGTH) return [text]
   const parts: string[] = []
   let current = ''
-  for (const section of splitAtBlankLinesOutsideFences(text)) {
+  for (const section of joinListSections(splitAtBlankLinesOutsideFences(text))) {
     const joined = current === '' ? section : `${current}\n\n${section}`
     if (joined.length <= DOCUMENT_MAX_TEXT_LENGTH) {
       current = joined
@@ -545,6 +648,29 @@ function splitLongParagraph(text: string): string[] {
   }
   if (current !== '') parts.push(current)
   return parts
+}
+
+/** List item marker at the start of a section. */
+const LIST_ITEM_START = /^(?:[*+-]|\d{1,9}[.)])[ \t]/u
+
+/**
+ * Joins sections that are items of one list, so a split never makes two lists that number or
+ * space their items differently from the one written.
+ *
+ * @param sections - Sections split at blank lines.
+ * @returns Sections with each list in one piece.
+ */
+function joinListSections(sections: readonly string[]): string[] {
+  const joined: string[] = []
+  let previousIsList = false
+  for (const section of sections) {
+    const isList = LIST_ITEM_START.test(section)
+    const previous = joined.at(-1)
+    if (isList && previousIsList && previous !== undefined) joined[joined.length - 1] = `${previous}\n\n${section}`
+    else joined.push(section)
+    previousIsList = isList
+  }
+  return joined
 }
 
 /**
@@ -558,17 +684,18 @@ function splitLongParagraph(text: string): string[] {
 function linesOutsideFences(text: string): string[] {
   const lines: string[] = []
   let fence: string | undefined
-  let fenceIndent = 0
+  let container: FenceContainer = { quoted: false, column: 0 }
   let comment = false
   for (const line of text.split('\n')) {
+    if (!comment && fence !== undefined && leavesFenceContainer(line, container)) fence = undefined
     if (!comment && fence !== undefined) {
-      if (closesNestedFence(line, fence, fenceIndent)) fence = undefined
+      if (closesNestedFence(line, fence, container)) fence = undefined
       continue
     }
     const open = comment ? undefined : readFenceOpening(fenceContent(line))
     if (open !== undefined) {
       fence = open
-      fenceIndent = readNestedFenceCloseIndent(line)
+      container = readFenceContainer(line)
       continue
     }
     const visible = removeHtmlComments(line, comment)
@@ -636,13 +763,14 @@ function splitAtBlankLinesOutsideFences(text: string): string[] {
   const sections: string[] = []
   let lines: string[] = []
   let fence: string | undefined
-  let fenceIndent = 0
+  let container: FenceContainer = { quoted: false, column: 0 }
   let comment = false
   for (const line of text.split('\n')) {
+    if (!comment && fence !== undefined && leavesFenceContainer(line, container)) fence = undefined
     if (comment) {
       comment = opensHtmlComment(line, true)
     } else if (fence !== undefined) {
-      if (closesNestedFence(line, fence, fenceIndent)) fence = undefined
+      if (closesNestedFence(line, fence, container)) fence = undefined
     } else if (line.trim() === '') {
       if (lines.length > 0) sections.push(lines.join('\n'))
       lines = []
@@ -651,7 +779,7 @@ function splitAtBlankLinesOutsideFences(text: string): string[] {
       const open = readFenceOpening(fenceContent(line))
       if (open !== undefined) {
         fence = open
-        fenceIndent = readNestedFenceCloseIndent(line)
+        container = readFenceContainer(line)
       } else {
         comment = opensHtmlComment(line, false)
       }
@@ -683,19 +811,27 @@ function readChecklist(
   createId: (prefix: string) => string,
 ): { block: DocumentBlock, next: number } | undefined {
   const items: DocumentChecklistItem[] = []
+  const bullet = (lines[start] ?? '')[0]
   let index = start
-  while (index < lines.length && (lines[index] ?? '').trim() !== '') {
-    const match = TASK_ITEM.exec(lines[index] ?? '')
-    const text = match?.[2]?.trim() ?? ''
-    if (!match || text === '' || hasMarkdownSyntax(text)) return undefined
-    items.push({ id: createId('item'), text, checked: match[1] !== ' ' })
-    index += 1
+  for (;;) {
+    while (index < lines.length && (lines[index] ?? '').trim() !== '') {
+      const match = TASK_ITEM.exec(lines[index] ?? '')
+      const text = match?.[2]?.trim() ?? ''
+      if (!match || text === '' || hasMarkdownSyntax(text)) return undefined
+      items.push({ id: createId('item'), text, checked: match[1] !== ' ' })
+      index += 1
+    }
+    if (items.length === 0) return undefined
+    let after = index
+    while (after < lines.length && (lines[after] ?? '').trim() === '') after += 1
+    const next = lines[after] ?? ''
+    // An indented line after the run continues its last item, which a checklist cannot hold.
+    if (/^[ \t]/u.test(next)) return undefined
+    // An item with the same bullet after blank lines belongs to the same list: the list is a
+    // checklist only when every item in it is a plain task.
+    if (after === index || next[0] !== bullet || !/^[-*+][ \t]/u.test(next)) break
+    index = after
   }
-  if (items.length === 0) return undefined
-  // An indented line after the run continues its last item, which a checklist cannot hold.
-  let after = index
-  while (after < lines.length && (lines[after] ?? '').trim() === '') after += 1
-  if (/^[ \t]/u.test(lines[after] ?? '')) return undefined
   return { block: { id: createId('checklist'), type: 'checklist', items }, next: index }
 }
 
