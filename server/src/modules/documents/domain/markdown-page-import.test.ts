@@ -361,6 +361,8 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
     const escaped = 'See [docs][ref].\n\n## Details\n\nType \\<!-- literally.\n\n[ref]: https://example.com'
     expect(convert(escaped).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: escaped }])
+    const multiline = 'See [docs][ref].\n\n## Details\n\nUse `start\ntext <!--\nend`.\n\n[ref]: https://example.com'
+    expect(convert(multiline).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: multiline }])
   })
 
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {

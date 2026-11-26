@@ -166,7 +166,15 @@ export function convertMarkdownToPageBlocks(
     if (isBlockBoundary(line)) return false
     const content = stripContainerMarkers(line)
     return REFERENCE_DEFINITION.test(content) || REFERENCE_LABEL_START.test(content) || HTML_BLOCK_START.test(content)
-  })
+  }) || (
+    // A code span may run across lines, and a `<!--` inside it opens no comment. When a line leaves
+    // a backtick run unclosed, definitions are also looked for with comment delimiters read as text.
+    hasUnclosedBacktickRun(bodyText) && linesOutsideFences(bodyText, false, true).some((line) => {
+      if (isBlockBoundary(line)) return false
+      const content = stripContainerMarkers(line)
+      return REFERENCE_DEFINITION.test(content) || REFERENCE_LABEL_START.test(content)
+    })
+  )
   /** Keeps the whole body in one paragraph, which shows it as the Markdown it is. */
   const whole = (): MarkdownPageImportResult => {
     if (bodyText.length > DOCUMENT_MAX_TEXT_LENGTH) return { ok: false, code: 'block-too-long' }
@@ -665,9 +673,10 @@ function joinListSections(sections: readonly string[]): string[] {
  *
  * @param text - Paragraph Markdown.
  * @param skipHtmlBlocks - Whether to leave out raw HTML blocks, start line included.
+ * @param keepComments - Whether to read HTML comment delimiters as text, keeping commented lines.
  * @returns Lines outside fenced code, in order.
  */
-function linesOutsideFences(text: string, skipHtmlBlocks = false): string[] {
+function linesOutsideFences(text: string, skipHtmlBlocks = false, keepComments = false): string[] {
   const lines: string[] = []
   let fence: string | undefined
   let container: FenceContainer = { quoted: false, column: 0 }
@@ -700,7 +709,7 @@ function linesOutsideFences(text: string, skipHtmlBlocks = false): string[] {
         continue
       }
     }
-    const visible = removeHtmlComments(line, comment)
+    const visible: { text: string, open: boolean } = keepComments ? { text: line, open: false } : removeHtmlComments(line, comment)
     comment = visible.open
     if (visible.text.trim() !== '' || line.trim() === '') lines.push(visible.text)
   }
@@ -773,6 +782,37 @@ function removeHtmlComments(line: string, open: boolean): { text: string, open: 
     position += 1
   }
   return { text, open: inside }
+}
+
+/**
+ * Tells whether a line of the text has a backtick run that no run of the same length closes later
+ * on that line, so a code span may continue on the next line.
+ *
+ * @param text - Markdown text.
+ * @returns Whether any line leaves a backtick run unclosed.
+ */
+function hasUnclosedBacktickRun(text: string): boolean {
+  return text.split('\n').some((line) => {
+    let position = 0
+    while (position < line.length) {
+      const character = line[position]
+      if (character === '\\') {
+        position += 2
+        continue
+      }
+      if (character !== '`') {
+        position += 1
+        continue
+      }
+      let runEnd = position
+      while (line[runEnd] === '`') runEnd += 1
+      const length = runEnd - position
+      const close = findBacktickRun(line, runEnd, length)
+      if (close < 0) return true
+      position = close + length
+    }
+    return false
+  })
 }
 
 /**
