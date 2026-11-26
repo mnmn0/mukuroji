@@ -85,6 +85,7 @@ export const auditLogMessages = {
   'auditLog.eventType.labelAfterLatin': '{resource} の{action}',
   'auditLog.eventType.unknownAction': '{resource}: {action}',
   'auditLog.resource.agent-run': 'Agent Run',
+  'auditLog.resource.agent-defaults': 'Workspace のエージェント既定値',
   'auditLog.resource.agent-settings': 'Agent 設定',
   'auditLog.resource.ai-assistance.policy': 'AI 支援のポリシー',
   'auditLog.resource.ai-assistance.provider-credential': 'AI の接続キー',

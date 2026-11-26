@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(664)
-  expect(new Set(inventory).size).toBe(660)
+  expect(inventory).toHaveLength(667)
+  expect(new Set(inventory).size).toBe(663)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -164,6 +164,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('POST /api/teams/:teamId/agent-runs/:runId/release')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-settings')
   expect(inventory).toContain('PUT /api/teams/:teamId/agent-settings')
+  expect(inventory).toContain('GET /api/workspace/agent-defaults')
+  expect(inventory).toContain('PUT /api/workspace/agent-defaults')
   expect(inventory).toContain('GET /api/developer/me/agent-connection')
   expect(inventory).toContain('POST /api/developer/me/api-keys')
   expect(inventory).toContain('POST /api/developer/me/api-keys/:apiKeyId/rotate')
@@ -213,6 +215,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/v1/agent-runs/*')
   expect(inventory).toContain('ALL /api/v1/agent-telemetry/*')
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
+  expect(inventory).toContain('ALL /api/workspace/agent-defaults')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   // Slack destinations (#399): the caller's own, a Team channel, and a Project channel.
   expect(inventory).toContain('PUT /api/notification-preferences/slack-destination')
@@ -222,6 +225,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '299a14743c5577a36292b051ec63a0126697be0a523abafcc401fd49d0c9cce9',
+    '0b0b54b7859d3aa1478e09aa7d1824121437e267237f65dc295ab4373e4b1053',
   )
 })
