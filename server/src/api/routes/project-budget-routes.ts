@@ -8,8 +8,8 @@ import {
 import { ProjectDataError } from '../../modules/directory'
 import { loadProjectBudgetReport, ProjectBudgetReportError } from '../../modules/project-budget'
 import { TimeTrackingError } from '../../modules/time-tracking'
-import { requireAppDependencies, workItemDependencies } from '../shared/app-dependencies'
-import { WORK_ITEMS_AGGREGATE_ITEM_LIMIT, WORK_ITEMS_AGGREGATE_READ_PAGE_SIZE } from '../shared/constants'
+import { WORK_ITEMS_AGGREGATE_ITEM_LIMIT } from '../shared/constants'
+import { createProjectBudgetReportPorts } from '../shared/project-budget-report-ports'
 import { readBearerAccessToken } from '../shared/http'
 import { toWorkItemConfigurationErrorResponse } from '../shared/collaboration-access'
 import { requireTeamPermission, requireWorkspaceBusinessRead } from '../shared/project-access'
@@ -89,32 +89,9 @@ async function readReport(c: Context): Promise<ProjectBudgetReport> {
     'ProjectBudgetForbidden',
     'Only a Project manager can read the Project budget report.',
   ))
-  const timeTracking = requireAppDependencies().timeTracking.timeTrackingService
   return await loadProjectBudgetReport(
     { workspaceId: principal.directoryId, teamId, projectId, ...query },
-    {
-      getBudget: (workspaceId, ownerTeamId, ownerProjectId) => timeTracking.getBudget(workspaceId, ownerTeamId, 'project', ownerProjectId),
-      getBaseline: (workspaceId, ownerTeamId, ownerProjectId) => workItemDependencies.scheduleBaselines.get(workspaceId, ownerTeamId, ownerProjectId),
-      getProgressMode: async (workspaceId, ownerTeamId) =>
-        (await workItemDependencies.workItemConfigurations.getTeamConfiguration(workspaceId, ownerTeamId)).configuration.progressMode,
-      listEntries: (input) => timeTracking.listAllEntries({
-        workspaceId: input.workspaceId,
-        teamId: input.teamId,
-        from: input.from,
-        to: input.to,
-        projectIds: new Set([input.projectId]),
-      }),
-      listExpenses: (workspaceId, ownerTeamId, ownerProjectId) =>
-        workItemDependencies.projectExpenses.list({ workspaceId, teamId: ownerTeamId, projectId: ownerProjectId }),
-      listWorkItems: (workspaceId, ownerTeamId, startAfterIssueId) => workItemDependencies.teamIssues.getTeamIssues(workspaceId, ownerTeamId, {
-        limit: WORK_ITEMS_AGGREGATE_READ_PAGE_SIZE,
-        includeArchived: true,
-        consistentRead: true,
-        limitEvaluatedRows: true,
-        ...(startAfterIssueId ? { startAfterIssueId } : {}),
-      }),
-      now: () => new Date(),
-    },
+    createProjectBudgetReportPorts(),
     WORK_ITEMS_AGGREGATE_ITEM_LIMIT,
   )
 }

@@ -553,6 +553,58 @@ describe('AnalyticsWorkbench', () => {
     expect(cost).toContain('coding agent の見積もりで、請求額とは一致しません。')
   })
 
+  test('shows earned value widgets as indexes with their Project figures and warnings', () => {
+    const [base] = analyticsSnapshotFixture.widgets
+    if (base === undefined) throw new Error('Expected a fixture widget.')
+    const spi = {
+      ...base,
+      widgetId: 'metric-throughput',
+      metric: 'evm-spi' as const,
+      definition: { ...base.definition, key: 'evm-spi' as const, label: 'SPI', unit: 'index' as const },
+      value: 0.8,
+      warnings: [
+        '2 Project(s) you do not manage were left out of the earned value.',
+        '1 Project(s) have no baseline with planned effort and were left out.',
+      ],
+    }
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        locale="ja"
+        snapshot={{ ...analyticsSnapshotFixture, widgets: [spi] }}
+        widgets={[{ ...analyticsWidgetFixtures[0]!, metric: 'evm-spi' }]}
+      />,
+    )
+    expect(html).toContain('0.80')
+    // Every warning shows, so both reasons a Project was left out are visible.
+    expect(html).toContain('自分が管理していない Project 2件は出来高に含めていません。 予定工数のある baseline がない Project 1件は含めていません。')
+    expect(html).toContain('baseline の予定工数で測ります')
+
+    const table = {
+      ...spi,
+      definition: { ...spi.definition, key: 'evm-eac' as const, unit: 'hours' as const },
+      metric: 'evm-eac' as const,
+      value: 312,
+      warnings: [],
+      rows: [{
+        id: 'core\0project-a',
+        label: 'project-a',
+        values: { teamId: 'core', projectId: 'project-a', budgetAtCompletionHours: 200, plannedValueHours: 100, earnedValueHours: 100, actualHours: 80, value: 160 },
+      }],
+    }
+    const tableHtml = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        locale="ja"
+        snapshot={{ ...analyticsSnapshotFixture, widgets: [table] }}
+        widgets={[{ ...analyticsWidgetFixtures[0]!, type: 'table', metric: 'evm-eac', groupBy: { dimension: 'project' } }]}
+      />,
+    )
+    expect(tableHtml).toContain('>出来高 EV（時間）</th>')
+    expect(tableHtml).toContain('>実績 AC（時間）</th>')
+    expect(tableHtml).toContain('>値</th>')
+  })
+
   test('renders reproducible forecast baseline date controls', () => {
     const html = renderToStaticMarkup(
       <AnalyticsWorkbench {...baseProps} />,

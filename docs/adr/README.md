@@ -130,3 +130,4 @@
 | [0107](0107-planning-public-api.md) | Planning の Public API は `work-items:read` / `work-items:write` で受け、権限判定は Web の `planning.read` / `planning.write` と同じにする | 提案 |
 | [0108](0108-analytics-agent-usage-metrics.md) | Analytics の `agent-tokens` / `agent-cost` は query のたびに終了済み Run と usage 行を読み、費用を見られる Team を snapshot の scope に固定する | 提案 |
 | [0109](0109-work-item-web-links-in-planning-table.md) | Work Item の URL リンクを Planning table の 1 row に置き、Public API と MCP から work-items scope で読み書きする | 提案 |
+| [0110](0110-analytics-earned-value-metrics.md) | Analytics の EVM（SPI / CPI / EAC）は query のたびに管理する Project の予算レポートの値を読み、その Project の集合を snapshot の scope に固定する | 提案 |
