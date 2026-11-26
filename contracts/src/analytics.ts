@@ -19,6 +19,9 @@ export type AnalyticsMetricKey =
   | 'milestone-trend'
   | 'agent-tokens'
   | 'agent-cost'
+  | 'evm-spi'
+  | 'evm-cpi'
+  | 'evm-eac'
 
 /**
  * How throughput, velocity, and forecast count completed and remaining work.
@@ -307,7 +310,7 @@ export type AnalyticsMetricDefinition = {
   /** Metric の表示名です。 */
   label: string
   /** Metric value の単位です。 */
-  unit: 'count' | 'hours' | 'items-per-week' | 'hours-per-week' | 'percent' | 'tokens' | 'usd'
+  unit: 'count' | 'hours' | 'items-per-week' | 'hours-per-week' | 'percent' | 'tokens' | 'usd' | 'index'
   /** Metric 算出規則の短い説明です。 */
   description: string
 }

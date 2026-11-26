@@ -34,6 +34,16 @@ export {
   type AnalyticsAgentUsage,
   type AnalyticsAgentUsageRun,
 } from './analytics-agent-usage'
+/** Earned value read by the `evm-spi`, `evm-cpi`, and `evm-eac` metrics (ADR 0110). */
+export {
+  ANALYTICS_EARNED_VALUE_MAX_AS_OF_AGE_MS,
+  MAX_ANALYTICS_EARNED_VALUE_PROJECTS,
+  analyticsQueryReadsEarnedValue,
+  analyticsSnapshotReadEarnedValue,
+  createAnalyticsEarnedValueProjectKey,
+  type AnalyticsEarnedValue,
+  type AnalyticsEarnedValueProject,
+} from './analytics-earned-value'
 export {
   ANALYTICS_PLANNING_GROUPS_UNAVAILABLE_WARNING,
   MAX_ANALYTICS_RECIPIENT_DELIVERY_PAGE,

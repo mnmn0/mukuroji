@@ -7,12 +7,14 @@ export {
 } from './project-budget-report'
 export {
   loadProjectBudgetReport,
+  loadProjectEarnedValue,
   ProjectBudgetReportError,
   type ProjectBudgetReportErrorCode,
   type ProjectBudgetReportPorts,
   type ProjectBudgetReportRequest,
   type ProjectBudgetWorkItem,
   type ProjectBudgetWorkItemPage,
+  type ProjectEarnedValueRequest,
 } from './application/load-project-budget-report'
 export {
   createProjectExpenseUseCase,

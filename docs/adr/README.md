@@ -128,3 +128,4 @@
 | [0105](0105-project-budget-threshold-alerts.md) | Project 予算の消化率を毎日1回調べ、通知の閾値に達した予算ごとに1回だけ通知と Automation trigger を出す | 提案 |
 | [0106](0106-public-workspace-documents-markdown.md) | Workspace の Document を Public API と MCP で Markdown として一覧・作成・更新し、scope は既存の `work-items:read` / `work-items:write` を使う | 提案 |
 | [0108](0108-analytics-agent-usage-metrics.md) | Analytics の `agent-tokens` / `agent-cost` は query のたびに終了済み Run と usage 行を読み、費用を見られる Team を snapshot の scope に固定する | 提案 |
+| [0110](0110-analytics-earned-value-metrics.md) | Analytics の EVM（SPI / CPI / EAC）は query のたびに管理する Project の予算レポートの値を読み、その Project の集合を snapshot の scope に固定する | 提案 |

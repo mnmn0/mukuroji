@@ -348,6 +348,9 @@ const metricKeys = [
   'milestone-trend',
   'agent-tokens',
   'agent-cost',
+  'evm-spi',
+  'evm-cpi',
+  'evm-eac',
 ] as const satisfies readonly AnalyticsMetricKey[]
 
 const statusCategories = [
@@ -384,6 +387,9 @@ const metricLabelKeys: Record<AnalyticsMetricKey, MessageKey> = {
   'milestone-trend': 'analytics.metric.milestoneTrend',
   'agent-tokens': 'analytics.metric.agentTokens',
   'agent-cost': 'analytics.metric.agentCost',
+  'evm-spi': 'analytics.metric.evmSpi',
+  'evm-cpi': 'analytics.metric.evmCpi',
+  'evm-eac': 'analytics.metric.evmEac',
 }
 
 const metricDescriptionKeys: Record<AnalyticsMetricKey, MessageKey> = {
@@ -400,6 +406,36 @@ const metricDescriptionKeys: Record<AnalyticsMetricKey, MessageKey> = {
   'milestone-trend': 'analytics.metricDescription.milestoneTrend',
   'agent-tokens': 'analytics.metricDescription.agentTokens',
   'agent-cost': 'analytics.metricDescription.agentCost',
+  'evm-spi': 'analytics.metricDescription.evmSpi',
+  'evm-cpi': 'analytics.metricDescription.evmCpi',
+  'evm-eac': 'analytics.metricDescription.evmEac',
+}
+
+/** Dimensions an earned value widget may group by; it is measured per Project at the as-of date. */
+const earnedValueGroupDimensions = ['team', 'project'] as const
+
+/**
+ * Returns whether a metric is an earned value metric (SPI, CPI, or EAC).
+ *
+ * @param metric - Metric key.
+ * @returns Whether the metric is measured per Project at the as-of date.
+ */
+function isEarnedValueMetric(metric: AnalyticsMetricKey) {
+  return metric === 'evm-spi' || metric === 'evm-cpi' || metric === 'evm-eac'
+}
+
+/**
+ * Keeps a widget's group-by valid for an earned value metric: Team or Project, and a chart always
+ * groups by one of them.
+ *
+ * @param widget - Widget whose metric is an earned value metric.
+ * @returns The widget with a Team or Project group-by, or none for a metric or table.
+ */
+function withEarnedValueGroupBy(widget: AnalyticsWidget): AnalyticsWidget {
+  const dimension = widget.groupBy?.dimension
+  if (dimension === 'team' || dimension === 'project') return widget
+  if (widget.type === 'chart') return { ...widget, groupBy: { dimension: 'project' } }
+  return { ...widget, groupBy: undefined }
 }
 
 /** Calendar bucket dimensions, the only group-by a Milestone trend accepts. */
@@ -416,7 +452,11 @@ function isCalendarGroup(groupBy: AnalyticsWidget['groupBy']) {
 }
 
 const tableColumnLabelKeys: Readonly<Record<string, MessageKey>> = {
+  actualHours: 'analytics.earnedValue.actualHours',
   baselineEndDate: 'analytics.milestoneTrend.baseline',
+  budgetAtCompletionHours: 'analytics.earnedValue.budgetAtCompletionHours',
+  earnedValueHours: 'analytics.earnedValue.earnedValueHours',
+  plannedValueHours: 'analytics.earnedValue.plannedValueHours',
   changeCount: 'analytics.milestoneTrend.changes',
   forecastEndDate: 'analytics.milestoneTrend.latest',
   milestoneId: 'analytics.milestoneTrend.milestoneId',
@@ -2098,7 +2138,9 @@ function AnalyticsWidgetEditor({
             // A Milestone trend groups by Milestone, so it keeps only a calendar bucket.
             onChange(metric === 'milestone-trend' && !isCalendarGroup(next.groupBy)
               ? { ...next, groupBy: next.type === 'chart' ? { dimension: 'week' } : undefined }
-              : next)
+              : isEarnedValueMetric(metric)
+                ? withEarnedValueGroupBy(next)
+                : next)
           }}
         >
           {metricKeys.map((metric) => <option key={metric} value={metric}>{t(metricLabelKeys[metric])}</option>)}
@@ -2124,8 +2166,10 @@ function AnalyticsWidgetEditor({
                 : undefined,
             })}
           >
-            <option value="">{t('analytics.builder.groupNone')}</option>
-            {(widget.metric === 'milestone-trend' ? calendarGroupDimensions : [
+            {isEarnedValueMetric(widget.metric) && widget.type === 'chart'
+              ? null
+              : <option value="">{t('analytics.builder.groupNone')}</option>}
+            {(widget.metric === 'milestone-trend' ? calendarGroupDimensions : isEarnedValueMetric(widget.metric) ? earnedValueGroupDimensions : [
               ...calendarGroupDimensions,
               'team',
               'project',
@@ -2604,7 +2648,8 @@ function AnalyticsTable({
   result: AnalyticsWidgetResult
   t: ReturnType<typeof createTranslator>
 }) {
-  const columns = [...new Set(result.rows.flatMap((row) => Object.keys(row.values)))].slice(0, 6)
+  // Earned value rows carry eight figures per Project; other tables carry at most six.
+  const columns = [...new Set(result.rows.flatMap((row) => Object.keys(row.values)))].slice(0, 8)
 
   if (result.rows.length === 0) {
     return (
@@ -3241,6 +3286,9 @@ function formatMetricValue(
   if (unit === 'usd') {
     return new Intl.NumberFormat(locale, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(value)
   }
+  if (unit === 'index') {
+    return new Intl.NumberFormat(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)
+  }
   const formatter = new Intl.NumberFormat(locale, {
     maximumFractionDigits: unit === 'count' || unit === 'tokens' ? 0 : 1,
   })
@@ -3373,10 +3421,21 @@ function formatAnalyticsWarning(
   if (warning === 'No Agent Runs with usage finished in this period.') {
     return t('analytics.warning.noAgentUsage')
   }
+  if (warning === 'Earned value is not available for this run.') {
+    return t('analytics.warning.earnedValueUnavailable')
+  }
+  if (warning === 'Earned value uses the Work Items\' current progress, so it is measured only when the as-of time is within the last day.') {
+    return t('analytics.warning.earnedValueAsOf')
+  }
+  if (warning === 'No Project you manage in this scope has a baseline with planned effort.') {
+    return t('analytics.warning.noEarnedValue')
+  }
   const agentUsageWarnings = [
     [/^(\d+) Agent Run\(s\) of Teams you do not manage were left out of the estimated cost\.$/u, 'analytics.warning.agentCostHidden'],
     [/^(\d+) Agent Run\(s\) reported no estimated cost and counted as zero\.$/u, 'analytics.warning.agentCostMissing'],
     [/^(\d+) Agent Run\(s\) had more usage than one read returns, so the total is a lower bound\.$/u, 'analytics.warning.agentUsageTruncated'],
+    [/^(\d+) Project\(s\) you do not manage were left out of the earned value\.$/u, 'analytics.warning.earnedValueUnmanaged'],
+    [/^(\d+) Project\(s\) have no baseline with planned effort and were left out\.$/u, 'analytics.warning.earnedValueWithoutBaseline'],
   ] as const satisfies readonly (readonly [RegExp, MessageKey])[]
   for (const [pattern, key] of agentUsageWarnings) {
     const count = pattern.exec(warning)?.[1]

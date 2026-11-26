@@ -179,6 +179,9 @@ Metric contract の version は snapshot に固定します。同じ入力、met
 | Milestone trend | 期間中に予定日（forecast の終了日）が変わった Milestone 数。Chart の各 point は bucket 末時点の各 Milestone の予定日を、key が Milestone ID、value が 1970-01-01 からの日数の `segments` で返します。Group は Milestone ごとに、期間中に予定日が動いた日数（遅れは正）と変更回数（`sampleSize`）を返します。 |
 | Agent tokens | 期間内（`asOf` まで）に終わった Agent Run が使ったトークン数（入力・出力・prompt cache の読み取り・書き込みの合計、unit `tokens`）。`sampleSize` は数えた Run 数です。 |
 | Agent estimated cost | 期間内に終わった Agent Run の推定費用（USD、unit `usd`）。閲覧者が manager である Team の Run だけを数えます。 |
+| SPI | `asOf` の日付の出来高（EV）÷ 計画値（PV）。baseline の予定工数（分）で測り、unit は `index`（小数 2 桁）。閲覧者が manager で、予定工数のある baseline を持つ Project だけを数えます。 |
+| CPI | EV ÷ Project に記録した時間（AC）。unit `index`。対象は SPI と同じです。 |
+| EAC | baseline の予定工数（BAC）÷ CPI を時間で表した値（unit `hours`）。対象は SPI と同じです。 |
 
 Remaining scope と cumulative flow は WIP と同じく、chart の bucket ごとに bucket 末（`asOf` を超えない）時点へ
 state を巻き戻して評価する state metric です。期間の途中で作成された Work Item は作成後の bucket から scope に入るため、
@@ -256,6 +259,27 @@ evidence、定期配信の hash に含まれます。
 うち閲覧者が manager である Team の ID を加え、一覧・export の再検証でも同じ規則で比べます。`agent-cost` のない query の
 hash は変わりません。Software factory を deploy していない環境と定期配信の runner は usage を読まず、widget は
 warning だけを返します（hash にも Team を加えません）。
+
+### SPI / CPI / EAC（EVM）
+
+[ADR 0110](adr/0110-analytics-earned-value-metrics.md)。値は Project の予算レポート
+（[docs/time-tracking.md](time-tracking.md)）の EVM と同じ計算の工数版です。PV は baseline の各 Work Item の予定工数を
+予定開始日〜終了日に均等に割り振った `asOf` の日付までの合計、EV は予定工数 × Work Item の今の進捗率、AC は予算期間の開始と
+baseline の予定日のうち最も早い日から `asOf` の日付までの記録時間です。中止した Work Item は BAC・PV・EV から外します。
+複数の Project をまとめた値と group の値は、分を足してから割ります（SPI = ΣEV ÷ ΣPV、CPI = ΣEV ÷ ΣAC、EAC = ΣBAC ÷ CPI）。
+PV が 0 なら SPI、AC が 0 なら CPI と EAC、CPI が 0 なら EAC は `null` です。
+
+API は EVM の widget を含む query のときだけ、report の範囲（Team / Project の filter）にある認可済み Work Item の今の
+Project を Team 付きで集め、閲覧者が Project manager である Project を読みます。それ以外の Project と、予定工数のある
+baseline がない Project は件数を warning で返します。1 query で 20 Project を超えれば `413`
+（`AnalyticsEarnedValueLimitExceeded`）です。担当者・状態などほかの filter は EVM に効きません。Group は Team と Project
+だけで、chart はどちらかで分けることが必須です（日・週の series は作りません）。Table は Project ごとに BAC / PV / EV / AC
+の時間と値を返します。Evidence はありません。
+
+EV は Work Item の今の進捗を使うので、`asOf` が 1 日より前の query では値を作らず warning だけを返します。過去の値は、
+その時点で作った snapshot で見ます。EVM を含む snapshot の permission scope hash には、閲覧者が manager である Project の
+`teamId\0projectId` を加え、一覧・export の再検証でも同じ規則で比べます。EVM のない query の hash は変わりません。
+定期配信の runner は EVM を読まず、widget は warning だけを返します（hash にも Project を加えません）。
 
 Software factory の Run の成功率・手戻り率・工程別の滞在時間は、まだ Analytics engine の metric ではなく、
 Factory board の期間サマリーとして別 API で計算します。定義は

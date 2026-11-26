@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { TimeEntry } from '@mukuroji/contracts'
 import {
   loadProjectBudgetReport,
+  loadProjectEarnedValue,
   type ProjectBudgetReportPorts,
   type ProjectBudgetReportRequest,
   type ProjectBudgetWorkItemPage,
@@ -141,5 +142,44 @@ describe('loadProjectBudgetReport', () => {
     ]), 100)
 
     expect(report.earnedValue).toMatchObject({ budgetAtCompletionMinutes: 600, earnedValueMinutes: 0 })
+  })
+})
+
+describe('loadProjectEarnedValue', () => {
+  test('counts time from the first planned date through the as-of date', async () => {
+    const calls: string[] = []
+    const figures = await loadProjectEarnedValue(
+      { workspaceId: 'w', teamId: 't', projectId: 'p', timeZone: 'Asia/Tokyo', asOf: Date.parse('2026-01-05T12:00:00.000Z') },
+      ports([{ issues: [{ id: 'a', statusCategory: 'started', schedule: {}, assignedProjectId: 'p' }] }], calls),
+      100,
+    )
+
+    // The baseline plans 2026-01-05..06, so time is read from 2026-01-05 to the as-of date.
+    expect(calls).toEqual([
+      'budget w/t/p',
+      'entries p 2026-01-04T10:00:00.000Z 2026-01-06T14:00:00.000Z',
+      'expenses w/t/p',
+    ])
+    // Half of the 600 planned minutes are due by the end of 2026-01-05; a started Work Item earns half.
+    expect(figures).toMatchObject({
+      budgetAtCompletionMinutes: 600,
+      plannedValueMinutes: 300,
+      earnedValueMinutes: 300,
+      actualMinutes: 60,
+      schedulePerformanceIndex: 1,
+    })
+  })
+
+  test('reads nothing more for a Project without a baseline that plans effort', async () => {
+    const calls: string[] = []
+    const base = ports([], calls)
+    const figures = await loadProjectEarnedValue(
+      { workspaceId: 'w', teamId: 't', projectId: 'p', timeZone: 'UTC', asOf: Date.parse('2026-01-05T12:00:00.000Z') },
+      { ...base, getBaseline: async () => null },
+      100,
+    )
+
+    expect(figures).toBeNull()
+    expect(calls).toEqual(['budget w/t/p'])
   })
 })
