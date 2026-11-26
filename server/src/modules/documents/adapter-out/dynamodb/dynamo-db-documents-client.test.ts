@@ -1460,6 +1460,36 @@ test('refuses a pending block edit after a replacement changed that block\'s con
   })).rejects.toMatchObject({ status: 409 })
 })
 
+test('fails closed on a content replacement receipt with invalid values', async () => {
+  for (const broken of [{ revision: 0 }, { expiresAtEpoch: -1 }, { revision: 1.5 }]) {
+    const memory = createMemoryDocumentClient()
+    const client = createClient(memory)
+    const created = await client.create({
+      workspaceId: 'workspace-1',
+      access: ownerAccess,
+      kind: 'page',
+      scope: { type: 'workspace' },
+      title: 'Plan',
+      blocks: [{ id: 'block-a', type: 'paragraph', text: 'old' }],
+    })
+    const write = {
+      workspaceId: 'workspace-1',
+      documentId: created.id,
+      access: ownerAccess,
+      expectedRevision: 1,
+      blocks: [{ id: 'block-b', type: 'paragraph' as const, text: 'new' }],
+      idempotencyKey: 'key-1',
+      idempotencyFingerprint: 'fingerprint-1',
+    }
+    await client.replaceContent(write)
+    const receipt = memory.items().find((item) => item.entryType === 'document-content-replace-receipt')
+    expect(receipt).toBeDefined()
+    memory.put({ ...receipt, ...broken })
+
+    await expect(client.replaceContent(write)).rejects.toMatchObject({ status: 503, code: 'InvalidStoredDocumentData' })
+  }
+})
+
 test('returns the saved Document when a keyed content replacement is retried', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)

@@ -2589,8 +2589,11 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       !isRecord(receipt) ||
       receipt.entryType !== 'document-content-replace-receipt' ||
       typeof receipt.expiresAtEpoch !== 'number' ||
-      !Number.isSafeInteger(receipt.revision) ||
+      !Number.isSafeInteger(receipt.expiresAtEpoch) ||
+      receipt.expiresAtEpoch < 0 ||
       typeof receipt.revision !== 'number' ||
+      !Number.isSafeInteger(receipt.revision) ||
+      receipt.revision < 1 ||
       typeof receipt.actorKey !== 'string' ||
       typeof receipt.fingerprint !== 'string'
     ) {
