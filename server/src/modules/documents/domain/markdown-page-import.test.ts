@@ -79,6 +79,10 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(inCode.map(({ type }) => type)).toEqual(['paragraph', 'heading', 'paragraph'])
     const inComment = convert('See [ref].\n\n## Example\n\n<!--\n[ref]: https://example.com\n-->').blocks
     expect(inComment.map(({ type }) => type)).toEqual(['paragraph', 'heading', 'paragraph'])
+    const nextLine = 'See [docs][ref].\n\n## Details\n\n[ref]:\n  https://example.com'
+    expect(convert(nextLine).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: nextLine }])
+    const indented = '    literal code\n\nSee [ref].\n\n[ref]: https://example.com'
+    expect(convert(`\n\n${indented}\n\n`).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: indented }])
     expect(convertMarkdownToPageBlocks(`[ref]: https://example.com\n\n${'x'.repeat(DOCUMENT_MAX_TEXT_LENGTH)}`, (prefix) => prefix))
       .toEqual({ ok: false, code: 'block-too-long' })
   })

@@ -98,7 +98,8 @@ export function convertMarkdownToPageBlocks(
   const lines = source.replace(/^\uFEFF/u, '').split(/\r\n?|\n/u)
   const title = findLeadingTitle(lines)
   const bodyLines = title === undefined ? lines : lines.slice(title.next)
-  const bodyText = bodyLines.join('\n').trim()
+  // Only blank lines are trimmed, so the first line keeps indentation that makes it code.
+  const bodyText = bodyLines.join('\n').replace(/^(?:[ \t]*\n)+/u, '').replace(/(?:\n[ \t]*)+$/u, '')
   // A reference or footnote definition resolves anywhere in the document, but each paragraph
   // block is shown on its own; such Markdown stays whole in one paragraph so every reference
   // keeps its definition.
@@ -159,8 +160,12 @@ function findLeadingTitle(lines: readonly string[]): { text: string, next: numbe
   return { text: text.replace(/\\([!-/:-@[-`{-~])/gu, '$1'), next: first + 1 }
 }
 
-/** Reference definition line, such as `[docs]: https://example.com`. */
-const REFERENCE_DEFINITION = /^ {0,3}\[([^\]]+)\]:[ \t]*\S/u
+/**
+ * Start of a reference or footnote definition, such as `[docs]: https://example.com`. Its content
+ * may start on the next line, so nothing after the colon is required; a false match only keeps
+ * more Markdown together.
+ */
+const REFERENCE_DEFINITION = /^ {0,3}\[([^\]]+)\]:/u
 
 /**
  * Clamps a shifted heading level to the levels a page supports.
