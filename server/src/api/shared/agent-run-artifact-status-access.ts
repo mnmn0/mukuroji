@@ -280,17 +280,18 @@ export type PullRequestReaderConnectors = {
  * Each connected GitHub installation is tried in turn until one can read the pull request, so the
  * result never shows a repository that none of the Workspace's accounts can read.
  *
- * When the Workspace has more accounts than one read tries, each refresh interval starts at a
- * different one, and an unread pull request is reported as `unavailable` rather than
- * `not-accessible`, since an untried account might read it.
+ * When the Workspace has more accounts than one read tries, each read starts at a randomly chosen
+ * one, and an unread pull request is reported as `unavailable` rather than `not-accessible`, since
+ * an untried account might read it. A random start, unlike one taken from the clock, cannot fall
+ * back on the same accounts every time the refresh period lines up with the account count.
  *
  * @param connectors - Installation list and engine loader.
- * @param now - Clock that picks the accounts a read tries.
+ * @param pickStart - Chooses where among the other accounts a read starts, from 0 to below `size`.
  * @returns The reader.
  */
 export function createConnectorPullRequestStatusReader(
   connectors: PullRequestReaderConnectors,
-  now: () => Date = () => new Date(),
+  pickStart: (size: number) => number = pickRandomIndex,
 ): PullRequestStatusReader {
   return async (workspaceId, reference) => {
     if (reference.provider !== 'github') return { kind: 'unverified', reason: 'unsupported-provider' }
@@ -301,7 +302,7 @@ export function createConnectorPullRequestStatusReader(
         (await connectors.listConnectors(workspaceId)).filter((installation) => installation.provider === 'github' &&
           (installation.status === 'connected' || installation.status === 'degraded')),
         reference.repository,
-        Math.floor(now().getTime() / ARTIFACT_STATUS_REFRESH_INTERVAL_MS),
+        pickStart,
       )
       installations = candidates.slice(0, maximumInstallationsPerRead)
       untried = candidates.length > installations.length
@@ -340,26 +341,37 @@ export function createConnectorPullRequestStatusReader(
 
 /**
  * Orders installations so the ones whose account is named like the repository owner come first.
- * When the others do not all fit in one read, they start at a position that moves with each
- * refresh interval, so every account is reached in turn.
+ * When the others do not all fit in one read, they start at a chosen position and wrap around, so
+ * over repeated reads every account is tried.
  *
  * @param installations - Connected GitHub installations.
  * @param repository - Lowercase `owner/repo` path.
- * @param interval - Refresh interval number of the read.
+ * @param pickStart - Chooses the start position among the other accounts.
  * @returns The installations in the order to try.
  */
 function orderInstallationsForRepository(
   installations: ConnectorInstallation[],
   repository: string,
-  interval: number,
+  pickStart: (size: number) => number,
 ): ConnectorInstallation[] {
   const owner = repository.split('/')[0]
   const ownsRepository = (installation: ConnectorInstallation) => installation.externalAccountName?.toLowerCase() === owner
   const owners = installations.filter(ownsRepository)
   const others = installations.filter((installation) => !ownsRepository(installation))
   if (owners.length + others.length <= maximumInstallationsPerRead) return [...owners, ...others]
-  const start = (interval * Math.max(1, maximumInstallationsPerRead - owners.length)) % others.length
+  const picked = Math.trunc(pickStart(others.length))
+  const start = Number.isFinite(picked) ? ((picked % others.length) + others.length) % others.length : 0
   return [...owners, ...others.slice(start), ...others.slice(0, start)]
+}
+
+/**
+ * Picks a uniformly random index.
+ *
+ * @param size - Number of positions.
+ * @returns An integer from 0 to below `size`.
+ */
+function pickRandomIndex(size: number): number {
+  return Math.floor(Math.random() * size)
 }
 
 /**

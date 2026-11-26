@@ -289,23 +289,35 @@ test('reads report pages until a pull request is found, and flags a read that st
   expect(truncated).toMatchObject({ items: [], incomplete: true })
 })
 
-test('the connector reader reaches an eleventh account on a later interval, and does not call the pull request inaccessible before', async () => {
+test('the connector reader reaches accounts past the first ten on a later read, and does not call the pull request inaccessible before', async () => {
   const reference = { url: 'https://github.com/org/repo/pull/1', provider: 'github' as const, repository: 'org/repo', number: 1 }
-  const accounts = Array.from({ length: 11 }, (_, index) => installation(`account-${index + 1}`))
-  // Interval 0 starts at the first account.
-  let clock = new Date(0)
+  // Twenty accounts and a refresh period that is a multiple of ten: a clock-based start would
+  // land on the same ten accounts every time. Only the fifteenth can read the pull request.
+  const accounts = Array.from({ length: 20 }, (_, index) => installation(`account-${index + 1}`))
+  const starts = [0, 0, 10]
+  const tried: string[][] = []
+  let current: string[] = []
   const reader = createConnectorPullRequestStatusReader({
     listConnectors: async () => accounts,
     getEngine: async () => ({
       readPullRequest: async (_workspaceId, installationId) => {
-        if (installationId !== 'account-11') throw new ConnectorRuntimeError('ConnectorExternalResourceMissing', 'Missing.')
+        current.push(installationId)
+        if (installationId !== 'account-15') throw new ConnectorRuntimeError('ConnectorExternalResourceMissing', 'Missing.')
         return openPullRequest
       },
     }),
-  }, () => clock)
+  }, (size) => {
+    expect(size).toBe(20)
+    current = []
+    tried.push(current)
+    return starts.shift() ?? 0
+  })
 
-  // The first interval tries ten accounts; the eleventh is left, so the result is not final.
+  // Each unsuccessful read leaves accounts untried, so the result is not final.
   expect(await reader('workspace', reference)).toEqual({ kind: 'unverified', reason: 'unavailable' })
-  clock = new Date(clock.getTime() + ARTIFACT_STATUS_REFRESH_INTERVAL_MS)
+  expect(await reader('workspace', reference)).toEqual({ kind: 'unverified', reason: 'unavailable' })
+  expect(tried[0]).toHaveLength(10)
+  expect(tried[0]?.at(-1)).toBe('account-10')
   expect(await reader('workspace', reference)).toEqual({ kind: 'verified', pullRequest: openPullRequest })
+  expect(tried[2]?.[0]).toBe('account-11')
 })

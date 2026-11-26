@@ -45,7 +45,8 @@ credential の復号・更新と、失敗時の degraded / needs-reauth の扱�
   残りは保存済みの状態か未確認のまま返す。照会を始める位置は照会の間隔ごとにずらし、遅い pull request が
   先頭にあっても後ろのものがいつまでも確かめられないことはないようにする。review の履歴と check run も最後まで読み、review が 1,000 件、check run が 500 件を超えて読み切れないときは
   途中までの判定を出さずに `unavailable` にする。connector が複数あるときは、repository の owner と同じ名前の account を先に試し、
-  1 回に最大 10 個まで順に試す。それより多いときは照会の間隔ごとに試し始める account をずらし、
+  1 回に最大 10 個まで順に試す。それより多いときは試し始める account を照会ごとに無作為に選ぶ（時刻から決めると、
+  再照会の周期と account 数がそろったとき同じ 10 個に戻り続けるため）。
   試していない account が残る間は `not-accessible` と確定せず `unavailable` にする。
 - 未確認の理由は `repository-not-allowed`、`no-connector`、`not-accessible`、`unsupported-provider`、
   `unavailable` の 5 つ。Web は未確認の pull request に「未確認」と理由を出し、確認済みのものと区別する。
