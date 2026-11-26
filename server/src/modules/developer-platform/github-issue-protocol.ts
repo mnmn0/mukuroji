@@ -160,6 +160,9 @@ export class GitHubIssueProtocol implements ConnectorResourceProtocol {
     if (current.status === 404 || current.status === 410) throw missingIssue()
     const currentIssue = readIssue(current.payload, `${issue.owner}/${issue.repository}`)
     if (mutation.expectedExternalVersion !== undefined && currentIssue.externalVersion !== mutation.expectedExternalVersion) {
+      // A retry after a lost response or a failed commit reads the version its own write made.
+      // The issue then carries this write's signed marker and contents, so it is returned as done.
+      if (isCompletedWrite(currentIssue, mutation, body)) return currentIssue
       throw issueChanged()
     }
     const response = await request({
@@ -280,6 +283,30 @@ function readIssue(value: unknown, repositoryName: string): ConnectorExternalRec
     metadata: {},
     ...(originMarker === undefined ? {} : { originMarker }),
   }
+}
+
+/**
+ * Tells whether the issue already holds this write: a replay after a lost response or a failed
+ * commit. The signed origin marker names the write, and the title, description, and state must
+ * still be the ones it sent, so a later edit that kept the marker is not taken as the write.
+ *
+ * @param issue - Issue as read now.
+ * @param mutation - The write being retried.
+ * @param body - PATCH body built for the write.
+ * @param body.title - Title the write sends, when it sends one.
+ * @param body.state - State the write sends, when it sends one.
+ * @returns Whether the issue already shows the write.
+ */
+function isCompletedWrite(
+  issue: ConnectorExternalRecord,
+  mutation: ConnectorOutboundMutation,
+  body: { title?: string; state?: string },
+) {
+  return issue.originMarker === mutation.originMarker &&
+    (body.title === undefined || issue.title === body.title) &&
+    // Reading the issue turns CRLF into LF, so the sent description is compared the same way.
+    issue.description === (mutation.description ?? '').replace(/\r\n/gu, '\n') &&
+    (body.state === undefined || issue.state === body.state)
 }
 
 /**
