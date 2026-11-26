@@ -1993,6 +1993,16 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({ status: 200, json: factoryBoardFixture })
   })
 
+  // Work Item web links shown in the task detail; the fixtures have none.
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/web-links$/, async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback()
+      return
+    }
+    const [, teamId = '', workItemId = ''] = /\/api\/teams\/([^/]+)\/issues\/([^/]+)\/web-links$/u.exec(new URL(route.request().url()).pathname) ?? []
+    await route.fulfill({ status: 200, json: { schemaVersion: 1, teamId, workItemId, items: [] } })
+  })
+
   await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/relations$/, async (route) => {
     if (route.request().method() !== 'POST') {
       await route.fallback()

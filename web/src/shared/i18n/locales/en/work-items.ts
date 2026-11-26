@@ -947,7 +947,7 @@ export const workItemsMessages = {
   'workItems.webLinks.readOnly': 'Read only',
   'workItems.webLinks.loading': 'Loading links…',
   'workItems.webLinks.loadError': 'Links could not be loaded.',
-  'workItems.webLinks.retry': 'Retry',
+  'workItems.webLinks.retry': 'Reload links',
   'workItems.webLinks.empty': 'No links yet.',
   'workItems.webLinks.add': 'Add link',
   'workItems.webLinks.save': 'Save link',
