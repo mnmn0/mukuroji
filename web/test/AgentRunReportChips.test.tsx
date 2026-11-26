@@ -106,7 +106,7 @@ describe('Reported pull request statuses', () => {
       />,
     )
     expect(unchecked).toContain(labels.artifactStatus.unverified)
-    expect(unchecked).toContain(labels.artifactStatus.unverifiedReasons['repository-not-allowed'].replace("'", '&#x27;'))
+    expect(unchecked).toContain(labels.artifactStatus.unverifiedReasons['repository-not-allowed'].replaceAll("'", '&#x27;'))
 
     const plain = renderToStaticMarkup(<AgentRunReportChips labels={labels} report={agentRunReportFixture} />)
     expect(plain).not.toContain(labels.artifactStatus.unverified)
