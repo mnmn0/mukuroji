@@ -314,6 +314,34 @@ describe('public Document service', () => {
     expect(result).not.toHaveProperty('content')
   })
 
+  test('answers a retried creation of a page edited since with the page as it was created', async () => {
+    configureFakeProjectClients(true, {
+      directoryId: workspaceId,
+      projectAccesses: [{ projectId: 'refero', role: 'member' }],
+      role: 'member',
+      workspaceRole: 'member',
+    })
+    setTestAppDependencies({
+      documents: createDocumentFake({
+        async getAuthorizationRevision() {
+          return 1
+        },
+        async create(input) {
+          // The store finds the page an earlier attempt created, which another writer changed.
+          return { ...createLinkedDocument('doc-new', []), title: 'Renamed', scope: input.scope, revision: 4 }
+        },
+      }),
+    })
+
+    const result = await runWithTestAppDependencies(() => createCanonicalPublicDocumentService().createDocument(
+      { ...credential, scopes: ['work-items:write'] },
+      { title: ' Plan ', content: 'Body', projectId: 'refero' },
+      { requestId: 'request-1', idempotencyKey: 'key-1' },
+    ))
+
+    expect(result).toEqual({ id: 'doc-new', kind: 'page', title: 'Plan', scope: { type: 'project', projectId: 'refero' }, revision: 1 })
+  })
+
   test('refuses a Project page from a viewer and a link to a Work Item the owner cannot view', async () => {
     configureFakeProjectClients(true, {
       directoryId: workspaceId,

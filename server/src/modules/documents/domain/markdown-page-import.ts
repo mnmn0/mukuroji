@@ -419,12 +419,14 @@ function readTable(
 
 /**
  * Splits one pipe table line into trimmed cells. A line counts only when it starts and ends with
- * a pipe, so ordinary text with a pipe is never read as a table.
+ * a pipe and is not indented as code, so ordinary text with a pipe is never read as a table.
  *
  * @param line - Source line.
  * @returns The cells, or undefined when the line is not a pipe table row.
  */
 function splitTableRow(line: string): string[] | undefined {
+  // Four spaces or a tab of indentation make an indented code block, not a table.
+  if (/^(?: {4}|\t)/u.test(line)) return undefined
   const trimmed = line.trim()
   if (trimmed.length < 2 || !trimmed.startsWith('|') || !trimmed.endsWith('|') || trimmed.includes('\\|')) {
     return undefined

@@ -311,6 +311,9 @@ function toPublicDocumentContent(document: DocumentDetail): PublicDocumentConten
   }
 }
 
+/** Revision every newly created Document starts at. */
+const CREATED_DOCUMENT_REVISION = 1
+
 /**
  * Summarizes a Document as the Public API lists it and answers its writes. A write answers with
  * the summary rather than the body, so a saved write always fits in its idempotency receipt.
@@ -498,6 +501,18 @@ export function createCanonicalPublicDocumentService(): PublicDocumentService {
           idempotencyFingerprint: createHash('sha256').update(JSON.stringify(input)).digest('hex'),
           auditContext: createDocumentWriteAudit(credential, principal, context, 'POST', '/api/v1/documents'),
         })
+        if (document.revision !== CREATED_DOCUMENT_REVISION) {
+          // A retry of a creation that someone has edited since answers with the page as this
+          // request created it, so the caller never receives a revision it has not read.
+          return {
+            id: document.id,
+            kind: 'page',
+            title: input.title.trim(),
+            scope: scope.type === 'workspace' ? { type: 'workspace' } : { type: 'project', projectId: scope.projectId },
+            ...(input.parentId === undefined ? {} : { parentId: input.parentId }),
+            revision: CREATED_DOCUMENT_REVISION,
+          }
+        }
         await reflectDocumentWrite(principal.workspaceId, document)
         return toPublicDocumentSummary(document)
       } catch (error) {

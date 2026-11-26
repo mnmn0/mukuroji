@@ -1388,6 +1388,42 @@ test('replaces a page title and body in one revision and drops links owned by re
   })).rejects.toMatchObject({ status: expect.any(Number) })
 })
 
+test('keeps an editor\'s pending block edit valid across a title-only replacement', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Plan',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'old' }],
+  })
+  await client.replaceContent({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    expectedRevision: 1,
+    title: 'Plan v2',
+  })
+
+  await expect(client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-1',
+      operations: [{
+        operationId: 'pending-edit',
+        type: 'update-block',
+        blockId: 'block-a',
+        block: { id: 'block-a', type: 'paragraph', text: 'edited' },
+      }],
+    },
+  })).resolves.toMatchObject({ revision: 3 })
+})
+
 test('returns the saved Document when a keyed content replacement is retried', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)

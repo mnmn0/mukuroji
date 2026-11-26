@@ -2464,12 +2464,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     incrementDocument(next, input.access.memberKey, this.now())
     validateDocumentPayload(next)
     assertElementLinkCountsWithinLimit(row.document, next)
-    const elementRevisions = restoredElementRevisions(
-      row.document,
-      next,
-      row.elementRevisions,
-      next.revision,
-    )
+    const elementRevisions = replacedElementRevisions(row.document, next, row.elementRevisions)
     const mutationAuthorizationGuards =
       mergeAuthorizationGuards(
         input.workspaceId,
@@ -7797,6 +7792,38 @@ function initialElementRevisions(
     for (const frame of document.whiteboard.frames) revisions[`frame:${frame.id}`] = revision
   }
   for (const relation of document.relations) revisions[`relation:${relation.id}`] = revision
+  return revisions
+}
+
+/**
+ * Advances the element revisions that a content replacement changed: every replaced or new block,
+ * and every relation the replacement removed. Untouched relations keep their revisions, and a
+ * title-only change keeps all of them, so an editor's pending block edits are not refused.
+ *
+ * @param current - Document before the replacement.
+ * @param next - Document after the replacement, at its new revision.
+ * @param existing - Stored element revisions.
+ * @returns Element revisions after the replacement.
+ */
+function replacedElementRevisions(
+  current: DocumentDetail,
+  next: DocumentDetail,
+  existing: Readonly<Record<string, number>>,
+): Record<string, number> {
+  const revisions = { ...existing }
+  const blocksOf = (document: DocumentDetail) =>
+    document.kind === 'page' || document.kind === 'template' ? document.blocks : []
+  const nextBlockIds = new Set(blocksOf(next).map(({ id }) => id))
+  const currentBlockIds = new Set(blocksOf(current).map(({ id }) => id))
+  const changedBlocks = [
+    ...blocksOf(current).filter(({ id }) => !nextBlockIds.has(id)),
+    ...blocksOf(next).filter(({ id }) => !currentBlockIds.has(id)),
+  ]
+  for (const { id } of changedBlocks) revisions[`block:${id}`] = next.revision
+  const nextRelationIds = new Set(next.relations.map(({ id }) => id))
+  for (const { id } of current.relations) {
+    if (!nextRelationIds.has(id)) revisions[`relation:${id}`] = next.revision
+  }
   return revisions
 }
 

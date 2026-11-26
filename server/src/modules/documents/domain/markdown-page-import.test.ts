@@ -117,6 +117,11 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
   })
 
+  test('keeps an indented code block that looks like a table as paragraph Markdown', () => {
+    const source = 'Intro\n\n    | Name |\n    | --- |\n    | value |'
+    expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
+  })
+
   test('reads a task item run only as a whole block', () => {
     expect(convert('Text\n- [ ] not a checklist').blocks.map(({ type }) => type)).toEqual(['paragraph'])
     expect(convert('- [ ] task\n- plain').blocks.map(({ type }) => type)).toEqual(['paragraph'])
