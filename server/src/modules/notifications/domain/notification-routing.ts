@@ -1,4 +1,5 @@
 import {
+  AGENT_RUN_NOTIFICATION_REASONS,
   DEFAULT_NOTIFICATION_MUTES,
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_MUTES_MAXIMUM,
@@ -51,7 +52,7 @@ const reasonCategories: ReadonlyArray<readonly [NotificationCategory, ReadonlySe
   ['due', new Set([
     'due', 'due-soon', 'overdue', 'overdue-reminder', 'stale', 'schedule-change', 'due-date-change', 'baseline-slip',
   ])],
-  ['status', new Set(['status-change', 'archive-change'])],
+  ['status', new Set(['status-change', 'archive-change', ...AGENT_RUN_NOTIFICATION_REASONS])],
   ['comment', new Set(['reply'])],
   ['reminder', new Set(['timesheet', 'weekly-report', 'weekly-report-escalation', 'member-access-expiry'])],
 ]

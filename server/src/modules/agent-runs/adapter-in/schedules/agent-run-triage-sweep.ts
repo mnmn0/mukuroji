@@ -93,6 +93,18 @@ export interface AgentRunTriageFiler {
   file(directoryId: string, teamId: string, filing: AgentRunTriageFiling): Promise<'filed' | 'rejected'>
 }
 
+/** Sends the assignee notification of a stalled run. */
+export interface AgentRunStallNotifier {
+  /**
+   * Notifies the run's assignee that the run stalled. Notifying the same run again replays the first
+   * notification, so a retried sweep sends it once.
+   * @param run - Stalled run.
+   * @param workItem - Work Item of the run.
+   * @returns Resolves once the notification is recorded.
+   */
+  notifyStalled(run: StoredAgentRun, workItem: AgentRunTriageWorkItem): Promise<void>
+}
+
 /** Dependencies of one sweep. */
 export type AgentRunTriageSweepDependencies = {
   /** Agent Run reads and the Triage outbox. */
@@ -101,6 +113,8 @@ export type AgentRunTriageSweepDependencies = {
   workItems: AgentRunTriageWorkItemReader
   /** Triage writer. */
   triage: AgentRunTriageFiler
+  /** Stall notifier; without it, Teams that turned on notifications still have stalls filed only to Triage. */
+  notifier?: AgentRunStallNotifier
   /** Sweep time. */
   now: Date
   /** Receives a failure that leaves its item for the next sweep; only IDs and an error code are passed. */
@@ -127,6 +141,8 @@ export type AgentRunTriageSweepResult = {
   failedSkipped: number
   /** Stalled runs filed, including entries that already existed. */
   stalledFiled: number
+  /** Stalled runs whose assignee was notified, including notifications that already existed. */
+  stalledNotified: number
   /** Runs Triage refused; they are not retried. */
   rejected: number
   /** Items left for the next sweep after a failure. */
@@ -206,7 +222,7 @@ function readErrorCode(error: unknown): string {
  * @returns Counts of the sweep.
  */
 export async function runAgentRunTriageSweep(dependencies: AgentRunTriageSweepDependencies): Promise<AgentRunTriageSweepResult> {
-  const result: AgentRunTriageSweepResult = { failedFiled: 0, failedSkipped: 0, stalledFiled: 0, rejected: 0, errors: 0, truncated: false }
+  const result: AgentRunTriageSweepResult = { failedFiled: 0, failedSkipped: 0, stalledFiled: 0, stalledNotified: 0, rejected: 0, errors: 0, truncated: false }
   const settingsByTeam = new Map<string, Promise<AgentSettings>>()
   /**
    * Strongly reads a Team's settings once per sweep.
@@ -310,7 +326,9 @@ async function fileStalledRuns(
         teamsSeen += 1
         try {
           const settings = await readSettings(team)
-          if (settings.fileStalledRunsToTriage) complete = await fileTeamStalledRuns(dependencies, team, result)
+          if (settings.fileStalledRunsToTriage || (settings.notifyAssigneeOfRunEvents && dependencies.notifier)) {
+            complete = await fileTeamStalledRuns(dependencies, team, settings, result)
+          }
         } catch (error) {
           result.errors += 1
           dependencies.onError?.({ ...team, code: readErrorCode(error) })
@@ -333,7 +351,7 @@ async function fileStalledRuns(
  * @returns True when no further stalled run may be filed.
  */
 function isStalledBatchFull(result: AgentRunTriageSweepResult): boolean {
-  return result.stalledFiled + result.errors >= AGENT_RUN_TRIAGE_STALLED_BATCH
+  return Math.max(result.stalledFiled, result.stalledNotified) + result.errors >= AGENT_RUN_TRIAGE_STALLED_BATCH
 }
 
 /**
@@ -344,12 +362,14 @@ function isStalledBatchFull(result: AgentRunTriageSweepResult): boolean {
  *
  * @param dependencies - Sweep dependencies.
  * @param team - Team that files stalled runs.
+ * @param settings - Team settings that choose filing and notification.
  * @param result - Counts to update.
  * @returns False when the sweep bound stopped the Team before its last stalled run.
  */
 async function fileTeamStalledRuns(
   dependencies: AgentRunTriageSweepDependencies,
   team: AgentRunTriageTeam,
+  settings: AgentSettings,
   result: AgentRunTriageSweepResult,
 ): Promise<boolean> {
   const { store, now } = dependencies
@@ -380,7 +400,7 @@ async function fileTeamStalledRuns(
           break reading
         }
         try {
-          await fileStalledRun(dependencies, team, run, result)
+          await fileStalledRun(dependencies, team, settings, run, result)
         } catch (error) {
           result.errors += 1
           dependencies.onError?.({ ...team, runId: run.runId, code: readErrorCode(error) })
@@ -412,16 +432,20 @@ async function fileTeamStalledRuns(
 }
 
 /**
- * Files one run the index lists as stalled, after reading it again strongly.
+ * Files one run the index lists as stalled to Triage, notifies its assignee, or both, as the Team
+ * chose, after reading it again strongly. The run is then marked, so neither happens again for it,
+ * even after its heartbeat recovers.
  *
  * @param dependencies - Sweep dependencies.
  * @param team - Team of the run.
+ * @param settings - Team settings that choose filing and notification.
  * @param run - Run as listed.
  * @param result - Counts to update.
  */
 async function fileStalledRun(
   dependencies: AgentRunTriageSweepDependencies,
   team: AgentRunTriageTeam,
+  settings: AgentSettings,
   run: StoredAgentRun,
   result: AgentRunTriageSweepResult,
 ): Promise<void> {
@@ -431,9 +455,15 @@ async function fileStalledRun(
   if (!current || !isAgentRunStalled(current, now) || current.stallTriagedAt !== undefined) return
   const workItem = await dependencies.workItems.read(team.directoryId, team.teamId, current.workItemId)
   if (!workItem) return
-  const outcome = await dependencies.triage.file(team.directoryId, team.teamId, createAgentRunTriageFiling(current, 'stalled', workItem))
-  if (outcome === 'filed') result.stalledFiled += 1
-  else result.rejected += 1
+  if (settings.fileStalledRunsToTriage) {
+    const outcome = await dependencies.triage.file(team.directoryId, team.teamId, createAgentRunTriageFiling(current, 'stalled', workItem))
+    if (outcome === 'filed') result.stalledFiled += 1
+    else result.rejected += 1
+  }
+  if (settings.notifyAssigneeOfRunEvents && dependencies.notifier) {
+    await dependencies.notifier.notifyStalled(current, workItem)
+    result.stalledNotified += 1
+  }
   // A run that recovered or finished since it was read keeps no mark; its entry stays.
   await store.markStallTriaged(current, now)
 }
