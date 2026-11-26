@@ -34,6 +34,8 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   許さない link、2 つ目の親、循環する link は `409` です（#360）。
 - MCP: `create_subtasks` が子を作った後に親への link で失敗したときは、その子の ID をエラーに含めます。親の Type が
   許さない Type なら `save_issue` で Type を変え、同じ引数と `idempotencyKey` で再試行すると link まで済みます（#360）。
+- MCP: `create_subtasks` の再試行で、途中で親の Project が変わって作り済みの子の再生が食い違ったときは、再試行不可の
+  `idempotency_conflict` で、親を元の Project に戻すか `list_relations` で子を確かめる手順を示します（#360）。
 - server API: relation の作成・削除は `Idempotency-Key` の receipt を relation と同じ transaction に残すので、
   応答が失われた後に同じ key で再試行すると結果を replay します（#360）。
 - server API: `GET /api/v1/agent-context` が `acceptNewRuns` を返します。Team の管理者が新しい Agent Run の受付を
