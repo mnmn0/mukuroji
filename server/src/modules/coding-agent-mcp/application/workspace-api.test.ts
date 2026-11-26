@@ -124,6 +124,21 @@ test('create_subtasks names a created Work Item whose parent link failed and how
     .rejects.toMatchObject({ code: 'conflict', message: expect.stringContaining('Work Item child-1 was created but is not linked to the parent yet; if its Type is not allowed under the parent, change it with save_issue and retry.') })
 })
 
+test('create_subtasks explains a replay conflict after the parent moved to another Project', async () => {
+  const { api } = apiForRelations()
+  const issues = createWorkspaceIssues({
+    ...api,
+    createIssue: async () => { throw new AgentTaskError('idempotency_conflict', 'Different request', true) },
+  })
+
+  await expect(issues.createSubtasks({ parentId: 'ABC-1', subtasks: [{ title: 'Design' }], idempotencyKey: 'moved' }))
+    .rejects.toMatchObject({
+      code: 'idempotency_conflict',
+      retryable: false,
+      message: expect.stringContaining("the parent's Project has changed since then. Move the parent back to its earlier Project"),
+    })
+})
+
 test('save_relation links and unlinks by key, and list_relations combines the tree with the other links', async () => {
   const { api, writes } = apiForRelations()
   const issues = createWorkspaceIssues(api)

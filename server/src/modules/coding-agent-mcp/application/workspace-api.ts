@@ -546,6 +546,16 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
           created.push({ id: child.id, title: child.title, ...await keyAfterWrite(parent.teamId, child.id) })
         } catch (error) {
           const done = created.length === 0 ? 'No subtask was finished.' : `Subtasks 1 to ${created.length} were created under the parent.`
+          // The child creation key replays only the same body, and the body carries the parent's Project. A
+          // conflict there means the parent moved to another Project after the first attempt created this child.
+          const projectChanged = childId === undefined && error instanceof AgentTaskError && error.code === 'idempotency_conflict'
+          if (projectChanged) {
+            throw new AgentTaskError(
+              'idempotency_conflict',
+              `${done} Subtask ${index + 1} was already created by an earlier attempt with this idempotencyKey, but the parent's Project has changed since then. Move the parent back to its earlier Project and retry with the same arguments and idempotencyKey, or check the parent's subtasks with list_relations before retrying with a new idempotencyKey.`,
+              false,
+            )
+          }
           const message = error instanceof AgentTaskError ? error.message : 'The request failed.'
           // The child exists once its creation succeeded, so name it: a Type the parent does not allow can be
           // changed with save_issue, and the same arguments and key then replay the creation and link it.
