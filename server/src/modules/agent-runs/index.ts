@@ -11,7 +11,10 @@ export {
 export {
   calculateLeaseExpiry,
   createActiveAgentRun,
+  applyWorkspaceAgentDefaults,
   createDefaultAgentSettings,
+  createDefaultWorkspaceAgentDefaults,
+  createSavedWorkspaceAgentDefaults,
   describeHoldingRun,
   finishAgentRun,
   hashAgentInstanceId,
@@ -26,6 +29,8 @@ export {
   readStartAgentRunRequest,
   readTakeOverAgentRunRequest,
   readUpdateAgentSettingsRequest,
+  readUpdateWorkspaceAgentDefaultsRequest,
+  resolveTeamAgentBrief,
   assertAgentSettingsBriefLimits,
   splitAgentRunMutationFence,
   toAgentRun,
@@ -37,6 +42,8 @@ export {
   type ValidatedAgentRunStart,
   type ValidatedAgentRunTakeOver,
   type ValidatedAgentSettingsUpdate,
+  type ResolvedAgentSettings,
+  type ValidatedWorkspaceAgentDefaultsUpdate,
 } from './domain/agent-run'
 export {
   calculateFactoryAnalytics,
@@ -55,6 +62,22 @@ export {
   type StoredAgentRunReport,
   type ValidatedAgentRunReport,
 } from './domain/agent-run-report'
+export {
+  collectPullRequestArtifacts,
+  createUnverifiedArtifactStatus,
+  isArtifactRepositoryAllowed,
+  isFinalArtifactStatus,
+  readPullRequestArtifactReference,
+  type PullRequestArtifactReference,
+  type PullRequestStatusReadResult,
+  type PullRequestStatusReader,
+} from './domain/artifact-status'
+export {
+  DynamoDbAgentRunArtifactStatusStore,
+  type AgentRunArtifactStatusDocumentClient,
+  type AgentRunArtifactStatusStore,
+} from './adapter-out/dynamodb/agent-run-artifact-status-store'
+export { InMemoryAgentRunArtifactStatusStore } from './adapter-out/in-memory/agent-run-artifact-status-store'
 export {
   AGENT_RUN_ACTIVE_INDEX_NAME,
   AGENT_RUN_TRIAGE_INDEX_NAME,

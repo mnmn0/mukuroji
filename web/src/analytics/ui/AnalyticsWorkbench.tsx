@@ -346,6 +346,8 @@ const metricKeys = [
   'remaining-scope',
   'cumulative-flow',
   'milestone-trend',
+  'agent-tokens',
+  'agent-cost',
 ] as const satisfies readonly AnalyticsMetricKey[]
 
 const statusCategories = [
@@ -380,6 +382,8 @@ const metricLabelKeys: Record<AnalyticsMetricKey, MessageKey> = {
   'remaining-scope': 'analytics.metric.remainingScope',
   'cumulative-flow': 'analytics.metric.cumulativeFlow',
   'milestone-trend': 'analytics.metric.milestoneTrend',
+  'agent-tokens': 'analytics.metric.agentTokens',
+  'agent-cost': 'analytics.metric.agentCost',
 }
 
 const metricDescriptionKeys: Record<AnalyticsMetricKey, MessageKey> = {
@@ -394,6 +398,8 @@ const metricDescriptionKeys: Record<AnalyticsMetricKey, MessageKey> = {
   'remaining-scope': 'analytics.metricDescription.remainingScope',
   'cumulative-flow': 'analytics.metricDescription.cumulativeFlow',
   'milestone-trend': 'analytics.metricDescription.milestoneTrend',
+  'agent-tokens': 'analytics.metricDescription.agentTokens',
+  'agent-cost': 'analytics.metricDescription.agentCost',
 }
 
 /** Calendar bucket dimensions, the only group-by a Milestone trend accepts. */
@@ -3232,8 +3238,11 @@ function formatMetricValue(
     return t('analytics.value.unavailable')
   }
 
+  if (unit === 'usd') {
+    return new Intl.NumberFormat(locale, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(value)
+  }
   const formatter = new Intl.NumberFormat(locale, {
-    maximumFractionDigits: unit === 'count' ? 0 : 1,
+    maximumFractionDigits: unit === 'count' || unit === 'tokens' ? 0 : 1,
   })
   const formatted = formatter.format(value)
 
@@ -3241,6 +3250,7 @@ function formatMetricValue(
   if (unit === 'items-per-week') return t('analytics.value.perWeek').replace('{value}', formatted)
   if (unit === 'hours-per-week') return t('analytics.value.hoursPerWeek').replace('{value}', formatted)
   if (unit === 'percent') return `${formatted}%`
+  if (unit === 'tokens') return t('analytics.value.tokens').replace('{value}', formatted)
   return formatted
 }
 
@@ -3356,6 +3366,21 @@ function formatAnalyticsWarning(
   }
   if (warning === 'Cycle and Milestone membership is not available for this run.') {
     return t('analytics.warning.planningGroupsUnavailable')
+  }
+  if (warning === 'Agent Run usage is not available for this run.') {
+    return t('analytics.warning.agentUsageUnavailable')
+  }
+  if (warning === 'No Agent Runs with usage finished in this period.') {
+    return t('analytics.warning.noAgentUsage')
+  }
+  const agentUsageWarnings = [
+    [/^(\d+) Agent Run\(s\) of Teams you do not manage were left out of the estimated cost\.$/u, 'analytics.warning.agentCostHidden'],
+    [/^(\d+) Agent Run\(s\) reported no estimated cost and counted as zero\.$/u, 'analytics.warning.agentCostMissing'],
+    [/^(\d+) Agent Run\(s\) had more usage than one read returns, so the total is a lower bound\.$/u, 'analytics.warning.agentUsageTruncated'],
+  ] as const satisfies readonly (readonly [RegExp, MessageKey])[]
+  for (const [pattern, key] of agentUsageWarnings) {
+    const count = pattern.exec(warning)?.[1]
+    if (count) return t(key).replace('{count}', count)
   }
   const milestonesWithoutHistory = /^(\d+) Milestone\(s\) have no recorded date history; their current date is shown since creation\.$/u
     .exec(warning)

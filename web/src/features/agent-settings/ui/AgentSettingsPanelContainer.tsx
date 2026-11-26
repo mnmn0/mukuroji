@@ -15,6 +15,7 @@ import {
 import { useSaveTeamAgentSettings } from '../mutations/useSaveTeamAgentSettings'
 import { useTeamAgentSettings } from '../queries/useTeamAgentSettings'
 import { AgentSettingsPanel, type AgentSettingsConfigurationState } from './AgentSettingsPanel'
+import { WorkspaceAgentDefaultsContainer } from './WorkspaceAgentDefaultsContainer'
 
 /** Team as listed in the Workspace directory. */
 export type AgentSettingsTeam = {
@@ -32,6 +33,8 @@ export type AgentSettingsPanelContainerProps = {
   accessToken: string
   /** Whether the operator may attempt Team configuration changes; the server still requires a Team manager. */
   canMutateTeamConfiguration: boolean
+  /** Whether the operator administers the Workspace and may edit the Workspace agent defaults. */
+  canManageWorkspaceConfiguration?: boolean
   /** Locale used by the panel. */
   locale: Locale
   /** Teams of the Workspace. */
@@ -56,6 +59,7 @@ type AgentSettingsDraftState = {
  */
 export function AgentSettingsPanelContainer({
   accessToken,
+  canManageWorkspaceConfiguration = false,
   canMutateTeamConfiguration,
   locale,
   teams,
@@ -108,41 +112,51 @@ export function AgentSettingsPanelContainer({
   }
 
   return (
-    <AgentSettingsPanel
-      acceptanceCriteriaFieldOptions={listAgentAcceptanceCriteriaFieldOptions(configuration, draft?.acceptanceCriteriaFieldId ?? '')}
-      configurationState={configurationState}
-      draft={draft}
-      feedback={saving.feedback}
-      hasLoadError={Boolean(settingsQuery.error)}
-      hasRevisionConflict={Boolean(settings && ownDraft && ownDraft.baseRevision !== settings.revision)}
-      isDirty={Boolean(settings && draft && isAgentSettingsDraftChanged(settings, draft))}
-      isLoading={settingsQuery.isLoading}
-      isSaving={saving.isSaving}
-      locale={locale}
-      projectBriefTargets={settings ? listAgentProjectBriefTargets(team?.projects ?? [], settings.projectBriefs) : []}
-      readOnly={readOnly}
-      readyStatusOptions={listAgentReadyStatusOptions(configuration, draft?.readyStatusIds ?? [])}
-      resumableStatusOptions={listAgentResumableStatusOptions(configuration, draft?.resumableStatusIds ?? [])}
-      selectedTeamId={teamId}
-      settings={settings}
-      t={t}
-      teamOptions={teams}
-      onConfigurationRetry={() => void configurationQuery.mutate()}
-      onDraftChange={(value) => {
-        if (!teamId || !settings) return
-        saving.clearFeedback()
-        setDraftState({ teamId, baseRevision: ownDraft?.baseRevision ?? settings.revision, value })
-      }}
-      onReload={() => {
-        resetEditing()
-        void settingsQuery.mutate()
-      }}
-      onRetry={() => void settingsQuery.mutate()}
-      onSave={handleSave}
-      onTeamChange={(nextTeamId) => {
-        resetEditing()
-        setSelectedTeamId(nextTeamId)
-      }}
-    />
+    <div className="grid gap-5">
+      <AgentSettingsPanel
+        acceptanceCriteriaFieldOptions={listAgentAcceptanceCriteriaFieldOptions(configuration, draft?.acceptanceCriteriaFieldId ?? '')}
+        configurationState={configurationState}
+        draft={draft}
+        feedback={saving.feedback}
+        hasLoadError={Boolean(settingsQuery.error)}
+        hasRevisionConflict={Boolean(settings && ownDraft && ownDraft.baseRevision !== settings.revision)}
+        isDirty={Boolean(settings && draft && isAgentSettingsDraftChanged(settings, draft))}
+        isLoading={settingsQuery.isLoading}
+        isSaving={saving.isSaving}
+        locale={locale}
+        projectBriefTargets={settings ? listAgentProjectBriefTargets(team?.projects ?? [], settings.projectBriefs) : []}
+        readOnly={readOnly}
+        readyStatusOptions={listAgentReadyStatusOptions(configuration, draft?.readyStatusIds ?? [])}
+        resumableStatusOptions={listAgentResumableStatusOptions(configuration, draft?.resumableStatusIds ?? [])}
+        selectedTeamId={teamId}
+        settings={settings}
+        t={t}
+        teamOptions={teams}
+        onConfigurationRetry={() => void configurationQuery.mutate()}
+        onDraftChange={(value) => {
+          if (!teamId || !settings) return
+          saving.clearFeedback()
+          setDraftState({ teamId, baseRevision: ownDraft?.baseRevision ?? settings.revision, value })
+        }}
+        onReload={() => {
+          resetEditing()
+          void settingsQuery.mutate()
+        }}
+        onRetry={() => void settingsQuery.mutate()}
+        onSave={handleSave}
+        onTeamChange={(nextTeamId) => {
+          resetEditing()
+          setSelectedTeamId(nextTeamId)
+        }}
+      />
+      {canManageWorkspaceConfiguration ? (
+        <WorkspaceAgentDefaultsContainer
+          accessToken={accessToken}
+          locale={locale}
+          t={t}
+          onSaved={() => void settingsQuery.mutate()}
+        />
+      ) : null}
+    </div>
   )
 }

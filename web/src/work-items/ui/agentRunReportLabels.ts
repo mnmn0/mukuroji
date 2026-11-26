@@ -1,4 +1,12 @@
-import type { AgentRunArtifactType, AgentRunReportKind, AgentRunVerificationStatus } from '@mukuroji/contracts'
+import type {
+  AgentRunArtifactType,
+  AgentRunArtifactUnverifiedReason,
+  AgentRunPullRequestCheckState,
+  AgentRunPullRequestReviewState,
+  AgentRunPullRequestState,
+  AgentRunReportKind,
+  AgentRunVerificationStatus,
+} from '@mukuroji/contracts'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 
 /** Locale-aware text of report chips. */
@@ -17,6 +25,24 @@ export type AgentRunReportChipsLabels = {
   decisionNeeded: string
   /** Text of the answer to a blocker or hand-off. */
   answer: AgentRunReportAnswerLabels
+  /** Text of a reported pull request's provider status. */
+  artifactStatus: AgentRunArtifactStatusLabels
+}
+
+/** Locale-aware text of a reported pull request's provider status (ADR 0103). */
+export type AgentRunArtifactStatusLabels = {
+  /** Display names of pull request states. */
+  states: Record<AgentRunPullRequestState, string>
+  /** Badge of a draft pull request. */
+  draft: string
+  /** Display names of check states; `none` shows nothing. */
+  checks: Record<Exclude<AgentRunPullRequestCheckState, 'none'>, string>
+  /** Display names of review states; `none` shows nothing. */
+  reviews: Record<Exclude<AgentRunPullRequestReviewState, 'none'>, string>
+  /** Badge of a pull request that could not be checked. */
+  unverified: string
+  /** Why a pull request could not be checked. */
+  unverifiedReasons: Record<AgentRunArtifactUnverifiedReason, string>
 }
 
 /** Locale-aware text of the answer to a blocker or hand-off. */
@@ -82,6 +108,31 @@ export function createAgentRunReportChipsLabels(locale: Locale): AgentRunReportC
       conflict: t('workItems.agentRunReports.answer.conflict'),
       tooLong: t('workItems.agentRunReports.answer.tooLong'),
     },
+    artifactStatus: {
+      states: {
+        open: t('workItems.agentRunReports.artifactStatus.state.open'),
+        closed: t('workItems.agentRunReports.artifactStatus.state.closed'),
+        merged: t('workItems.agentRunReports.artifactStatus.state.merged'),
+      },
+      draft: t('workItems.agentRunReports.artifactStatus.draft'),
+      checks: {
+        success: t('workItems.agentRunReports.artifactStatus.checks.success'),
+        failure: t('workItems.agentRunReports.artifactStatus.checks.failure'),
+        pending: t('workItems.agentRunReports.artifactStatus.checks.pending'),
+      },
+      reviews: {
+        approved: t('workItems.agentRunReports.artifactStatus.review.approved'),
+        'changes-requested': t('workItems.agentRunReports.artifactStatus.review.changes-requested'),
+      },
+      unverified: t('workItems.agentRunReports.artifactStatus.unverified'),
+      unverifiedReasons: {
+        'repository-not-allowed': t('workItems.agentRunReports.artifactStatus.reason.repository-not-allowed'),
+        'no-connector': t('workItems.agentRunReports.artifactStatus.reason.no-connector'),
+        'not-accessible': t('workItems.agentRunReports.artifactStatus.reason.not-accessible'),
+        'unsupported-provider': t('workItems.agentRunReports.artifactStatus.reason.unsupported-provider'),
+        unavailable: t('workItems.agentRunReports.artifactStatus.reason.unavailable'),
+      },
+    },
   }
 }
 
@@ -103,6 +154,35 @@ export function createAgentRunReportsNoticeLabels(locale: Locale): AgentRunRepor
   const t = createTranslator(locale)
   return {
     loadError: t('workItems.agentRunReports.loadError'),
+    retry: t('workItems.agentRunReports.retry'),
+  }
+}
+
+/**
+ * Builds the text of the notice shown when the pull request statuses could not be read.
+ *
+ * @param locale - Display locale.
+ * @returns Notice text.
+ */
+export function createAgentRunArtifactStatusNoticeLabels(locale: Locale): AgentRunReportsNoticeLabels {
+  const t = createTranslator(locale)
+  return {
+    loadError: t('workItems.agentRunReports.artifactStatus.loadError'),
+    retry: t('workItems.agentRunReports.retry'),
+  }
+}
+
+/**
+ * Builds the text of the notice shown when the status read stopped before every reported pull
+ * request was checked.
+ *
+ * @param locale - Display locale.
+ * @returns Notice text.
+ */
+export function createAgentRunArtifactStatusIncompleteNoticeLabels(locale: Locale): AgentRunReportsNoticeLabels {
+  const t = createTranslator(locale)
+  return {
+    loadError: t('workItems.agentRunReports.artifactStatus.incomplete'),
     retry: t('workItems.agentRunReports.retry'),
   }
 }

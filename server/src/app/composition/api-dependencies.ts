@@ -158,8 +158,10 @@ import { SecretsManagerSlackDestinationSecretStore } from '../../modules/notific
 import { createSlackTestMessageSender } from '../../modules/notifications/adapter-out/slack/slack-channel-post-sender'
 import { getConfiguredNotificationsTableName } from '../../modules/notifications/notifications'
 import {
+  DynamoDbAgentRunArtifactStatusStore,
   DynamoDbAgentRunStore,
   DynamoDbAgentRunUsageStore,
+  InMemoryAgentRunArtifactStatusStore,
   InMemoryAgentRunStore,
   InMemoryAgentRunUsageStore,
 } from '../../modules/agent-runs'
@@ -707,6 +709,10 @@ export function createProductionWorkItemDependencies(
       loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
     ),
     agentRunUsage: new DynamoDbAgentRunUsageStore(
+      createDynamoDbDocumentClient(),
+      loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
+    ),
+    agentRunArtifactStatuses: new DynamoDbAgentRunArtifactStatusStore(
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
     ),
@@ -2078,6 +2084,7 @@ export function createTestAppDependencies(): AppDependencies {
       analytics: new InMemoryAnalyticsRepository(),
       agentRuns: new InMemoryAgentRunStore(),
       agentRunUsage: new InMemoryAgentRunUsageStore(),
+      agentRunArtifactStatuses: new InMemoryAgentRunArtifactStatusStore(),
       requestIntake,
     },
     automation,
@@ -2191,6 +2198,7 @@ export function overrideAppDependencies(
         : {}),
       ...(overrides.agentRuns ? { agentRuns: overrides.agentRuns } : {}),
       ...(overrides.agentRunUsage ? { agentRunUsage: overrides.agentRunUsage } : {}),
+      ...(overrides.agentRunArtifactStatuses ? { agentRunArtifactStatuses: overrides.agentRunArtifactStatuses } : {}),
       ...(overrides.focusState ? { focusState: overrides.focusState } : {}),
       ...(overrides.workspaceSearch
         ? { workspaceSearch: overrides.workspaceSearch }

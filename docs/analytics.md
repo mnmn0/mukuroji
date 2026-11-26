@@ -177,6 +177,8 @@ Metric contract の version は snapshot に固定します。同じ入力、met
 | Remaining scope | 評価時点で archive されておらず、`completed` / `canceled` ではない Work Item 数。Chart の各 point は burnup 用に `scope`（`canceled` を除く total scope）と `completed` を `segments` で返します。`weighting: "effort"` では残工数（記録された残工数、なければ見積）の合計時間で、burnup の `scope` と `completed` は見積の合計時間です（残工数の消化が scope の減少に見えないようにするため）。 |
 | Cumulative flow | 評価時点で archive されていない Work Item 数。Chart の各 point は status category（`completed` / `started` / `unstarted` / `backlog` / `canceled`）ごとの件数を `segments` で返します。 |
 | Milestone trend | 期間中に予定日（forecast の終了日）が変わった Milestone 数。Chart の各 point は bucket 末時点の各 Milestone の予定日を、key が Milestone ID、value が 1970-01-01 からの日数の `segments` で返します。Group は Milestone ごとに、期間中に予定日が動いた日数（遅れは正）と変更回数（`sampleSize`）を返します。 |
+| Agent tokens | 期間内（`asOf` まで）に終わった Agent Run が使ったトークン数（入力・出力・prompt cache の読み取り・書き込みの合計、unit `tokens`）。`sampleSize` は数えた Run 数です。 |
+| Agent estimated cost | 期間内に終わった Agent Run の推定費用（USD、unit `usd`）。閲覧者が manager である Team の Run だけを数えます。 |
 
 Remaining scope と cumulative flow は WIP と同じく、chart の bucket ごとに bucket 末（`asOf` を超えない）時点へ
 state を巻き戻して評価する state metric です。期間の途中で作成された Work Item は作成後の bucket から scope に入るため、
@@ -237,6 +239,23 @@ Forecast は query / report の `forecastWeighting: "effort"` で、完了した
 残工数（記録された残工数、なければ見積）の合計 `remainingEffortHours` から完了日を予測します。この場合の
 `dailyThroughput` は 1 日あたりの見積時間です。`weighting` と `forecastWeighting` は query hash、snapshot、
 evidence、定期配信の hash に含まれます。
+
+### Agent tokens / Agent estimated cost
+
+[ADR 0108](adr/0108-analytics-agent-usage-metrics.md)。値は OpenTelemetry で届いた usage を
+[ADR 0061](adr/0061-agent-token-usage-over-otlp.md) の規則で Run に割り当てたものです。API は `agent-tokens` /
+`agent-cost` widget を含む query と evidence のときだけ、認可済み Work Item の Team ごとに終了済み Run の index を
+期間の両端で読み、report の filter に `asOf` 時点で一致する Work Item の Run だけを強整合で読み直してから usage 行を読みます。usage のない Run は数えません。
+1 query で 500 Run を超えるか、index を 100 page（見えない Work Item の Run も page を埋めます）読んでも終わらなければ `413`（`AnalyticsAgentUsageLimitExceeded`）です。Chart の bucket は Run の終了時刻で
+分け、group は他の metric と同じく `asOf` 時点の Work Item の state で分けます。Evidence と table は Run ごとに 1 行で、
+値はその Run のトークン数または推定費用です。
+
+推定費用は閲覧者が manager である Team（Team の全 active Project の manager）の Run だけを数え、それ以外の Run は件数を warning で返します（数えられる Run の
+ない group の値は `null`）。費用が届いていない Run は 0 として数え、usage の読み取りが上限で止まった Run は合計が
+下限であることを warning で返します。`agent-cost` を含む snapshot の permission scope hash には、Work Item の Team の
+うち閲覧者が manager である Team の ID を加え、一覧・export の再検証でも同じ規則で比べます。`agent-cost` のない query の
+hash は変わりません。Software factory を deploy していない環境と定期配信の runner は usage を読まず、widget は
+warning だけを返します（hash にも Team を加えません）。
 
 Software factory の Run の成功率・手戻り率・工程別の滞在時間は、まだ Analytics engine の metric ではなく、
 Factory board の期間サマリーとして別 API で計算します。定義は

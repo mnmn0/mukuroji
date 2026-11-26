@@ -24,6 +24,16 @@ export {
   type AnalyticsMilestoneFieldChange,
   type AnalyticsMilestoneHistory,
 } from './analytics-milestone-trend'
+/** Agent Run telemetry usage read by the `agent-tokens` and `agent-cost` metrics (ADR 0061). */
+export {
+  ANALYTICS_AGENT_USAGE_UNAVAILABLE_WARNING,
+  MAX_ANALYTICS_AGENT_USAGE_RUNS,
+  analyticsQueryReadsAgentCost,
+  analyticsQueryReadsAgentUsage,
+  analyticsSnapshotReadAgentCost,
+  type AnalyticsAgentUsage,
+  type AnalyticsAgentUsageRun,
+} from './analytics-agent-usage'
 export {
   ANALYTICS_PLANNING_GROUPS_UNAVAILABLE_WARNING,
   MAX_ANALYTICS_RECIPIENT_DELIVERY_PAGE,
