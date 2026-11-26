@@ -29,6 +29,7 @@ import {
   type AgentRunRevocation,
   type StoredAgentRunClaim,
   type ValidatedAgentSettingsUpdate,
+  type ResolvedAgentSettings,
   type ValidatedWorkspaceAgentDefaultsUpdate,
 } from '../../domain/agent-run'
 import { isAgentRunQuestionReport, readAgentRunReportDetails, type AgentRunReportDetails, type StoredAgentRunReport } from '../../domain/agent-run-report'
@@ -276,7 +277,7 @@ export interface AgentRunStore {
    * @param teamId - Team ID.
    * @returns Saved settings, or the Workspace defaults at revision 0, with the Workspace brief.
    */
-  getSettings(directoryId: string, teamId: string): Promise<AgentSettings>
+  getSettings(directoryId: string, teamId: string): Promise<ResolvedAgentSettings>
   /**
    * Strongly reads the Workspace agent defaults.
    * @param directoryId - Workspace ID.
@@ -402,13 +403,18 @@ export interface AgentRunStore {
    */
   createClaimAbsentCheck(directoryId: string, teamId: string, workItemId: string): AgentRunTransactItem
   /**
-   * Builds a check that the Team's Agent settings are still at the revision a start read.
+   * Builds checks that the Agent settings a start read are still current. A Team that never saved
+   * settings uses the Workspace defaults, so its check also covers the defaults revision.
    * @param directoryId - Workspace ID.
    * @param teamId - Team ID.
-   * @param revision - Revision the start read; `0` means the defaults were never saved.
-   * @returns ConditionCheck on the settings row.
+   * @param settings - Revisions the start read; Team revision `0` means the Team never saved settings.
+   * @returns ConditionChecks on the settings row and, for an unsaved Team, the Workspace defaults row.
    */
-  createSettingsRevisionCheck(directoryId: string, teamId: string, revision: number): AgentRunTransactItem
+  createSettingsRevisionChecks(
+    directoryId: string,
+    teamId: string,
+    settings: Pick<ResolvedAgentSettings, 'revision' | 'workspaceDefaultsRevision'>,
+  ): AgentRunTransactItem[]
   /**
    * Builds the writes that finish an active run, remove its claim, and, for a release or take over,
    * revoke the run's instance on the Work Item.
@@ -1319,7 +1325,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
-  async getSettings(directoryId: string, teamId: string): Promise<AgentSettings> {
+  async getSettings(directoryId: string, teamId: string): Promise<ResolvedAgentSettings> {
     const [response, defaults] = await Promise.all([
       this.#client.send(new GetCommand({
         TableName: this.#tableName,
@@ -2126,11 +2132,36 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
-  createSettingsRevisionCheck(directoryId: string, teamId: string, revision: number): AgentRunTransactItem {
-    const conditionCheck = {
-      TableName: this.#tableName,
-      Key: { directoryTeamId: createAgentRunPartition(directoryId, teamId), recordKey: settingsRecordKey },
-    }
+  createSettingsRevisionChecks(
+    directoryId: string,
+    teamId: string,
+    settings: Pick<ResolvedAgentSettings, 'revision' | 'workspaceDefaultsRevision'>,
+  ): AgentRunTransactItem[] {
+    const teamCheck = this.#createRevisionCheck(
+      { directoryTeamId: createAgentRunPartition(directoryId, teamId), recordKey: settingsRecordKey },
+      settings.revision,
+    )
+    if (settings.revision !== 0) return [teamCheck]
+    // The Team inherits the Workspace lease, take over, and acceptance criteria values.
+    return [
+      teamCheck,
+      this.#createRevisionCheck(
+        { directoryTeamId: createWorkspaceAgentPartition(directoryId), recordKey: workspaceDefaultsRecordKey },
+        settings.workspaceDefaultsRevision,
+      ),
+    ]
+  }
+
+  /**
+   * Builds a check that a revisioned row is still at a revision, where `0` means the row is absent.
+   * @param key - Row key.
+   * @param key.directoryTeamId - Partition key value.
+   * @param key.recordKey - Sort key value.
+   * @param revision - Revision that was read.
+   * @returns ConditionCheck on the row.
+   */
+  #createRevisionCheck(key: { directoryTeamId: string, recordKey: string }, revision: number): AgentRunTransactItem {
+    const conditionCheck = { TableName: this.#tableName, Key: key }
     return {
       ConditionCheck: revision === 0
         ? { ...conditionCheck, ConditionExpression: 'attribute_not_exists(#recordKey)', ExpressionAttributeNames: { '#recordKey': 'recordKey' } }

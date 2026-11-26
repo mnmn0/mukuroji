@@ -15,6 +15,7 @@ import {
   type StoredAgentRun,
   type AgentRunRevocation,
   type StoredAgentRunClaim,
+  type ResolvedAgentSettings,
   type ValidatedAgentSettingsUpdate,
   type ValidatedWorkspaceAgentDefaultsUpdate,
 } from '../../domain/agent-run'
@@ -193,7 +194,7 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
-  async getSettings(directoryId: string, teamId: string): Promise<AgentSettings> {
+  async getSettings(directoryId: string, teamId: string): Promise<ResolvedAgentSettings> {
     const settings = this.state.settings.get(`${directoryId}|${teamId}`) ?? createDefaultAgentSettings(teamId)
     return structuredClone(applyWorkspaceAgentDefaults(settings, await this.getWorkspaceAgentDefaults(directoryId)))
   }
@@ -538,11 +539,25 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
-  createSettingsRevisionCheck(directoryId: string, teamId: string, revision: number): AgentRunTransactItem {
-    return this.#register(this.#builder.createSettingsRevisionCheck(directoryId, teamId, revision), {
-      check: (state) => (state.settings.get(`${directoryId}|${teamId}`)?.revision ?? 0) === revision,
-      apply: () => undefined,
-    })
+  createSettingsRevisionChecks(
+    directoryId: string,
+    teamId: string,
+    settings: Pick<ResolvedAgentSettings, 'revision' | 'workspaceDefaultsRevision'>,
+  ): AgentRunTransactItem[] {
+    const [teamCheck, defaultsCheck] = this.#builder.createSettingsRevisionChecks(directoryId, teamId, settings)
+    if (!teamCheck) throw new Error('The settings check builder returned no items.')
+    return [
+      this.#register(teamCheck, {
+        check: (state) => (state.settings.get(`${directoryId}|${teamId}`)?.revision ?? 0) === settings.revision,
+        apply: () => undefined,
+      }),
+      ...(defaultsCheck
+        ? [this.#register(defaultsCheck, {
+            check: (state) => (state.workspaceDefaults.get(directoryId)?.revision ?? 0) === settings.workspaceDefaultsRevision,
+            apply: () => undefined,
+          })]
+        : []),
+    ]
   }
 
   /** @inheritdoc */

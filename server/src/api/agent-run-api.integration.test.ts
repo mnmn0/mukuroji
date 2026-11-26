@@ -2439,7 +2439,10 @@ describe('Web Agent Run routes', () => {
 
     // A Team that never saved settings uses the Workspace values and passes its brief to agents.
     const team = await app.request('http://localhost/api/teams/core-team/agent-settings', { headers })
-    expect(await team.json()).toMatchObject({ revision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, workspaceBrief: brief })
+    const teamBody: unknown = await team.json()
+    expect(teamBody).toMatchObject({ revision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, workspaceBrief: brief })
+    // The defaults revision only fences runs on the server.
+    expect(teamBody).not.toHaveProperty('workspaceDefaultsRevision')
     const service = createCanonicalPublicAgentRunService()
     expect(await runWithTestAppDependencies(() => service.getContext(credential, 'core-team'))).toMatchObject({ brief })
 

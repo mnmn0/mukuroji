@@ -8,8 +8,7 @@
 
 Agent settings（lease、take over、Ready status、受け入れ条件、brief）は Team ごとにしかなく、
 Team を作るたびに同じ値を入れ直す必要があった。Workspace 全体で共通の前提（リポジトリの規則、
-テストの流し方など）を agent に渡す手段もなかった。また Project brief は 1 Team で 20 Project までで、
-Project の多い Team では足りなかった。
+テストの流し方など）を agent に渡す手段もなかった。また Project brief の件数上限（1 Team で 20 Project）も見直しの対象だった。
 
 制約は次のとおり。
 
@@ -31,8 +30,12 @@ Project の多い Team では足りなかった。
   Team が保存した後は Team の値が優先し、既定値の変更は反映しない。Ready status などの Team 固有の値は既定値に持たない。
 - `GET /api/workspace/agent-defaults` と `PUT ...` を追加し、どちらも `workspace.manage` を要求する。
   audit event は `agent-defaults.updated` で、brief は本文ではなく byte 数だけを残す。
-- `AGENT_SETTINGS_MAX_PROJECT_BRIEFS` を 20 から 100 に上げる。row の大きさは brief 合計 128 KiB の上限で
-  抑えられているため、件数の上限は一覧を見通せる範囲に置く。
+- `AGENT_SETTINGS_MAX_PROJECT_BRIEFS`（20）は据え置く。MCP build は `agent-context` の `projectBriefs` をこの件数で
+  検証するため、上げると古い build が応答全体を拒否し、タスクの選択まで止まる。上げるときは
+  `CODING_AGENT_MCP_MINIMUM_API_REVISION` も上げ、古い build に更新を促してから応答を広げる。
+- run の start、take over、resume の transaction は、Team の設定 row に加えて、Team が設定を保存していない
+  （revision 0）ときは既定値 row の revision も ConditionCheck で確かめる。読み取りの後に既定値が変わると
+  start は `409` になる。既定値の revision は server の内部だけで持ち、API の応答には含めない。
 
 ## 検討した選択肢
 
@@ -46,7 +49,7 @@ Project の多い Team では足りなかった。
 ## 結果
 
 - Workspace 管理者が、Team が設定を保存する前の lease、take over、受け入れ条件と、共通の brief を一か所で決められる。
-- Team 設定の読み取りは既定値 row の GetItem が1回増える。
+- Team 設定の読み取りは既定値 row の GetItem が1回増える。設定を保存していない Team の run の transaction は ConditionCheck が1件増える。
 - 受け入れる欠点は次のとおり。
   - 保存済みの Team には既定値の lease などの変更が届かない。Team の管理者が Team 設定を変えて合わせる。
   - 一括での Run 解放、同時実行数の上限、brief 内の secret 検査、`leaseMinutes` の既定値そのものの変更は、

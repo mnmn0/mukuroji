@@ -42,6 +42,7 @@ export {
   type ValidatedAgentRunStart,
   type ValidatedAgentRunTakeOver,
   type ValidatedAgentSettingsUpdate,
+  type ResolvedAgentSettings,
   type ValidatedWorkspaceAgentDefaultsUpdate,
 } from './domain/agent-run'
 export {

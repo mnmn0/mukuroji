@@ -198,7 +198,7 @@ describe('Agent Run domain', () => {
       [{ brief: 'é'.repeat(8193) }, '/brief'],
       [{ brief: 7 }, '/brief'],
       [{ projectBriefs: { 'a/b': 'x', '..': 'y' } }, '/projectBriefs/..'],
-      [{ projectBriefs: Object.fromEntries(Array.from({ length: 101 }, (_, index) => [`p${index}`, 'x'])) }, '/projectBriefs'],
+      [{ projectBriefs: Object.fromEntries(Array.from({ length: 21 }, (_, index) => [`p${index}`, 'x'])) }, '/projectBriefs'],
       [{ brief: 'a'.repeat(16384), projectBriefs: Object.fromEntries(Array.from({ length: 8 }, (_, index) => [`p${index}`, 'a'.repeat(16384)])) }, '/projectBriefs'],
     ] as const) {
       expect(() => readUpdateAgentSettingsRequest({ ...base, ...invalid })).toThrow(expect.objectContaining({ pointer }))
@@ -681,7 +681,7 @@ describe('DynamoDB Agent Run store', () => {
     }
     const old = createClient([{ Item: legacy }])
     expect(await new DynamoDbAgentRunStore(old.client, 'AgentRuns').getSettings('workspace-1', 'core'))
-      .toEqual({ schemaVersion: 1, teamId: 'core', revision: 3, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false, acceptNewRuns: true, updatedAt: now.toISOString(), updatedBy: 'member-1' })
+      .toEqual({ schemaVersion: 1, teamId: 'core', revision: 3, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false, acceptNewRuns: true, updatedAt: now.toISOString(), updatedBy: 'member-1', workspaceDefaultsRevision: 0 })
     // An explicit null is corrupt rather than absent: it must not lift the Ready gate.
     for (const corrupt of [{ readyStatusIds: [7] }, { readyStatusIds: null }, { resumableStatusIds: [''] }, { resumableStatusIds: null }, { requireAcceptanceCriteria: 'yes' }, { acceptNewRuns: 'no' }, { acceptNewRuns: null }, { acceptanceCriteriaFieldId: '' }, { brief: '' }, { brief: null }, { projectBriefs: { web: 3 } }, { projectBriefs: [] }, { projectBriefs: null }]) {
       const client = createClient([{ Item: { ...legacy, ...corrupt } }])
@@ -764,6 +764,15 @@ describe('Workspace agent defaults', () => {
     expect(await new DynamoDbAgentRunStore(savedTeam.client, 'AgentRuns').getSettings('workspace-1', 'core')).toMatchObject({
       revision: 2, leaseMinutes: 15, allowTakeoverAfterLeaseExpiry: false, requireAcceptanceCriteria: false, workspaceBrief: 'Workspace brief',
     })
+    // A run of a Team that inherits the defaults is fenced on them too; a saved Team only on its own row.
+    const fence = new DynamoDbAgentRunStore(createClient([]).client, 'AgentRuns')
+    expect(fence.createSettingsRevisionChecks('workspace-1', 'core', { revision: 0, workspaceDefaultsRevision: 3 })).toMatchObject([
+      { ConditionCheck: { Key: { directoryTeamId: 'workspace-1#team#core', recordKey: 'agent-settings' }, ConditionExpression: 'attribute_not_exists(#recordKey)' } },
+      { ConditionCheck: { Key: { directoryTeamId: 'workspace-1#workspace', recordKey: 'agent-defaults' }, ConditionExpression: '#revision = :revision', ExpressionAttributeValues: { ':revision': 3 } } },
+    ])
+    expect(fence.createSettingsRevisionChecks('workspace-1', 'core', { revision: 0, workspaceDefaultsRevision: 0 })[1])
+      .toMatchObject({ ConditionCheck: { ConditionExpression: 'attribute_not_exists(#recordKey)' } })
+    expect(fence.createSettingsRevisionChecks('workspace-1', 'core', { revision: 2, workspaceDefaultsRevision: 3 })).toHaveLength(1)
     // A corrupt Workspace row is not read as defaults.
     const corrupt = createClient([{ Item: { ...row, leaseMinutes: 'long' } }])
     await expect(new DynamoDbAgentRunStore(corrupt.client, 'AgentRuns').getWorkspaceAgentDefaults('workspace-1'))

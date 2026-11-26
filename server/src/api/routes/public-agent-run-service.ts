@@ -510,7 +510,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
                 transactItems: [
                   ...store.createStartItems(run),
                   // The lease length is fixed for the run, so settings saved meanwhile must not be missed.
-                  store.createSettingsRevisionCheck(principal.directoryId, teamId, settings.revision),
+                  ...store.createSettingsRevisionChecks(principal.directoryId, teamId, settings),
                   ...(auditPut ? [auditPut] : []),
                 ],
                 createReceipt: (workItem) => ({ status: 201, body: { run: toAgentRun(run, now), workItem } }),
@@ -878,7 +878,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
           ...takeOverItems,
           // The take over was authorized against this assignment and these settings.
           createWorkItemRevisionConditionCheck(getTeamIssuesTableName(), principal.directoryId, teamId, workItemId, detail.issue.revision),
-          store.createSettingsRevisionCheck(principal.directoryId, teamId, settings.revision),
+          ...store.createSettingsRevisionChecks(principal.directoryId, teamId, settings),
           // The caller's membership and Team and Project access must not have changed since authorization.
           ...createAuthorizationSnapshotConditionChecks(authorizationSnapshot),
           ...(supersededAudit ? [supersededAudit] : []),
@@ -1005,7 +1005,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
           ...startItems,
           // The resume was authorized against this status, assignment, and these settings.
           createWorkItemRevisionConditionCheck(getTeamIssuesTableName(), principal.directoryId, teamId, workItemId, detail.issue.revision),
-          store.createSettingsRevisionCheck(principal.directoryId, teamId, settings.revision),
+          ...store.createSettingsRevisionChecks(principal.directoryId, teamId, settings),
           // The caller's membership and Team and Project access must not have changed since authorization.
           ...createAuthorizationSnapshotConditionChecks(authorizationSnapshot),
           ...(auditPut ? [auditPut] : []),

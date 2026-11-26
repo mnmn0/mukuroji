@@ -44,11 +44,11 @@ export const AGENT_SETTINGS_MAX_RESUMABLE_STATUSES = 50
 export const AGENT_SETTINGS_BRIEF_MAX_BYTES = 16 * 1024
 
 /**
- * Maximum number of Projects that may carry their own agent brief. The combined size limit
- * {@link AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES} bounds the stored row, so the count only keeps the
- * list reviewable.
+ * Maximum number of Projects that may carry their own agent brief. MCP builds validate agent context
+ * against this count, so raising it needs an MCP API revision that older builds are told to update
+ * from (ADR 0099).
  */
-export const AGENT_SETTINGS_MAX_PROJECT_BRIEFS = 100
+export const AGENT_SETTINGS_MAX_PROJECT_BRIEFS = 20
 
 /** Maximum combined UTF-8 size in bytes of the Team brief and every Project brief. */
 export const AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES = 128 * 1024

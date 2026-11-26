@@ -683,7 +683,7 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
 Slice 3 は 3 つの変更に分けて入れ、すべて実装済み。
 
 - 実装済み（Agent settings、Ready、brief）: Agent settings に `readyStatusIds`（最大 50 件、重複不可）、
-  Team の `brief`、`projectBriefs`（最大 100 Project。当初は 20 で、ADR 0099 で引き上げた）を追加した。brief はそれぞれ UTF-8 で 16 KiB まで、
+  Team の `brief`、`projectBriefs`（最大 20 Project。古い MCP build がこの件数で検証するため、ADR 0099 で据え置いた）を追加した。brief はそれぞれ UTF-8 で 16 KiB まで、
   合計 128 KiB までとし、空白だけの brief は保存しない。保存は全体の置き換えで、省略した field は
   消える。保存前の row は新しい field を持たず、既定値（空の一覧と map）として読む。audit には
   `readyStatusIds` の変更と、brief の本文ではなく byte 数の変化を残す。Project brief は Team の Project に

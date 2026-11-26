@@ -928,6 +928,16 @@ export function createSavedWorkspaceAgentDefaults(
 }
 
 /**
+ * Team settings with the Workspace defaults applied, as the server uses them. The Workspace defaults
+ * revision stays on the server: a run of a Team without saved settings conditions its transaction on
+ * it, so defaults saved meanwhile are not missed. API responses drop it.
+ */
+export type ResolvedAgentSettings = AgentSettings & {
+  /** Revision of the Workspace defaults the settings were resolved from; `0` when none were saved. */
+  workspaceDefaultsRevision: number
+}
+
+/**
  * Applies the Workspace defaults to a Team's settings. A Team that never saved settings uses the
  * Workspace lease, take over, and acceptance criteria values; every Team sees the Workspace brief,
  * which agents receive when the Team has no brief of its own.
@@ -939,7 +949,7 @@ export function createSavedWorkspaceAgentDefaults(
 export function applyWorkspaceAgentDefaults(
   settings: AgentSettings,
   defaults: WorkspaceAgentDefaults,
-): AgentSettings {
+): ResolvedAgentSettings {
   const inherited = settings.revision === 0
     ? {
         leaseMinutes: defaults.leaseMinutes,
@@ -951,6 +961,7 @@ export function applyWorkspaceAgentDefaults(
     ...settings,
     ...inherited,
     ...(defaults.brief === undefined ? {} : { workspaceBrief: defaults.brief }),
+    workspaceDefaultsRevision: defaults.revision,
   }
 }
 
