@@ -70,6 +70,12 @@ import {
   createAnalyticsMilestoneTrend,
   type AnalyticsMilestoneHistory,
 } from './analytics-milestone-trend'
+import {
+  ANALYTICS_AGENT_USAGE_UNAVAILABLE_WARNING,
+  analyticsQueryReadsAgentCost,
+  isAnalyticsAgentUsageMetric,
+  type AnalyticsAgentUsage,
+} from './analytics-agent-usage'
 
 const REPORT_RECORD_PREFIX = 'REPORT#'
 const SNAPSHOT_RECORD_PREFIX = 'SNAPSHOT#'
@@ -161,6 +167,8 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       'remaining-scope': 'Remaining scope',
       'cumulative-flow': 'Cumulative flow',
       'milestone-trend': 'Milestone trend',
+      'agent-tokens': 'Agent tokens',
+      'agent-cost': 'Agent estimated cost',
     }),
     unitLabels: Object.freeze({
       count: 'items',
@@ -168,6 +176,8 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       'items-per-week': 'items/week',
       'hours-per-week': 'hours/week',
       percent: '%',
+      tokens: 'tokens',
+      usd: 'USD',
     }),
     riskLabels: Object.freeze({
       unknown: 'Unknown',
@@ -264,6 +274,8 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       'remaining-scope': 'Remaining scope',
       'cumulative-flow': 'Cumulative flow',
       'milestone-trend': 'Milestone trend',
+      'agent-tokens': 'エージェントのトークン',
+      'agent-cost': 'エージェントの推定費用',
     }),
     unitLabels: Object.freeze({
       count: '件',
@@ -271,6 +283,8 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       'items-per-week': '件/週',
       'hours-per-week': '時間/週',
       percent: '%',
+      tokens: 'トークン',
+      usd: 'USD',
     }),
     riskLabels: Object.freeze({
       unknown: '不明',
@@ -411,6 +425,12 @@ export type AnalyticsEngineInput = {
    * だけを返します。
    */
   planningGroups?: AnalyticsPlanningGroups
+  /**
+   * Telemetry usage of the Agent Runs that finished on `workItems` in the query period.
+   * `agent-tokens` / `agent-cost` widget を含む query で渡します。省略時、その widget は warning
+   * だけを返します。
+   */
+  agentUsage?: AnalyticsAgentUsage
   /** Snapshot を再現する query です。 */
   query: AnalyticsQueryInput
 }
@@ -451,6 +471,8 @@ export type AnalyticsEvidenceEngineInput = {
   events: readonly AnalyticsHistoryEvent[]
   /** Current viewer が参照できる Project ID の server-side allowlist です。 */
   authorizedProjectIds: ReadonlySet<string>
+  /** Agent Run usage for an `agent-tokens` / `agent-cost` drill-down; without it those metrics have no evidence. */
+  agentUsage?: AnalyticsAgentUsage
   /** Scope-bound cursor を含む evidence query です。 */
   evidence: AnalyticsEvidenceInput
 }
@@ -748,6 +770,22 @@ export const ANALYTICS_METRIC_DEFINITIONS: Readonly<Record<
     description:
       'Counts Milestones whose forecast end date changed in the period. Chart points report each Milestone\'s forecast end date at the bucket end as days since 1970-01-01, from its recorded Planning history.',
   }),
+  'agent-tokens': Object.freeze({
+    key: 'agent-tokens',
+    version: 1,
+    label: 'Agent tokens',
+    unit: 'tokens',
+    description:
+      'Adds up the input, output, and prompt cache tokens of the Agent Runs that finished in the period on the Work Items, from the telemetry attributed to each run.',
+  }),
+  'agent-cost': Object.freeze({
+    key: 'agent-cost',
+    version: 1,
+    label: 'Agent estimated cost',
+    unit: 'usd',
+    description:
+      'Adds up the estimated cost in US dollars that the agent runtime reported for the Agent Runs that finished in the period, counting only Teams the viewer manages.',
+  }),
 })
 
 /** Status category order of cumulative flow segments, from the bottom of the stack. */
@@ -852,6 +890,8 @@ type NormalizedAnalyticsQuery = {
   periodTo: number
   /** As-of epoch milliseconds です。 */
   asOf: number
+  /** Authorized Agent Run usage the `agent-tokens` / `agent-cost` metrics add up. */
+  agentUsage?: AnalyticsAgentUsage
 }
 
 /** Metric の scalar result と evidence です。 */
@@ -1155,7 +1195,7 @@ export function normalizeAnalyticsEvidenceInput(
  * @returns Query の `asOf` に固定した snapshot です。
  */
 export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsSnapshot {
-  const normalized = normalizeAnalyticsQuery(input.query)
+  const normalized = withAnalyticsAgentUsage(normalizeAnalyticsQuery(input.query), input.agentUsage)
   const authorizedProjectIds = normalizeAuthorizedProjectIds(input.authorizedProjectIds)
   const eventsByWorkItem = indexAuthorizedEvents(input.workItems, input.events)
   const facts = createFilteredFacts(
@@ -1176,7 +1216,9 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
       ? createMilestoneTrendWidgetResult(widget, input.milestones, normalized)
       : input.planningGroups === undefined && analyticsWidgetReadsPlanningGroups(widget)
         ? createPlanningGroupsUnavailableWidgetResult(widget)
-        : createWidgetResult(
+        : input.agentUsage === undefined && isAnalyticsAgentUsageMetric(widget.metric)
+          ? createAgentUsageUnavailableWidgetResult(widget)
+          : createWidgetResult(
             widget,
             facts,
             input.workItems,
@@ -1209,6 +1251,9 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
       : undefined,
     input.planningGroups !== undefined && analyticsQueryReadsPlanningGroups(normalized.query)
       ? input.planningGroups.entityScopeKeys
+      : undefined,
+    input.agentUsage !== undefined && analyticsQueryReadsAgentCost(normalized.query)
+      ? input.agentUsage.costTeamIds ?? []
       : undefined,
   )
 
@@ -1253,7 +1298,7 @@ export function queryAnalyticsEvidence(
     asOf: evidence.asOf,
     timeZone: evidence.timeZone,
   }
-  const normalized = normalizeAnalyticsQuery(query)
+  const normalized = withAnalyticsAgentUsage(normalizeAnalyticsQuery(query), input.agentUsage)
   const authorizedProjectIds = normalizeAuthorizedProjectIds(input.authorizedProjectIds)
   const eventsByWorkItem = indexAuthorizedEvents(input.workItems, input.events)
   const facts = createFilteredFacts(
@@ -1285,6 +1330,9 @@ export function queryAnalyticsEvidence(
       input.workItems,
       normalized.asOf,
       authorizedProjectIds,
+      undefined,
+      undefined,
+      evidence.metric === 'agent-cost' ? input.agentUsage?.costTeamIds ?? [] : undefined,
     ),
   })
   const offset = evidence.cursor
@@ -2868,6 +2916,98 @@ export function analyticsSnapshotReadPlanningGroups(
 }
 
 /**
+ * Returns a normalized query that carries the Agent Run usage, when the API read it.
+ *
+ * @param normalized - Normalized query.
+ * @param agentUsage - Authorized Agent Run usage, when read.
+ * @returns The same query with the usage attached.
+ */
+function withAnalyticsAgentUsage(
+  normalized: NormalizedAnalyticsQuery,
+  agentUsage: AnalyticsAgentUsage | undefined,
+): NormalizedAnalyticsQuery {
+  return agentUsage === undefined ? normalized : { ...normalized, agentUsage }
+}
+
+/**
+ * Creates the result of an Agent usage widget for a run that cannot read Agent Run usage, such as a
+ * scheduled delivery.
+ *
+ * @param widget - `agent-tokens` or `agent-cost` widget.
+ * @returns A result with no value and the unavailable warning.
+ */
+function createAgentUsageUnavailableWidgetResult(widget: AnalyticsWidget): AnalyticsWidgetResult {
+  return {
+    widgetId: widget.id,
+    metric: widget.metric,
+    definition: resolveAnalyticsMetricDefinition(widget.metric, widget.weighting),
+    value: null,
+    sampleSize: 0,
+    series: [],
+    groups: [],
+    rows: [],
+    warnings: [ANALYTICS_AGENT_USAGE_UNAVAILABLE_WARNING],
+  }
+}
+
+/**
+ * Adds up the telemetry usage of the Agent Runs that finished between two instants on the given
+ * Work Items. `agent-cost` counts only runs of Teams whose cost the viewer may see.
+ *
+ * @param metric - `agent-tokens` or `agent-cost`.
+ * @param facts - Filtered Work Item facts of the group or bucket.
+ * @param agentUsage - Authorized Agent Run usage; undefined adds nothing.
+ * @param from - First finish instant counted, inclusive.
+ * @param to - Last finish instant counted, inclusive.
+ * @returns Total, the number of runs counted, one evidence item per run, and warnings.
+ */
+function calculateAgentUsageMetric(
+  metric: 'agent-tokens' | 'agent-cost',
+  facts: readonly AnalyticsWorkItemFact[],
+  agentUsage: AnalyticsAgentUsage | undefined,
+  from: number,
+  to: number,
+): MetricComputation {
+  const costTeamIds = new Set(agentUsage?.costTeamIds ?? [])
+  const samples = facts.flatMap((fact) =>
+    (agentUsage?.runs.get(workItemKey(fact.state.teamId, fact.state.id)) ?? [])
+      .filter((run) => run.finishedAt >= from && run.finishedAt <= to)
+      .map((run) => ({ fact, run }))
+  )
+  const counted = metric === 'agent-cost'
+    ? samples.filter(({ fact }) => costTeamIds.has(fact.state.teamId))
+    : samples
+  const values = counted.map(({ run }) =>
+    metric === 'agent-cost' ? (run.estimatedCostMicroUsd ?? 0) / 1_000_000 : run.tokens
+  )
+  const hidden = samples.length - counted.length
+  const withoutCost = metric === 'agent-cost'
+    ? counted.filter(({ run }) => run.estimatedCostMicroUsd === undefined).length
+    : 0
+  const truncated = counted.filter(({ run }) => run.hasMore).length
+  return {
+    // Cost the viewer may not see at all is unknown, not zero.
+    value: counted.length === 0 && hidden > 0 ? null : roundMetric(values.reduce((sum, value) => sum + value, 0)),
+    sampleSize: counted.length,
+    evidence: counted.map(({ fact, run }, index) =>
+      createFactEvidence(fact, metric, run.finishedAt, values[index])
+    ),
+    warnings: [
+      ...(samples.length === 0 ? ['No Agent Runs with usage finished in this period.'] : []),
+      ...(hidden === 0
+        ? []
+        : [`${hidden} Agent Run(s) of Teams you do not manage were left out of the estimated cost.`]),
+      ...(withoutCost === 0
+        ? []
+        : [`${withoutCost} Agent Run(s) reported no estimated cost and counted as zero.`]),
+      ...(truncated === 0
+        ? []
+        : [`${truncated} Agent Run(s) had more usage than one read returns, so the total is a lower bound.`]),
+    ],
+  }
+}
+
+/**
  * Creates the result of a Cycle or Milestone grouped widget for a run that cannot read Planning.
  *
  * @param widget - Widget that groups by Cycle or Milestone.
@@ -3034,6 +3174,7 @@ function createMetricSeries(
       periodFrom: normalized.periodFrom,
       periodTo: normalized.periodTo,
       asOf: evaluationAt,
+      ...(normalized.agentUsage === undefined ? {} : { agentUsage: normalized.agentUsage }),
     }
     const bucketFacts = sharedFacts ?? createFilteredFacts(
       workItems,
@@ -3128,6 +3269,7 @@ function createMetricGroups(
         periodFrom: normalized.periodFrom,
         periodTo: normalized.periodTo,
         asOf: evaluationAt,
+        ...(normalized.agentUsage === undefined ? {} : { agentUsage: normalized.agentUsage }),
       }
       const metricFacts = isAnalyticsStateMetric(widget.metric)
         ? createFilteredFacts(
@@ -3349,6 +3491,9 @@ function calculateMetric(
   if (metric === 'milestone-trend') {
     // Milestones are Planning entities, not Work Items, so they add no Work Item evidence.
     return { value: null, sampleSize: 0, evidence: [], warnings: [] }
+  }
+  if (isAnalyticsAgentUsageMetric(metric)) {
+    return calculateAgentUsageMetric(metric, facts, normalized.agentUsage, from, Math.min(to, evaluationAt))
   }
   if (metric === 'throughput' || metric === 'velocity') {
     const completed = facts.filter((fact) =>
@@ -6397,7 +6542,9 @@ function readMetricKey(value: unknown): AnalyticsMetricKey {
     value === 'sla' ||
     value === 'remaining-scope' ||
     value === 'cumulative-flow' ||
-    value === 'milestone-trend'
+    value === 'milestone-trend' ||
+    value === 'agent-tokens' ||
+    value === 'agent-cost'
   ) return value
   throw invalid('AnalyticsMetricInvalid', 'Analytics metric key is invalid.')
 }
@@ -6489,6 +6636,8 @@ function workItemKey(teamId: string, workItemId: string) {
  *   それ以外の snapshot では省略し、既存 snapshot と同じ hash にします。
  * @param planningEntityKeys - Cycle / Milestone で分けた snapshot で current viewer が読める
  *   Cycle と Milestone の scope key です。それ以外の snapshot では省略します。
+ * @param agentCostTeamIds - `agent-cost` を計算した snapshot で current viewer が推定費用を
+ *   見られる（manager である）Team の ID です。それ以外の snapshot では省略します。
  * @returns Snapshot/evidence cursor の認可 scope hash です。
  */
 export function createAnalyticsPermissionScopeHash(
@@ -6497,6 +6646,7 @@ export function createAnalyticsPermissionScopeHash(
   authorizedProjectIds: ReadonlySet<string>,
   milestoneIds?: readonly string[],
   planningEntityKeys?: readonly string[],
+  agentCostTeamIds?: readonly string[],
 ) {
   if (!Number.isFinite(asOf)) {
     throw invalid('AnalyticsPermissionScopeInvalid', 'Analytics permission scope as-of time is invalid.')
@@ -6517,6 +6667,9 @@ export function createAnalyticsPermissionScopeHash(
       ...(planningEntityKeys === undefined
         ? {}
         : { planningEntityKeys: [...new Set(planningEntityKeys)].sort() }),
+      ...(agentCostTeamIds === undefined
+        ? {}
+        : { agentCostTeamIds: [...new Set(agentCostTeamIds)].sort() }),
     },
   )
 }

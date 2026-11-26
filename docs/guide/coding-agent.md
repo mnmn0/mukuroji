@@ -147,6 +147,8 @@ Claude Code の OpenTelemetry を Mukuroji に送るよう設定すると、タ�
   `~/.claude/settings.json` に足す設定が作られます。
 - Factory board の期間サマリーにも、期間内に終わった Run のトークンの合計、Project 別の合計、トークンの多い
   タスクが表示されます。
+- **レポート** の指標「エージェントのトークン」「エージェントの推定費用」でも、チームやプロジェクトごと、
+  日・週ごとの推移を見たり、スナップショットや CSV / PDF に残したりできます。
 - 今のところ送れるのは Claude Code だけです。Codex と Kiro には対応していません。
 
 ### agent の質問に答える

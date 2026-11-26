@@ -57,6 +57,11 @@ import {
 } from '../../modules/analytics/analytics'
 import { createAnalyticsMilestoneScopeKey } from '../../modules/analytics/analytics-milestone-trend'
 import {
+  analyticsQueryReadsAgentCost,
+  analyticsQueryReadsAgentUsage,
+  analyticsSnapshotReadAgentCost,
+} from '../../modules/analytics/analytics-agent-usage'
+import {
   readAnalyticsWorkItemHistoryEvents,
   type AnalyticsWorkItemHistoryReader,
 } from '../../modules/analytics/analytics-history-reader'
@@ -79,6 +84,10 @@ import {
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { canReadAnalyticsReport } from '../shared/analytics-access'
+import {
+  readAnalyticsAgentCostTeamIds,
+  readAuthorizedAnalyticsAgentUsage,
+} from '../shared/analytics-agent-usage'
 import {
   readAuthorizedAnalyticsMilestones,
   readAuthorizedAnalyticsPlanningGroups,
@@ -557,11 +566,13 @@ async function listAnalyticsHttpSnapshots(
       inspectedCount += 1
       const readsMilestones = analyticsSnapshotReadMilestones(record.snapshot)
       const readsPlanningGroups = analyticsSnapshotReadPlanningGroups(record.query, record.snapshot)
-      // A scheduled snapshot of the same query leaves the Milestones and Cycles out of its hash.
+      const readsAgentCost = analyticsSnapshotReadAgentCost(record.snapshot)
+      // A scheduled snapshot of the same query leaves the Milestones, Cycles, and cost Teams out of its hash.
       const queryCacheKey = [
         record.snapshot.queryHash,
         readsMilestones ? 'milestones' : '',
         readsPlanningGroups ? 'planning-groups' : '',
+        readsAgentCost ? 'agent-cost' : '',
       ].join('\0')
       let pendingPermissionScopeHash = permissionScopeHashCache.get(queryCacheKey)
       if (!pendingPermissionScopeHash) {
@@ -571,6 +582,7 @@ async function listAnalyticsHttpSnapshots(
           readsMilestones,
           scopeCache,
           readsPlanningGroups,
+          readsAgentCost,
         )
         permissionScopeHashCache.set(queryCacheKey, pendingPermissionScopeHash)
       }
@@ -804,11 +816,20 @@ async function executeNormalizedAnalyticsQuery(
   const planningGroups = analyticsQueryReadsPlanningGroups(normalizedQuery)
     ? await readAuthorizedAnalyticsPlanningGroups(principal, authorized.workItems)
     : undefined
+  const agentUsage = analyticsQueryReadsAgentUsage(normalizedQuery)
+    ? await readAuthorizedAnalyticsAgentUsage(
+        principal,
+        authorized.workItems,
+        normalizedQuery.filter.period,
+        analyticsQueryReadsAgentCost(normalizedQuery),
+      )
+    : undefined
   return {
     snapshot: createAnalyticsSnapshot({
       ...authorized,
       ...(milestones === undefined ? {} : { milestones }),
       ...(planningGroups === undefined ? {} : { planningGroups }),
+      ...(agentUsage === undefined ? {} : { agentUsage }),
       query: normalizedQuery,
     }),
     query: normalizedQuery,
@@ -826,7 +847,19 @@ async function executeAnalyticsEvidenceQuery(
     normalizedEvidence.filter,
     normalizedEvidence.asOf,
   )
-  return queryAnalyticsEvidence({ ...authorized, evidence: normalizedEvidence })
+  const agentUsage = normalizedEvidence.metric === 'agent-tokens' || normalizedEvidence.metric === 'agent-cost'
+    ? await readAuthorizedAnalyticsAgentUsage(
+        principal,
+        authorized.workItems,
+        normalizedEvidence.filter.period,
+        normalizedEvidence.metric === 'agent-cost',
+      )
+    : undefined
+  return queryAnalyticsEvidence({
+    ...authorized,
+    ...(agentUsage === undefined ? {} : { agentUsage }),
+    evidence: normalizedEvidence,
+  })
 }
 
 /**
@@ -1173,6 +1206,8 @@ function createAnalyticsHistoryLimitExceededError() {
  * @param cache - Accessible Work Item and Milestone reads shared by the snapshots of one response.
  * @param readsPlanningGroups - Whether the stored snapshot fixed the readable Cycles and Milestones
  *   of its Cycle or Milestone grouped widgets.
+ * @param readsAgentCost - Whether the stored snapshot fixed the Teams whose Agent Run cost the
+ *   viewer could see.
  * @returns The current permission scope hash.
  */
 async function readCurrentAnalyticsPermissionScopeHash(
@@ -1181,6 +1216,7 @@ async function readCurrentAnalyticsPermissionScopeHash(
   readsMilestones: boolean,
   cache: AnalyticsPermissionScopeReadCache = createAnalyticsPermissionScopeReadCache(),
   readsPlanningGroups = false,
+  readsAgentCost = false,
 ) {
   const normalized = normalizeAnalyticsQueryInput(query)
   const cacheKey = JSON.stringify({
@@ -1224,6 +1260,7 @@ async function readCurrentAnalyticsPermissionScopeHash(
     readsPlanningGroups
       ? (await readAuthorizedAnalyticsPlanningGroups(principal, current.workItems)).entityScopeKeys
       : undefined,
+    readsAgentCost ? await readAnalyticsAgentCostTeamIds(principal, current.workItems) : undefined,
   )
 }
 
@@ -1319,6 +1356,7 @@ async function resolveAnalyticsExportSnapshot(
     analyticsSnapshotReadMilestones(stored.snapshot),
     undefined,
     analyticsSnapshotReadPlanningGroups(stored.query, stored.snapshot),
+    analyticsSnapshotReadAgentCost(stored.snapshot),
   )
   if (currentPermissionScopeHash !== stored.snapshot.permissionScopeHash) {
     throw new AnalyticsError(
