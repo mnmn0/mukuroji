@@ -53,10 +53,11 @@ const usageWidgets: AnalyticsWidget[] = [
  * Configures the fake Workspace, an Agent Run store with finished runs, and their usage.
  *
  * @param role - Team role of the viewer.
+ * @param archivedTeamIssueCount - Fake Work Items archived from the start; the first is `onboarding-friction`.
  * @returns The stores.
  */
-async function configure(role: 'manager' | 'member') {
-  configureFakeProjectClients(true, { teamIssueCount: 2, role })
+async function configure(role: 'manager' | 'member', archivedTeamIssueCount = 0) {
+  configureFakeProjectClients(true, { teamIssueCount: 2, role, archivedTeamIssueCount })
   const runs = new InMemoryAgentRunStore()
   const usage = new InMemoryAgentRunUsageStore()
   const repository = new InMemoryAnalyticsRepository()
@@ -203,6 +204,27 @@ test('fails with 413 instead of a partial total when the period holds too many r
   // Other metrics never read Agent Runs.
   const throughput = await analyticsApiRequest('/api/analytics/query', createQuery([{ id: 'done', title: 'Done', type: 'metric', metric: 'throughput' }]))
   expect(throughput.status).toBe(200)
+})
+
+test('spends the run budget only on Work Items the report filter keeps', async () => {
+  const { runs } = await configure('manager', 1)
+  // The archived Work Item is accessible but left out by the filter, so its runs do not count.
+  for (let index = 0; index < MAX_ANALYTICS_AGENT_USAGE_RUNS; index += 1) {
+    const run = createActiveAgentRun({
+      directoryId: workspaceId,
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      assigneeUserId: memberKey,
+      start: readStartAgentRunRequest({ expectedRevision: 1, workflowStatusId: 'in-progress', runtime: 'claude-code', agentName: 'Claude Code', instanceId: 'laptop' }),
+      credentialId: 'agent-key',
+      startRevision: 2,
+      leaseMinutes: 30,
+      now: new Date(Date.parse('2026-07-15T00:00:00.000Z') + index * 60_000),
+    })
+    runs.seed(finishAgentRun(run, 'failed', 'agent', new Date(Date.parse('2026-07-15T00:00:30.000Z') + index * 60_000)))
+  }
+  const snapshot = await readSnapshot(createQuery([usageWidgets[0]!]))
+  expect(snapshot.widgets[0]).toMatchObject({ value: 500, sampleSize: 1 })
 })
 
 test('bounds the index pages it reads when other Work Items fill them', async () => {

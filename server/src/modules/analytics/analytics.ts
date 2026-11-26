@@ -1214,10 +1214,12 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
   const widgets = normalized.query.widgets.map((widget) =>
     widget.metric === 'milestone-trend'
       ? createMilestoneTrendWidgetResult(widget, input.milestones, normalized)
-      : input.planningGroups === undefined && analyticsWidgetReadsPlanningGroups(widget)
-        ? createPlanningGroupsUnavailableWidgetResult(widget)
-        : input.agentUsage === undefined && isAnalyticsAgentUsageMetric(widget.metric)
-          ? createAgentUsageUnavailableWidgetResult(widget)
+      // Checked before the Planning groups so every Agent usage widget of a run without usage carries
+      // the warning that tells the snapshot permission check its hash has no cost Teams.
+      : input.agentUsage === undefined && isAnalyticsAgentUsageMetric(widget.metric)
+        ? createAgentUsageUnavailableWidgetResult(widget)
+        : input.planningGroups === undefined && analyticsWidgetReadsPlanningGroups(widget)
+          ? createPlanningGroupsUnavailableWidgetResult(widget)
           : createWidgetResult(
             widget,
             facts,
@@ -2506,6 +2508,38 @@ function isWorkItemSelfTargetedEvent(event: AnalyticsHistoryEvent) {
     event.target.type === 'work-item' &&
     event.targetId === event.target.id &&
     event.targetId === event.entityId
+}
+
+/**
+ * Selects the authorized Work Items that match a query filter at its as-of instant, the same rule
+ * the engine applies before it computes a metric. The API uses it to read Agent Run usage only for
+ * the Work Items a report counts.
+ *
+ * @param input - Authorized Work Items and events, the readable Project IDs, and the normalized
+ *   filter and as-of instant of the query.
+ * @returns The matching Work Items in input order.
+ */
+export function selectAnalyticsWorkItemsMatchingFilter(input: {
+  /** Authorized canonical Work Items. */
+  workItems: readonly CanonicalWorkItem[]
+  /** Events of those Work Items. */
+  events: readonly AnalyticsHistoryEvent[]
+  /** Project IDs the viewer may read. */
+  authorizedProjectIds: ReadonlySet<string>
+  /** Normalized query filter. */
+  filter: AnalyticsFilter
+  /** As-of instant, ISO 8601. */
+  asOf: string
+}): CanonicalWorkItem[] {
+  const asOf = Date.parse(input.asOf)
+  const authorizedProjectIds = normalizeAuthorizedProjectIds(input.authorizedProjectIds)
+  const eventsByWorkItem = indexAuthorizedEvents(input.workItems, input.events)
+  return input.workItems.filter((item) => {
+    const fact = createFact(item, eventsByWorkItem.get(workItemKey(item.teamId, item.id)) ?? [], asOf)
+    return fact !== undefined &&
+      (fact.state.assignedProjectId === undefined || authorizedProjectIds.has(fact.state.assignedProjectId)) &&
+      matchesAnalyticsFilter(fact.state, input.filter, asOf)
+  })
 }
 
 function createFilteredFacts(

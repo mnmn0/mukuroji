@@ -104,7 +104,9 @@ async function collectTeamFinishedRuns(
  * `includeCost` is set. Runs without usage are left out.
  *
  * @param principal - Viewer whose access already bounded `workItems`.
- * @param workItems - Authorized canonical Work Items of the query.
+ * @param workItems - Authorized Work Items the query counts; only their runs are read.
+ * @param scopeWorkItems - Every authorized Work Item of the query scope. The managed Teams are read
+ *   among their Teams, the same set the snapshot permission check reads again.
  * @param period - Normalized query period; its end is already capped at the as-of time.
  * @param includeCost - Whether the query has an `agent-cost` widget.
  * @returns The usage, or undefined when the deployment has no Software factory.
@@ -114,6 +116,7 @@ async function collectTeamFinishedRuns(
 export async function readAuthorizedAnalyticsAgentUsage(
   principal: WorkspacePrincipal,
   workItems: readonly CanonicalWorkItem[],
+  scopeWorkItems: readonly CanonicalWorkItem[],
   period: { from: string; to: string },
   includeCost: boolean,
 ): Promise<AnalyticsAgentUsage | undefined> {
@@ -132,7 +135,7 @@ export async function readAuthorizedAnalyticsAgentUsage(
   for (const [teamId, workItemIds] of teams) {
     await collectTeamFinishedRuns(principal.directoryId, teamId, workItemIds, since, until, references, budget)
   }
-  const costTeamIds = includeCost ? await readAnalyticsAgentCostTeamIds(principal, workItems) : undefined
+  const costTeamIds = includeCost ? await readAnalyticsAgentCostTeamIds(principal, scopeWorkItems) : undefined
   const costTeams = new Set(costTeamIds ?? [])
   const usages = await mapInOrderWithConcurrency(references, AGENT_USAGE_READ_CONCURRENCY, async ({ teamId, entry }) => {
     const run = await workItemDependencies.agentRuns.getRun(principal.directoryId, teamId, entry.runId)

@@ -245,7 +245,7 @@ evidence、定期配信の hash に含まれます。
 [ADR 0108](adr/0108-analytics-agent-usage-metrics.md)。値は OpenTelemetry で届いた usage を
 [ADR 0061](adr/0061-agent-token-usage-over-otlp.md) の規則で Run に割り当てたものです。API は `agent-tokens` /
 `agent-cost` widget を含む query と evidence のときだけ、認可済み Work Item の Team ごとに終了済み Run の index を
-期間の両端で読み、認可済み Work Item の Run を強整合で読み直してから usage 行を読みます。usage のない Run は数えません。
+期間の両端で読み、report の filter に `asOf` 時点で一致する Work Item の Run だけを強整合で読み直してから usage 行を読みます。usage のない Run は数えません。
 1 query で 500 Run を超えるか、index を 100 page（見えない Work Item の Run も page を埋めます）読んでも終わらなければ `413`（`AnalyticsAgentUsageLimitExceeded`）です。Chart の bucket は Run の終了時刻で
 分け、group は他の metric と同じく `asOf` 時点の Work Item の state で分けます。Evidence と table は Run ごとに 1 行で、
 値はその Run のトークン数または推定費用です。

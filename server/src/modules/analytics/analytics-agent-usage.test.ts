@@ -234,6 +234,17 @@ describe('Agent usage metrics', () => {
     )
   })
 
+  test('marks a cost widget grouped by Cycle as unavailable when the run reads neither usage nor Planning', () => {
+    const snapshot = createAnalyticsSnapshot({
+      workItems,
+      events: [],
+      authorizedProjectIds,
+      query: createQuery([{ id: 'cost', title: 'Cost', type: 'metric', metric: 'agent-cost', groupBy: { dimension: 'cycle' } }]),
+    })
+    expect(snapshot.widgets[0]?.warnings).toEqual([ANALYTICS_AGENT_USAGE_UNAVAILABLE_WARNING])
+    expect(analyticsSnapshotReadAgentCost(snapshot)).toBe(false)
+  })
+
   test('fixes the Teams whose cost the viewer could see in the permission scope', () => {
     const query = createQuery([{ id: 'cost', title: 'Cost', type: 'metric', metric: 'agent-cost' }])
     const managed = createAnalyticsSnapshot({ workItems, events: [], authorizedProjectIds, agentUsage, query })

@@ -50,6 +50,7 @@ import {
   normalizeAnalyticsExportLocale,
   normalizeAnalyticsQueryInput,
   queryAnalyticsEvidence,
+  selectAnalyticsWorkItemsMatchingFilter,
   resolveAnalyticsReportFilterPeriod,
   selectAnalyticsWorkItemsRequiringHistory,
   type AnalyticsExportContext,
@@ -819,6 +820,8 @@ async function executeNormalizedAnalyticsQuery(
   const agentUsage = analyticsQueryReadsAgentUsage(normalizedQuery)
     ? await readAuthorizedAnalyticsAgentUsage(
         principal,
+        // Only the Work Items the report counts spend the run budget.
+        selectAnalyticsWorkItemsMatchingFilter({ ...authorized, filter: normalizedQuery.filter, asOf: normalizedQuery.asOf }),
         authorized.workItems,
         normalizedQuery.filter.period,
         analyticsQueryReadsAgentCost(normalizedQuery),
@@ -850,6 +853,7 @@ async function executeAnalyticsEvidenceQuery(
   const agentUsage = normalizedEvidence.metric === 'agent-tokens' || normalizedEvidence.metric === 'agent-cost'
     ? await readAuthorizedAnalyticsAgentUsage(
         principal,
+        selectAnalyticsWorkItemsMatchingFilter({ ...authorized, filter: normalizedEvidence.filter, asOf: normalizedEvidence.asOf }),
         authorized.workItems,
         normalizedEvidence.filter.period,
         normalizedEvidence.metric === 'agent-cost',
