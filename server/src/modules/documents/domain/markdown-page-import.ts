@@ -217,22 +217,10 @@ function findLeadingTitle(lines: readonly string[]): { text: string, next: numbe
   const match = first < 0 ? undefined : parseAtxHeading(lines[first] ?? '')
   const text = match?.text ?? ''
   if (match?.level !== 1 || text === '') return undefined
-  let fence: string | undefined
-  for (let index = first + 1; index < lines.length; index += 1) {
-    const line = lines[index] ?? ''
-    if (fence !== undefined) {
-      if (closesFence(line.replace(/^ {0,3}/u, ''), fence)) fence = undefined
-      continue
-    }
-    // A fence may be indented by up to three spaces.
-    const open = FENCE_OPEN.exec(line.replace(/^ {0,3}/u, ''))
-    if (open?.[1] !== undefined && !(open[1].startsWith('`') && (open[2] ?? '').includes('`'))) {
-      fence = open[1]
-      continue
-    }
-    // A heading may be indented by up to three spaces.
-    if (parseAtxHeading(line.replace(/^ {0,3}/u, ''))?.level === 1) return undefined
-  }
+  // Another `#` heading, outside fenced code and HTML comments and indented by up to three
+  // spaces, means the first one is not a title.
+  const rest = linesOutsideFences(lines.slice(first + 1).join('\n'))
+  if (rest.some((line) => parseAtxHeading(line.replace(/^ {0,3}/u, ''))?.level === 1)) return undefined
   return { text: text.replace(/\\([!-/:-@[-`{-~])/gu, '$1'), next: first + 1 }
 }
 

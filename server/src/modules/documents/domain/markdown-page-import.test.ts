@@ -242,6 +242,11 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(convert('## C#').blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: '## C#' }])
   })
 
+  test('finds the exported title past a heading line inside an HTML comment', () => {
+    const result = convertMarkdownToPageBlocks('# Page\n\n<!--\n# hidden\n-->', (prefix) => prefix)
+    expect(result).toEqual(expect.objectContaining({ ok: true, leadingTitle: 'Page' }))
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])
