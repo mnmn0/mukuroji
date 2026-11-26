@@ -5,7 +5,9 @@ import {
   type TimeBudget,
   type TimeEntry,
   type TenantProfile,
+  type EnterpriseIdentitySnapshot,
 } from '@mukuroji/contracts'
+import { listEnterpriseProjectManagerKeys } from '../../modules/enterprise-identity'
 import type {
   BudgetAlertProject,
   ScheduledBudgetThresholdReader,
@@ -36,6 +38,8 @@ export type BudgetThresholdReaderSources = {
   }): Promise<readonly TimeEntry[]>
   /** Reads every expense of a Project. */
   listExpenses(workspaceId: string, teamId: string, projectId: string): Promise<readonly ProjectExpense[]>
+  /** Reads the Workspace's Enterprise roles, when the deployment has them. */
+  readEnterpriseSnapshot?(workspaceId: string): Promise<Pick<EnterpriseIdentitySnapshot, 'customRoles' | 'roleAssignments'>>
 }
 
 /**
@@ -44,7 +48,8 @@ export type BudgetThresholdReaderSources = {
  *
  * Each Project's use is measured in the Workspace time zone the same way as the Project budget
  * report: time cost plus approved expenses in the budget currency. A Workspace being closed is
- * not checked.
+ * not checked. The managers are the Project's manager members and the members an Enterprise role
+ * makes managers of the Project or its Team.
  *
  * @param sources - Directory, profile, budget, entry, and expense reads.
  * @returns Reader of budget use per active Project.
@@ -56,6 +61,7 @@ export function createBudgetThresholdReader(sources: BudgetThresholdReaderSource
       if (profile && profile.status !== 'active') return []
       const timeZone = (profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS).timeZone
       const statuses: ScheduledProjectBudgetStatus[] = []
+      let enterprise: Pick<EnterpriseIdentitySnapshot, 'customRoles' | 'roleAssignments'> | undefined
       for (const project of await sources.readProjects(workspaceId)) {
         const consumption = await loadProjectBudgetConsumption(
           { workspaceId, teamId: project.teamId, projectId: project.projectId },
@@ -65,6 +71,10 @@ export function createBudgetThresholdReader(sources: BudgetThresholdReaderSource
         )
         if (!consumption) continue
         const { budget } = consumption
+        enterprise ??= await sources.readEnterpriseSnapshot?.(workspaceId)
+        const managerMemberKeys = enterprise
+          ? [...new Set([...project.managerMemberKeys, ...listEnterpriseProjectManagerKeys(enterprise, project.teamId, project.projectId)])]
+          : project.managerMemberKeys
         statuses.push({
           teamId: project.teamId,
           projectId: project.projectId,
@@ -75,7 +85,7 @@ export function createBudgetThresholdReader(sources: BudgetThresholdReaderSource
           alertPercent: budget.alertPercent ?? TIME_BUDGET_ALERT_PERCENT_DEFAULT,
           consumedPercent: consumption.consumedPercent,
           ...(project.ownerMemberKey === undefined ? {} : { ownerMemberKey: project.ownerMemberKey }),
-          managerMemberKeys: project.managerMemberKeys,
+          managerMemberKeys,
         })
       }
       return statuses

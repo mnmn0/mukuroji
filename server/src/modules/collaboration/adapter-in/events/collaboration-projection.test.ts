@@ -212,6 +212,17 @@ describe('collaboration projection pure helpers', () => {
     expect(isCurrentBudgetThresholdRecipient({ eventType: 'comment.created' }, 'dev@example.com', directory)).toBe(true)
   })
 
+  test('sends a budget threshold alert to an Enterprise manager of its active Project', () => {
+    const event = { eventType: 'project-budget.threshold-reached', teamId: 'core', projectId: 'platform' }
+    const project: ProjectDirectoryItem = { entryType: 'project', teamId: 'core', projectId: 'platform' }
+
+    expect(isCurrentBudgetThresholdRecipient(event, 'boss@example.com', [project], ['Boss@example.com'])).toBe(true)
+    expect(isCurrentBudgetThresholdRecipient(event, 'dev@example.com', [project], ['boss@example.com'])).toBe(false)
+    // A Project that was archived or moved to another Team no longer has Enterprise managers.
+    expect(isCurrentBudgetThresholdRecipient(event, 'boss@example.com', [{ ...project, archivedAt: '2026-11-01T00:00:00.000Z' }], ['boss@example.com'])).toBe(false)
+    expect(isCurrentBudgetThresholdRecipient(event, 'boss@example.com', [{ ...project, teamId: 'other' }], ['boss@example.com'])).toBe(false)
+  })
+
   test('fans Work Item and Planning update events out to current recipients but not the actor', async () => {
     const keys = [
       'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',

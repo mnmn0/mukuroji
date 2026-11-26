@@ -53,8 +53,8 @@ const AUDIT_FIELDS = [
   'decisionNote',
   'revision',
 ]
-/** Free-text fields whose values are redacted in audit changes. */
-const AUDIT_REDACTED_FIELDS = ['category', 'description', 'decisionNote']
+/** Free-text fields and the confidential amount, whose values are redacted in audit changes. */
+const AUDIT_REDACTED_FIELDS = ['category', 'amountMinor', 'description', 'decisionNote']
 
 /**
  * Builds the record key of a Project's expense counter, which also prefixes every expense key.

@@ -137,6 +137,12 @@ test('writes the expense, the counter, the caller fence, and the audit event in 
       { Put: { TableName: 'audit' } },
     ],
   })
+  // The amount is confidential, so the audit event records that it changed without its value.
+  const input = sent[0]?.input
+  const items = typeof input === 'object' && input !== null && 'TransactItems' in input && Array.isArray(input.TransactItems) ? input.TransactItems : []
+  const auditItem = JSON.stringify(items[3])
+  expect(auditItem).toContain('amountMinor')
+  expect(auditItem).not.toContain(String(expense.amountMinor))
 })
 
 test('returns the stored expense for a retried creation and refuses a reused key with other content', async () => {

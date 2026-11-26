@@ -15,6 +15,7 @@ Project の予算は人件費（工数 × 単価）だけでは消化しない�
 1. 経費は Planning table に1件1行で保存する。key は `PROJECT_EXPENSE#<teamId>#<projectId>#ENTRY#<expenseId>`（各 ID は
    URL encode）、同じ prefix の `PROJECT_EXPENSE#<teamId>#<projectId>` に件数 counter を置き、1 Project 2,000 件までにする。
    追加は経費行・counter・呼び出し元の認可 fence・audit event を1つの transaction で書き、削除は counter を減らす。
+   audit event の変更には金額・費目・説明・判断メモの値を残さない（audit を読めても Project を管理できない人に金額を見せない）。
    Project ID は Team の中でしか一意でないので（ADR 0028）、key に Team を含める。
 2. 経費の ID は Idempotency-Key から決めるので、同じ要求の再送は同じ経費を返し、同じ key で別の内容なら 409 にする。
    更新・承認は revision で世代を確かめ、要求の receipt を行に残して再送を見分ける（RAID log と同じ）。

@@ -38,6 +38,7 @@ import { isWorkspaceMemberRowActive } from '../../../workspace-access'
 import { isCanonicalWorkItemRecord, workItemScheduleInstantToLocalDate } from '../../../work-items'
 import {
   evaluateEnterpriseAccess,
+  listEnterpriseProjectManagerKeys,
   resolveEnterpriseDirectoryPrincipal,
   type EnterpriseIdentityReadCapability,
 } from '../../../enterprise-identity'
@@ -977,13 +978,18 @@ async function processRecord(
       ? await readProjectDirectory(authorizationEvent.workspaceId)
       : []
   )
+  const budgetEnterpriseManagers = await readBudgetThresholdEnterpriseManagers(
+    authorizationEvent,
+    dependencies.enterpriseIdentity,
+    enterpriseSnapshotCache,
+  )
   const eligibleCandidates = (
     await Promise.all(
       candidates.map(async (candidate) =>
         isCurrentEscalationManager(authorizationEvent, candidate.memberKey, directoryItems) &&
         isCurrentWeeklyReportRecipient(authorizationEvent, candidate.memberKey, directoryItems) &&
         isCurrentMemberAccessExpiryRecipient(authorizationEvent, candidate.memberKey, directoryItems) &&
-        isCurrentBudgetThresholdRecipient(authorizationEvent, candidate.memberKey, directoryItems) &&
+        isCurrentBudgetThresholdRecipient(authorizationEvent, candidate.memberKey, directoryItems, budgetEnterpriseManagers) &&
         await isEligibleRecipient(
           authorizationEvent,
           candidate.memberKey,
@@ -2238,28 +2244,63 @@ export function isCurrentMemberAccessExpiryRecipient(
  * Reports whether a recipient may still receive a Project budget threshold alert (ADR 0105).
  *
  * Budget use is confidential to Project managers, so a recipient who stepped down from managing
- * the Project after the scan is not told. The same check runs at projection and again before an
- * external channel sends.
+ * the Project after the scan is not told. A manager is a manager member of the Project, or a
+ * member an Enterprise role makes manager of the Project or its Team. The same check runs at
+ * projection and again before an external channel sends.
  *
- * @param event - Event whose Project the alert is for.
+ * @param event - Event whose Team and Project the alert is for.
  * @param memberKey - Recipient member key.
  * @param directoryItems - Current Project directory rows.
+ * @param enterpriseManagerKeys - Members an Enterprise role currently makes managers of the Project.
  * @returns True for other events, or when the recipient still manages the event's Project.
  */
 export function isCurrentBudgetThresholdRecipient(
-  event: Pick<AuditProjectionEvent, 'eventType' | 'projectId'>,
+  event: Pick<AuditProjectionEvent, 'eventType' | 'projectId' | 'teamId'>,
   memberKey: string,
   directoryItems: ProjectDirectoryItem[],
+  enterpriseManagerKeys: readonly string[] = [],
 ) {
   if (event.eventType !== BUDGET_THRESHOLD_REACHED_EVENT_TYPE) return true
   const recipient = normalizeMemberKey(memberKey)
-  return Boolean(event.projectId) && recipient !== undefined && directoryItems.some((item) =>
+  if (!event.projectId || recipient === undefined) return false
+  if (directoryItems.some((item) =>
     item.entryType === 'project-member' &&
     item.projectId === event.projectId &&
     item.role === 'manager' &&
     item.archivedAt === undefined &&
     normalizeMemberKey(item.memberKey) === recipient
-  )
+  )) return true
+  // An Enterprise manager has no member row, so the Project itself must still be active in the Team.
+  return directoryItems.some((item) =>
+    item.entryType === 'project' &&
+    item.projectId === event.projectId &&
+    item.teamId === event.teamId &&
+    !item.archivedAt
+  ) && enterpriseManagerKeys.some((key) => normalizeMemberKey(key) === recipient)
+}
+
+/**
+ * Reads the members an Enterprise role currently makes managers of a budget alert's Project.
+ *
+ * @param event - Projected event.
+ * @param enterpriseIdentity - Enterprise state reader, when the deployment has one.
+ * @param snapshotCache - Snapshots already read, by Workspace.
+ * @returns The manager member keys, or none for other events.
+ */
+async function readBudgetThresholdEnterpriseManagers(
+  event: Pick<AuditProjectionEvent, 'eventType' | 'projectId' | 'teamId' | 'workspaceId'>,
+  enterpriseIdentity: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'> | undefined,
+  snapshotCache: Map<string, Promise<EnterpriseIdentitySnapshot>>,
+): Promise<string[]> {
+  if (event.eventType !== BUDGET_THRESHOLD_REACHED_EVENT_TYPE || !enterpriseIdentity || !event.teamId || !event.projectId) return []
+  let snapshot = snapshotCache.get(event.workspaceId)
+  if (!snapshot) {
+    snapshot = enterpriseIdentity.getSnapshot(event.workspaceId)
+    snapshotCache.set(event.workspaceId, snapshot)
+  }
+  const current = await snapshot
+  if (current.workspaceId !== event.workspaceId) return []
+  return listEnterpriseProjectManagerKeys(current, event.teamId, event.projectId)
 }
 
 /**
@@ -3099,7 +3140,12 @@ export async function authorizeNotificationDelivery(
   if (!isCurrentEscalationManager(refreshed, memberKey, directory)) return false
   if (!isCurrentWeeklyReportRecipient(refreshed, memberKey, directory)) return false
   if (!isCurrentMemberAccessExpiryRecipient(refreshed, memberKey, directory)) return false
-  if (!isCurrentBudgetThresholdRecipient(refreshed, memberKey, directory)) return false
+  if (!isCurrentBudgetThresholdRecipient(
+    refreshed,
+    memberKey,
+    directory,
+    await readBudgetThresholdEnterpriseManagers(refreshed, enterpriseIdentity, cache.enterpriseSnapshots),
+  )) return false
   if (
     currentPlanningActivityEvent &&
     !hasSamePlanningScope(refreshed, currentPlanningActivityEvent) &&

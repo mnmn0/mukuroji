@@ -16,6 +16,7 @@ import { DynamoDbTimeTrackingRepository } from '../../modules/time-tracking'
 import { createTimesheetReader } from './timesheet-reminders'
 import { createBudgetThresholdReader } from './budget-threshold-alerts'
 import { DynamoDbProjectExpenseStore } from '../../modules/project-budget'
+import { DynamoDbEnterpriseIdentityReadClient } from '../../modules/enterprise-identity'
 import {
   createDynamoDbClient,
   createDynamoDbDocumentClient,
@@ -116,6 +117,11 @@ export function createProductionNotificationScheduleHandler() {
   const timeTrackingRepository = new DynamoDbTimeTrackingRepository(analyticsTableName, documentClient)
   // Read-only: the schedule reads budgets, entries, and expenses to check budget use (ADR 0105).
   const projectExpenses = new DynamoDbProjectExpenseStore(planningTableName, documentClient)
+  // Read-only: Enterprise roles can make a member a Project manager who gets budget alerts.
+  const enterpriseIdentityTableName = environment.ENTERPRISE_IDENTITY_TABLE_NAME?.trim()
+  const enterpriseIdentity = enterpriseIdentityTableName
+    ? new DynamoDbEnterpriseIdentityReadClient(enterpriseIdentityTableName, documentClient)
+    : undefined
   const notificationHandler = createNotificationScheduleHandler(
     documentClient,
     createDynamoDbScheduledWorkItemSource({
@@ -164,6 +170,9 @@ export function createProductionNotificationScheduleHandler() {
       }),
       listExpenses: async (workspaceId, teamId, projectId) =>
         await projectExpenses.list({ workspaceId, teamId, projectId }),
+      ...(enterpriseIdentity
+        ? { readEnterpriseSnapshot: async (workspaceId: string) => await enterpriseIdentity.getSnapshot(workspaceId) }
+        : {}),
     }),
   )
   return createRetentionAwareNotificationScheduleHandler(

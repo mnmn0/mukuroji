@@ -24,6 +24,10 @@ Issue #345 は「予算 90%（設定値）到達時に責任者へ通知」と�
 4. 通知先は Project manager に限る（金額は機密値なので、event は割合だけを持ち、金額は持たない）。charter の owner が
    その Project の manager ならその人だけ、owner がいない・manager でないときは Project の manager 全員にする。
    配信時と外部 channel の送信前に、受信者がまだその Project の manager かを確かめ直す。
+   manager は、Project の manager member に加えて、Enterprise role の直接割り当てでその Project か所属 Team に
+   `projects.manage` を持つ member も含める。directory group への割り当ては、group の所属がその member の
+   sign-in 時にしか分からず、毎朝の判定では読めないので含めない。このため notification schedule job は
+   Enterprise identity table を読み取り専用で読む。
 5. Automation に `budget-threshold` trigger を足す。この event で動き、Team の rule は自分の Team の Project の event でだけ
    動く。event に Work Item はないので、Work Item を変える action はこの trigger では対象がなく失敗する（form・webhook
    trigger と同じ）。通知・作成・webhook の action は使える。
