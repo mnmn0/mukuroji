@@ -880,6 +880,9 @@ describe('public API router', () => {
     const unknownField = await reserve('field-key', { subtasks: [{ title: 'Design', parentId: 'task-9' }] })
     const untitled = await reserve('title-key', { subtasks: [{ description: 'No title' }] })
     const denied = await reserve('reader-key', list, reader.secret)
+    // An entry takes the same description length as creating a Work Item.
+    const longDescription = await reserve('long-key', { subtasks: [{ title: 'Design', description: 'x'.repeat(100_000) }] })
+    const tooLongDescription = await reserve('too-long-key', { subtasks: [{ title: 'Design', description: 'x'.repeat(100_001) }] })
 
     expect(reserved.status).toBe(201)
     expect(await reserved.json()).toEqual({ schemaVersion: 1, teamId: 'team-1', workItemId: 'task-1', subtaskCount: 1 })
@@ -889,8 +892,9 @@ describe('public API router', () => {
     expect(await changed.json()).toMatchObject({ code: 'idempotency_conflict', retryable: false })
     expect([empty.status, tooMany.status, unknownField.status, untitled.status]).toEqual([400, 400, 400, 400])
     expect(denied.status).toBe(403)
+    expect([longDescription.status, tooLongDescription.status]).toEqual([201, 400])
     // The first request and the replay both check that the caller may still link children to the parent.
-    expect(calls).toEqual(['authorize team-1/task-1->task-1', 'authorize team-1/task-1->task-1'])
+    expect(calls).toEqual(['authorize team-1/task-1->task-1', 'authorize team-1/task-1->task-1', 'authorize team-1/task-1->task-1'])
   })
 
   test('lists Documents linked to a Work Item with the read scope and signs the continuation', async () => {

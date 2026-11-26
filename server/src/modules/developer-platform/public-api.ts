@@ -4066,7 +4066,7 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
     'workItemTypeId',
     'templateId',
   ], 'Work Item body')
-  const description = readOptionalString(body.description, 'description', 100_000)
+  const description = readOptionalString(body.description, 'description', PUBLIC_WORK_ITEM_DESCRIPTION_MAX_LENGTH)
   const templateId = body.templateId === undefined ? undefined : readIdentifier(body.templateId, 'templateId')
   if (body.schedule !== undefined && body.dueDate !== undefined) {
     throw new PublicApiServiceError(400, 'validation_failed', 'Send schedule or dueDate, not both.')
@@ -5910,8 +5910,8 @@ function readCreatePublicWorkItemRelationRequest(value: unknown): CreatePublicWo
 /** Fields of one subtask in a batch body. */
 const SUBTASK_BATCH_ENTRY_FIELDS = ['title', 'description', 'assigneeUserId', 'priority', 'workItemTypeId', 'dueDate'] as const
 
-/** Longest text a subtask batch entry may carry in one field. */
-const SUBTASK_BATCH_TEXT_MAX_LENGTH = 65_536
+/** Longest description a Work Item created through the Public API may have. */
+const PUBLIC_WORK_ITEM_DESCRIPTION_MAX_LENGTH = 100_000
 
 /**
  * Reads the body of `POST /api/v1/work-items/{workItemId}/subtask-batches`.
@@ -5933,7 +5933,12 @@ function readCreatePublicSubtaskBatchRequest(value: unknown): CreatePublicSubtas
       assertAllowedFields(record, SUBTASK_BATCH_ENTRY_FIELDS, label)
       const optional = Object.fromEntries(SUBTASK_BATCH_ENTRY_FIELDS
         .filter((field) => field !== 'title')
-        .map((field) => [field, readOptionalString(record[field], `${label}.${field}`, SUBTASK_BATCH_TEXT_MAX_LENGTH)])
+        .map((field) => [field, readOptionalString(
+          record[field],
+          `${label}.${field}`,
+          // Each entry takes what `POST /api/v1/work-items` takes, so the reservation never refuses a creatable subtask.
+          field === 'description' ? PUBLIC_WORK_ITEM_DESCRIPTION_MAX_LENGTH : undefined,
+        )])
         .filter(([, text]) => text !== undefined))
       return { title: readRequiredString(record.title, `${label}.title`), ...optional }
     }),
