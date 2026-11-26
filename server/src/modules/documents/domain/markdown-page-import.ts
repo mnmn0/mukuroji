@@ -9,6 +9,7 @@ import {
   DOCUMENT_MAX_TABLE_ROWS,
   DOCUMENT_MAX_TEXT_LENGTH,
 } from './document-limits'
+import { MARKDOWN_BLOCK_BOUNDARY } from './document-content'
 
 /** Most characters of Markdown one page write accepts. */
 export const MARKDOWN_PAGE_IMPORT_MAX_LENGTH = 300_000
@@ -121,6 +122,7 @@ export function convertMarkdownToPageBlocks(
   // A definition or HTML block may sit inside a list item or quote, so container markers are
   // removed first; a false match only keeps more Markdown together.
   const keepsWhole = linesOutsideFences(bodyText).some((line) => {
+    if (isBlockBoundary(line)) return false
     const content = stripContainerMarkers(line)
     return REFERENCE_DEFINITION.test(content) || HTML_BLOCK_START.test(content)
   })
@@ -278,6 +280,13 @@ function scanBlocks(
       index += 1
       continue
     }
+    // The definition an export writes between two blocks only keeps them apart, so it ends the
+    // open paragraph and is dropped.
+    if (isBlockBoundary(line)) {
+      flushParagraph()
+      index += 1
+      continue
+    }
     const fence = FENCE_OPEN.exec(line)
     if (fence) {
       const marker = fence[1] ?? '```'
@@ -345,6 +354,17 @@ function scanBlocks(
   }
   flushParagraph()
   return tooLong ? { ok: false, code: 'block-too-long' } : { ok: true, blocks }
+}
+
+/**
+ * Tells whether a line is the definition an export writes between two blocks that Markdown would
+ * otherwise read as one.
+ *
+ * @param line - Source line.
+ * @returns Whether the line is that block boundary.
+ */
+function isBlockBoundary(line: string): boolean {
+  return line.trim() === MARKDOWN_BLOCK_BOUNDARY
 }
 
 /**

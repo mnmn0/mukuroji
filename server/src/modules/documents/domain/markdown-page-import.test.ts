@@ -186,6 +186,18 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(performance.now() - started).toBeLessThan(2_000)
   })
 
+  test('splits at the block boundary an export writes and drops it', () => {
+    expect(convert('- [ ] task\n\n[mukuroji-block-boundary]: #\n\n- plain\n\n## Heading').blocks).toEqual([
+      { id: expect.any(String), type: 'checklist', items: [expect.objectContaining({ text: 'task', checked: false })] },
+      { id: expect.any(String), type: 'paragraph', text: '- plain' },
+      { id: expect.any(String), type: 'heading', level: 1, text: 'Heading' },
+    ])
+    expect(convert('- one\n\n[mukuroji-block-boundary]: #\n\n- two').blocks).toEqual([
+      { id: expect.any(String), type: 'paragraph', text: '- one' },
+      { id: expect.any(String), type: 'paragraph', text: '- two' },
+    ])
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])
