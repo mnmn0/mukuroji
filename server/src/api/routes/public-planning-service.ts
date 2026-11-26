@@ -660,7 +660,8 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
       const link: PlanningWorkItemLinkInput = {
         teamId,
         workItemId,
-        ...(current?.projectId === undefined ? {} : { projectId: current.projectId }),
+        // The store takes the Project from the canonical Work Item, which may have moved since the
+        // stored link was written.
         ...(cycleId === undefined ? {} : { cycleId }),
         ...(milestoneId === undefined ? {} : { milestoneId }),
         goalIds: [...(current?.goalIds ?? [])],
@@ -668,29 +669,24 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
         // it in between.
         expectedRevision: await resolveReceiptRevision(principal, input.expectedRevision, state.revision),
       }
-      if (link.cycleId === undefined && link.milestoneId === undefined && link.goalIds.length === 0) {
-        // A link must name a Cycle, Milestone, or Goal, so taking the last one out removes the link.
-        if (current) {
-          await deletePlanningWorkItemLinkAsPrincipal(
-            principal,
-            teamId,
-            workItemId,
-            { expectedRevision: link.expectedRevision },
-            createWorkItemPlanningReceipt(credential.workspaceId, idempotency, await readVisibleEntityIds(principal)),
-          )
-        } else {
-          // Nothing to remove; still answer only for a Work Item the owner may change.
-          requireWorkspaceBusinessWrite(principal)
-          await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
-        }
-      } else {
-        await putPlanningWorkItemLinkAsPrincipal(
-          principal,
-          link,
-          createWorkItemPlanningReceipt(credential.workspaceId, idempotency, await readVisibleEntityIds(principal)),
-        )
+      const removes = link.cycleId === undefined && link.milestoneId === undefined && link.goalIds.length === 0
+      if (removes && !current) {
+        // Nothing to remove; still answer only for a Work Item the owner may change.
+        requireWorkspaceBusinessWrite(principal)
+        await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+        return readWorkItemPlanning(principal, teamId, workItemId)
       }
-      return readWorkItemPlanning(principal, teamId, workItemId)
+      const visible = await readVisibleEntityIds(principal)
+      const receipt = createWorkItemPlanningReceipt(credential.workspaceId, idempotency, visible)
+      // A link must name a Cycle, Milestone, or Goal, so taking the last one out removes the link.
+      const response = removes
+        ? await deletePlanningWorkItemLinkAsPrincipal(principal, teamId, workItemId, { expectedRevision: link.expectedRevision }, receipt)
+        : await putPlanningWorkItemLinkAsPrincipal(principal, link, receipt)
+      // Answer from the committed graph, as the receipt does, so a replay returns the same body.
+      const committed = removes
+        ? undefined
+        : response.planning.workItemLinks.find((candidate) => candidate.teamId === teamId && candidate.workItemId === workItemId)
+      return toPublicWorkItemPlanning(teamId, workItemId, response.planning.revision, committed, visible)
     },
 
     async listStatusUpdates(credential, target, limit, cursor) {
