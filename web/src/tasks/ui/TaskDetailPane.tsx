@@ -81,7 +81,8 @@ import {
   WorkItemContributorsEditor,
 } from '../../work-items/ui/WorkItemContributorsEditor'
 import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
-import { readAcceptanceCriteriaDraftSubmission } from '../../work-items/model/acceptanceCriteria'
+import { readAcceptanceCriteriaDraftSubmission, selectCompletionGateAcceptanceCriteria } from '../../work-items/model/acceptanceCriteria'
+import { readCompletionGateOverrideSubmission } from '../../work-items/model/completionGateOverride'
 import { WorkItemAcceptanceCriteriaEditor } from '../../work-items/ui/WorkItemAcceptanceCriteriaEditor'
 import { WorkItemCompletionGateStatus } from '../../work-items/ui/WorkItemCompletionGateStatus'
 import { useAcceptanceCriteriaDraft } from '../../work-items/ui/useAcceptanceCriteriaDraft'
@@ -1005,6 +1006,10 @@ export function TaskDetailPane({
     if (acceptanceCriteriaSubmission) {
       nextIssueInput.acceptanceCriteria = acceptanceCriteriaSubmission.criteria
     }
+    const completionGateOverride = canCorrectActualDates ? readCompletionGateOverrideSubmission(formData) : undefined
+    if (completionGateOverride) {
+      nextIssueInput.completionGateOverride = completionGateOverride
+    }
 
     void submitIssueUpdate(nextIssueInput)
   }
@@ -1147,9 +1152,16 @@ export function TaskDetailPane({
         readOnly={isReadOnly}
       />
       <WorkItemCompletionGateStatus
-        acceptanceCriteria={(issue ?? currentTask).acceptanceCriteria}
+        acceptanceCriteria={selectCompletionGateAcceptanceCriteria(
+          acceptanceCriteriaDraftState.draft.rows,
+          (issue ?? currentTask).acceptanceCriteria,
+        )}
         approvalSummary={(issue ?? currentTask).approvalSummary}
         locale={locale}
+        {...(canCorrectActualDates && !isReadOnly && (issue ?? currentTask).statusCategory !== 'completed'
+          // The Team manager who may correct actual dates is the one who may override the Gate.
+          ? { overrideFormId: editorFormId }
+          : {})}
         policy={resolvedConfiguration?.completionGate}
       />
     </>

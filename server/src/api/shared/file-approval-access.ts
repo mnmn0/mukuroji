@@ -12,6 +12,7 @@ import {
   type WorkItemAcceptanceCriterion,
   type WorkItemCompletionGateApprovalCounts,
   type WorkItemCompletionGateConditionStatus,
+  type WorkItemCompletionGateOverrideRecord,
   type WorkItemConfiguration,
   type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
@@ -573,10 +574,12 @@ export function hasApprovalSummaryContent(summary: ApprovalSummary) {
  * @param resolved - Resolved Work Item configuration.
  * @param rulePrincipal - Who makes the change, for the workflow's transition actor roles.
  * @param options - Optional dependency overrides for relation validation and the approval read,
- *   and acceptance criterion marks a caller sends outside `input`.
- * @returns The validated update and its configuration transaction items.
+ *   acceptance criterion marks a caller sends outside `input`, and the reason of a completion Gate
+ *   override the caller has already authorized as a manager's.
+ * @returns The validated update and its configuration transaction items, with
+ *   `completionGateOverridden` when the override let a blocked completion through.
  * @throws WorkItemCompletionGateError when the change completes the Work Item while a required
- *   completion Gate condition is unmet.
+ *   completion Gate condition is unmet and no override was given.
  * @throws WorkflowRuleError when the actor may not make the status change, or a field the target
  *   status requires is empty.
  * @throws WorkItemConfigurationError with a 4xx status when the update fails validation, such as a
@@ -594,6 +597,7 @@ export async function prepareConfiguredUpdateWorkItem(
     relationDependencies?: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'> &
       Partial<Pick<WorkItemDependencies, 'fileProofing'>>
     acceptanceCriteriaMarks?: unknown
+    completionGateOverrideReason?: string
   } = {},
 ): Promise<UpdateTeamIssueRequestBody> {
   const currentWorkItemType = resolveWorkItemType(
@@ -676,6 +680,9 @@ export async function prepareConfiguredUpdateWorkItem(
     : current.customFieldValues
   const inputWithoutTypeChangeResolution = { ...input }
   delete inputWithoutTypeChangeResolution.typeChangeResolution
+  // Only an authorized caller's option records an override; a body field never does.
+  delete inputWithoutTypeChangeResolution.completionGateOverride
+  delete inputWithoutTypeChangeResolution.completionGateOverridden
   if (
     typeChangePreview &&
     isRecord(inputWithoutTypeChangeResolution.customFieldValues)
@@ -750,7 +757,13 @@ export async function prepareConfiguredUpdateWorkItem(
     options.relationDependencies?.fileProofing === undefined
       ? workItemDependencies
       : { fileProofing: options.relationDependencies.fileProofing },
-    { expectedRevision: input.expectedRevision },
+    {
+      expectedRevision: input.expectedRevision,
+      // The override is a person's exception: a service account or another credential never gets one.
+      ...(options.completionGateOverrideReason === undefined || rulePrincipal.kind !== 'person'
+        ? {}
+        : { overrideReason: options.completionGateOverrideReason }),
+    },
   )
   const otherConditionChecks = createWorkItemConfigurationGuardConditionChecks(
     getWorkItemConfigurationTableName(),
@@ -776,13 +789,19 @@ export async function prepareConfiguredUpdateWorkItem(
   return {
     ...inputWithoutTypeChangeResolution,
     // The status was entered by the caller's roles, so the write fails when they change first.
-    ...withWorkflowRoleConditionChecks(inputWithoutTypeChangeResolution, rulePrincipal, judgedActorRoles),
+    // An override was allowed by the caller's manager roles, so it is fenced the same way.
+    ...withWorkflowRoleConditionChecks(
+      inputWithoutTypeChangeResolution,
+      rulePrincipal,
+      judgedActorRoles || gateFence.override !== undefined,
+    ),
     workItemTypeId: targetWorkItemType.id,
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     workflowStatusId: nextWorkflowStatus.workflowStatusId,
     statusCategory: nextWorkflowStatus.statusCategory,
     customFieldValues,
     configurationConditionChecks: otherConditionChecks.concat(childCompletionConditionChecks),
+    ...(gateFence.override ? { completionGateOverridden: gateFence.override } : {}),
   }
 }
 
@@ -792,6 +811,8 @@ type WorkItemCompletionGateFence = {
   approvalConditionCheck?: WorkItemConfigurationTransactionItems[number]
   /** Approval counts as stored when the Gate judged them; absent when none was judged. */
   observedApprovals?: WorkItemCompletionGateApprovalCounts
+  /** Override that let the change through although a required condition is unmet. */
+  override?: WorkItemCompletionGateOverrideRecord
 }
 
 /**
@@ -800,7 +821,7 @@ type WorkItemCompletionGateFence = {
  * Only a move into the `completed` category is checked, and nothing is read when the Team sets no
  * Gate. Approval counts that cannot be read leave approval conditions unmet, so the Gate fails closed.
  * When a `required` approval condition passed, the counts it judged are returned so the change can
- * commit only while they are unchanged.
+ * commit only while they are unchanged, also when an override lets other unmet conditions through.
  *
  * @param directoryId - Workspace directory ID.
  * @param teamId - Team that owns the Work Item.
@@ -813,10 +834,13 @@ type WorkItemCompletionGateFence = {
  *   counts for a decision not yet saved.
  * @param options.expectedRevision - Revision the update is conditioned on, when it carries one.
  * @param options.adjustApprovals - Adjusts the stored approval counts for a decision not yet saved.
- * @returns The approval fence to commit with the change.
+ * @param options.overrideReason - Reason of a manager override the caller authorized; a blocked
+ *   completion then goes through and the override is returned for the record.
+ * @returns The approval fence to commit with the change, and the override that let it through.
  * @throws ProjectDataError `409 WorkItemRevisionConflict` when the Gate would judge another revision
  *   than the update writes.
- * @throws WorkItemCompletionGateError `409` when a `required` condition is unmet.
+ * @throws WorkItemCompletionGateError `409` when a `required` condition is unmet and no override
+ *   was given.
  */
 async function assertWorkItemCompletionGate(
   directoryId: string,
@@ -829,6 +853,7 @@ async function assertWorkItemCompletionGate(
   options: {
     expectedRevision?: unknown
     adjustApprovals?: (summary: ApprovalSummary) => WorkItemCompletionGateApprovalCounts
+    overrideReason?: string
   } = {},
 ): Promise<WorkItemCompletionGateFence> {
   const policy = configuration.completionGate
@@ -861,25 +886,32 @@ async function assertWorkItemCompletionGate(
     acceptanceCriteria: typeof acceptanceCriteria === 'function' ? acceptanceCriteria() : acceptanceCriteria,
     approvalSummary: fence && options.adjustApprovals ? options.adjustApprovals(fence.summary) : fence?.summary,
   }).filter((condition) => condition.requirement === 'required')
-  if (unmet.length > 0) {
-    throw new WorkItemCompletionGateError(unmet)
-  }
+  if (unmet.length > 0 && options.overrideReason === undefined) throw new WorkItemCompletionGateError(unmet)
+  const override: WorkItemCompletionGateOverrideRecord | undefined = unmet.length > 0 && options.overrideReason !== undefined
+    ? { reason: options.overrideReason, conditions: unmet.map((condition) => condition.condition) }
+    : undefined
   // An approval created or decided meanwhile changes the counts, so a required approval condition
-  // that passed is fenced. A `warn` condition never blocks, so it needs no fence.
+  // that passed is fenced, also when an override lets other unmet conditions through. An overridden
+  // condition is recorded instead, and a `warn` condition never blocks, so neither needs a fence.
+  const passedRequiredApproval = (condition: 'no-pending-approvals' | 'human-approval'): boolean =>
+    getWorkItemCompletionGateRequirement(policy, condition) === 'required' &&
+    !unmet.some((unmetCondition) => unmetCondition.condition === condition)
   const fencesApprovals = fence !== undefined && (
-    getWorkItemCompletionGateRequirement(policy, 'no-pending-approvals') === 'required' ||
-    getWorkItemCompletionGateRequirement(policy, 'human-approval') === 'required'
+    passedRequiredApproval('no-pending-approvals') || passedRequiredApproval('human-approval')
   )
-  return fence && fencesApprovals
-    ? {
-        approvalConditionCheck: fence.conditionCheck,
-        observedApprovals: {
-          pendingCount: fence.summary.pendingCount,
-          approvedCount: fence.summary.approvedCount,
-          changesRequestedCount: fence.summary.changesRequestedCount,
-        },
-      }
-    : {}
+  return {
+    ...(fence && fencesApprovals
+      ? {
+          approvalConditionCheck: fence.conditionCheck,
+          observedApprovals: {
+            pendingCount: fence.summary.pendingCount,
+            approvedCount: fence.summary.approvedCount,
+            changesRequestedCount: fence.summary.changesRequestedCount,
+          },
+        }
+      : {}),
+    ...(override ? { override } : {}),
+  }
 }
 
 /**
