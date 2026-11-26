@@ -250,38 +250,28 @@ export function createDeveloperPlatformLabels(
       },
       {
         value: 'comment.created',
-        label: ja ? 'コメント作成' : 'Comment created',
-        description: ja
-          ? 'Work Item に新しいコメント（返信ではないもの）が付いたとき。'
-          : 'A new top-level comment was added to a Work Item.',
+        label: t('developerPlatform.webhookEvents.commentCreated.label'),
+        description: t('developerPlatform.webhookEvents.commentCreated.description'),
       },
       {
         value: 'agent-run.started',
-        label: ja ? 'Agent Run 開始' : 'Agent Run started',
-        description: ja
-          ? 'coding agent が Work Item の作業を始めたとき。'
-          : 'A coding agent started work on a Work Item.',
+        label: t('developerPlatform.webhookEvents.agentRunStarted.label'),
+        description: t('developerPlatform.webhookEvents.agentRunStarted.description'),
       },
       {
         value: 'agent-run.reported',
-        label: ja ? 'Agent Run 報告' : 'Agent Run reported',
-        description: ja
-          ? 'coding agent が進捗や確認依頼を報告したとき。'
-          : 'A coding agent saved a progress or handoff report.',
+        label: t('developerPlatform.webhookEvents.agentRunReported.label'),
+        description: t('developerPlatform.webhookEvents.agentRunReported.description'),
       },
       {
         value: 'agent-run.finished',
-        label: ja ? 'Agent Run 終了' : 'Agent Run finished',
-        description: ja
-          ? 'coding agent が run を終えたとき。失敗も含み、結果は metadata の outcome で分かります。'
-          : 'A coding agent finished its run, including failures; metadata.outcome holds the result.',
+        label: t('developerPlatform.webhookEvents.agentRunFinished.label'),
+        description: t('developerPlatform.webhookEvents.agentRunFinished.description'),
       },
       {
         value: 'agent-run.released',
-        label: ja ? 'Agent Run 解放' : 'Agent Run released',
-        description: ja
-          ? 'メンバーが run を解放したとき。'
-          : 'A member released an Agent Run.',
+        label: t('developerPlatform.webhookEvents.agentRunReleased.label'),
+        description: t('developerPlatform.webhookEvents.agentRunReleased.description'),
       },
     ],
     connectorCatalog: [
