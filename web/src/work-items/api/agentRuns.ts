@@ -1,4 +1,9 @@
 import {
+  AGENT_RUN_ARTIFACT_PROVIDERS,
+  AGENT_RUN_ARTIFACT_UNVERIFIED_REASONS,
+  AGENT_RUN_PULL_REQUEST_CHECK_STATES,
+  AGENT_RUN_PULL_REQUEST_REVIEW_STATES,
+  AGENT_RUN_PULL_REQUEST_STATES,
   AGENT_RUN_ARTIFACT_TYPES,
   AGENT_RUN_RUNTIMES,
   FACTORY_ANALYTICS_STAGES,
@@ -6,6 +11,8 @@ import {
   AGENT_RUN_VERIFICATION_STATUSES,
   isAgentRunArtifactUrl,
   type AgentRunArtifact,
+  type AgentRunArtifactStatus,
+  type AgentRunPullRequestStatus,
   type AgentRunHistoryEntry,
   type AgentRunHistoryFilters,
   type AgentRunOutcome,
@@ -28,6 +35,7 @@ import {
   type TeamAgentRunHistoryResponse,
   type TeamFactoryAnalyticsResponse,
   type WorkItemAgentRunReportsResponse,
+  type WorkItemArtifactStatusesResponse,
   type WorkItemAgentRunsResponse,
 } from '@mukuroji/contracts'
 import { isNonnegativeSafeInteger, isPositiveSafeInteger, isRecord } from '../../shared/api/jsonValidation'
@@ -128,6 +136,92 @@ export async function listWorkItemAgentRunReports(
     throw new WorkItemConfigurationApiError(502, 'Agent Run reports returned an unexpected response.')
   }
   return { items: reports, hasMore: data.hasMore }
+}
+
+/**
+ * Reads whether the pull requests that a Work Item's agents reported exist, with their state,
+ * checks, and review (ADR 0103). A malformed item fails the whole response.
+ *
+ * @param accessToken - Session access token.
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemId - Work Item ID.
+ * @returns One status per reported pull request URL.
+ */
+export async function listWorkItemArtifactStatuses(
+  accessToken: string,
+  teamId: string,
+  workItemId: string,
+): Promise<WorkItemArtifactStatusesResponse> {
+  const data = await requestJson(
+    `${apiBaseUrl}/teams/${encodeURIComponent(teamId)}/work-items/${encodeURIComponent(workItemId)}/artifact-statuses`,
+    accessToken,
+  )
+  const items = isRecord(data) && Array.isArray(data.items) ? data.items.map(readAgentRunArtifactStatus) : undefined
+  const statuses = items?.filter((item): item is AgentRunArtifactStatus => item !== undefined)
+  if (!isRecord(data) || data.teamId !== teamId || data.workItemId !== workItemId || !items || !statuses ||
+      statuses.length !== items.length) {
+    throw new WorkItemConfigurationApiError(502, 'Artifact statuses returned an unexpected response.')
+  }
+  return { teamId, workItemId, items: statuses }
+}
+
+/**
+ * Checks that a value is one of a fixed list of strings.
+ *
+ * @param values - Accepted values.
+ * @param value - Untrusted value.
+ * @returns True when the value is accepted.
+ */
+function isOneOf<T extends string>(values: readonly T[], value: unknown): value is T {
+  return typeof value === 'string' && values.some((candidate) => candidate === value)
+}
+
+/**
+ * Reads the provider state of a verified pull request.
+ *
+ * @param value - Untrusted value.
+ * @returns The state, or undefined when malformed.
+ */
+function readAgentRunPullRequestStatus(value: unknown): AgentRunPullRequestStatus | undefined {
+  if (!isRecord(value) || !isOneOf(AGENT_RUN_PULL_REQUEST_STATES, value.state) || typeof value.draft !== 'boolean' ||
+      typeof value.headSha !== 'string' || !isOneOf(AGENT_RUN_PULL_REQUEST_CHECK_STATES, value.checks) ||
+      !isOneOf(AGENT_RUN_PULL_REQUEST_REVIEW_STATES, value.review) ||
+      (value.mergedAt !== undefined && typeof value.mergedAt !== 'string') ||
+      (value.mergeCommitSha !== undefined && typeof value.mergeCommitSha !== 'string')) {
+    return undefined
+  }
+  return {
+    state: value.state,
+    draft: value.draft,
+    headSha: value.headSha,
+    checks: value.checks,
+    review: value.review,
+    ...(typeof value.mergedAt === 'string' ? { mergedAt: value.mergedAt } : {}),
+    ...(typeof value.mergeCommitSha === 'string' ? { mergeCommitSha: value.mergeCommitSha } : {}),
+  }
+}
+
+/**
+ * Reads one artifact status. A verified status must carry the pull request state, and an
+ * unverified one its reason.
+ *
+ * @param value - Untrusted value.
+ * @returns The status, or undefined when malformed.
+ */
+function readAgentRunArtifactStatus(value: unknown): AgentRunArtifactStatus | undefined {
+  if (!isRecord(value) || typeof value.url !== 'string' || !isOneOf(AGENT_RUN_ARTIFACT_PROVIDERS, value.provider) ||
+      typeof value.repository !== 'string' || !isPositiveSafeInteger(value.number) || typeof value.checkedAt !== 'string') {
+    return undefined
+  }
+  const base = { url: value.url, provider: value.provider, repository: value.repository, number: value.number, checkedAt: value.checkedAt }
+  if (value.verification === 'verified') {
+    const pullRequest = readAgentRunPullRequestStatus(value.pullRequest)
+    return pullRequest ? { ...base, verification: 'verified', pullRequest } : undefined
+  }
+  if (value.verification === 'unverified' && isOneOf(AGENT_RUN_ARTIFACT_UNVERIFIED_REASONS, value.unverifiedReason)) {
+    return { ...base, verification: 'unverified', unverifiedReason: value.unverifiedReason }
+  }
+  return undefined
 }
 
 /**

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { answerAgentRunReport, listWorkItemAgentRunReports } from '../src/work-items/api/agentRuns'
+import { answerAgentRunReport, listWorkItemAgentRunReports, listWorkItemArtifactStatuses } from '../src/work-items/api/agentRuns'
 import { agentRunHandoffReportFixture, agentRunReportFixture } from '../src/work-items/agentRunFixtures'
 import {
   indexAgentRunReportsByComment,
@@ -54,6 +54,58 @@ describe('Agent Run report API', () => {
       answerWith({ items, hasMore: false })
       await expect(listWorkItemAgentRunReports('token', 'core', 'task-1')).rejects.toMatchObject({ status: 502 })
     }
+  })
+})
+
+describe('Reported pull request statuses', () => {
+  const verified = {
+    url: 'https://github.com/example/repo/pull/12', provider: 'github', repository: 'example/repo', number: 12,
+    verification: 'verified', checkedAt: '2026-11-26T00:00:00.000Z',
+    pullRequest: { state: 'merged', draft: false, headSha: 'a'.repeat(40), checks: 'success', review: 'approved', mergedAt: '2026-11-25T00:00:00.000Z' },
+  } as const
+
+  test('reads the statuses from the Web route and rejects a malformed item', async () => {
+    const requests: string[] = []
+    answerWith({ teamId: 'core', workItemId: 'task-1', items: [verified] }, requests)
+    expect(await listWorkItemArtifactStatuses('token', 'core', 'task-1')).toEqual({ teamId: 'core', workItemId: 'task-1', items: [verified] })
+    expect(requests[0]).toEndWith('/teams/core/work-items/task-1/artifact-statuses')
+    for (const item of [
+      { ...verified, pullRequest: undefined },
+      { ...verified, verification: 'unverified' },
+      { ...verified, provider: 'bitbucket' },
+    ]) {
+      answerWith({ teamId: 'core', workItemId: 'task-1', items: [item] })
+      await expect(listWorkItemArtifactStatuses('token', 'core', 'task-1')).rejects.toMatchObject({ status: 502 })
+    }
+    answerWith({ teamId: 'core', workItemId: 'other', items: [] })
+    await expect(listWorkItemArtifactStatuses('token', 'core', 'task-1')).rejects.toMatchObject({ status: 502 })
+  })
+
+  test('shows the provider state next to the pull request link, and marks one that was not checked', () => {
+    const merged = renderToStaticMarkup(
+      <AgentRunReportChips artifactStatuses={new Map([[verified.url, verified]])} labels={labels} report={agentRunReportFixture} />,
+    )
+    expect(merged).toContain(labels.artifactStatus.states.merged)
+    expect(merged).toContain(labels.artifactStatus.reviews.approved)
+    // A merged pull request no longer shows its checks.
+    expect(merged).not.toContain(labels.artifactStatus.checks.success)
+
+    const unchecked = renderToStaticMarkup(
+      <AgentRunReportChips
+        artifactStatuses={new Map([[verified.url, {
+          url: verified.url, provider: 'github', repository: 'example/repo', number: 12,
+          verification: 'unverified', unverifiedReason: 'repository-not-allowed', checkedAt: verified.checkedAt,
+        }]])}
+        labels={labels}
+        report={agentRunReportFixture}
+      />,
+    )
+    expect(unchecked).toContain(labels.artifactStatus.unverified)
+    expect(unchecked).toContain(labels.artifactStatus.unverifiedReasons['repository-not-allowed'].replace("'", '&#x27;'))
+
+    const plain = renderToStaticMarkup(<AgentRunReportChips labels={labels} report={agentRunReportFixture} />)
+    expect(plain).not.toContain(labels.artifactStatus.unverified)
+    expect(plain).not.toContain('data-testid="agent-run-artifact-state"')
   })
 })
 

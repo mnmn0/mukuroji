@@ -1,0 +1,266 @@
+import type {
+  AgentRunArtifactStatus,
+  AgentRunPullRequestStatus,
+  ConnectorInstallation,
+  WorkItemArtifactStatusesResponse,
+} from '@mukuroji/contracts'
+import { ConnectorRuntimeError } from '../../modules/developer-platform/connector-oauth'
+import {
+  collectPullRequestArtifacts,
+  createUnverifiedArtifactStatus,
+  isArtifactRepositoryAllowed,
+  isFinalArtifactStatus,
+  type AgentRunArtifactStatusStore,
+  type AgentRunStore,
+  type PullRequestArtifactReference,
+  type PullRequestStatusReadResult,
+  type PullRequestStatusReader,
+  type StoredAgentRunReport,
+} from '../../modules/agent-runs'
+
+/** Age after which an open pull request's stored status is read again from the provider. */
+export const ARTIFACT_STATUS_STALE_AFTER_MS = 2 * 60_000
+
+/** Shortest interval between two provider refreshes of one Work Item's artifacts. */
+export const ARTIFACT_STATUS_REFRESH_INTERVAL_MS = 60_000
+
+/** Report pages read to find a Work Item's newest pull request artifacts. */
+const maximumReportPages = 5
+
+/** Pull requests read from the provider at once. */
+const readConcurrency = 5
+
+/** Stores and reader one artifact status read uses. */
+export type ArtifactStatusDependencies = {
+  /** Agent Run reports and Team Agent settings. */
+  agentRuns: Pick<AgentRunStore, 'listWorkItemReports' | 'getSettings'>
+  /** Stored artifact statuses. */
+  statuses: AgentRunArtifactStatusStore
+  /** Provider reader of the Workspace's connectors. */
+  reader: PullRequestStatusReader
+}
+
+/** Work Item whose artifact statuses are read; the caller has already authorized the viewer. */
+export type ArtifactStatusTarget = {
+  /** Workspace ID. */
+  directoryId: string
+  /** Team ID. */
+  teamId: string
+  /** Work Item ID. */
+  workItemId: string
+}
+
+/**
+ * Reads the verification of a Work Item's reported pull requests (ADR 0103). Stored statuses are
+ * returned as they are while fresh; a missing status, or an open pull request's status older than
+ * {@link ARTIFACT_STATUS_STALE_AFTER_MS}, is read again from the provider, at most once per
+ * {@link ARTIFACT_STATUS_REFRESH_INTERVAL_MS} for the Work Item. Merged pull requests are not read again.
+ *
+ * @param target - Authorized Work Item.
+ * @param dependencies - Stores and reader.
+ * @param now - Read time.
+ * @returns One status per distinct reported pull request URL, newest report first.
+ */
+export async function readWorkItemArtifactStatuses(
+  target: ArtifactStatusTarget,
+  dependencies: ArtifactStatusDependencies,
+  now: Date = new Date(),
+): Promise<WorkItemArtifactStatusesResponse> {
+  const references = collectPullRequestArtifacts(await readNewestReports(target, dependencies.agentRuns))
+  const stored = new Map((await dependencies.statuses.listStatuses(target.directoryId, target.teamId, target.workItemId))
+    .map((status) => [status.url, status]))
+  const stale = references.filter((reference) => needsRefresh(stored.get(reference.url), now))
+  if (stale.length > 0 &&
+      await dependencies.statuses.claimRefresh(target.directoryId, target.teamId, target.workItemId, now, ARTIFACT_STATUS_REFRESH_INTERVAL_MS)) {
+    const settings = await dependencies.agentRuns.getSettings(target.directoryId, target.teamId)
+    const refreshed: AgentRunArtifactStatus[] = []
+    for (let index = 0; index < stale.length; index += readConcurrency) {
+      refreshed.push(...await Promise.all(stale.slice(index, index + readConcurrency).map((reference) =>
+        checkReference(target.directoryId, reference, settings.artifactRepositories, stored.get(reference.url), dependencies.reader, now))))
+    }
+    await dependencies.statuses.saveStatuses(target.directoryId, target.teamId, target.workItemId, refreshed)
+    for (const status of refreshed) stored.set(status.url, status)
+  }
+  return {
+    teamId: target.teamId,
+    workItemId: target.workItemId,
+    // A reference another viewer is refreshing for the first time shows as unavailable until then.
+    items: references.map((reference) => stored.get(reference.url) ?? createUnverifiedArtifactStatus(reference, 'unavailable', now)),
+  }
+}
+
+/**
+ * Reads the Work Item's newest reports, enough to find its newest pull request artifacts.
+ *
+ * @param target - Work Item.
+ * @param agentRuns - Report store.
+ * @returns Reports, newest first.
+ */
+async function readNewestReports(
+  target: ArtifactStatusTarget,
+  agentRuns: Pick<AgentRunStore, 'listWorkItemReports'>,
+): Promise<StoredAgentRunReport[]> {
+  const reports: StoredAgentRunReport[] = []
+  let cursor: string | undefined
+  for (let page = 0; page < maximumReportPages; page += 1) {
+    const result = await agentRuns.listWorkItemReports(target.directoryId, target.teamId, target.workItemId, cursor, 100)
+    reports.push(...result.reports)
+    if (result.nextCursor === undefined) break
+    cursor = result.nextCursor
+  }
+  return reports
+}
+
+/**
+ * Checks whether a stored status must be read again.
+ *
+ * @param status - Stored status, if any.
+ * @param now - Read time.
+ * @returns True when the status is missing, or not final and older than the stale age.
+ */
+function needsRefresh(status: AgentRunArtifactStatus | undefined, now: Date): boolean {
+  if (status === undefined) return true
+  if (isFinalArtifactStatus(status)) return false
+  return now.getTime() - Date.parse(status.checkedAt) >= ARTIFACT_STATUS_STALE_AFTER_MS
+}
+
+/**
+ * Checks one reference against the allowlist and the provider. When the provider cannot be read
+ * for a moment, a previously verified status is kept with its old check time, so a short outage
+ * does not turn a verified pull request into an unverified one.
+ *
+ * @param workspaceId - Workspace ID.
+ * @param reference - Pull request reference.
+ * @param allowlist - Team's artifact repositories.
+ * @param previous - Stored status, if any.
+ * @param reader - Provider reader.
+ * @param now - Check time.
+ * @returns The status to store.
+ */
+async function checkReference(
+  workspaceId: string,
+  reference: PullRequestArtifactReference,
+  allowlist: readonly string[],
+  previous: AgentRunArtifactStatus | undefined,
+  reader: PullRequestStatusReader,
+  now: Date,
+): Promise<AgentRunArtifactStatus> {
+  if (!isArtifactRepositoryAllowed(allowlist, reference.repository)) {
+    return createUnverifiedArtifactStatus(reference, 'repository-not-allowed', now)
+  }
+  const result = await reader(workspaceId, reference)
+  if (result.kind === 'unverified') {
+    if (result.reason === 'unavailable' && previous?.verification === 'verified') return previous
+    return createUnverifiedArtifactStatus(reference, result.reason, now)
+  }
+  return {
+    url: reference.url,
+    provider: reference.provider,
+    repository: reference.repository,
+    number: reference.number,
+    verification: 'verified',
+    pullRequest: result.pullRequest,
+    checkedAt: now.toISOString(),
+  }
+}
+
+/** Connected installations tried for one pull request, so a Workspace with many accounts stays bounded. */
+const maximumInstallationsPerRead = 3
+
+/** Connector engine method the pull request reader uses. */
+export type PullRequestConnectorEngine = {
+  /**
+   * Reads a pull request through a connected installation.
+   *
+   * @param workspaceId - Workspace of the installation.
+   * @param installationId - Installation ID.
+   * @param reference - Repository and pull request number.
+   * @returns The pull request state, checks, and reviews.
+   */
+  readPullRequest(
+    workspaceId: string,
+    installationId: string,
+    reference: { repository: string, number: number },
+  ): Promise<AgentRunPullRequestStatus>
+}
+
+/** Connector reads the pull request reader needs. */
+export type PullRequestReaderConnectors = {
+  /** Lists the Workspace's connector installations. */
+  listConnectors(workspaceId: string): Promise<ConnectorInstallation[]>
+  /** Loads the connector engine; throws ConnectorRuntimeUnavailable when connectors are not configured. */
+  getEngine(): Promise<PullRequestConnectorEngine>
+}
+
+/**
+ * Creates the reader that verifies a pull request through the Workspace's own connected accounts
+ * (ADR 0103). Only GitHub is read; a GitLab merge request is reported as an unsupported provider.
+ * Each connected GitHub installation is tried in turn until one can read the pull request, so the
+ * result never shows a repository that none of the Workspace's accounts can read.
+ *
+ * @param connectors - Installation list and engine loader.
+ * @returns The reader.
+ */
+export function createConnectorPullRequestStatusReader(connectors: PullRequestReaderConnectors): PullRequestStatusReader {
+  return async (workspaceId, reference) => {
+    if (reference.provider !== 'github') return { kind: 'unverified', reason: 'unsupported-provider' }
+    let installations: ConnectorInstallation[]
+    try {
+      installations = (await connectors.listConnectors(workspaceId))
+        .filter((installation) => installation.provider === 'github' &&
+          (installation.status === 'connected' || installation.status === 'degraded'))
+        .slice(0, maximumInstallationsPerRead)
+    } catch (error) {
+      console.error(error)
+      return { kind: 'unverified', reason: 'unavailable' }
+    }
+    if (installations.length === 0) return { kind: 'unverified', reason: 'no-connector' }
+    let engine: PullRequestConnectorEngine
+    try {
+      engine = await connectors.getEngine()
+    } catch (error) {
+      if (error instanceof ConnectorRuntimeError && error.code === 'ConnectorRuntimeUnavailable') {
+        return { kind: 'unverified', reason: 'no-connector' }
+      }
+      console.error(error)
+      return { kind: 'unverified', reason: 'unavailable' }
+    }
+    let result: PullRequestStatusReadResult = { kind: 'unverified', reason: 'not-accessible' }
+    for (const installation of installations) {
+      try {
+        return {
+          kind: 'verified',
+          pullRequest: await engine.readPullRequest(workspaceId, installation.id, {
+            repository: reference.repository,
+            number: reference.number,
+          }),
+        }
+      } catch (error) {
+        result = { kind: 'unverified', reason: toUnverifiedReason(error, result) }
+      }
+    }
+    return result
+  }
+}
+
+/**
+ * Maps a failed provider read to the reason shown for the pull request. A missing or unreadable
+ * pull request on one account does not hide an outage seen on another.
+ *
+ * @param error - Thrown value.
+ * @param previous - Result of the installations tried before.
+ * @returns The reason to report.
+ */
+function toUnverifiedReason(
+  error: unknown,
+  previous: PullRequestStatusReadResult,
+): 'not-accessible' | 'unsupported-provider' | 'unavailable' {
+  const before = previous.kind === 'unverified' && previous.reason === 'unavailable' ? 'unavailable' : 'not-accessible'
+  if (!(error instanceof ConnectorRuntimeError)) {
+    console.error(error)
+    return 'unavailable'
+  }
+  if (error.code === 'ConnectorExternalResourceMissing' || error.authorizationRequired) return before
+  if (error.code === 'ConnectorCapabilityUnsupported') return before === 'unavailable' ? before : 'unsupported-provider'
+  return 'unavailable'
+}

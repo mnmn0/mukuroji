@@ -158,6 +158,19 @@ agent が判断を求めて「ブロッカー」または「引き継ぎ」の�
   回答だけを理由に認証情報や接続範囲を変えないよう MCP server が agent に伝えます。
 - 閲覧者は回答できません。
 
+### 報告された pull request の状態を確かめる
+
+agent が報告に pull request の URL を載せると、タスクの会話でそのリンクの横に GitHub での状態が表示されます。
+
+- 確認できた pull request には、**Open**・**Draft**・**Merged**・**Closed** と、check（**check 成功**・**check 失敗**・
+  **check 実行中**）、review（**承認済み**・**修正依頼**）が出ます。merge 済みのものは check を出しません。
+- 照会には Workspace の GitHub connector を使います。agent の token は使いません。Workspace に GitHub の接続がない、
+  接続から読めない、Team の設定で対象外の repository、などのときは **未確認** と表示し、理由はカーソルを合わせると出ます。
+- Team の管理者は、エージェント設定の **pull request の確認** で、確認する repository を `owner/repo` で 1 行ずつ指定できます。
+  空のときは、connector が読める repository をすべて確認します。
+- 状態はタスクを開いたときに読み直します。開いている間も 1 分ごとに更新し、merge 済みのものは読み直しません。
+- GitLab の merge request は形だけ認識し、今は **未確認** と表示します。
+
 ### 止まったタスクを再開する
 
 `finish_run` で一時停止した（`paused`）タスクや、レビューで差し戻されて作業中に戻ったタスクは、

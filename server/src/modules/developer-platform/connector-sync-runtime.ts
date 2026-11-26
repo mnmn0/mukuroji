@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { externalIdMatchKey } from './domain/external-id-match-key'
 import type {
+  AgentRunPullRequestStatus,
   CanonicalWorkItem,
   ConnectorInstallation,
   ExternalWorkItemLink,
@@ -25,6 +26,7 @@ import {
   type ConnectorEventSchedule,
   type ConnectorExternalRecord,
   type ConnectorOutboundMutation,
+  type ConnectorPullRequestReference,
   type ConnectorSyncState,
   type ExternalResourceType,
 } from './connectors'
@@ -1376,6 +1378,36 @@ export class ConnectorSyncEngine {
       ) return false
       throw error
     }
+  }
+
+  /**
+   * Reads a pull request through a connected installation to verify an Agent Run artifact
+   * (ADR 0103). The credential is decrypted and refreshed the same way as for sync.
+   *
+   * @param workspaceId - Workspace of the installation.
+   * @param installationId - Connected installation of the pull request's provider.
+   * @param reference - Repository and pull request number.
+   * @returns The pull request state, checks, and reviews.
+   * @throws ConnectorRuntimeError ConnectorCapabilityUnsupported when the provider reads no pull
+   * requests, ConnectorExternalResourceMissing when the account cannot read it.
+   */
+  async readPullRequest(
+    workspaceId: string,
+    installationId: string,
+    reference: ConnectorPullRequestReference,
+  ): Promise<AgentRunPullRequestStatus> {
+    const snapshot = await this.requireInstallationSnapshot(workspaceId, installationId)
+    return this.withConnectorCredential(
+      workspaceId,
+      snapshot.installation,
+      snapshot.lifecycleRevision,
+      async (adapter, credential) => {
+        if (!adapter.readPullRequest) {
+          throw new ConnectorRuntimeError('ConnectorCapabilityUnsupported', 'Connector cannot read pull requests.')
+        }
+        return adapter.readPullRequest(credential, reference)
+      },
+    )
   }
 
   /** Installation と lifecycle revision を検証します。 */

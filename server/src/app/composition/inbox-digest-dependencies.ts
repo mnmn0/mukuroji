@@ -35,7 +35,7 @@ export function createInboxDigestAppDependencies(planningTable: string, enterpri
       collaboration: new DynamoDbCollaborationClient(),
       updateFeedReadState: new DynamoDbUpdateFeedReadStateStore(planningTable, client),
       savedUpdateFeeds: new DynamoDbSavedUpdateFeedsStore(planningTable, client),
-      teamIssues: unavailable(), realtimeTickets: unavailable(), fileProofing: unavailable(), notifications: unavailable(), pushSubscriptions: unavailable(), teamReminderSettings: unavailable(), channelDestinations: unavailable(), notificationDestinationSecrets: unavailable(), notificationDestinationTestSender: unavailable(), agentRuns: unavailable(), agentRunUsage: unavailable(),
+      teamIssues: unavailable(), realtimeTickets: unavailable(), fileProofing: unavailable(), notifications: unavailable(), pushSubscriptions: unavailable(), teamReminderSettings: unavailable(), channelDestinations: unavailable(), notificationDestinationSecrets: unavailable(), notificationDestinationTestSender: unavailable(), agentRuns: unavailable(), agentRunUsage: unavailable(), agentRunArtifactStatuses: unavailable(),
       focusState: unavailable(), workspaceSearch: unavailable(), documents: unavailable(), workspaceSearchProjectionEnabled: false,
       workItemConfigurations: unavailable(), projectRaidLogs: unavailable(), projectStatusShares: unavailable(), calendarFeeds: unavailable(), weeklyReports: unavailable(), scheduleBaselines: unavailable(), cycleScheduleBaselines: unavailable(), portfolioSnapshots: unavailable(), updateFeedDigest: unavailable(), inboxDigestSettings: unavailable(),
       requestIntake: unavailable(), triage: unavailable(), analytics: unavailable(), collections: unavailable(),

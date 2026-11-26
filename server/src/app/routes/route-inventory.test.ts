@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(656)
-  expect(new Set(inventory).size).toBe(652)
+  expect(inventory).toHaveLength(658)
+  expect(new Set(inventory).size).toBe(654)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -205,6 +205,9 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/v1/agent-runs/*')
   expect(inventory).toContain('ALL /api/v1/agent-telemetry/*')
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
+  // Reported pull request status (#353, ADR 0103) is part of Software factory.
+  expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/artifact-statuses')
+  expect(inventory).toContain('ALL /api/teams/:teamId/work-items/:workItemId/artifact-statuses')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   // Slack destinations (#399): the caller's own, a Team channel, and a Project channel.
   expect(inventory).toContain('PUT /api/notification-preferences/slack-destination')
@@ -214,6 +217,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '446f461042ea5caaf5a33ced43322cae5123aab9988b822d0bf390b5bb3c2ded',
+    '9f16d48931a1f4ccbd6632e9dc552694b7b4b8684d2bbf8150da0b1fbf71d87e',
   )
 })

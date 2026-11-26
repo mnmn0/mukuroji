@@ -1,8 +1,8 @@
-import type { AgentRunReport, AgentRunVerificationStatus } from '@mukuroji/contracts'
+import type { AgentRunArtifactStatus, AgentRunReport, AgentRunVerificationStatus } from '@mukuroji/contracts'
 import { isAgentRunReportAwaitingDecision, readAgentRunArtifactText } from '../model/agentRunReportDisplay'
 import type { AgentRunReportAnswerResult } from '../mutations/useAnswerAgentRunReport'
 import { AgentRunReportAnswerForm } from './AgentRunReportAnswerForm'
-import type { AgentRunReportChipsLabels, AgentRunReportsNoticeLabels } from './agentRunReportLabels'
+import type { AgentRunArtifactStatusLabels, AgentRunReportChipsLabels, AgentRunReportsNoticeLabels } from './agentRunReportLabels'
 
 /** Props of the report chips shown under one comment. */
 export type AgentRunReportChipsProps = {
@@ -12,6 +12,8 @@ export type AgentRunReportChipsProps = {
   labels: AgentRunReportChipsLabels
   /** Answers a blocker or hand-off; without it, the report shows no answer form. */
   onAnswer?: (body: string) => Promise<AgentRunReportAnswerResult>
+  /** Provider status of reported pull requests by URL; a pull request without one shows only its link. */
+  artifactStatuses?: ReadonlyMap<string, AgentRunArtifactStatus>
 }
 
 /** Badge class of each verification result. */
@@ -30,7 +32,7 @@ const verificationBadgeClasses: Record<AgentRunVerificationStatus, string> = {
  * @param props - Report and text.
  * @returns Chip group.
  */
-export function AgentRunReportChips({ labels, onAnswer, report }: AgentRunReportChipsProps) {
+export function AgentRunReportChips({ artifactStatuses, labels, onAnswer, report }: AgentRunReportChipsProps) {
   const question = isAgentRunReportAwaitingDecision(report.kind)
   const awaitingDecision = question && report.answer === undefined
   return (
@@ -55,19 +57,24 @@ export function AgentRunReportChips({ labels, onAnswer, report }: AgentRunReport
           <code className="min-w-0 truncate">{verification.command}</code>
         </span>
       ))}
-      {report.artifacts.map((artifact, index) => (
-        <a
-          className="workbench-badge max-w-full underline-offset-2 hover:underline"
-          href={artifact.url}
-          key={`artifact-${index}`}
-          rel="noreferrer noopener"
-          target="_blank"
-          title={artifact.url}
-        >
-          <span className="shrink-0 font-semibold">{labels.artifactTypes[artifact.type]}</span>
-          <span className="min-w-0 truncate">{readAgentRunArtifactText(artifact)}</span>
-        </a>
-      ))}
+      {report.artifacts.map((artifact, index) => {
+        const status = artifact.type === 'pull-request' ? artifactStatuses?.get(artifact.url) : undefined
+        return (
+          <span className="contents" key={`artifact-${index}`}>
+            <a
+              className="workbench-badge max-w-full underline-offset-2 hover:underline"
+              href={artifact.url}
+              rel="noreferrer noopener"
+              target="_blank"
+              title={artifact.url}
+            >
+              <span className="shrink-0 font-semibold">{labels.artifactTypes[artifact.type]}</span>
+              <span className="min-w-0 truncate">{readAgentRunArtifactText(artifact)}</span>
+            </a>
+            {status ? <AgentRunArtifactStatusBadges labels={labels.artifactStatus} status={status} /> : null}
+          </span>
+        )
+      })}
       {report.changedFileCount === undefined ? null : (
         <span className="workbench-badge">
           {labels.changedFiles.replace('{count}', String(report.changedFileCount))}
@@ -75,6 +82,60 @@ export function AgentRunReportChips({ labels, onAnswer, report }: AgentRunReport
       )}
       {awaitingDecision && onAnswer ? <AgentRunReportAnswerForm labels={labels.answer} onAnswer={onAnswer} /> : null}
     </div>
+  )
+}
+
+/** Badge class of each check state that is shown. */
+const checkBadgeClasses = {
+  success: 'workbench-badge-success',
+  failure: 'workbench-badge-danger',
+  pending: 'workbench-badge-warning',
+} as const
+
+/** Props of the badges that describe one reported pull request. */
+type AgentRunArtifactStatusBadgesProps = {
+  /** Provider status of the pull request. */
+  status: AgentRunArtifactStatus
+  /** Locale-aware text. */
+  labels: AgentRunArtifactStatusLabels
+}
+
+/**
+ * Shows what the provider says about a reported pull request (ADR 0103): its state, draft flag,
+ * checks, and review. A pull request that could not be checked says so, with the reason as its
+ * title, so a link is never mistaken for a verified one.
+ *
+ * @param props - Status and text.
+ * @returns Badges.
+ */
+function AgentRunArtifactStatusBadges({ labels, status }: AgentRunArtifactStatusBadgesProps) {
+  const pullRequest = status.pullRequest
+  if (status.verification === 'unverified' || pullRequest === undefined) {
+    const reason = status.unverifiedReason === undefined ? undefined : labels.unverifiedReasons[status.unverifiedReason]
+    return (
+      <span className="workbench-badge" data-testid="agent-run-artifact-unverified" title={reason}>
+        <span className="font-semibold">{labels.unverified}</span>
+        {reason ? <span className="sr-only">{reason}</span> : null}
+      </span>
+    )
+  }
+  const stateClass = pullRequest.state === 'merged' ? 'workbench-badge-primary'
+    : pullRequest.state === 'closed' ? 'workbench-badge' : 'workbench-badge-success'
+  return (
+    <>
+      <span className={stateClass} data-testid="agent-run-artifact-state">
+        <span className="font-semibold">{labels.states[pullRequest.state]}</span>
+        {pullRequest.draft && pullRequest.state === 'open' ? <span>{labels.draft}</span> : null}
+      </span>
+      {pullRequest.state === 'merged' || pullRequest.checks === 'none' ? null : (
+        <span className={checkBadgeClasses[pullRequest.checks]}>{labels.checks[pullRequest.checks]}</span>
+      )}
+      {pullRequest.review === 'none' ? null : (
+        <span className={pullRequest.review === 'approved' ? 'workbench-badge-success' : 'workbench-badge-warning'}>
+          {labels.reviews[pullRequest.review]}
+        </span>
+      )}
+    </>
   )
 }
 

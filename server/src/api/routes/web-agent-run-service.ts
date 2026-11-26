@@ -914,6 +914,7 @@ export async function updateWebAgentSettings(
     changes: [
       { field: 'leaseMinutes', before: before.leaseMinutes, after: update.leaseMinutes },
       { field: 'acceptNewRuns', before: before.acceptNewRuns, after: update.acceptNewRuns },
+      { field: 'artifactRepositories', before: before.artifactRepositories.join(','), after: update.artifactRepositories.join(',') },
       {
         field: 'allowTakeoverAfterLeaseExpiry',
         before: before.allowTakeoverAfterLeaseExpiry,

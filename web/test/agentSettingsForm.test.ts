@@ -1,4 +1,5 @@
 import {
+  AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX,
   AGENT_SETTINGS_BRIEF_MAX_BYTES,
   AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES,
   AGENT_SETTINGS_MAX_PROJECT_BRIEFS,
@@ -30,6 +31,7 @@ describe('Agent settings draft', () => {
       expectedRevision: 4,
       leaseMinutes: 45,
       allowTakeoverAfterLeaseExpiry: true,
+      artifactRepositories: [],
       readyStatusIds: ['ready'],
       resumableStatusIds: ['active'],
       requireAcceptanceCriteria: true,
@@ -53,6 +55,7 @@ describe('Agent settings draft', () => {
       expectedRevision: 4,
       leaseMinutes: 45,
       allowTakeoverAfterLeaseExpiry: true,
+      artifactRepositories: [],
       readyStatusIds: ['ready'],
       resumableStatusIds: ['active'],
       requireAcceptanceCriteria: true,
@@ -166,5 +169,19 @@ describe('Agent settings options', () => {
       { projectId: 'project-api', name: 'Public API' },
       { projectId: 'project-legacy' },
     ])
+  })
+
+  test('reads the repository list one path per line, and rejects other text or too many', () => {
+    const listed = { ...draft, artifactRepositories: ' Org/Repo \n\norg/repo, group/sub/app\n' }
+    expect(validateAgentSettingsDraft(listed)).toMatchObject({ valid: true, invalidArtifactRepositories: [] })
+    expect(createUpdateAgentSettingsRequest(listed, 4)?.artifactRepositories).toEqual(['org/repo', 'group/sub/app'])
+    expect(isAgentSettingsDraftChanged(agentSettingsFixture, listed)).toBeTrue()
+    expect(isAgentSettingsDraftChanged(agentSettingsFixture, { ...draft, artifactRepositories: ' \n' })).toBeFalse()
+
+    expect(validateAgentSettingsDraft({ ...draft, artifactRepositories: 'https://github.com/org/repo\nrepo' }))
+      .toMatchObject({ valid: false, invalidArtifactRepositories: ['https://github.com/org/repo', 'repo'] })
+    const many = Array.from({ length: AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX + 1 }, (_, index) => `org/repo-${index}`).join('\n')
+    expect(validateAgentSettingsDraft({ ...draft, artifactRepositories: many }))
+      .toMatchObject({ valid: false, tooManyArtifactRepositories: true })
   })
 })

@@ -36,6 +36,7 @@ const defaultSettings: AgentSettings = {
   fileFailedRunsToTriage: false,
   fileStalledRunsToTriage: false,
   acceptNewRuns: true,
+  artifactRepositories: [],
 }
 
 /** Storybook metadata for the Team Agent settings panel. */

@@ -1000,6 +1000,8 @@ export function isSameSettingsSave(saved: AgentSettings, update: ValidatedAgentS
     saved.fileFailedRunsToTriage === update.fileFailedRunsToTriage &&
     saved.fileStalledRunsToTriage === update.fileStalledRunsToTriage &&
     saved.acceptNewRuns === update.acceptNewRuns &&
+    saved.artifactRepositories.length === update.artifactRepositories.length &&
+    saved.artifactRepositories.every((repository, index) => repository === update.artifactRepositories[index]) &&
     saved.acceptanceCriteriaFieldId === update.acceptanceCriteriaFieldId &&
     saved.brief === update.brief &&
     savedProjects.length === updateProjects.length &&
@@ -1069,7 +1071,11 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
   const readyStatusIds = item.readyStatusIds === undefined ? [] : item.readyStatusIds
   const resumableStatusIds = item.resumableStatusIds === undefined ? [] : item.resumableStatusIds
   const projectBriefs = item.projectBriefs === undefined ? {} : item.projectBriefs
+  // Rows saved before the allowlist existed list no repository.
+  const artifactRepositories = item.artifactRepositories === undefined ? [] : item.artifactRepositories
   if (
+    !Array.isArray(artifactRepositories) ||
+    !artifactRepositories.every((repository): repository is string => typeof repository === 'string' && repository !== '') ||
     !Array.isArray(readyStatusIds) ||
     !readyStatusIds.every((id): id is string => typeof id === 'string' && id !== '') ||
     !Array.isArray(resumableStatusIds) ||
@@ -1097,6 +1103,7 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
     leaseMinutes,
     // Rows saved before the switch existed accept new runs.
     acceptNewRuns: item.acceptNewRuns !== false,
+    artifactRepositories,
     allowTakeoverAfterLeaseExpiry: item.allowTakeoverAfterLeaseExpiry,
     readyStatusIds,
     resumableStatusIds,

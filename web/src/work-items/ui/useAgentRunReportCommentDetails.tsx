@@ -3,6 +3,7 @@ import type { Locale } from '../../shared/i18n/i18n'
 import { indexAgentRunReportsByComment, selectAgentRunReportsForWorkItem } from '../model/agentRunReportDisplay'
 import { useAnswerAgentRunReport } from '../mutations/useAnswerAgentRunReport'
 import { useWorkItemAgentRunReports } from '../queries/useWorkItemAgentRunReports'
+import { useWorkItemArtifactStatuses } from '../queries/useWorkItemArtifactStatuses'
 import { AgentRunReportChips, AgentRunReportsLoadNotice } from './AgentRunReportChips'
 import { createAgentRunReportChipsLabels, createAgentRunReportsNoticeLabels } from './agentRunReportLabels'
 
@@ -59,18 +60,26 @@ export function useAgentRunReportCommentDetails({
     () => indexAgentRunReportsByComment(selectAgentRunReportsForWorkItem(reports, { accessToken, teamId, workItemId })),
     [accessToken, reports, teamId, workItemId],
   )
+  const hasPullRequests = reports?.some((report) => report.artifacts.some((artifact) => artifact.type === 'pull-request')) === true
+  const { data: statusData, error: statusError } = useWorkItemArtifactStatuses(
+    accessToken, teamId, workItemId, hasPullRequests ? reports?.length ?? 0 : 0,
+  )
+  // A failed status read shows the plain links again rather than statuses that may be stale.
+  const statuses = statusError || statusData?.workItemId !== workItemId ? undefined : statusData.items
+  const statusByUrl = useMemo(() => new Map(statuses?.map((status) => [status.url, status])), [statuses])
   const answer = useAnswerAgentRunReport({ accessToken, teamId, refreshReports: mutate, onAnswered })
   const renderCommentDetails = useCallback((comment: { id: string }) => {
     const report = byComment.get(comment.id)
     if (!report) return null
     return (
       <AgentRunReportChips
+        artifactStatuses={statusByUrl}
         labels={labels}
         onAnswer={canAnswer && accessToken && teamId ? (body) => answer(report, body) : undefined}
         report={report}
       />
     )
-  }, [accessToken, answer, byComment, canAnswer, labels, teamId])
+  }, [accessToken, answer, byComment, canAnswer, labels, statusByUrl, teamId])
   return {
     renderCommentDetails,
     loadNotice: error && accessToken && teamId ? <AgentRunReportsLoadNotice labels={noticeLabels} onRetry={() => { void mutate() }} /> : null,
