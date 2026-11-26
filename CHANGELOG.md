@@ -24,6 +24,25 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Added
 
+- Workspace profile に `list_relations`（親・子・WBS 番号と blocks / blockedBy / related / duplicate の link）、
+  `save_relation`（同じ Team の Work Item を link、`remove: true` で解除）、`create_subtasks`（親の下に親の Project で最大 20 件の
+  子を作る。途中で失敗したら同じ引数と `idempotencyKey` の再試行で残りだけを作る）を追加しました（#360）。
+- server API: `GET /api/v1/work-items/{workItemId}/relations`（scope `work-items:read`）、
+  `POST /api/v1/work-items/{workItemId}/relations` と
+  `DELETE /api/v1/work-items/{workItemId}/relations/{targetWorkItemId}/{relationType}`（scope `work-items:write`、
+  `Idempotency-Key` 必須）を追加しました。権限は Web の relation 操作と同じで、親の Work Item Type が子の Type を
+  許さない link、2 つ目の親、循環する link は `409` です（#360）。
+- MCP: `create_subtasks` が子を作った後に親への link で失敗したときは、その子の ID をエラーに含めます。親の Type が
+  許さない Type なら `save_issue` で Type を変え、同じ引数と `idempotencyKey` で再試行すると link まで済みます（#360）。
+- MCP: `create_subtasks` の再試行で、途中で親の Project が変わって作り済みの子の再生が食い違ったときは、再試行不可の
+  `idempotency_conflict` で、親を元の Project に戻すか `list_relations` で子を確かめる手順を示します（#360）。
+- server API: `POST /api/v1/work-items/{workItemId}/subtask-batches`（scope `work-items:write`、`Idempotency-Key` 必須）を
+  追加しました。親と作る予定の子の一覧に key を結び付けるだけの API で、同じ key で一覧が違うと `409 idempotency_conflict` です。
+  MCP の `create_subtasks` は子を作る前にこれを呼ぶので、同じ `idempotencyKey` で一覧を変えた呼び出しは子を足さずに失敗します（#360）。
+- server API: relation の作成・削除は、認可に使った呼び出し元の Workspace member 行（version・status）と同じ transaction で
+  確かめるので、認可の後に権限が外れた場合は書き込みません（#360）。
+- server API: relation の作成・削除は `Idempotency-Key` の receipt を relation と同じ transaction に残すので、
+  応答が失われた後に同じ key で再試行すると結果を replay します（#360）。
 - server API: `GET /api/v1/work-items/{workItemId}/completion-gate?teamId=` を追加しました。Team の完了 Gate の
   条件ごとに満たしているか（`met` / `unmet` / `unavailable`）と、完了が拒否される状態か（`blocksCompletion`）を
   `WorkItemCompletionGateStatus` で返します。scope は既存の `work-items:read` です（#354）。
@@ -87,6 +106,8 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   server が古いと警告し、`create_task` は失敗します。
 - MCP API revision を 4 に上げました。server は revision 1〜4 を受け付けます。revision 3 以前の server に接続した新しい MCP は
   server が古いと警告し、Workspace profile のツールは使えません。
+- MCP API revision を 5 に上げました。server は revision 1〜5 を受け付けます。revision 4 以前の server に接続した新しい MCP は
+  server が古いと警告し、`list_relations`・`save_relation`・`create_subtasks` は使えません（#360）。
 - server API: Software factory が off の deploy でも、本人用 token の確認・発行・再発行
   （`/api/developer/me/agent-connection`、`POST /api/developer/me/api-keys`、`.../rotate`）と、管理者による本人用 token の
   rotate を `503` で断らないようにしました。Web の「agent を接続」は off では Workspace profile の設定例を出します。
