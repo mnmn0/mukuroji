@@ -374,3 +374,36 @@ test('applies the Gate to Public API updates and reads acceptance criterion mark
   const completed = await update({ acceptanceCriteriaMarks: [{ id: openCriterion.id, satisfied: true }] }, 'mark-and-complete')
   expect(completed.workflowStatusId).toBe('done')
 })
+
+test('reports the Gate state through the Public API without changing the Work Item', async () => {
+  configureFakeProjectClients(true, {
+    directoryId: credential.workspaceId,
+    role: 'member',
+    workspaceRole: 'member',
+    detailAssigneeUserId: 'demo@example.com',
+    detailWorkflowStatusId: 'in-progress',
+    detailStatusCategory: 'started',
+    detailAcceptanceCriteria: [openCriterion, metCriterion],
+  })
+  const workItems = createCanonicalPublicWorkItemService()
+  const read = () => runWithTestAppDependencies(() => workItems.getCompletionGate(credential, 'core-team', 'task-1'))
+
+  configureGate(undefined)
+  expect(await read()).toMatchObject({ teamId: 'core-team', workItemId: 'task-1', conditions: [], blocksCompletion: false })
+
+  configureGate({ acceptanceCriteria: 'warn', humanApproval: 'required' }, async () => approvals({ approvedCount: 1 }))
+  expect(await read()).toMatchObject({
+    conditions: [
+      { condition: 'acceptance-criteria', requirement: 'warn', state: 'unmet' },
+      { condition: 'human-approval', requirement: 'required', state: 'met' },
+    ],
+    // A `warn` condition never blocks completion.
+    blocksCompletion: false,
+  })
+
+  configureGate({ noPendingApprovals: 'required' }, async () => { throw new Error('approvals unavailable') })
+  expect(await read()).toMatchObject({
+    conditions: [{ condition: 'no-pending-approvals', requirement: 'required', state: 'unavailable' }],
+    blocksCompletion: true,
+  })
+})

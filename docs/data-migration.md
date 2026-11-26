@@ -67,8 +67,10 @@ runner は `transform` の結果を書き込む前に、次をすべて確かめ
   checkpoint の続きから再開します。
 - 書き込みは `--max-writes-per-second`（既定 25）の間隔を空けます。
 - 1 page を書き終えるたびに checkpoint を compare-and-set で保存します。page の途中で失敗した場合、
-  checkpoint は前の page のままで、再実行するとその page を読み直します。書き込み済みの row は
-  `migrated` に分類されるので二重には書きません（`alreadyMigrated` として数えます）。
+  checkpoint は前の page のままで、再実行するとその page を読み直します。row を置き換える migration では、
+  書き込み済みの row は `migrated` に分類されるので二重には書きません（`alreadyMigrated` として数えます）。
+  派生 row を作る migration では元の row が `pending` のままなので、読み直した page の派生 row を同じ内容で
+  書き直します（[派生 row の作成](#派生-row-の作成kind-derive)）。
 - segment ごとに lease（5 分）を取り、別の実行が有効な lease を持つ segment には `LEASE_HELD` で
   止まります。期限が切れた lease は引き継ぎます。page の処理中も、残りが半分を切ると書き込みの前に
   lease を compare-and-set で延長し、負けたら（別の実行に取られたら）その時点で書き込みをやめて
@@ -78,7 +80,8 @@ runner は `transform` の結果を書き込む前に、次をすべて確かめ
   `PARTITION_PLAN_MISMATCH`、`DEFINITION_MISMATCH` で止まります。別の table を移行するときは、別の
   checkpoint table を使います。
 - page の途中で止まった場合も、その page で書き込んだ行数は実行の report と run record に含めます。
-  checkpoint の累計には含めず、再開時に `alreadyMigrated` として数えます。
+  checkpoint の累計には含めず、row を置き換える migration では再開時に `alreadyMigrated` として数えます。
+  派生 row を作る migration では、再開時にその page の派生 row をもう一度書きます。
 
 ### Row の置き換え
 
@@ -114,6 +117,7 @@ row は conditional put で置き換えます。条件は「key が存在し、`
 | id | table | 内容 |
 | --- | --- | --- |
 | `0001-work-item-member-index` | `work-items` | Work Item の責任者と Contributor ごとに Focus の index row を作る（ADR 0038）。Work Item の作成・更新・削除は同じ row を transaction で保つので、writer は止めない（`revision-fenced`） |
+| `0002-document-comment-participant-index` | `documents` | Document comment ごとに thread の参加者 row を、root comment からは index の完了 marker を作る（ADR 0092）。root の marker が返信の参加者 row より先に書かれることがあり、その間の返信は通知先を取りこぼすので、migration の間は comment の作成を止める（`pause-writers`） |
 
 ## Writer と dual-read
 
@@ -320,7 +324,7 @@ local の emulator（Floci）では CLI が初回に table を作ります。Flo
 ## 対象外にしたもの（Issue #365）
 
 - **Team / Workspace の partition を Query で読む row store**: [ADR 0013](adr/0013-data-migration-runner.md) のとおり、
-  必要な migration が出たときに足します。今の対象 table（`work-items`、`project-directory`）は parallel scan の
+  必要な migration が出たときに足します。今の対象 table（`work-items`、`project-directory`、`documents`）は parallel scan の
   segment で読み切れる規模で、Workspace をまたいで table 全体を移すので Query の単位が要りません。
 - **#335・#340・#337 の migration 定義**: #335・#340 の schema 変更は初回 deploy（#636）より前に入り、旧 version の
   row を持つ環境がまだ無いため、migration は作りません。#337 も初回 deploy より前に入るなら同じです。初回 deploy の後に

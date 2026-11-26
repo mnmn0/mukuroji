@@ -1,7 +1,12 @@
 import { describe, expect, test } from 'bun:test'
-import type { AgentRunTriageFiling } from '../../modules/agent-runs'
+import { TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
+import {
+  createActiveAgentRun,
+  readStartAgentRunRequest,
+  type AgentRunTriageFiling,
+} from '../../modules/agent-runs'
 import { TriageError } from '../../modules/triage'
-import { createAgentRunTriageFiler, createAgentRunTriageWorkItemReader } from './agent-run-triage'
+import { createAgentRunStallNotifier, createAgentRunTriageFiler, createAgentRunTriageWorkItemReader } from './agent-run-triage'
 
 const filing: AgentRunTriageFiling = {
   runId: 'run_1',
@@ -120,5 +125,75 @@ describe('Agent Run triage composition', () => {
     expect(await reader.read('workspace-1', 'core', 'task-1')).toEqual({ title: 'Title of task-1', path: '/teams/core/issues?issueId=task-1', projectId: 'checkout' })
     expect(await reader.read('workspace-1', 'core', 'archived')).toBeUndefined()
     expect(await reader.read('workspace-1', 'core', 'deleted')).toBeUndefined()
+  })
+
+  test('notifies a stalled run once through an audit event that holds no instance secret', async () => {
+    const run = createActiveAgentRun({
+      directoryId: 'workspace-1',
+      teamId: 'core',
+      workItemId: 'task-1',
+      assigneeUserId: 'member-1',
+      start: readStartAgentRunRequest({ expectedRevision: 1, workflowStatusId: 'doing', runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-1' }),
+      credentialId: 'key-1',
+      startRevision: 2,
+      leaseMinutes: 30,
+      now: new Date('2026-11-25T00:00:00.000Z'),
+    })
+    const workItem = { title: 'Fix checkout', path: '/teams/core/issues?issueId=task-1', projectId: 'checkout' }
+    const commands: TransactWriteCommand[] = []
+    let failure: unknown
+    const writer = {
+      /**
+       * Records the transaction, then succeeds or fails.
+       * @param command - Transaction.
+       */
+      async send(command: TransactWriteCommand) {
+        commands.push(command)
+        if (failure) throw failure
+      },
+    }
+    const notifier = createAgentRunStallNotifier(writer, createTenant(true), 'AuditEvents')
+    await notifier.notifyStalled(run, workItem)
+    const [put, condition] = commands[0]?.input.TransactItems ?? []
+    expect(condition).toEqual({ ConditionCheck: expect.objectContaining({ TableName: 'Tenants' }) })
+    const event = put?.Put?.Item
+    expect(event).toMatchObject({
+      eventType: 'agent-run.stalled',
+      outboxStatus: 'pending',
+      metadata: {
+        teamId: 'core',
+        issueId: 'task-1',
+        projectId: 'checkout',
+        notificationTitle: 'Agent Run stalled',
+        notificationCandidates: [{ memberKey: 'member-1', reason: 'agent-run-stalled' }],
+      },
+    })
+    expect(JSON.stringify(event)).not.toContain(run.instanceIdHash)
+    expect(JSON.stringify(event)).not.toContain('laptop-1')
+
+    // A retried sweep writes the same event ID, and an existing event means it was already sent.
+    failure = Object.assign(new Error('cancelled'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+    })
+    await notifier.notifyStalled(run, workItem)
+    expect(commands[1]?.input.TransactItems?.[0]?.Put?.Item?.eventId).toBe(event?.eventId)
+
+    // A transient failure leaves the run for the next sweep.
+    failure = Object.assign(new Error('throttled'), { name: 'ThrottlingException' })
+    await expect(notifier.notifyStalled(run, workItem)).rejects.toThrow('throttled')
+
+    // A closing Workspace is not notified.
+    const closing: TransactWriteCommand[] = []
+    await createAgentRunStallNotifier({
+      /**
+       * Records the transaction.
+       * @param command - Transaction.
+       */
+      async send(command: TransactWriteCommand) {
+        closing.push(command)
+      },
+    }, createTenant(false), 'AuditEvents').notifyStalled(run, workItem)
+    expect(closing).toEqual([])
   })
 })

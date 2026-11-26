@@ -1619,6 +1619,14 @@ export type DocumentComment = {
    * Comment の最終更新日時です。
    */
   updatedAt: string
+  /**
+   * Time the author last edited the body.
+   */
+  editedAt?: string
+  /**
+   * Time the author deleted the comment; the body and mentions are then empty.
+   */
+  deletedAt?: string
 }
 
 /**

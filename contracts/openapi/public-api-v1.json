@@ -4785,6 +4785,87 @@
         ],
         "type": "object"
       },
+      "WorkItemCompletionGateConditionStatus": {
+        "description": "One completion Gate condition with whether the Work Item meets it. New condition values may be added later; clients should show an unknown condition by its message.",
+        "properties": {
+          "condition": {
+            "description": "acceptance-criteria: every acceptance criterion is satisfied. no-pending-approvals: no approval is pending or has changes requested. human-approval: at least one approval is approved.",
+            "enum": [
+              "acceptance-criteria",
+              "no-pending-approvals",
+              "human-approval"
+            ],
+            "type": "string"
+          },
+          "message": {
+            "description": "Short English explanation of an unmet or unavailable condition; absent when the condition is met.",
+            "type": "string"
+          },
+          "requirement": {
+            "description": "warn reports the condition without blocking completion; required blocks it.",
+            "enum": [
+              "warn",
+              "required"
+            ],
+            "type": "string"
+          },
+          "state": {
+            "description": "met, unmet, or unavailable when the state needed to evaluate it could not be read (the Gate then fails closed).",
+            "enum": [
+              "met",
+              "unmet",
+              "unavailable"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "condition",
+          "requirement",
+          "state"
+        ],
+        "type": "object"
+      },
+      "WorkItemCompletionGateStatus": {
+        "description": "The Team's completion Gate evaluated against one Work Item at its current revision. The server evaluates the Gate again when the Work Item is moved into the completed category. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "blocksCompletion": {
+            "description": "Whether a required condition is unmet or could not be checked, so moving the Work Item into the completed category would be rejected at this revision.",
+            "type": "boolean"
+          },
+          "conditions": {
+            "description": "Every condition the Team evaluates (warn or required), in display order; empty when the Team sets no completion Gate.",
+            "items": {
+              "$ref": "#/components/schemas/WorkItemCompletionGateConditionStatus"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "description": "Work Item revision the Gate was evaluated at.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "workItemId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "teamId",
+          "workItemId",
+          "revision",
+          "conditions",
+          "blocksCompletion"
+        ],
+        "type": "object"
+      },
       "WorkItemEffort": {
         "description": "Estimate, remaining effort, and recorded progress of one Work Item. Properties may be added later, so clients must ignore those they do not know.",
         "properties": {
@@ -13382,6 +13463,99 @@
           }
         ],
         "summary": "Add an idempotent progress note to the canonical discussion",
+        "tags": [
+          "Work Items"
+        ]
+      }
+    },
+    "/api/v1/work-items/{workItemId}/completion-gate": {
+      "get": {
+        "operationId": "getPublicWorkItemCompletionGate",
+        "parameters": [
+          {
+            "description": "Work Item ID です。",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Work Item を所有する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkItemCompletionGateStatus"
+                }
+              }
+            },
+            "description": "Completion Gate status",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "Evaluate the Team's completion Gate against a Work Item",
         "tags": [
           "Work Items"
         ]

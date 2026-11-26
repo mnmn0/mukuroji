@@ -5,6 +5,7 @@ import type {
   DocumentPermission,
   PublicDocument,
 } from '@mukuroji/contracts'
+import { markdownInspector } from './markdown-inspector'
 import { DOCUMENT_SCHEMA_VERSION } from '@mukuroji/contracts'
 import type {
   DocumentExportFormat,
@@ -180,5 +181,5 @@ export function renderAuthorizedPublicDocumentExport(
       'This public link does not allow export.',
     )
   }
-  return renderPublicDocumentExport(document, format)
+  return renderPublicDocumentExport(document, format, markdownInspector)
 }

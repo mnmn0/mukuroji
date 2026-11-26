@@ -118,10 +118,12 @@ finished(paused|completed など) + Work Item が started --resume(同じ assign
   `lastHeartbeatAt` を更新する。読み取りは lease を延長しない。lease は `lastHeartbeatAt < now`
   を条件に更新し、遅れて届いた更新で期限を戻さない。
 - heartbeat は Run ごとに 10 秒に 1 回まで受け付け、超過分は `429` と `retryAfterSeconds` を返す。
-- Phase 1 の heartbeat は MCP tool 呼び出しだけで送る。Claude Code の hooks や Kiro の agent
-  hooks から定期送信する方式は後続 Phase の option とし、Codex は hook 相当の有無を確認して
-  から決める。tool を呼ばない長い作業中に停滞表示になることは、停滞が「要確認」であって
-  「失敗」ではないことで許容する。
+- heartbeat は MCP tool 呼び出しで送るほか、agent の hooks から `mcp.mjs --heartbeat` で送れる
+  （[coding-agent-mcp](coding-agent-mcp.md)「hooks からの heartbeat」）。この mode は MCP server と同じ設定と
+  instance ID を使い、その instance の `active` Run だけを延長する。account の cache directory に置く stamp で instance ごとに 1 分に 1 回までとし、
+  失敗しても終了コード 0 で終える。Claude Code の `PostToolUse` hook の例を示し、Kiro は agent hook に同じ command を指定する。
+  Codex は hook 相当の有無を実機で確かめるまで `heartbeat` tool だけとする。hook を使わない長い作業中に
+  停滞表示になることは、停滞が「要確認」であって「失敗」ではないことで許容する。
 
 ### Work Item mutation との fence
 
@@ -438,6 +440,39 @@ Factory board の上部に、期間内に終わった Run の集計を出す。d
     少ないため shard しない。GSI は table 更新ごとに 1 つしか追加できないため 1 つにまとめる。
 - 閉鎖中の Workspace には起票しない。起票の transaction に Workspace が active である条件を含め、
   確認の後に閉鎖が始まっても entry を作らない。
+
+## 担当者への通知
+
+Run が人の判断を必要とするとき、Work Item の担当者（Run の member）に通知する。Triage を見ない
+メンバーにも届くよう、Inbox と本人が有効にしている channel（email・push・Slack）へ既存の delivery plan で
+配信する。既定では無効とし、Team が Agent settings で有効にする。
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `notifyAssigneeOfRunEvents` | `false` | `true` なら次の Run event を担当者に通知する。 |
+
+| Event | Reason | 通知の時点 |
+| --- | --- | --- |
+| `kind: blocker` の report | `agent-run-blocker` | report を保存した transaction と同じ audit event |
+| `kind: handoff` の report | `agent-run-handoff` | 同上 |
+| `failed` の finish | `agent-run-failed` | finish の audit event |
+| 停滞（`active` のまま lease 切れ） | `agent-run-stalled` | Triage 起票と同じ定期 worker が書く `agent-run.stalled` event |
+
+- 通知は Run の audit event の `notificationCandidates` から作る。新しい stream consumer は増やさない。
+  agent は担当者の credential で動くため、event の actor は担当者本人になる。通常は actor 本人への
+  通知を除くが、上の reason だけは除かずに届ける。
+- 通知の reason は担当者だけを対象とし、配信時点で担当者が変わっていれば届けない。通知設定の
+  category は `status` に入る。
+- 停滞の通知は Run ごとに 1 回とする。worker は通知した Run に Triage 起票と同じ印を付け、event ID は
+  Run ID から決めるため、再実行や heartbeat 回復後の再停滞でも 2 件目を作らない。停滞の走査は
+  Triage の起票か通知のどちらかを有効にした Team だけを対象にする。
+- audit metadata と通知には Run ID、Work Item の ID と path、agent 名、runtime、固定の title だけを入れ、
+  instance ID とその hash、report の本文は入れない。report の本文は従来どおり comment として
+  watcher に配信される。
+- 閉鎖中の Workspace には停滞を通知しない。event の transaction に Workspace が active である条件を含める。
+- Automation trigger、Update Feed の entry、外部 chat 向けの report 要約 renderer は作らない。
+  Automation は status と comment の trigger で足り、Update Feed は Project の status report の
+  feed であり Work Item 単位の event を持たないためである。
 - worker の 1 回の処理件数には上限を設け、上限に達した場合は記録して次の実行に続ける。
 
 ## Public API
@@ -566,8 +601,8 @@ tool は次のとおり変更・追加する。
 - Run と report に prompt、生成内容、model 名、token 数を保存しない。token 数・推定費用・model 名は
   OpenTelemetry で受け取った usage の行として member ごとに別に持ち、読み取り時に時刻で Run に割り当てる
   （[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)）。prompt と生成内容は引き続き保存しない。
-- 外部 chat sync や Update Feed への Run event の配信は Phase 1 では行わない。comment は
-  従来どおり既存経路で配信される。
+- 外部 chat sync や Update Feed への Run event の配信は行わない。comment は従来どおり既存経路で
+  配信され、判断待ちの Run は「担当者への通知」で担当者に届く。
 
 ## 実装スライスと検証
 
@@ -924,8 +959,10 @@ report row と Agent settings の row は件数だけを数え、内容は検査
   組み込む。既存の approval action を再利用する。
 - token 費用を analytics に追加し、stage 別 lead time と Run の成功 / 手戻り率（「期間サマリー」）を
   Analytics engine の metric と snapshot に統合する。
-- hooks による heartbeat、planner / implementer / reviewer の多段 Run を Work Item relation と
-  Run の親子で表現する。
+- planner / implementer / reviewer の役割（`role`）を Run に持たせる。Run の連鎖は、`paused` の Run を
+  `resume_task` で続けた Run が `resumedFromRunId` で前の Run を指し、Run 履歴に連鎖として表示される形で表す。
+  役割、handoff report の構造化された引き継ぎ、reviewer の判定を Gate（bot review 条件、#353 の GitHub 連携に依存）に
+  つなぐこと、役割ごとの lease 既定値は、利用者の運用が固まってから決める。
 
 ## 決定事項と保留
 
@@ -942,5 +979,6 @@ report row と Agent settings の row は件数だけを数え、内容は検査
 保留:
 
 - `leaseMinutes` の既定値 30 分が実際の作業間隔に合うか。Slice 1 の運用で見直す。
-- report を Update Feed と Inbox digest に出すか。Phase 1 は comment の既存配信に任せる。
+- report を Update Feed に出すか。blocker・handoff・失敗・停滞は担当者に通知し、それ以外の report は
+  comment の既存配信に任せる。
 - Kiro と Codex の resources / prompts 対応。確認結果を `docs/coding-agent-mcp.md` に記す。

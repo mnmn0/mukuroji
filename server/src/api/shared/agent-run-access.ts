@@ -15,8 +15,10 @@ import {
   createAgentRunForbiddenError,
   createAgentRunIntegrityError,
   createAgentRunNotActiveError,
+  createAgentRunNotificationMetadata,
   describeHoldingRun,
   finishAgentRun,
+  type AgentRunAssigneeNotification,
   type AgentRunTransactItem,
   type StoredAgentRun,
   type ValidatedAgentRunFence,
@@ -307,6 +309,7 @@ export const AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM = 1
  * @param action - Lifecycle action.
  * @param summary - Human-readable summary.
  * @param sequence - Audit sequence slot; pass {@link AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM} when another event shares the transaction.
+ * @param notification - Assignee notification the event carries, when the Team turned it on.
  * @returns Audit put, or undefined when auditing is not configured.
  */
 export function createAgentRunAuditPut(
@@ -315,6 +318,7 @@ export function createAgentRunAuditPut(
   action: 'started' | 'resumed' | 'reported' | 'finished' | 'released' | 'taken-over' | 'answered',
   summary: string,
   sequence?: number,
+  notification?: AgentRunAssigneeNotification,
 ): AgentRunTransactItem | undefined {
   return createMutationAuditEventPut(getConfiguredAuditTableName(), auditContext, {
     directoryId: run.directoryId,
@@ -337,6 +341,7 @@ export function createAgentRunAuditPut(
       state: run.state,
       ...(run.outcome ? { outcome: run.outcome } : {}),
       ...(run.resumedFromRunId ? { resumedFromRunId: run.resumedFromRunId } : {}),
+      ...(notification ? createAgentRunNotificationMetadata(run, notification) : {}),
     },
   })
 }

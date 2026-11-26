@@ -38,6 +38,13 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   `idempotency_conflict` で、親を元の Project に戻すか `list_relations` で子を確かめる手順を示します（#360）。
 - server API: relation の作成・削除は `Idempotency-Key` の receipt を relation と同じ transaction に残すので、
   応答が失われた後に同じ key で再試行すると結果を replay します（#360）。
+- server API: `GET /api/v1/work-items/{workItemId}/completion-gate?teamId=` を追加しました。Team の完了 Gate の
+  条件ごとに満たしているか（`met` / `unmet` / `unavailable`）と、完了が拒否される状態か（`blocksCompletion`）を
+  `WorkItemCompletionGateStatus` で返します。scope は既存の `work-items:read` です（#354）。
+- MCP: `get_task` が `completionGate` で Team の完了 Gate の達成状況を返します。server が古いときは `null` です。
+  この client が知らない条件は `conditions` から省き、`blocksCompletion` はそれも含めて判定した値のままです（#354）。
+- MCP: `mcp.mjs --heartbeat` を追加しました。agent の hooks から呼ぶと、MCP server と同じ設定と instance ID で
+  その instance の `active` Run の lease を延長します。instance ごとに 1 分に 1 回までで、失敗しても終了コード 0 で終わります（#356）。
 - server API: `GET /api/v1/agent-context` が `acceptNewRuns` を返します。Team の管理者が新しい Agent Run の受付を
   止めている間は `false` で、start・resume・take over は `409 not_ready`（pointer `/acceptNewRuns`）になります（#412）。
 - MCP: `get_configuration` の `agentSettings.acceptNewRuns` で受付停止を示し、`get_next_task` は受付停止中に
@@ -99,6 +106,15 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 - server API: Software factory が off の deploy でも、本人用 token の確認・発行・再発行
   （`/api/developer/me/agent-connection`、`POST /api/developer/me/api-keys`、`.../rotate`）と、管理者による本人用 token の
   rotate を `503` で断らないようにしました。Web の「agent を接続」は off では Workspace profile の設定例を出します。
+- server API / MCP: `GET /api/v1/work-items/{workItemId}/documents/{documentId}` と `read_document` が返す Markdown で、
+  段落の text を escape せずに Markdown のまま返すようにしました。raw HTML の部分だけを escape し、参照の定義を使う
+  link と画像は inline の link に書き換えて定義を消し、脚注の label は `<block の番号>-<番号>` に付け替えます。
+  定義のない `[^…]` は `[\^…]` と書き、隣の block とつながる段落の間には何も表示しない定義
+  `[mukuroji-block-boundary]: #` を入れます。参照の書き換えで増える長さが 1 回で 1,000,000 文字を超える
+  段落は、書き換えずに平文で書きます。見出し・チェック項目・表の cell・埋め込みのタイトルは、`&` と `~` と
+  見出し末尾の `#` も escape して書いた文字のとおりに表示されるようにし、チェック項目と表の cell の中の
+  ページへの link（`[label](/documents/<id>)`）は escape せず Markdown の link として書きます。
+  response の形と field は変わりません（#422）。
 
 ### Fixed
 

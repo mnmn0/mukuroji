@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useId,
   useRef,
   useState,
   type FormEvent,
@@ -11,6 +12,7 @@ import type {
   DocumentPermission,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
+import type { MentionableMember } from '../../shared/lib/memberMentions'
 import type {
   CreateDocumentShareInput,
   DocumentRecord,
@@ -58,6 +60,10 @@ export type DocumentShareDialogProps = {
    */
   shares: DocumentShare[]
   /**
+   * Workspace members offered by name when adding a member and used to show member names.
+   */
+  members?: readonly MentionableMember[]
+  /**
    * 表示文言を解決する翻訳関数です。
    */
   t: (key: MessageKey) => string
@@ -86,6 +92,7 @@ export type DocumentShareDialogProps = {
  */
 export function DocumentShareDialog({
   document,
+  members = [],
   onClose,
   onCreateShare,
   onDeleteShare,
@@ -94,6 +101,8 @@ export function DocumentShareDialog({
   t,
 }: DocumentShareDialogProps) {
   const dialogRef = useRef<HTMLElement>(null)
+  const memberListId = useId()
+  const activeMembers = members.filter((member) => member.status === 'active')
   const [guestEmail, setGuestEmail] = useState('')
   const [guestRole, setGuestRole] =
     useState<DocumentMemberGrantRole>('viewer')
@@ -331,12 +340,23 @@ export function DocumentShareDialog({
               >
                 <input
                   aria-label={t('documents.share.guestEmail')}
+                  autoComplete="off"
                   className="workbench-input min-h-10 px-3"
+                  list={activeMembers.length > 0 ? memberListId : undefined}
                   onChange={(event) => setGuestEmail(event.target.value)}
-                  placeholder="guest@example.com"
-                  type="email"
+                  placeholder={t('documents.share.memberPlaceholder')}
+                  type="text"
                   value={guestEmail}
                 />
+                {activeMembers.length > 0 ? (
+                  <datalist id={memberListId}>
+                    {activeMembers.map((member) => (
+                      <option key={member.memberKey} value={member.memberKey}>
+                        {member.name ? `${member.name}${member.email ? ` (${member.email})` : ''}` : member.email}
+                      </option>
+                    ))}
+                  </datalist>
+                ) : null}
                 <select
                   aria-label={t('documents.share.guestRole')}
                   className="workbench-input min-h-10 px-2"
@@ -374,6 +394,7 @@ export function DocumentShareDialog({
             ) : null}
             <ShareList
               deletingShareId={deletingShareId}
+              members={members}
               shares={memberShares}
               t={t}
               onDeleteShare={
@@ -507,11 +528,14 @@ export function DocumentShareDialog({
 
 function ShareList({
   deletingShareId,
+  members,
   onDeleteShare,
   shares,
   t,
 }: {
   deletingShareId?: string
+  /** Workspace members whose names stand in for member keys. */
+  members: readonly MentionableMember[]
   onDeleteShare?: (input: RevokeDocumentShareInput) => Promise<void>
   shares: DocumentMemberShare[]
   t: (key: MessageKey) => string
@@ -531,12 +555,15 @@ function ShareList({
           className="flex items-center gap-3 px-3 py-3"
           key={share.grant.memberKey}
         >
-          <span className="grid h-8 w-8 flex-none place-items-center rounded-full bg-tone-e5f7f4 text-xs font-bold text-[var(--workbench-primary-text)]">
-            {share.grant.memberKey.charAt(0).toUpperCase()}
+          <span
+            aria-hidden="true"
+            className="grid h-8 w-8 flex-none place-items-center rounded-full bg-tone-e5f7f4 text-xs font-bold text-[var(--workbench-primary-text)]"
+          >
+            {resolveShareMemberName(share.grant.memberKey, members).charAt(0).toUpperCase()}
           </span>
           <div className="min-w-0 flex-1">
-            <p className="m-0 truncate text-sm font-semibold text-[var(--workbench-text)]">
-              {share.grant.memberKey}
+            <p className="m-0 truncate text-sm font-semibold text-[var(--workbench-text)]" title={share.grant.memberKey}>
+              {resolveShareMemberName(share.grant.memberKey, members)}
             </p>
             <p className="m-0 mt-0.5 text-xs font-medium text-[var(--workbench-muted)]">
               {t(
@@ -569,4 +596,17 @@ function ShareList({
       ))}
     </div>
   )
+}
+
+/**
+ * Resolves the name shown for a shared member, falling back to the member key.
+ *
+ * @param memberKey - Member key of the grant.
+ * @param members - Workspace members with display names.
+ * @returns The member's display name or member key.
+ */
+function resolveShareMemberName(memberKey: string, members: readonly MentionableMember[]) {
+  const normalized = memberKey.trim().toLowerCase()
+  return members.find((member) => member.memberKey.trim().toLowerCase() === normalized)?.name?.trim() ||
+    memberKey
 }

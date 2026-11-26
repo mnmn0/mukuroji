@@ -102,6 +102,7 @@ test('data migration function is operator-invoked only and pins its tables', () 
   });
   expect(JSON.stringify(variables.DATA_MIGRATION_TARGET_TABLES)).toContain('"work-items')
   expect(JSON.stringify(variables.DATA_MIGRATION_TARGET_TABLES)).toContain('"project-directory')
+  expect(JSON.stringify(variables.DATA_MIGRATION_TARGET_TABLES)).toContain('"documents')
 
   const triggers = Object.values(document.Resources).map(readResource).filter((typed) => {
     const serialized = JSON.stringify(typed.Properties);
@@ -145,6 +146,7 @@ test('data migration role reads and replaces rows only in allowlisted tables', (
   if (!Array.isArray(rowResources)) throw new Error('Row statement has no resource list.');
   expect(rowStatements[0]?.Effect).toBe('Allow');
   expect(rowResources.map((resource) => JSON.stringify(resource)).sort()).toEqual([
+    { 'Fn::GetAtt': [outputReference('DocumentsTableName'), 'Arn'] },
     { 'Fn::GetAtt': [outputReference('ProjectDirectoryTableName'), 'Arn'] },
     { 'Fn::GetAtt': [outputReference('WorkItemsTableName'), 'Arn'] },
   ].map((resource) => JSON.stringify(resource)).sort());

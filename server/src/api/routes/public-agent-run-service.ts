@@ -21,6 +21,8 @@ import {
   finishAgentRun,
   isAgentRunStalled,
   isClaimHeldBy,
+  selectAgentRunFinishNotification,
+  selectAgentRunReportNotification,
   toAgentRun,
   toAgentRunReport,
   type StoredAgentRun,
@@ -632,13 +634,16 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       // The response and receipt are built from the run as read, so a report or heartbeat that
       // commits first sends the close back to read the run again.
       return retryProgressFencedClose(async () => {
-        const { run, workItemRevision } = await requireOwnRun(principal, teamId, runId, instanceIdHash)
+        const { run, workItemRevision, workItemProjectId } = await requireOwnRun(principal, teamId, runId, instanceIdHash)
         const now = new Date()
         if (run.state !== 'active') {
           if (run.outcome === outcome && run.finishedBy === 'agent') return toAgentRun(run, now)
           throw createAgentRunNotActiveError()
         }
         const finished = finishAgentRun(run, outcome, 'agent', now)
+        const notification = selectAgentRunFinishNotification(
+          await workItemDependencies.agentRuns.getSettings(principal.directoryId, teamId), outcome, workItemProjectId,
+        )
         const auditContext = createMutationAuditContext({
           workspaceId: principal.directoryId,
           actor: { id: principal.actorId, kind: 'user', displayName: principal.userKey },
@@ -658,7 +663,9 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
           },
         })
         const response = toAgentRun(finished, now)
-        const auditPut = createAgentRunAuditPut(auditContext, finished, 'finished', `Agent Run finished as ${outcome}.`)
+        const auditPut = createAgentRunAuditPut(
+          auditContext, finished, 'finished', `Agent Run finished as ${outcome}.`, undefined, notification,
+        )
         const receipt = await createWorkItemIdempotencyTransaction(principal.directoryId, idempotency)
           ?.prepare({ status: 200, body: response })
         const store = workItemDependencies.agentRuns
@@ -759,8 +766,16 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         comment: { id: commentId, actorUserId: principal.userKey, body, createdAt },
         run: toAgentRun(reported, now),
       }
+      const notification = selectAgentRunReportNotification(
+        await store.getSettings(principal.directoryId, teamId), report.kind, detail.issue.assignedProjectId,
+      )
       const auditPut = createAgentRunAuditPut(
-        auditContext, reported, 'reported', `Agent Run saved a ${report.kind} report.`, AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
+        auditContext,
+        reported,
+        'reported',
+        `Agent Run saved a ${report.kind} report.`,
+        AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
+        notification,
       )
       const receipt = await createWorkItemIdempotencyTransaction(principal.directoryId, idempotency)
         ?.prepare({ status: 201, body: response })

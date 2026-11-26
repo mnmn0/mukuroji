@@ -1,5 +1,6 @@
 import {
   DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
+  describeWorkItemCompletionGate,
   evaluateWorkItemCompletionGate,
   getWorkItemCompletionGateRequirement,
   hasWorkItemCompletionGateConditions,
@@ -10,6 +11,7 @@ import {
   type ResolvedWorkItemConfiguration,
   type WorkItemAcceptanceCriterion,
   type WorkItemCompletionGateApprovalCounts,
+  type WorkItemCompletionGateConditionStatus,
   type WorkItemConfiguration,
   type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
@@ -875,6 +877,50 @@ async function assertWorkItemCompletionGate(
         },
       }
     : {}
+}
+
+/**
+ * Evaluates a Team's completion Gate against a saved Work Item for display, the same way a move into
+ * the `completed` category judges it, without changing anything.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param teamId - Team that owns the Work Item.
+ * @param workItem - Saved Work Item.
+ * @param configuration - Team configuration that holds the Gate.
+ * @param dependencies - File proofing store for the approval counts.
+ * @returns Every condition the Team evaluates with its state, and whether a required one blocks
+ * completion. Approval conditions are `unavailable` when the counts cannot be read.
+ */
+export async function readWorkItemCompletionGateStatus(
+  directoryId: string,
+  teamId: string,
+  workItem: Pick<TeamIssueResponseItem, 'id' | 'acceptanceCriteria'>,
+  configuration: Pick<WorkItemConfiguration, 'completionGate'>,
+  dependencies: Pick<WorkItemDependencies, 'fileProofing'>,
+): Promise<{ conditions: WorkItemCompletionGateConditionStatus[]; blocksCompletion: boolean }> {
+  const policy = configuration.completionGate
+  let approvalSummary: WorkItemCompletionGateApprovalCounts | undefined
+  if (needsWorkItemCompletionGateApprovals(policy)) {
+    try {
+      approvalSummary = (await dependencies.fileProofing.readApprovalSummaryFence({
+        workspaceId: directoryId,
+        teamId,
+        kind: 'work-item',
+        issueId: workItem.id,
+      })).summary
+    } catch (error) {
+      console.error('Work Item approvals could not be read for the completion Gate status.', error)
+    }
+  }
+  const conditions = describeWorkItemCompletionGate(policy, {
+    acceptanceCriteria: workItem.acceptanceCriteria ?? [],
+    approvalSummary,
+  })
+  return {
+    conditions,
+    blocksCompletion: conditions.some((condition) =>
+      condition.requirement === 'required' && condition.state !== 'met'),
+  }
 }
 
 /**
