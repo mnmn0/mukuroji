@@ -149,7 +149,12 @@ function readStoredStatusUpdate(storedBody: unknown): { id: string, version: num
 /**
  * Builds the audit context of a Planning write made through the Public API.
  *
+ * The audit idempotency key is namespaced by the credential's stable caller identity, as the
+ * Public API reservation and the inner publish receipt are, so two credentials of one member can
+ * use the same key without their audit events colliding.
+ *
  * @param principal - Credential owner.
+ * @param credential - Authenticated developer credential.
  * @param context - Request, correlation, and idempotency identifiers.
  * @param method - HTTP method.
  * @param route - Canonical route.
@@ -158,6 +163,7 @@ function readStoredStatusUpdate(storedBody: unknown): { id: string, version: num
  */
 function createAuditContext(
   principal: WorkspacePrincipal,
+  credential: AuthenticatedDeveloperCredential,
   context: PublicMutationContext,
   method: string,
   route: string,
@@ -166,7 +172,7 @@ function createAuditContext(
   return createMutationAuditContext({
     workspaceId: principal.directoryId,
     actor: { id: principal.actorId, kind: 'user', displayName: principal.userKey },
-    idempotencyKey: context.idempotencyKey,
+    idempotencyKey: deriveCredentialScopedKey('public-planning-audit-v1', credential, context),
     ...(context.correlationId ? { correlationId: context.correlationId } : {}),
     request: { method, path: route, body },
     source: { kind: 'api', requestId: context.requestId, method, route },
@@ -321,6 +327,19 @@ function requireVisibleMilestone(entities: readonly PlanningEntity[], milestoneI
 }
 
 /**
+ * Leaves out an entity's parent when the principal cannot see it, as the filtered snapshot does.
+ *
+ * @param entity - Planning entity.
+ * @param visible - IDs of the entities the principal can see.
+ * @returns The entity, without a parent the principal cannot see.
+ */
+function hideUnreadableParent(entity: PlanningEntity, visible: ReadonlySet<string>): PlanningEntity {
+  if (entity.parentId === undefined || visible.has(entity.parentId)) return entity
+  const { parentId: _hidden, ...rest } = entity
+  return rest
+}
+
+/**
  * Requires a Milestone the principal may change, as the Web patch route checks it.
  *
  * @param principal - Credential owner.
@@ -346,12 +365,15 @@ async function requireChangeableMilestone(principal: WorkspacePrincipal, milesto
  * @param workspaceId - Workspace ID of the credential.
  * @param token - Public API idempotency reservation.
  * @param before - The Milestone as read before the patch.
+ * @param visible - IDs of the entities the principal could see before the patch; a parent outside
+ *   them is left out, as the filtered response leaves it out.
  * @returns The receipt transaction, or undefined without a transactional idempotency store.
  */
 function createMilestoneUpdateReceipt(
   workspaceId: string,
   token: IdempotencyMutationToken,
   before: PlanningEntity,
+  visible: ReadonlySet<string>,
 ): PlanningMutationTransaction<PlanningEntityTransactionResult> | undefined {
   const transaction = createWorkItemIdempotencyTransaction(workspaceId, token)
   if (!transaction) return undefined
@@ -360,7 +382,7 @@ function createMilestoneUpdateReceipt(
       const body: PublicPlanningEntityMutation = {
         schemaVersion: 1,
         revision: result.revision,
-        item: toPublicPlanningEntity({ ...result.entity, ...(result.rollup ?? before) }),
+        item: toPublicPlanningEntity(hideUnreadableParent({ ...result.entity, ...(result.rollup ?? before) }, visible)),
       }
       return transaction.prepare({ status: 200, body })
     },
@@ -430,8 +452,24 @@ function createWorkItemPlanningReceipt(
  * @returns The key the shared publish reserves.
  */
 function deriveInnerPublishKey(credential: AuthenticatedDeveloperCredential, context: PublicMutationContext): string {
+  return deriveCredentialScopedKey('public-planning-update-v1', credential, context)
+}
+
+/**
+ * Derives a key inside the credential's stable caller identity from one Public API idempotency key.
+ *
+ * @param purpose - Versioned name of what the key is for.
+ * @param credential - Authenticated developer credential.
+ * @param context - Mutation context carrying the idempotency key.
+ * @returns The derived key.
+ */
+function deriveCredentialScopedKey(
+  purpose: string,
+  credential: AuthenticatedDeveloperCredential,
+  context: PublicMutationContext,
+): string {
   const digest = createHash('sha256')
-    .update(`public-planning-update-v1\n${readCredentialPrincipalKey(credential)}\n${context.idempotencyKey}`)
+    .update(`${purpose}\n${readCredentialPrincipalKey(credential)}\n${context.idempotencyKey}`)
     .digest('hex')
   return `public-api-${digest}`
 }
@@ -460,12 +498,14 @@ async function readWorkItemPlanning(
   teamId: string,
   workItemId: string,
 ): Promise<PublicWorkItemPlanning> {
-  const state = await workItemDependencies.planning.getAuthorizationState(principal.directoryId)
-  const link = state.workItemLinks.find((candidate) =>
+  // The live snapshot leaves out a link kept from the Project the Work Item has moved out of, as
+  // Web Planning does until the Work Item is linked again.
+  const snapshot = await readUnfilteredSnapshot(principal)
+  const link = snapshot.workItemLinks.find((candidate) =>
     candidate.teamId === teamId && candidate.workItemId === workItemId
   )
   const visible = link === undefined ? new Set<string>() : await readVisibleEntityIds(principal)
-  return toPublicWorkItemPlanning(teamId, workItemId, state.revision, link, visible)
+  return toPublicWorkItemPlanning(teamId, workItemId, snapshot.revision, link, visible)
 }
 
 /**
@@ -577,7 +617,7 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
           principal,
           creation,
           entityId,
-          (recorded) => createAuditContext(principal, context, 'POST', MILESTONES_ROUTE, recorded),
+          (recorded) => createAuditContext(principal, credential, context, 'POST', MILESTONES_ROUTE, recorded),
         )
         const visible = filterPlanningSnapshotForPrincipal(principal, response.planning)
         return { schemaVersion: 1, revision: visible.revision, item: requireVisibleMilestone(visible.entities, entityId) }
@@ -605,6 +645,7 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
         await readEntityResource(credential.workspaceId, milestoneId),
       )
       const before = await requireChangeableMilestone(principal, milestoneId)
+      const visibleBefore = await readVisibleEntityIds(principal)
       const patch: PlanningEntityPatch = {
         ...(input.title === undefined ? {} : { title: input.title }),
         ...(input.description === undefined ? {} : { description: input.description }),
@@ -624,11 +665,14 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
         principal,
         milestoneId,
         { expectedRevision, patch },
-        createAuditContext(principal, context, 'PATCH', `${MILESTONES_ROUTE}/{milestoneId}`, { entityId: milestoneId, expectedRevision, patch }),
-        createMilestoneUpdateReceipt(credential.workspaceId, idempotency, before),
+        createAuditContext(principal, credential, context, 'PATCH', `${MILESTONES_ROUTE}/{milestoneId}`, { entityId: milestoneId, expectedRevision, patch }),
+        createMilestoneUpdateReceipt(credential.workspaceId, idempotency, before, visibleBefore),
       )
+      // Hide the parent by the same set as the receipt, so a replay returns the same body.
       const visible = filterPlanningSnapshotForPrincipal(principal, response.planning)
-      return { schemaVersion: 1, revision: visible.revision, item: requireVisibleMilestone(visible.entities, milestoneId) }
+      const committed = visible.entities.find((candidate) => candidate.id === milestoneId)
+      const entities = committed === undefined ? [] : [hideUnreadableParent(committed, visibleBefore)]
+      return { schemaVersion: 1, revision: visible.revision, item: requireVisibleMilestone(entities, milestoneId) }
     },
 
     async getWorkItemPlanning(credential, teamId, workItemId) {
@@ -653,7 +697,8 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
         'planning.write',
         await readWorkItemResource(credential.workspaceId, teamId, workItemId),
       )
-      const state = await workItemDependencies.planning.getAuthorizationState(principal.directoryId)
+      // Merge into the live link: one kept from the Project the Work Item left is not active.
+      const state = await readUnfilteredSnapshot(principal)
       const current = state.workItemLinks.find((link) => link.teamId === teamId && link.workItemId === workItemId)
       const cycleId = input.cycleId === undefined ? current?.cycleId : input.cycleId ?? undefined
       const milestoneId = input.milestoneId === undefined ? current?.milestoneId : input.milestoneId ?? undefined
@@ -725,7 +770,7 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
         method: 'POST',
         path: STATUS_UPDATES_ROUTE,
         fingerprint: input,
-        createAuditContext: (recorded) => createAuditContext(principal, context, 'POST', STATUS_UPDATES_ROUTE, recorded),
+        createAuditContext: (recorded) => createAuditContext(principal, credential, context, 'POST', STATUS_UPDATES_ROUTE, recorded),
       })
       return { schemaVersion: 1, revision: outcome.planning.revision, item: toPublicStatusUpdate(outcome.update) }
     },
