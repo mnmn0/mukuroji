@@ -738,8 +738,14 @@ export function resolveAnalyticsGroupLabel(
   switch (groupBy?.dimension) {
     case 'team':
       return lookup.team?.(group.key) ?? group.label
-    case 'project':
+    case 'project': {
+      // Earned value groups key a Project by `teamId\0projectId`, since a Project ID can repeat across Teams.
+      const separator = group.key.indexOf('\0')
+      if (separator > 0) {
+        return lookup.project?.(group.key.slice(separator + 1), group.key.slice(0, separator)) ?? group.label
+      }
       return lookup.project?.(group.key) ?? group.label
+    }
     case 'assignee':
       return lookup.member?.(group.key) ?? group.label
     case 'status':
