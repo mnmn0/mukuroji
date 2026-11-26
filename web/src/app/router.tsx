@@ -143,6 +143,10 @@ export const appRoutes: RouteObject[] = [
                     lazy: lazyPage(async () => (await import('../pages/workspace/TeamFactoryBoardPage')).TeamFactoryBoardPage),
                   },
                   {
+                    path: '/teams/:teamId/factory/history',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/TeamRunHistoryPage')).TeamRunHistoryPage),
+                  },
+                  {
                     path: '/teams/:teamId/timesheet',
                     lazy: lazyPage(async () => (await import('../pages/workspace/TeamTimeTrackingPage')).TeamTimeTrackingPage),
                   },

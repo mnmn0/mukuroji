@@ -50,6 +50,8 @@ import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { createTeamTimeTrackingPath, createTeamTriagePath } from '../../shared/routing/paths'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
+import { resolveAllowedChildWorkItemTypes } from '../../features/ai-assistance/mutations/useAiPlanningStructureAdoption'
+import type { AiPlanningStructureAdoptionContext } from '../../features/ai-assistance/ui/AiPlanningStructureAdoption'
 import {
   resolveRecordedRemainingEffortMinutes,
   resolveWorkItemDraftRevision,
@@ -79,8 +81,10 @@ import {
   WorkItemContributorsEditor,
 } from '../../work-items/ui/WorkItemContributorsEditor'
 import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
-import { readAcceptanceCriteriaDraftSubmission } from '../../work-items/model/acceptanceCriteria'
+import { readAcceptanceCriteriaDraftSubmission, selectCompletionGateAcceptanceCriteria } from '../../work-items/model/acceptanceCriteria'
+import { readCompletionGateOverrideSubmission } from '../../work-items/model/completionGateOverride'
 import { WorkItemAcceptanceCriteriaEditor } from '../../work-items/ui/WorkItemAcceptanceCriteriaEditor'
+import { WorkItemCompletionGateStatus } from '../../work-items/ui/WorkItemCompletionGateStatus'
 import { useAcceptanceCriteriaDraft } from '../../work-items/ui/useAcceptanceCriteriaDraft'
 import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
 import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
@@ -141,6 +145,8 @@ export type TaskDetailAiAssistanceRenderContext = {
   resolveWorkItemLabel?: (endpoint: WorkItemDependencyEndpoint) => string
   /** Whether Planning adoption must confirm replacing local edits. */
   requirePlanningAdoptionConfirmation?: boolean
+  /** Parent and allowed child types for creating proposed children and dependencies; omit when read-only. */
+  planningStructureAdoption?: AiPlanningStructureAdoptionContext
   /** Reports Summary operation state to the local Work Item save guard. */
   onSummaryOperationPendingChange?: (pending: boolean) => void
   /** Revision-fenced Work Item source shared by both workflows. */
@@ -372,8 +378,10 @@ export function TaskDetailPane({
   const [isCommentDraftDirty, setIsCommentDraftDirty] = useState(false)
   const agentRunReports = useAgentRunReportCommentDetails({
     accessToken: softwareFactoryEnabled ? accessToken : undefined,
+    canAnswer: collaboration?.capabilities.canComment ?? false,
     commentCount: collaboration?.comments.length ?? 0,
     locale,
+    onAnswered: collaboration?.refresh,
     teamId: task?.teamId,
     workItemId: task?.id ?? '',
   })
@@ -669,6 +677,21 @@ export function TaskDetailPane({
     onPlanningAdopt: isReadOnly ? undefined : handleAiPlanningAdopt,
     onPlanningOperationPendingChange: handleAiPlanningOperationPendingChange,
     onSummaryOperationPendingChange: handleAiSummaryOperationPendingChange,
+    planningStructureAdoption: isReadOnly || !issue
+      ? undefined
+      : {
+          childTypes: resolveAllowedChildWorkItemTypes(
+            workItemTypes,
+            issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+          ).map((type) => ({ id: type.id, name: type.name })),
+          parent: {
+            ...(issue.assignedProjectId ? { assignedProjectId: issue.assignedProjectId } : {}),
+            assigneeUserId: issue.assigneeUserId,
+            teamId: issue.teamId,
+            workItemId: issue.id,
+            workItemTypeId: issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+          },
+        },
     requirePlanningAdoptionConfirmation: isEditorDirty,
     resolveStatusLabel: (statusId) =>
       workflowStatuses.find((status) => status.id === statusId)?.name ?? statusId,
@@ -803,6 +826,35 @@ export function TaskDetailPane({
       await onUpdateIssue(currentTask.teamId, currentTask.id, input)
     } catch {
       // The owning route supplies the user-visible mutation error.
+    } finally {
+      isIssueSavingRef.current = false
+      setIsIssueSaving(false)
+    }
+  }
+
+  /**
+   * Saves a status-only change for the Ready action under the same mutation lock as the editor.
+   *
+   * @param workflowStatusId - Target workflow status ID.
+   * @throws When another mutation is pending or the update fails, so the action reports a failure.
+   */
+  async function moveToWorkflowStatus(workflowStatusId: string) {
+    if (
+      isReadOnly ||
+      !task ||
+      !task.teamId ||
+      !onUpdateIssue ||
+      isIssueSavingRef.current ||
+      isHistoryRestorePending ||
+      isAiPlanningOperationPendingRef.current ||
+      isAiSummaryOperationPendingRef.current
+    ) {
+      throw new Error('Another Work Item change is in progress.')
+    }
+    isIssueSavingRef.current = true
+    setIsIssueSaving(true)
+    try {
+      await onUpdateIssue(task.teamId, task.id, { workflowStatusId })
     } finally {
       isIssueSavingRef.current = false
       setIsIssueSaving(false)
@@ -954,6 +1006,10 @@ export function TaskDetailPane({
     if (acceptanceCriteriaSubmission) {
       nextIssueInput.acceptanceCriteria = acceptanceCriteriaSubmission.criteria
     }
+    const completionGateOverride = canCorrectActualDates ? readCompletionGateOverrideSubmission(formData) : undefined
+    if (completionGateOverride) {
+      nextIssueInput.completionGateOverride = completionGateOverride
+    }
 
     void submitIssueUpdate(nextIssueInput)
   }
@@ -1094,6 +1150,19 @@ export function TaskDetailPane({
         key={`acceptance-criteria:${editorIdentity}`}
         locale={locale}
         readOnly={isReadOnly}
+      />
+      <WorkItemCompletionGateStatus
+        acceptanceCriteria={selectCompletionGateAcceptanceCriteria(
+          acceptanceCriteriaDraftState.draft.rows,
+          (issue ?? currentTask).acceptanceCriteria,
+        )}
+        approvalSummary={(issue ?? currentTask).approvalSummary}
+        locale={locale}
+        {...(canCorrectActualDates && !isReadOnly && (issue ?? currentTask).statusCategory !== 'completed'
+          // The Team manager who may correct actual dates is the one who may override the Gate.
+          ? { overrideFormId: editorFormId }
+          : {})}
+        policy={resolvedConfiguration?.completionGate}
       />
     </>
   )
@@ -1236,7 +1305,7 @@ export function TaskDetailPane({
                   className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
                   defaultValue={seededWorkflowStatusId}
                   form={editorFormId}
-                  key={`status:${editorIdentity}:${selectedWorkItemTypeId}:${hasApplicableAiWorkflowStatus ? activeAiFormSeed?.revision ?? 0 : 0}`}
+                  key={`status:${editorIdentity}:${selectedWorkItemTypeId}:${currentWorkflowStatusId}:${hasApplicableAiWorkflowStatus ? activeAiFormSeed?.revision ?? 0 : 0}`}
                   name="workflowStatusId"
                 >
                   {workflowStatuses.map((status) => (
@@ -1679,7 +1748,14 @@ export function TaskDetailPane({
           </div>
         </div>
         {issue && !isRetainedDetail && softwareFactoryEnabled ? (
-          <TaskHandoffPanel accessToken={accessToken} configuration={resolvedConfiguration} includeDescription={hasDescriptionSection} t={t} task={issue} />
+          <TaskHandoffPanel
+            accessToken={accessToken}
+            configuration={resolvedConfiguration}
+            includeDescription={hasDescriptionSection}
+            onMoveToStatus={onUpdateIssue && !isReadOnly && !isWorkItemMutationPending ? moveToWorkflowStatus : undefined}
+            t={t}
+            task={issue}
+          />
         ) : null}
         {aiAssistanceEnabled ? aiAssistanceSlots?.planning ?? null : null}
         {!hasOverviewSection ? renderWorkItemTypeControl() : null}
@@ -1974,7 +2050,8 @@ function pickTaskDraftFields(item: CanonicalWorkItem): unknown {
     item.assignedProjectId,
     item.assigneeUserId,
     item.priority,
-    item.workflowStatusId,
+    // The status select is keyed by the saved status instead, so a status-only save, such as the
+    // Ready action, refreshes that select without discarding the other unsaved input.
     item.workItemTypeId,
     item.customFieldValues,
     item.contributorAssignments,

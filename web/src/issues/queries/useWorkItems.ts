@@ -340,6 +340,21 @@ function createProjectIssuesKey(
 }
 
 /**
+ * Decides whether a cache key holds a Workspace Work Item list, or a list of the given Project.
+ *
+ * Callers that create Work Items outside these lists use it to refresh them afterwards.
+ *
+ * @param key - Cache key supplied by the global mutator.
+ * @param projectId - Project whose lists are refreshed too; none when omitted.
+ * @returns Whether the key caches one of those lists.
+ */
+export function isWorkspaceOrProjectWorkItemListKey(key: unknown, projectId?: string): boolean {
+  if (!Array.isArray(key)) return false
+  if (key[0] === 'workspace-work-items') return true
+  return projectId !== undefined && key[0] === 'project-issues' && key[2] === projectId
+}
+
+/**
  * Decides whether a cache key is another list of the same Project as `currentKey`.
  *
  * @param candidate - Cache key supplied by the global mutator.

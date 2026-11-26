@@ -7,6 +7,7 @@ type Translate = (key: MessageKey) => string
  * Message keys of the resource part of an event type, keyed by everything before the last `.`.
  */
 const resourceLabelKeys: Readonly<Record<string, MessageKey>> = {
+  'agent-defaults': 'auditLog.resource.agent-defaults',
   'agent-run': 'auditLog.resource.agent-run',
   'agent-settings': 'auditLog.resource.agent-settings',
   'ai-assistance.policy': 'auditLog.resource.ai-assistance.policy',
@@ -49,6 +50,7 @@ const resourceLabelKeys: Readonly<Record<string, MessageKey>> = {
   'customer-request': 'auditLog.resource.customer-request',
   'customer-view': 'auditLog.resource.customer-view',
   'oauth-app': 'auditLog.resource.oauth-app',
+  'org-structure': 'auditLog.resource.org-structure',
   'planning-entity': 'auditLog.resource.planning-entity',
   'planning-dependency': 'auditLog.resource.planning-dependency',
   'planning-update': 'auditLog.resource.planning-update',
@@ -228,6 +230,7 @@ export const suggestedAuditEventTypes: readonly string[] = [
   'document.public-link.created',
   'document.public-link.revoked',
   'document.exported',
+  'org-structure.updated',
   'file.created',
   'file.deleted',
   'approval.requested',

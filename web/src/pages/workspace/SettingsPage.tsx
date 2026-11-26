@@ -13,6 +13,7 @@ import { AgentSettingsPanelContainer } from '../../features/agent-settings/ui/Ag
 import { AiAssistanceSettingsPanelContainer } from '../../features/ai-assistance/ui'
 import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
 import { DirectoryAdministrationPanelContainer } from '../../projects/ui/DirectoryAdministrationPanel'
+import { OrgStructurePanelContainer } from '../../projects/ui/OrgStructurePanel'
 import { TeamProfilePanelContainer } from '../../projects/ui/TeamProfilePanel'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { useAppBadgePermission } from '../../shared/lib/pwa/badgePermission'
@@ -200,6 +201,12 @@ export function SettingsPage() {
                       accessToken={workspace.accessToken}
                       locale={workspace.locale}
                     />
+                    <OrgStructurePanelContainer
+                      accessToken={workspace.accessToken}
+                      guardRequest={workspace.guardEnterpriseSession}
+                      locale={workspace.locale}
+                      teams={workspace.teams}
+                    />
                   </SettingsPanelAnchor>
                 ) : null}
                 {workspace.canManageWorkspaceTimePeriods ? (
@@ -286,6 +293,7 @@ export function SettingsPage() {
               <SettingsPanelAnchor panel="agent-settings">
                 <AgentSettingsPanelContainer
                   accessToken={workspace.accessToken}
+                  canManageWorkspaceConfiguration={workspace.canManageWorkspaceConfiguration}
                   canMutateTeamConfiguration={workspace.canMutateTeamConfiguration}
                   locale={workspace.locale}
                   teams={workspace.teams}

@@ -118,10 +118,12 @@ finished(paused|completed など) + Work Item が started --resume(同じ assign
   `lastHeartbeatAt` を更新する。読み取りは lease を延長しない。lease は `lastHeartbeatAt < now`
   を条件に更新し、遅れて届いた更新で期限を戻さない。
 - heartbeat は Run ごとに 10 秒に 1 回まで受け付け、超過分は `429` と `retryAfterSeconds` を返す。
-- Phase 1 の heartbeat は MCP tool 呼び出しだけで送る。Claude Code の hooks や Kiro の agent
-  hooks から定期送信する方式は後続 Phase の option とし、Codex は hook 相当の有無を確認して
-  から決める。tool を呼ばない長い作業中に停滞表示になることは、停滞が「要確認」であって
-  「失敗」ではないことで許容する。
+- heartbeat は MCP tool 呼び出しで送るほか、agent の hooks から `mcp.mjs --heartbeat` で送れる
+  （[coding-agent-mcp](coding-agent-mcp.md)「hooks からの heartbeat」）。この mode は MCP server と同じ設定と
+  instance ID を使い、その instance の `active` Run だけを延長する。account の cache directory に置く stamp で instance ごとに 1 分に 1 回までとし、
+  失敗しても終了コード 0 で終える。Claude Code の `PostToolUse` hook の例を示し、Kiro は agent hook に同じ command を指定する。
+  Codex は hook 相当の有無を実機で確かめるまで `heartbeat` tool だけとする。hook を使わない長い作業中に
+  停滞表示になることは、停滞が「要確認」であって「失敗」ではないことで許容する。
 
 ### Work Item mutation との fence
 
@@ -156,6 +158,8 @@ finished(paused|completed など) + Work Item が started --resume(同じ assign
 | table | `directoryTeamId` | `agent-run-latest#<workItemId>` | Work Item で最後に始まった Run の `runId`。start、take over、resume の transaction で書き、resume と Run 履歴の先頭ページが強整合で読む。index にまだない最新 Run は先頭ページの先頭に足す |
 | table | `directoryTeamId` | `agent-run-revoked#<workItemId>#<member と instance の hash>` | 人が解放した、または別 instance が引き継いだ Run の member と instance。fence が強整合で読む |
 | table | `directoryTeamId` | `agent-settings-mutation#<key hash>` | Agent settings の保存ごとの receipt。同じ key の再送を判定する |
+| table | `<directoryId>#workspace` | `agent-defaults` | Workspace の Agent 既定値（ADR 0099）。Team 設定の読み取り時に重ねる |
+| table | `<directoryId>#workspace` | `agent-defaults-mutation#<key hash>` | Workspace の Agent 既定値の保存ごとの receipt |
 | `WorkItemRunIndex` | `directoryTeamId#<workItemId>` | `<startedAt>#<runId>` | Work Item 詳細の Run 履歴 |
 | `ActiveRunIndex`（sparse） | `directoryTeamId` | `<leaseExpiresAt>#<runId>` | board の処理中・停滞一覧。`finished` で key を外す |
 | `FinishedRunIndex`（sparse） | `directoryTeamId#failed-run` または `directoryTeamId#finished-run` | `<finishedAt>#<runId>` | board の完了・失敗 lane。Run を閉じる transaction で key を書く。`failed` は別 partition。projection は `runId`・`workItemId`・`outcome`・`finishedAt` |
@@ -438,6 +442,39 @@ Factory board の上部に、期間内に終わった Run の集計を出す。d
     少ないため shard しない。GSI は table 更新ごとに 1 つしか追加できないため 1 つにまとめる。
 - 閉鎖中の Workspace には起票しない。起票の transaction に Workspace が active である条件を含め、
   確認の後に閉鎖が始まっても entry を作らない。
+
+## 担当者への通知
+
+Run が人の判断を必要とするとき、Work Item の担当者（Run の member）に通知する。Triage を見ない
+メンバーにも届くよう、Inbox と本人が有効にしている channel（email・push・Slack）へ既存の delivery plan で
+配信する。既定では無効とし、Team が Agent settings で有効にする。
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `notifyAssigneeOfRunEvents` | `false` | `true` なら次の Run event を担当者に通知する。 |
+
+| Event | Reason | 通知の時点 |
+| --- | --- | --- |
+| `kind: blocker` の report | `agent-run-blocker` | report を保存した transaction と同じ audit event |
+| `kind: handoff` の report | `agent-run-handoff` | 同上 |
+| `failed` の finish | `agent-run-failed` | finish の audit event |
+| 停滞（`active` のまま lease 切れ） | `agent-run-stalled` | Triage 起票と同じ定期 worker が書く `agent-run.stalled` event |
+
+- 通知は Run の audit event の `notificationCandidates` から作る。新しい stream consumer は増やさない。
+  agent は担当者の credential で動くため、event の actor は担当者本人になる。通常は actor 本人への
+  通知を除くが、上の reason だけは除かずに届ける。
+- 通知の reason は担当者だけを対象とし、配信時点で担当者が変わっていれば届けない。通知設定の
+  category は `status` に入る。
+- 停滞の通知は Run ごとに 1 回とする。worker は通知した Run に Triage 起票と同じ印を付け、event ID は
+  Run ID から決めるため、再実行や heartbeat 回復後の再停滞でも 2 件目を作らない。停滞の走査は
+  Triage の起票か通知のどちらかを有効にした Team だけを対象にする。
+- audit metadata と通知には Run ID、Work Item の ID と path、agent 名、runtime、固定の title だけを入れ、
+  instance ID とその hash、report の本文は入れない。report の本文は従来どおり comment として
+  watcher に配信される。
+- 閉鎖中の Workspace には停滞を通知しない。event の transaction に Workspace が active である条件を含める。
+- Automation trigger、Update Feed の entry、外部 chat 向けの report 要約 renderer は作らない。
+  Automation は status と comment の trigger で足り、Update Feed は Project の status report の
+  feed であり Work Item 単位の event を持たないためである。
 - worker の 1 回の処理件数には上限を設け、上限に達した場合は記録して次の実行に続ける。
 
 ## Public API
@@ -469,6 +506,7 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 | `GET /api/teams/{teamId}/work-items/{workItemId}/agent-runs?limit=` | Work Item 詳細に出す新しい順の Run（既定 20 件）と `hasMore`。table key を含む store cursor は返さない。各 Run に閲覧者が解放できるかどうか（`canRelease`）を付ける。 |
 | `POST /api/teams/{teamId}/agent-runs/{runId}/release` | `active` Run の解放。Run を開始した member、Work Item の現在の assignee、または Team manager に限る。解放済みへの再送は現在の Run を返す。 |
 | `GET /api/teams/{teamId}/agent-settings` / `PUT ...` | Agent settings の取得と、Team manager による `revision` CAS 付き更新。保存ごとに `Idempotency-Key` 由来の key の receipt row（`agent-settings-mutation#<key hash>`）を同じ transaction で書き、応答を失った同じ key と同じ値の再送は revision 不一致でも receipt の設定を返す。一度確定した key は、後で別の key の保存があっても、別の値や別の revision で再利用すると `409` にする。 |
+| `GET /api/workspace/agent-defaults` / `PUT ...` | Workspace 管理者（`workspace.manage`）だけが読み書きする Workspace の Agent 既定値（ADR 0099）。`revision` の CAS と receipt は Team 設定と同じ。まだ保存していない Team（revision 0）は lease、take over、受け入れ条件の必須化をここから取り、brief のない Team は既定 brief を agent に渡す。Team 設定の応答は既定 brief を `workspaceBrief` として返す。 |
 
 `ApiProblem.code` の enum は Public API の後方互換性（response enum を広げない）のため変えない。
 Run 固有の理由は既存の `conflict` / `forbidden` に対応する problem の `errors[].code` で返し、
@@ -554,15 +592,20 @@ tool は次のとおり変更・追加する。
   `credentialId` は Team 管理権限を持つ member にだけ返す。
 - 解放、take over、resume の実行者は audit event の actor として記録する。
 - audit event は entity type `agent-run` を追加し、`agent-run.started`、`agent-run.reported`、
-  `agent-run.finished`、`agent-run.released`、`agent-run.taken-over`、`agent-run.resumed` を既存の
-  mutation transaction と outbox で記録する。heartbeat は audit event を作らず
+  `agent-run.finished`、`agent-run.released`、`agent-run.taken-over`、`agent-run.resumed`、
+  `agent-run.answered` を既存の mutation transaction と outbox で記録する。heartbeat は audit event を作らず
   `lastHeartbeatAt` だけを更新する。actor は credential owner の member とし、`metadata` に
   `runtime` と `agentName` を持つ。
+- `blocker`・`handoff` の report には、Work Item に comment できる member が回答を 1 つだけ保存できる。
+  回答は report の `answer`（本文・回答者・時刻・回答 comment の ID）として、回答者の comment と
+  `agent-run.answered` と同じ transaction で書く。report の条件（`commentId` 一致・`answer` 未保存）で
+  同時の別回答を拒み、同じ member の同じ本文の再送は保存済みの回答を返す。agent は Public API の
+  `agent-run-questions` と MCP の `get_task` の `questions` で読む。
 - Run と report に prompt、生成内容、model 名、token 数を保存しない。token 数・推定費用・model 名は
   OpenTelemetry で受け取った usage の行として member ごとに別に持ち、読み取り時に時刻で Run に割り当てる
   （[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)）。prompt と生成内容は引き続き保存しない。
-- 外部 chat sync や Update Feed への Run event の配信は Phase 1 では行わない。comment は
-  従来どおり既存経路で配信される。
+- 外部 chat sync や Update Feed への Run event の配信は行わない。comment は従来どおり既存経路で
+  配信され、判断待ちの Run は「担当者への通知」で担当者に届く。
 
 ## 実装スライスと検証
 
@@ -621,7 +664,12 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   Run がある場合は、表示が新しい Run に限られることを示す。
 - `MUKUROJI_MCP_PROJECT_ID` を設定した MCP は、Project 外のタスクの Run を `ownRuns` / `otherRuns` に
   含めず、`heartbeat` と `finish_run` も `out_of_scope` で拒否する。
-- `instanceId` hash と `credentialId` は保存するが、Slice 1 ではどの API も返さない。
+- `instanceId` hash と `credentialId` は保存し、Web の Run 一覧と Factory board の Run に `startedBy` として
+  Team manager にだけ返す（#412）。API key の名前は Workspace の API key 一覧から引き、読めない場合は ID だけを返す。
+  Public API の `AgentRun` は閉じた schema のため返さない。
+- Team の Agent settings の `acceptNewRuns`（既定 `true`、この項目がない保存済み row も `true`）が `false` の間、
+  start・resume・take over は `409 not_ready`（pointer `/acceptNewRuns`）で拒否する。いずれも設定 row の revision の
+  ConditionCheck と一緒に確定するため、判定後に切り替わった場合も確定しない。実行中の Run はそのまま続く。
 - MCP の `get_next_task` は、自 instance の Run があり、かつ Work Item がまだ `started` のものだけを
   `in_progress` とする。Run 一覧の index は結果整合のため、index にない `started` タスクはすべて
   claim を強整合で読み（同時 10 件ずつ）、自 instance の Run を `ownRuns` に含める。`get_task` の
@@ -670,7 +718,7 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
 Slice 3 は 3 つの変更に分けて入れ、すべて実装済み。
 
 - 実装済み（Agent settings、Ready、brief）: Agent settings に `readyStatusIds`（最大 50 件、重複不可）、
-  Team の `brief`、`projectBriefs`（最大 20 Project）を追加した。brief はそれぞれ UTF-8 で 16 KiB まで、
+  Team の `brief`、`projectBriefs`（最大 20 Project。古い MCP build がこの件数で検証するため、ADR 0099 で据え置いた）を追加した。brief はそれぞれ UTF-8 で 16 KiB まで、
   合計 128 KiB までとし、空白だけの brief は保存しない。保存は全体の置き換えで、省略した field は
   消える。保存前の row は新しい field を持たず、既定値（空の一覧と map）として読む。audit には
   `readyStatusIds` の変更と、brief の本文ではなく byte 数の変化を残す。Project brief は Team の Project に
@@ -720,8 +768,16 @@ Slice 3 は 3 つの変更に分けて入れ、すべて実装済み。
     `finishedRunsHasMore: true` を返す。失敗の partition は解決済みの失敗も残るため、失敗の総数が 500 件を
     超える Team では古い失敗が欠けうる（[ADR 0006](adr/0006-finished-run-index.md)）。index の key がない
     既存の終了済み Run への付与は #365 の migration で行う。
-  - Work Item を更新の新しい順に最大 300 件評価し、閲覧できる `started` のものを拾う。status category の
-    index はない。
+  - `TeamStartedWorkItemIndex`（Team の `started` で archive されていない Work Item だけが載る sparse
+    index）から、更新の新しい順に最大 300 件読む。他の status category の Work Item は読まない
+    （[ADR 0098](adr/0098-team-started-work-item-index-and-board-continuation.md)）。
+- 上限で止まった source があれば、応答に opaque な `continuation` を付ける。
+  `GET /api/teams/{teamId}/agent-runs?continuation=...` は token にある source だけを続きから読み、
+  次の token を返す。続きの page は最初の page の読み取り時刻で評価するため、24 時間の範囲、lane、
+  lease の停滞判定、`generatedAt` は最初の page と同じになる。token は暗号化・認証され、
+  閲覧者と Team に結び付く。作り替えた token、別の閲覧者や Team の token、各 store の cursor の Team が
+  合わない token は `400` を返す。Web は「続きの Run とタスクを読み込む」で page を
+  足し、同じ Work Item が複数の page に出た場合は先の page を使う。
 - 候補の Work Item はそれぞれ強整合で読み直し、archive・削除済みと、閲覧できない Project のものを除く
   （`canAccessAssignedProject`）。`active` Run がなければ Work Item の Run 履歴から最新の 1 件を読む。
   「その後に新しい Run がない」はこの最新 1 件で判定する。読み取りは同時 10 件までとする。
@@ -906,8 +962,10 @@ report row と Agent settings の row は件数だけを数え、内容は検査
   組み込む。既存の approval action を再利用する。
 - token 費用を analytics に追加し、stage 別 lead time と Run の成功 / 手戻り率（「期間サマリー」）を
   Analytics engine の metric と snapshot に統合する。
-- hooks による heartbeat、planner / implementer / reviewer の多段 Run を Work Item relation と
-  Run の親子で表現する。
+- planner / implementer / reviewer の役割（`role`）を Run に持たせる。Run の連鎖は、`paused` の Run を
+  `resume_task` で続けた Run が `resumedFromRunId` で前の Run を指し、Run 履歴に連鎖として表示される形で表す。
+  役割、handoff report の構造化された引き継ぎ、reviewer の判定を Gate（bot review 条件、#353 の GitHub 連携に依存）に
+  つなぐこと、役割ごとの lease 既定値は、利用者の運用が固まってから決める。
 
 ## 決定事項と保留
 
@@ -924,5 +982,6 @@ report row と Agent settings の row は件数だけを数え、内容は検査
 保留:
 
 - `leaseMinutes` の既定値 30 分が実際の作業間隔に合うか。Slice 1 の運用で見直す。
-- report を Update Feed と Inbox digest に出すか。Phase 1 は comment の既存配信に任せる。
+- report を Update Feed に出すか。blocker・handoff・失敗・停滞は担当者に通知し、それ以外の report は
+  comment の既存配信に任せる。
 - Kiro と Codex の resources / prompts 対応。確認結果を `docs/coding-agent-mcp.md` に記す。

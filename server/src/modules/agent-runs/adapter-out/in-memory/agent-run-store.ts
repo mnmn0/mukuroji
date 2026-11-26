@@ -1,16 +1,23 @@
 import {
   AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS,
+  type AgentRunReportAnswer,
   type AgentSettings,
+  type WorkspaceAgentDefaults,
 } from '@mukuroji/contracts'
 import {
+  applyWorkspaceAgentDefaults,
   calculateLeaseExpiry,
   createDefaultAgentSettings,
+  createDefaultWorkspaceAgentDefaults,
   createSavedAgentSettings,
+  createSavedWorkspaceAgentDefaults,
   isClaimHeldBy,
   type StoredAgentRun,
   type AgentRunRevocation,
   type StoredAgentRunClaim,
+  type ResolvedAgentSettings,
   type ValidatedAgentSettingsUpdate,
+  type ValidatedWorkspaceAgentDefaultsUpdate,
 } from '../../domain/agent-run'
 import type { StoredAgentRunReport } from '../../domain/agent-run-report'
 import {
@@ -22,6 +29,7 @@ import {
 import {
   DynamoDbAgentRunStore,
   isSameSettingsSave,
+  isSameWorkspaceDefaultsSave,
   type AgentRunFenceInput,
   type AgentRunFinishedGroup,
   type AgentRunFinishedPage,
@@ -48,6 +56,8 @@ type InMemoryAgentRunState = {
   revocations: Set<string>
   /** Settings by `<directoryId>|<teamId>`. */
   settings: Map<string, AgentSettings>
+  /** Workspace agent defaults by `<directoryId>`. */
+  workspaceDefaults: Map<string, WorkspaceAgentDefaults>
   /** Structured reports by `<directoryId>|<teamId>|<runId>|<sequence>`. */
   reports: Map<string, StoredAgentRunReport>
   /** Failed runs waiting to be filed to Triage, by `<directoryId>|<teamId>|<runId>`. */
@@ -125,7 +135,7 @@ function revocationKey(directoryId: string, teamId: string, revocation: AgentRun
 export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore {
   /** Current state. */
   readonly state: InMemoryAgentRunState = {
-    runs: new Map(), claims: new Map(), latestRuns: new Map(), revocations: new Set(), settings: new Map(), reports: new Map(),
+    runs: new Map(), claims: new Map(), latestRuns: new Map(), revocations: new Set(), settings: new Map(), workspaceDefaults: new Map(), reports: new Map(),
     triageOutbox: new Set(), triageOutboxDeferrals: new Map(), stallWatermarks: new Map(), stallResumes: new Map(),
   }
   /** Builder that produces DynamoDB-shaped items. */
@@ -138,6 +148,8 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   readonly #effects = new WeakMap<AgentRunTransactItem, InMemoryEffect>()
   /** Settings each committed save key produced, by Team and key. */
   readonly #settingsReceipts = new Map<string, AgentSettings>()
+  /** Workspace defaults each committed save key produced, by Workspace and key. */
+  readonly #workspaceDefaultsReceipts = new Map<string, WorkspaceAgentDefaults>()
 
   /**
    * Seeds a run as the Work Item's newest run and, for an active run, its claim.
@@ -182,8 +194,41 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
-  async getSettings(directoryId: string, teamId: string): Promise<AgentSettings> {
-    return structuredClone(this.state.settings.get(`${directoryId}|${teamId}`) ?? createDefaultAgentSettings(teamId))
+  async getSettings(directoryId: string, teamId: string): Promise<ResolvedAgentSettings> {
+    const settings = this.state.settings.get(`${directoryId}|${teamId}`) ?? createDefaultAgentSettings(teamId)
+    return structuredClone(applyWorkspaceAgentDefaults(settings, await this.getWorkspaceAgentDefaults(directoryId)))
+  }
+
+  /** @inheritdoc */
+  async getWorkspaceAgentDefaults(directoryId: string): Promise<WorkspaceAgentDefaults> {
+    return structuredClone(this.state.workspaceDefaults.get(directoryId) ?? createDefaultWorkspaceAgentDefaults())
+  }
+
+  /** @inheritdoc */
+  async saveWorkspaceAgentDefaults(
+    directoryId: string,
+    update: ValidatedWorkspaceAgentDefaultsUpdate,
+    actorMemberKey: string,
+    now: Date,
+    mutationKey: string,
+  ): Promise<WorkspaceAgentDefaults> {
+    const receiptKey = `${directoryId}|${mutationKey}`
+    const receipt = this.#workspaceDefaultsReceipts.get(receiptKey)
+    if (receipt) {
+      if (isSameWorkspaceDefaultsSave(receipt, update)) return structuredClone(receipt)
+      throw new AgentRunError('conflict', 'This Idempotency-Key was already used for a different defaults save.')
+    }
+    // No await between the receipt and revision checks and the write, so concurrent saves see each other.
+    const currentRevision = this.state.workspaceDefaults.get(directoryId)?.revision ?? 0
+    if (currentRevision !== update.expectedRevision) {
+      throw new AgentRunError('conflict', 'Workspace agent defaults changed. Reload them before saving.', {
+        pointer: '/expectedRevision',
+      })
+    }
+    const defaults = createSavedWorkspaceAgentDefaults(update, actorMemberKey, now)
+    this.state.workspaceDefaults.set(directoryId, defaults)
+    this.#workspaceDefaultsReceipts.set(receiptKey, defaults)
+    return structuredClone(defaults)
   }
 
   /** @inheritdoc */
@@ -216,7 +261,7 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   async listTriageTeams(cursor: string | undefined, limit: number, from?: AgentRunTriageTeam): Promise<AgentRunTriageTeamPage> {
     const fromKey = cursor === undefined && from !== undefined ? `${from.directoryId}|${from.teamId}` : undefined
     const teams = [...this.state.settings.entries()]
-      .filter(([, settings]) => settings.fileFailedRunsToTriage || settings.fileStalledRunsToTriage)
+      .filter(([, settings]) => settings.fileFailedRunsToTriage || settings.fileStalledRunsToTriage || settings.notifyAssigneeOfRunEvents)
       .map(([settingsKey, settings]) => ({ directoryId: settingsKey.slice(0, settingsKey.lastIndexOf('|')), teamId: settings.teamId }))
       .sort((left, right) => `${left.directoryId}|${left.teamId}`.localeCompare(`${right.directoryId}|${right.teamId}`))
       .filter((team) => fromKey === undefined || `${team.directoryId}|${team.teamId}` >= fromKey)
@@ -419,6 +464,31 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
+  async getRunReport(run: StoredAgentRun, sequence: number): Promise<StoredAgentRunReport | undefined> {
+    const report = this.state.reports.get(`${key(run.directoryId, run.teamId, run.runId)}|${sequence}`)
+    return report === undefined ? undefined : structuredClone(report)
+  }
+
+  /** @inheritdoc */
+  createReportAnswerItems(report: StoredAgentRunReport, answer: AgentRunReportAnswer): AgentRunTransactItem[] {
+    const [reportUpdate] = this.#builder.createReportAnswerItems(report, answer)
+    if (!reportUpdate) throw new Error('The answer builder returned an unexpected item count.')
+    const reportKey = `${key(report.directoryId, report.teamId, report.runId)}|${report.sequence}`
+    return [
+      this.#register(reportUpdate, {
+        check: (state) => {
+          const current = state.reports.get(reportKey)
+          return current !== undefined && current.commentId === report.commentId && current.answer?.commentId === report.answer?.commentId
+        },
+        apply: (state) => {
+          const current = state.reports.get(reportKey)
+          if (current) state.reports.set(reportKey, { ...current, answer: { ...answer } })
+        },
+      }),
+    ]
+  }
+
+  /** @inheritdoc */
   createStartItems(run: StoredAgentRun, latest?: {
     /** Newest run ID the caller read, or undefined when it read none. */
     runId: string | undefined
@@ -470,11 +540,25 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
-  createSettingsRevisionCheck(directoryId: string, teamId: string, revision: number): AgentRunTransactItem {
-    return this.#register(this.#builder.createSettingsRevisionCheck(directoryId, teamId, revision), {
-      check: (state) => (state.settings.get(`${directoryId}|${teamId}`)?.revision ?? 0) === revision,
-      apply: () => undefined,
-    })
+  createSettingsRevisionChecks(
+    directoryId: string,
+    teamId: string,
+    settings: Pick<ResolvedAgentSettings, 'revision' | 'workspaceDefaultsRevision'>,
+  ): AgentRunTransactItem[] {
+    const [teamCheck, defaultsCheck] = this.#builder.createSettingsRevisionChecks(directoryId, teamId, settings)
+    if (!teamCheck) throw new Error('The settings check builder returned no items.')
+    return [
+      this.#register(teamCheck, {
+        check: (state) => (state.settings.get(`${directoryId}|${teamId}`)?.revision ?? 0) === settings.revision,
+        apply: () => undefined,
+      }),
+      ...(defaultsCheck
+        ? [this.#register(defaultsCheck, {
+            check: (state) => (state.workspaceDefaults.get(directoryId)?.revision ?? 0) === settings.workspaceDefaultsRevision,
+            apply: () => undefined,
+          })]
+        : []),
+    ]
   }
 
   /** @inheritdoc */

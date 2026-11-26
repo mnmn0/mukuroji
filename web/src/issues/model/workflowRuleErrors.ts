@@ -31,7 +31,19 @@ export function readWorkflowRuleRejection(error: unknown): readonly WorkflowRule
 }
 
 /**
- * Explains a workflow rule rejection in the person's language.
+ * Reads the API error code of a mutation failure, on the error or its cause.
+ *
+ * @param error - Unknown mutation failure.
+ * @returns The code, or undefined when the failure is not a Team API error.
+ */
+function readApiErrorCode(error: unknown): string | undefined {
+  if (error instanceof TeamIssuesApiError) return error.code
+  const cause = error instanceof Error ? error.cause : undefined
+  return cause instanceof TeamIssuesApiError ? cause.code : undefined
+}
+
+/**
+ * Explains a workflow rule or completion Gate rejection in the person's language.
  *
  * @param error - Unknown mutation failure.
  * @param t - Translator.
@@ -43,6 +55,7 @@ export function describeWorkflowRuleRejection(
   t: (key: MessageKey) => string,
   customFieldNames: ReadonlyMap<string, string> = new Map(),
 ): string | undefined {
+  if (readApiErrorCode(error) === 'WorkItemCompletionGateNotSatisfied') return t('issues.error.completionGate')
   const conditions = readWorkflowRuleRejection(error)
   if (conditions.length === 0) return undefined
   const actor = conditions.find((condition) => condition.rule === 'transition-actor')

@@ -4,6 +4,8 @@ import type {
   DocumentDetail,
   DocumentNode,
   DocumentTreeResponse,
+  DocumentVersion,
+  DocumentVersionDetail,
   DocumentVersionsResponse,
 } from '@mukuroji/contracts'
 import type {
@@ -21,6 +23,7 @@ import type {
   ExportDocumentRequest,
   GetDocumentCommentWindowRevisionRequest,
   GetDocumentRequest,
+  GetDocumentVersionRequest,
   HeartbeatDocumentPresenceRequest,
   InstantiateDocumentTemplateRequest,
   ListDocumentBacklinksRequest,
@@ -28,11 +31,14 @@ import type {
   ListDocumentVersionsRequest,
   ListDocumentsRequest,
   ListRecentDocumentsRequest,
+  PinDocumentVersionRequest,
   PrepareDocumentOperationsResponse,
   RenderedDocumentExport,
   ResolvedDocumentPublicShare,
   ResolvedDocumentSearchAccess,
   ResolveDocumentCommentRequest,
+  UpdateDocumentCommentRequest,
+  DeleteDocumentCommentRequest,
   ResolveDocumentSearchAccessRequest,
   RestoreDocumentVersionRequest,
   StoredDocumentComment,
@@ -210,6 +216,20 @@ export interface DocumentVersionsPort {
    * @returns Restored current Document detail.
    */
   restoreVersion(input: RestoreDocumentVersionRequest): Promise<DocumentDetail>
+  /**
+   * Returns one retained version with a read-only snapshot of its content.
+   *
+   * @param input - Version to read and the viewer's authorization snapshot.
+   * @returns Version metadata and the read-only Document snapshot.
+   */
+  getVersion(input: GetDocumentVersionRequest): Promise<DocumentVersionDetail>
+  /**
+   * Names a retained version and keeps it beyond the version retention period.
+   *
+   * @param input - Version to pin, its validated name, and the editor's authorization snapshot.
+   * @returns Pinned version metadata.
+   */
+  pinVersion(input: PinDocumentVersionRequest): Promise<DocumentVersion>
 }
 
 /** Stores viewer-specific favorite and recent-document preferences. */
@@ -271,6 +291,30 @@ export interface DocumentCommentsPort {
    * @returns Updated comment.
    */
   resolveComment(input: ResolveDocumentCommentRequest): Promise<StoredDocumentComment>
+  /**
+   * Edits the body and mentions of the actor's own comment.
+   *
+   * @param input - Comment identity, new body, and mentions.
+   * @returns Updated comment.
+   */
+  updateComment(input: UpdateDocumentCommentRequest): Promise<StoredDocumentComment>
+  /**
+   * Returns the recorded result of an idempotent comment edit after checking that the caller
+   * may comment, before the edit's mentions are validated again.
+   *
+   * @param input - Edit request with its idempotency key.
+   * @returns The first result, or `undefined` when the edit has not been recorded.
+   */
+  getCommentUpdateReplay(
+    input: UpdateDocumentCommentRequest,
+  ): Promise<StoredDocumentComment | undefined>
+  /**
+   * Deletes the actor's own comment, keeping a placeholder so the thread stays readable.
+   *
+   * @param input - Comment identity.
+   * @returns Deleted comment placeholder.
+   */
+  deleteComment(input: DeleteDocumentCommentRequest): Promise<StoredDocumentComment>
 }
 
 /** Maintains short-lived collaborative presence leases. */

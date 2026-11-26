@@ -124,6 +124,7 @@ export const issuesMessages = {
   'issues.error.update': 'Failed to update the issue',
   'issues.error.conflict': 'Another member updated this first. Review the latest details and save again.',
   'issues.error.openChildren': 'This Team does not allow completing a Work Item while a child is neither completed nor canceled. Complete or cancel the children first.',
+  'issues.error.completionGate': "The Team's completion Gate is not met, so the Work Item cannot be completed. Check the missing conditions under Completion Gate in the details.",
   'issues.error.workflowRule.actor': 'Only {roles} can make this status change, from the Web.',
   'issues.error.workflowRule.fields': 'Fill in these fields before moving to this status: {fields}',
   'issues.error.workflowRule.or': ' or ',

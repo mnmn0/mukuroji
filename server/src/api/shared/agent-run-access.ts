@@ -15,8 +15,10 @@ import {
   createAgentRunForbiddenError,
   createAgentRunIntegrityError,
   createAgentRunNotActiveError,
+  createAgentRunNotificationMetadata,
   describeHoldingRun,
   finishAgentRun,
+  type AgentRunAssigneeNotification,
   type AgentRunTransactItem,
   type StoredAgentRun,
   type ValidatedAgentRunFence,
@@ -320,15 +322,17 @@ export type AgentRunAuditProjectScope = {
  * @param summary - Human-readable summary.
  * @param projectScope - Work Item Project fenced by the same transaction, or undefined when none is.
  * @param sequence - Audit sequence slot; pass {@link AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM} when another event shares the transaction.
+ * @param notification - Assignee notification the event carries, when the Team turned it on.
  * @returns Audit put, or undefined when auditing is not configured.
  */
 export function createAgentRunAuditPut(
   auditContext: MutationAuditContext,
   run: StoredAgentRun,
-  action: 'started' | 'resumed' | 'reported' | 'finished' | 'released' | 'taken-over',
+  action: 'started' | 'resumed' | 'reported' | 'finished' | 'released' | 'taken-over' | 'answered',
   summary: string,
   projectScope: AgentRunAuditProjectScope | undefined,
   sequence?: number,
+  notification?: AgentRunAssigneeNotification,
 ): AgentRunTransactItem | undefined {
   return createMutationAuditEventPut(getConfiguredAuditTableName(), auditContext, {
     directoryId: run.directoryId,
@@ -357,6 +361,7 @@ export function createAgentRunAuditPut(
             ...(projectScope.projectId === undefined ? {} : { projectId: projectScope.projectId }),
             projectScopeRecorded: true,
           }),
+      ...(notification ? createAgentRunNotificationMetadata(run, notification) : {}),
     },
   })
 }
@@ -500,11 +505,13 @@ export async function createAgentRunDeletionFences(
 export function withVisibleProjectBriefs(
   principal: WorkspacePrincipal,
   permission: TeamPermissionContext,
-  settings: AgentSettings,
+  settings: AgentSettings & { workspaceDefaultsRevision?: number },
 ): AgentSettings {
-  const projectBriefs = Object.fromEntries(Object.entries(settings.projectBriefs)
+  // The Workspace defaults revision only fences runs on the server and is not part of the response.
+  const { workspaceDefaultsRevision: _workspaceDefaultsRevision, ...response } = settings
+  const projectBriefs = Object.fromEntries(Object.entries(response.projectBriefs)
     .filter(([projectId]) => canAccessAssignedProject(principal, permission, projectId, 'viewer')))
-  return { ...settings, projectBriefs }
+  return { ...response, projectBriefs }
 }
 
 /**

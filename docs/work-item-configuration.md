@@ -225,9 +225,15 @@ Configuration の `completionGate` は、Work Item が completed category の st
 - Public API は共通の error 形式に写し、`409`、`code: "conflict"`、`retryable: false` と、満たされない条件ごとに `errors[]` の `code: "gate_not_satisfied"` を返す。`message` は条件名で始まる。`ApiProblem.code` の enum は広げない。
 - 承認の決定で完了する場合は、決定中の承認を承認済みとして数えて判定する。満たされなければ決定ごと拒否し、Work Item の更新と同じ `409 WorkItemCompletionGateNotSatisfied` と `unmetConditions` を返す。
 
-承認の件数を読めなかったとき、承認の条件は `reason: "unavailable"` として満たされない扱いにする（fail-closed）。`warn` の条件は判定しても server は拒否しない（Web の表示は未実装）。受け入れ条件は Work Item の row にあり、更新の revision 条件で固定される。判定する更新の `expectedRevision` が判定した revision と違えば `409 WorkItemRevisionConflict` を返す。承認の条件が `required` で満たされたときは、判定した承認の件数（file proofing table の `APPROVAL_SUMMARY` row）を更新の transaction の条件に入れる。判定の後に承認が作られたり決定されたりすると、更新は `409` で失敗する。承認の決定で完了する場合は同じ row を決定の transaction が更新するので、別の条件ではなく、その更新に判定時の件数を条件として付ける。設定の変更は他の configuration と同じく監査に残る。
+承認の件数を読めなかったとき、承認の条件は `reason: "unavailable"` として満たされない扱いにする（fail-closed）。`warn` の条件は判定しても server は拒否しない。受け入れ条件は Work Item の row にあり、更新の revision 条件で固定される。判定する更新の `expectedRevision` が判定した revision と違えば `409 WorkItemRevisionConflict` を返す。承認の条件が `required` で満たされたときは、判定した承認の件数（file proofing table の `APPROVAL_SUMMARY` row）を更新の transaction の条件に入れる。判定の後に承認が作られたり決定されたりすると、更新は `409` で失敗する。承認の決定で完了する場合は同じ row を決定の transaction が更新するので、別の条件ではなく、その更新に判定時の件数を条件として付ける。設定の変更は他の configuration と同じく監査に残る。
 
-CI、bot / 人の review、merge、未解決 blocker の条件、manager の override、Web の設定画面と達成状況の表示、MCP `get_task` への Gate 状況の追加は後続で扱う（#354）。
+Web では、設定画面（ワークフローとフィールド）の「完了 Gate」で条件ごとに「使わない」「警告」「必須」を選ぶ。Work Item 詳細には、`warn` か `required` の条件がある Team でだけ、受け入れ条件の下に「完了 Gate」のチェックリストを出す。条件ごとに満たしているか、要求が警告か必須かを示し、保存済みの受け入れ条件と Work Item の承認の集計（`approvalSummary`。承認が無い Work Item では応答から省かれるので 0 件として数える）から contract の `describeWorkItemCompletionGate` で求める。表示は目安で、完了できるかは更新のときの server の判定で決まる。
+
+Public API の `GET /api/v1/work-items/{workItemId}/completion-gate` と MCP の `get_task`（`completionGate`）は、同じ判定を server で行った結果を返す。Web の表示と違い、承認の件数は Gate の判定と同じく強い読み取りで読み、読めなければ `unavailable` にする（[Public API](public-api.md)）。
+
+Work Item の manager（割り当てた Project の manager、Team の manager の直接の付与、system administrator。Project のない Work Item は Team の manager）は、Team API の更新に `completionGateOverride: { reason }`（前後の空白を除いて 1〜1,000 文字）を付けると、`required` の条件を満たさないまま完了にできる（[ADR 0100](adr/0100-completion-gate-manager-override.md)）。同じ更新で Project を移すときは移す前と後の両方の manager が要る。manager でない人と enterprise の service account は `403 ProjectAccessDenied`、理由が不正なら `400 InvalidWorkItemCompletionGateOverride`。override は Gate が拒否する更新でだけ効き、通した条件の ID と理由を監査 event `work-item.updated` の `metadata.completionGateOverride` と活動履歴の要約に残す。Public API・MCP・自動化・一括操作・承認の決定では override できない。override を通した更新は呼び出し元の役割を transaction の条件に入れるので、判定の後に manager の役割が外されると競合で失敗する。判定のときに満たしていた `required` の承認の条件は、override した更新でも承認の件数を commit まで固定する。Web ではタスク詳細の「完了 Gate」に、manager にだけ理由の入力欄が出る。受け入れ条件を編集中のときは、その編集内容で判定する。
+
+CI、bot / 人の review、merge、未解決 blocker の条件、Update Feed と Factory board への override の表示は後続で扱う（#354）。
 
 ### 遷移を実行できる役割と状態ごとの必須項目
 

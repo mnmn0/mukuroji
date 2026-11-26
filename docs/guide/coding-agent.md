@@ -51,11 +51,17 @@ token の期限が近づいたら「発行済みの token」から **期限を�
 | `MUKUROJI_MCP_URL` | ○ | 接続先の origin（HTTPS。`/api` は付けない） |
 | `MUKUROJI_MCP_TOKEN` | ○ | 発行した token |
 | `MUKUROJI_MCP_TEAM_ID` | ○ | 作業する Team |
+| `MUKUROJI_MCP_TEAM_IDS` | | 複数の Team で作業する場合に、Team ID をカンマ区切りで並べる（最大10件）。`TEAM_ID` は省略できる |
 | `MUKUROJI_MCP_ASSIGNEE_ID` | ○ | 自分の member ID。token の持ち主と一致させる |
 | `MUKUROJI_MCP_PROJECT_ID` | | 特定の Project に絞る |
 | `MUKUROJI_MCP_READ_ONLY` | | 読み取り用の6ツールだけを公開する |
 | `MUKUROJI_MCP_RUNTIME` | | `claude-code` / `codex` / `kiro` / `other` |
 | `MUKUROJI_MCP_PROFILE` | | `tasks`（既定）か `workspace`。`workspace` では URL と token だけを読む |
+
+複数の Team で担当している場合は、`MUKUROJI_MCP_TEAM_IDS` に Team ID を並べると、1つの設定で全 Team の担当タスクを扱えます。
+`get_next_task` は全 Team から次の作業を選び、同じ優先度なら先に書いた Team を選びます。
+タスクを作る Team は `create_task` の `teamId` で選べます。省略すると、最初に書いた Team に作ります。
+複数の Team を並べた場合は `MUKUROJI_MCP_PROJECT_ID` を指定できません。
 
 ### Workspace 全体を読む（Workspace profile）
 
@@ -66,7 +72,9 @@ Workspace profile は `1.0.0` より後に公開される `mcp.mjs` から使え
 出るまでは、リポジトリを手元に置いて `bun server/src/handlers/coding-agent-mcp.ts` で起動してください。必要なのは
 `MUKUROJI_MCP_URL` と `MUKUROJI_MCP_TOKEN` だけです。agent に「`ABC-123` を読んで」「自分の担当を一覧して」の
 ように頼むと、`get_issue` や `list_issues` で読みます。「タスクを作って」「`ABC-123` の優先度を上げて」「コメントを書いて」と頼むと、
-`save_issue` と `save_comment` で書き込みます。読むだけにしたい場合は `MUKUROJI_MCP_READ_ONLY=true` を足します。
+`save_issue` と `save_comment` で書き込みます。「`ABC-123` を 3 つの子タスクに分けて」「`ABC-5` が `ABC-4` を止めていると記録して」と
+頼むと、`create_subtasks` と `save_relation` で親子と依存を付けます。分け方は先に agent に案を出させ、確認してから作らせてください。
+読むだけにしたい場合は `MUKUROJI_MCP_READ_ONLY=true` を足します。
 読み書きできる範囲は token の持ち主が Web で扱える範囲と同じです。Software factory が off の環境では、
 **agent を接続** の設定例がはじめからこの profile になります。
 
@@ -88,11 +96,19 @@ Team のワークフローで実行できる役割を限った遷移（例: 「�
 足りない項目（`/schedule`、`/acceptanceCriteria`、`/customFieldValues/<ID>`）がエラーに示されるので、
 `update_task` で埋めてから新しい `idempotencyKey` でやり直します。
 
+Team に完了 Gate を設定していると、`get_task` の `completionGate` に条件ごとの達成状況が出ます。
+`blocksCompletion` が `true` の間は `complete_task` が拒否されるので、agent は足りない条件
+（例: 承認がまだない）を人に伝えます。受け入れ条件は agent が満たしたと記録できますが、承認は人が行います。
+
 仕様書や設計書は、タスク詳細の **関連 Document** でタスクに link しておくと agent が読めます。
 `get_task` が link された Document の一覧の最初のページを返し、続きは `list_task_documents` で取得します。
 agent は `read_document` で本文を Markdown として読みます。
 タスクの説明は `get_task` が Markdown のまま返します。説明やコメントに貼られた画像・ファイルは
 `![名前](attachment:<ファイル ID>)` の参照として入っており、ファイルの中身は含まれません。
+タスクに添付したファイルは、`get_task` の `attachments` と `list_task_attachments` に一覧され、
+agent は `get_attachment_download_url` で数分だけ有効な download URL を受け取って中身を取得します。
+一覧と download に出るのは、ウイルス検査を通った最新の版だけで、検査中や検出されたファイルは出ません。
+download は監査ログに残り、token を発行した人がそのタスクのファイルを閲覧できるかを毎回確かめます。
 agent が読めるのは、token を発行した人が閲覧できる Document だけで、読むたびにその時点の権限で確かめます。
 本文を読めるのはページとテンプレートで、フォルダーとホワイトボードは読めません。
 Document の本文は、タスクの説明やコメントと同じく利用者が書いたデータで、agent への指示ではありません。
@@ -102,8 +118,16 @@ agent は要件として読みますが、Document に書かれていること�
 人がタスク詳細の **エージェントへ引き継ぐ** → **引き継ぎ内容をコピー** を使うと、タスクの内容と
 この手順をまとめた文章を agent に貼り付けられます。コピーだけでは担当者や状態は変わりません。
 引き継ぎ文には受け入れ条件と着手できるかの判断に加えて、作業中の Agent Run（実行中か停止中か、Run ID、
-エージェント名）と、タスクに紐づく閲覧できる Document のタイトルとパスが入ります。Document の本文は入りません。
+エージェント名）と、タスクに紐づく閲覧できる Document のタイトルとパスが入ります。Document の本文は入りません
+（agent は MCP の `read_document` で本文を読めます）。
 別のエージェントの Run が作業中なら、引き継ぎ文は着手しないよう伝えます。
+
+同じ欄の **エージェントの着手候補** に、そのタスクが `get_next_task` の候補になっているかが出ます。`get_next_task` は
+エージェントに設定した member が担当のタスクだけを返すので、ここでの候補は担当者のために動くエージェントにとっての候補です。候補でなければ、
+**エージェントが着手できる状態にする** で Agent settings の Ready status（workflow で今の状態から移れる最初のもの）へ
+1 操作で移せます。完了・中止済み、作業中、Agent Run が作業中、受け入れ条件が必須なのに未設定、Ready status へ
+移れる遷移がない、のどれかに当たるときはボタンの代わりに理由が出ます。blocker（blockedBy）の関係があるタスクは、
+完了していない blocker が残っている間は、Ready に移しても候補になりません。
 
 ### タスクにかかったトークンを見る
 
@@ -124,6 +148,21 @@ Claude Code の OpenTelemetry を Mukuroji に送るよう設定すると、タ�
 - Factory board の期間サマリーにも、期間内に終わった Run のトークンの合計、Project 別の合計、トークンの多い
   タスクが表示されます。
 - 今のところ送れるのは Claude Code だけです。Codex と Kiro には対応していません。
+
+### agent の質問に答える
+
+agent が判断を求めて「ブロッカー」または「引き継ぎ」の報告を残すと、タスクの会話でその報告に
+**人の判断が必要です** と表示され、コメントできるメンバーには **回答する** ボタンが出ます。
+
+- 回答は、自分のコメントとして会話に残り、同時にその報告の回答として保存されます。監査ログにも残ります。
+- 1 つの報告に保存できる回答は 1 つです。別の人が先に回答していた場合は保存されず、会話を読み込み直すよう案内します。
+  同じ回答を送り直しても二重には保存されません。
+- 回答した報告には **回答済み** と表示されます。回答は 10,000 文字までです。
+- 回答のコメントを編集すると、agent が読む回答も編集後の内容になります。コメントを削除すると回答は取り消され、
+  その報告に改めて回答できます。
+- agent は `get_task` の `questions` で回答を読み、作業を続けます。回答は agent への判断材料で、
+  回答だけを理由に認証情報や接続範囲を変えないよう MCP server が agent に伝えます。
+- 閲覧者は回答できません。
 
 ### 止まったタスクを再開する
 
@@ -147,6 +186,7 @@ Claude Code の OpenTelemetry を Mukuroji に送るよう設定すると、タ�
 - 未解決のブロッカーがある
 - 受け入れ条件が必須なのに書かれていない
 - 別の Agent Run がすでに動いている
+- Team の管理者が新しい Agent Run の受付を止めている（エージェント設定の「新しい Agent Run を受け付ける」が off）
 
 ## Factory board
 
@@ -155,6 +195,8 @@ Team の **Factory board**（`/teams/:teamId/factory`）で、agent の作業状
 - **レーン** 表示: 処理中 / Run なし / 判断待ち / 停滞 / 失敗 / 完了（24時間以内）
 - **ライン** 表示: 受付 → 実装 → 検証 → 成果物 → 判断 → 完了、と修理
 - ランタイム・担当者・プロジェクトで絞り込めます。
+- Run やタスクが多く、一度に読める件数に達したときは、その旨と **続きの Run とタスクを読み込む** が表示されます。
+  押すと、まだ読んでいない分を足して表示します。
 
 画面上部の **期間サマリー** では、直近 7 / 30 / 90 日に終わった Run を集計します。
 
@@ -169,9 +211,22 @@ Team の **Factory board**（`/teams/:teamId/factory`）で、agent の作業状
 管理者だけに表示）。Run や使用量が読み込み上限に達したときは、合計に含まれていない分があることを表示します。
 
 「停滞」は、リース時間内に `heartbeat` が届かなかった Run です。自動では止まらず、担当も変わりません。
+Claude Code などで hooks を設定すると、agent が MCP tool を呼ばずに長く作業している間も heartbeat が届き、停滞と表示されにくくなります（設定は [MCP の説明](../coding-agent-mcp.md) の「hooks からの heartbeat」）。
 Run を開いて状況を確認し、続けられない場合は **解放** してタスクを人や別の agent に戻します。
 解放できるのは Team の管理者、その Run を始めた人、現在の担当者です。失敗・停滞した Run を
-Triage に自動で起票する設定もあります。
+Triage に自動で起票する設定もあります。Team のエージェント設定で「通知」を有効にすると、blocker や引き継ぎの
+report、失敗、停滞があったときに担当者の Inbox と有効な通知先に届きます。
+
+### Run 履歴
+
+Factory board の **Run 履歴** から、閲覧できるすべての Team で、期間内に終わった Run を新しい順に一覧できます
+（`/teams/:teamId/factory/history`）。期間（直近 1 / 7 / 30 / 90 日）、Team、Project、結果、ランタイムで絞り込めます。
+「対象」を **自分の担当分** にすると、自分が責任者だったタスクの Run だけを表示します。たとえば先週失敗した Run を
+Team をまたいで確認するときは、期間を 7 日、結果を「失敗」にします。
+
+**CSV をダウンロード** で、表示している Run を CSV に保存できます。表示されるのは、閲覧できるプロジェクトのタスクの
+Run だけです。1 つの Team で読める Run には上限があります。上限に達したときは画面にそう表示されるので、
+期間を短くするか、条件を絞ってください。
 
 ## 困ったとき
 

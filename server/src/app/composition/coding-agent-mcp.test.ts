@@ -1,11 +1,12 @@
-import { expect, test } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { Client } from '@modelcontextprotocol/client'
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio'
 import { CODING_AGENT_MCP_VERSION } from '../../modules/coding-agent-mcp/application/compatibility'
-import { composeCodingAgentMcp, deriveAgentInstanceId } from './coding-agent-mcp'
+import { AgentTaskError } from '../../modules/coding-agent-mcp/application/work-item-api'
+import { composeCodingAgentMcp, deriveAgentInstanceId, readTeamIds } from './coding-agent-mcp'
 
 /** Public run fields kept by the fake API, plus the raw instance ID only the fake sees. */
 type FakeRun = {
@@ -55,7 +56,7 @@ function startFakeApi() {
     // Liveness is public, so the MCP must read it without the API credential.
     if (new URL(request.url).pathname === '/api/health') {
       if (request.headers.get('Authorization') !== null) return Response.json({}, { status: 400 })
-      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 4, minimumApiRevision: 1 } })
+      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 5, minimumApiRevision: 1 } })
     }
     if (request.headers.get('Authorization') !== 'Bearer isolated-test-token') return Response.json({}, { status: 401 })
     const url = new URL(request.url)
@@ -129,6 +130,12 @@ function startFakeApi() {
         leaseMinutes: 30, startedAt: task.updatedAt, lastHeartbeatAt: task.updatedAt, leaseExpiresAt: '2026-09-01T00:30:00.000Z', stalled: false, reportCount: 0 }
       runs.push({ run, instanceId: body.instanceId })
       return Response.json({ run, workItem: task }, { status: 201 })
+    }
+    if (url.pathname === '/api/v1/work-items/task/attachments') {
+      return Response.json({ items: [{ id: 'file-1', name: 'spec.pdf', versionId: 'version-1', versionNumber: 1, contentType: 'application/pdf', sizeBytes: 10, updatedAt: '2026-09-01T00:00:00.000Z' }] })
+    }
+    if (url.pathname === '/api/v1/work-items/task/attachments/file-1/download') {
+      return Response.json({ fileId: 'file-1', versionId: 'version-1', url: 'https://files.example.test/file-1', expiresAt: '2026-09-01T00:05:00.000Z' })
     }
     if (url.pathname === '/api/v1/work-items/task/documents') return Response.json({ items: [{ id: 'spec', title: 'Spec' }], hasMore: false })
     if (url.pathname === '/api/v1/work-items/task/documents/spec') {
@@ -234,7 +241,7 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     clients.push(readOnly)
     const readTools = (await readOnly.listTools()).tools.map((tool) => tool.name)
     expect(readTools).toContain('get_next_task')
-    expect(readTools).toEqual(expect.arrayContaining(['list_task_documents', 'read_document']))
+    expect(readTools).toEqual(expect.arrayContaining(['list_task_documents', 'read_document', 'list_task_attachments', 'get_attachment_download_url']))
     for (const name of ['start_task', 'report_progress', 'heartbeat', 'finish_run', 'take_over_task', 'resume_task']) expect(readTools).not.toContain(name)
     expect((await readOnly.readResource({ uri: 'mukuroji://agent/workflow' })).contents).toHaveLength(1)
     expect((await readOnly.readResource({ uri: 'mukuroji://project/web/brief' })).contents)
@@ -246,13 +253,17 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
       .toMatchObject({ data: { items: [{ id: 'spec', title: 'Spec' }], hasMore: false } })
     expect((await call(readOnly, 'read_document', { taskId: 'task', documentId: 'spec' })).content)
       .toMatchObject({ data: { id: 'spec', format: 'markdown', content: '# Spec' } })
+    expect((await call(readOnly, 'list_task_attachments', { taskId: 'task' })).content)
+      .toMatchObject({ data: { items: [{ id: 'file-1', name: 'spec.pdf' }] } })
+    expect((await call(readOnly, 'get_attachment_download_url', { taskId: 'task', fileId: 'file-1' })).content)
+      .toMatchObject({ data: { fileId: 'file-1', url: 'https://files.example.test/file-1' } })
 
     const client = await connect(fake.api.port, 'legacy', { MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' })
     clients.push(client)
-    expect((await client.listTools()).tools).toHaveLength(20)
+    expect((await client.listTools()).tools).toHaveLength(22)
     expect((await call(client, 'get_configuration')).content).toMatchObject({ data: {
       runtime: 'claude-code', agentSettings: { leaseMinutes: 30, readyStatusIds: [] }, brief: 'Run bun test.',
-      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 4, serverCompatibility: { status: 'compatible', server: { apiRevision: 4, minimumApiRevision: 1 } } },
+      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 5, serverCompatibility: { status: 'compatible', server: { apiRevision: 5, minimumApiRevision: 1 } } },
     } })
     expect(client.getServerVersion()).toMatchObject({ name: 'mukuroji-tasks', version: CODING_AGENT_MCP_VERSION })
     expect((await call(client, 'get_next_task')).content).toMatchObject({ data: { action: 'start', task: { id: 'task' }, ownRuns: [] } })
@@ -323,6 +334,55 @@ test('two instances of one member never share a claim, and a release lets the ot
   } finally {
     for (const client of clients) await client.close()
     await fake.api.stop(true)
+  }
+}, 30_000)
+
+test('the hook heartbeat renews only the runs of the same instance and always exits 0', async () => {
+  const fake = startFakeApi()
+  const stampDirectory = await mkdtemp(join(tmpdir(), 'mukuroji-heartbeat-test-'))
+  let client: Client | undefined
+  /**
+   * Runs the handler in heartbeat mode.
+   *
+   * @param extra - Environment of the hook.
+   * @returns Exit code and stderr.
+   */
+  const heartbeat = async (extra: Record<string, string>) => {
+    const child = Bun.spawn([process.execPath, handlerPath, '--heartbeat'], {
+      env: { MUKUROJI_MCP_URL: `http://127.0.0.1:${fake.api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token',
+        MUKUROJI_MCP_TEAM_ID: 'team', MUKUROJI_MCP_ASSIGNEE_ID: 'agent', XDG_CACHE_HOME: stampDirectory, ...extra },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const [exitCode, stderr, stdout] = await Promise.all([child.exited, new Response(child.stderr).text(), new Response(child.stdout).text()])
+    return { exitCode, stderr, stdout }
+  }
+  try {
+    client = await connect(fake.api.port, 'legacy', { MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' })
+    expect((await call(client, 'start_task', { taskId: 'task', expectedRevision: 1, workflowStatusId: 'coding', idempotencyKey: crypto.randomUUID() })).isError).toBe(false)
+
+    expect(await heartbeat({ MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' }))
+      .toEqual({ exitCode: 0, stdout: '', stderr: 'mukuroji heartbeat: 1 renewed, 0 recent, 0 failed\n' })
+    // A hook that fires again within a minute does not call the API.
+    expect((await heartbeat({ MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' })).stderr)
+      .toBe('mukuroji heartbeat: skipped, renewed within the last minute\n')
+    expect((await heartbeat({ MUKUROJI_MCP_RUNTIME: 'codex', MUKUROJI_MCP_INSTANCE_ID: 'instance-b' })).stderr)
+      .toBe('mukuroji heartbeat: 0 renewed, 0 recent, 0 failed\n')
+    // A Project restriction keeps the hook to the runs the MCP server itself would act on.
+    expect((await heartbeat({ MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a',
+      MUKUROJI_MCP_PROJECT_ID: 'other-project' })).stderr)
+      .toBe('mukuroji heartbeat: 0 renewed, 0 recent, 0 failed\n')
+    // Each scope keeps its own stamp: the scoped hook above called the API although the unscoped one had
+    // just succeeded, and only its own next call is skipped.
+    expect((await heartbeat({ MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a',
+      MUKUROJI_MCP_PROJECT_ID: 'other-project' })).stderr)
+      .toBe('mukuroji heartbeat: skipped, renewed within the last minute\n')
+    // Missing configuration is reported, and the hook still exits 0.
+    expect(await heartbeat({ MUKUROJI_MCP_ASSIGNEE_ID: '' })).toMatchObject({ exitCode: 0, stderr: expect.stringContaining('MUKUROJI_MCP_') })
+  } finally {
+    await client?.close()
+    await fake.api.stop(true)
+    await rm(stampDirectory, { recursive: true, force: true })
   }
 }, 30_000)
 
@@ -400,7 +460,7 @@ test('the distributable Node bundle serves the same tools over stdio', async () 
     expect(await version.exited).toBe(0)
     expect((await new Response(version.stdout).text()).trim()).toBe(CODING_AGENT_MCP_VERSION)
     client = await connect(fake.api.port, 'auto', { MUKUROJI_MCP_RUNTIME: 'codex' }, join(outdir, 'mcp.mjs'), node)
-    expect((await client.listTools()).tools).toHaveLength(20)
+    expect((await client.listTools()).tools).toHaveLength(22)
     expect((await call(client, 'get_configuration')).content).toMatchObject({
       data: { runtime: 'codex', mcp: { version: CODING_AGENT_MCP_VERSION, serverCompatibility: { status: 'compatible' } } },
     })
@@ -418,7 +478,7 @@ test('reuses a known server compatibility and retries an unknown one', async () 
     healthRequests += 1
     // The first read fails as a transient outage would; later reads report the range.
     return healthRequests === 1 ? Response.json({}, { status: 503 })
-      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 4, minimumApiRevision: 1 } })
+      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 5, minimumApiRevision: 1 } })
   } })
   try {
     const factory = composeCodingAgentMcp({ MUKUROJI_MCP_URL: `http://127.0.0.1:${api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token',
@@ -429,6 +489,25 @@ test('reuses a known server compatibility and retries an unknown one', async () 
     expect(healthRequests).toBe(2)
   } finally {
     await api.stop(true)
+  }
+})
+
+test('several configured Teams let create_task choose its Team, and one Team keeps the old schema', async () => {
+  const fake = startFakeApi()
+  const clients: Client[] = []
+  try {
+    const single = await connect(fake.api.port, 'auto', {})
+    clients.push(single)
+    const multi = await connect(fake.api.port, 'auto', { MUKUROJI_MCP_TEAM_IDS: 'team-b' })
+    clients.push(multi)
+    /** Reads the argument names of create_task. */
+    const createArguments = async (client: Client) =>
+      Object.keys((await client.listTools()).tools.find((tool) => tool.name === 'create_task')?.inputSchema.properties ?? {})
+    expect(await createArguments(single)).not.toContain('teamId')
+    expect(await createArguments(multi)).toContain('teamId')
+  } finally {
+    await Promise.all(clients.map((client) => client.close()))
+    await fake.api.stop(true)
   }
 })
 
@@ -462,18 +541,27 @@ function startFakeWorkspaceApi() {
     createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z', relationIds: [], customFieldValues: {} }
   const api = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
     const url = new URL(request.url)
-    if (url.pathname === '/api/health') return Response.json({ ok: true, codingAgentMcp: { apiRevision: 4, minimumApiRevision: 1 } })
+    if (url.pathname === '/api/health') return Response.json({ ok: true, codingAgentMcp: { apiRevision: 5, minimumApiRevision: 1 } })
     if (request.headers.get('Authorization') !== 'Bearer isolated-test-token') return Response.json({}, { status: 401 })
     requests.push(`${url.pathname}${url.search}`)
     const teamId = url.searchParams.get('teamId')
     if (request.method !== 'GET') {
-      const body: unknown = await request.json()
+      const body: unknown = request.method === 'DELETE' ? undefined : await request.json()
       writes.push({ method: request.method, path: `${url.pathname}${url.search}`, key: request.headers.get('Idempotency-Key'), body })
       if (request.method === 'POST' && url.pathname === '/api/v1/work-items') {
         return Response.json({ ...issue, id: 'created', title: 'Track imports', revision: 1 }, { status: 201 })
       }
       if (request.method === 'PATCH' && url.pathname === '/api/v1/work-items/task' && teamId === 'team') {
         return Response.json({ ...issue, revision: 3, priority: 'high' })
+      }
+      if (request.method === 'POST' && url.pathname === '/api/v1/work-items/created/relations' && teamId === 'team') {
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'created', relation: { type: 'parent', targetWorkItemId: 'task' } }, { status: 201 })
+      }
+      if (request.method === 'POST' && url.pathname === '/api/v1/work-items/task/relations' && teamId === 'team') {
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', relation: { type: 'blockedBy', targetWorkItemId: 'other-task' } }, { status: 201 })
+      }
+      if (request.method === 'POST' && url.pathname === '/api/v1/work-items/task/subtask-batches' && teamId === 'team') {
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', subtaskCount: 1 }, { status: 201 })
       }
       if (request.method === 'POST' && url.pathname === '/api/v1/work-items/task/comments' && teamId === 'team') {
         return Response.json({ id: 'new-comment', actorUserId: 'owner', body: 'Linked to PR', createdAt: issue.createdAt }, { status: 201 })
@@ -490,6 +578,14 @@ function startFakeWorkspaceApi() {
         ] })
       case '/api/v1/work-item-keys/ABC-7':
         return Response.json({ schemaVersion: 1, key: 'ABC-7', teamId: 'team', workItemId: 'task' })
+      case '/api/v1/work-item-keys/ABC-8':
+        return Response.json({ schemaVersion: 1, key: 'ABC-8', teamId: 'team', workItemId: 'other-task' })
+      case '/api/v1/work-items/task/hierarchy':
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', parentWorkItemId: null, childWorkItemIds: ['created'], wbsNumber: '3' })
+      case '/api/v1/work-items/task/relations':
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', relations: [{ type: 'blockedBy', targetWorkItemId: 'other-task' }] })
+      case '/api/v1/work-items/created/key':
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'created', createdAt: issue.createdAt, key: 'ABC-9' })
       case '/api/v1/work-items/task':
         return teamId === 'team' ? Response.json(issue) : Response.json({}, { status: 404 })
       case '/api/v1/work-items/task/key':
@@ -524,7 +620,10 @@ test('the workspace profile reads Teams, members, statuses, and Work Items by ke
       stderr: 'pipe',
     }))
     const tools = (await client.listTools()).tools.map((tool) => tool.name).sort()
-    expect(tools).toEqual(['get_issue', 'list_comments', 'list_issue_statuses', 'list_issues', 'list_projects', 'list_teams', 'list_users', 'save_comment', 'save_issue', 'whoami'])
+    expect(tools).toEqual([
+      'create_subtasks', 'get_issue', 'list_comments', 'list_issue_statuses', 'list_issues', 'list_projects', 'list_relations', 'list_teams',
+      'list_users', 'save_comment', 'save_issue', 'save_relation', 'whoami',
+    ])
 
     expect((await call(client, 'list_projects', { teamId: 'team' })).content).toEqual({
       data: [{ id: 'project', name: 'WBS', lifecycleState: 'active', code: 'WBS', teamId: 'team', teamName: 'Platform' }],
@@ -607,6 +706,53 @@ test('the workspace profile creates and updates Work Items and adds comments by 
   }
 })
 
+test('the workspace profile breaks a Work Item down into subtasks and links Work Items by key', async () => {
+  const fake = startFakeWorkspaceApi()
+  const client = new Client({ name: 'mukuroji-integration-test', version: '1.0.0' })
+  const keys = ['00000000-0000-4000-8000-000000000011', '00000000-0000-4000-8000-000000000012']
+  try {
+    await client.connect(new StdioClientTransport({
+      command: process.execPath,
+      args: [handlerPath],
+      env: { MUKUROJI_MCP_URL: `http://127.0.0.1:${fake.api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token', MUKUROJI_MCP_PROFILE: 'workspace' },
+      stderr: 'pipe',
+    }))
+
+    expect((await call(client, 'create_subtasks', {
+      parentId: 'ABC-7', subtasks: [{ title: 'Track imports' }], idempotencyKey: keys[0],
+    })).content).toEqual({ data: { teamId: 'team', workItemId: 'task', subtasks: [{ id: 'created', title: 'Track imports', key: 'ABC-9' }] } })
+    expect((await call(client, 'save_relation', {
+      issueId: 'ABC-7', type: 'blockedBy', relatedIssueId: 'ABC-8', idempotencyKey: keys[1],
+    })).content).toEqual({ data: { teamId: 'team', workItemId: 'task', removed: false, relation: { type: 'blockedBy', relatedIssueId: 'other-task' } } })
+    expect((await call(client, 'list_relations', { issueId: 'ABC-7' })).content).toEqual({ data: {
+      teamId: 'team', workItemId: 'task', parentId: null, childIds: ['created'], wbsNumber: '3',
+      relations: [{ type: 'blockedBy', relatedIssueId: 'other-task' }],
+    } })
+    const tooMany = await call(client, 'create_subtasks', {
+      parentId: 'ABC-7', subtasks: Array.from({ length: 21 }, (_, index) => ({ title: `Part ${index}` })), idempotencyKey: keys[0],
+    })
+    expect(tooMany.isError).toBe(true)
+
+    expect(fake.writes).toEqual([
+      { method: 'POST', path: '/api/v1/work-items/task/subtask-batches?teamId=team', key: `${keys[0]}.batch`, body: {
+        subtasks: [{ title: 'Track imports', assigneeUserId: 'owner', priority: 'medium' }],
+      } },
+      { method: 'POST', path: '/api/v1/work-items', key: `${keys[0]}.subtask.0`, body: {
+        teamId: 'team', title: 'Track imports', assigneeUserId: 'owner', priority: 'medium',
+      } },
+      { method: 'POST', path: '/api/v1/work-items/created/relations?teamId=team', key: `${keys[0]}.subtask.0.parent`, body: {
+        type: 'parent', targetWorkItemId: 'task',
+      } },
+      { method: 'POST', path: '/api/v1/work-items/task/relations?teamId=team', key: keys[1], body: {
+        type: 'blockedBy', targetWorkItemId: 'other-task',
+      } },
+    ])
+  } finally {
+    await client.close()
+    await fake.api.stop(true)
+  }
+})
+
 test('the read-only workspace profile leaves out the write tools', async () => {
   const fake = startFakeWorkspaceApi()
   const client = new Client({ name: 'mukuroji-integration-test', version: '1.0.0' })
@@ -623,7 +769,10 @@ test('the read-only workspace profile leaves out the write tools', async () => {
     const tools = (await client.listTools()).tools.map((tool) => tool.name)
     expect(tools).not.toContain('save_issue')
     expect(tools).not.toContain('save_comment')
+    expect(tools).not.toContain('save_relation')
+    expect(tools).not.toContain('create_subtasks')
     expect(tools).toContain('get_issue')
+    expect(tools).toContain('list_relations')
   } finally {
     await client.close()
     await fake.api.stop(true)
@@ -636,4 +785,32 @@ test('the workspace profile needs only the origin and token, and rejects an unkn
   expect(() => composeCodingAgentMcp({
     MUKUROJI_MCP_PROFILE: 'workspace', MUKUROJI_MCP_URL: 'http://127.0.0.1:3000', MUKUROJI_MCP_TOKEN: 'token',
   })).not.toThrow()
+})
+
+test('a Project restriction needs exactly one Team', () => {
+  expect(() => composeCodingAgentMcp({
+    MUKUROJI_MCP_URL: 'http://127.0.0.1:3000', MUKUROJI_MCP_TOKEN: 'token', MUKUROJI_MCP_TEAM_IDS: 'team-a,team-b',
+    MUKUROJI_MCP_ASSIGNEE_ID: 'agent', MUKUROJI_MCP_PROJECT_ID: 'project',
+  })).toThrow('MUKUROJI_MCP_PROJECT_ID needs exactly one Team')
+  expect(() => composeCodingAgentMcp({
+    MUKUROJI_MCP_URL: 'http://127.0.0.1:3000', MUKUROJI_MCP_TOKEN: 'token', MUKUROJI_MCP_TEAM_IDS: 'team-a',
+    MUKUROJI_MCP_ASSIGNEE_ID: 'agent', MUKUROJI_MCP_PROJECT_ID: 'project',
+  })).not.toThrow()
+})
+
+describe('readTeamIds', () => {
+  test('keeps the single Team of an older configuration', () => {
+    expect(readTeamIds('team-a', undefined)).toEqual(['team-a'])
+  })
+
+  test('adds listed Teams in order without duplicates', () => {
+    expect(readTeamIds('team-a', 'team-b, team-a ,team-c')).toEqual(['team-a', 'team-b', 'team-c'])
+    expect(readTeamIds(undefined, 'team-b')).toEqual(['team-b'])
+  })
+
+  test('rejects no Team, an empty entry, and too many Teams', () => {
+    expect(() => readTeamIds(undefined, undefined)).toThrow(AgentTaskError)
+    expect(() => readTeamIds(undefined, 'team-a,,team-b')).toThrow(AgentTaskError)
+    expect(() => readTeamIds(undefined, Array.from({ length: 11 }, (_, index) => `team-${index}`).join(','))).toThrow(AgentTaskError)
+  })
 })

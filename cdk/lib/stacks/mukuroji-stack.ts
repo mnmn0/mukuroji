@@ -46,6 +46,7 @@ import {
   defineAnalyticsScheduleJob,
   defineCycleScheduleJob,
   defineInboxDigestJob,
+  defineMemberAccessExpiryJob,
   defineJapanesePublicHolidaySyncJob,
   defineNotificationScheduleJob,
 } from '../subsystems/workers/schedules';
@@ -190,6 +191,7 @@ export class MukurojiStack extends cdk.Stack {
       targets: [
         { logicalName: 'work-items', table: dataStores.workItemsTable },
         { logicalName: 'project-directory', table: dataStores.projectDirectoryTable },
+        { logicalName: 'documents', table: dataStores.documentsTable },
       ],
     });
     const restoreDrill = parameters.restoreDrillCleanupApproverRoleArn
@@ -333,6 +335,7 @@ export class MukurojiStack extends cdk.Stack {
         defineAnalyticsScheduleJob({ dataStores, parameters }),
         defineNotificationScheduleJob({ dataStores, parameters }),
         defineCycleScheduleJob({ dataStores, parameters }),
+        defineMemberAccessExpiryJob({ dataStores, parameters }),
         defineInboxDigestJob({ dataStores, parameters }),
         defineJapanesePublicHolidaySyncJob({ dataStores, parameters }),
       ],

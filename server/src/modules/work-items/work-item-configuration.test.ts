@@ -2199,6 +2199,42 @@ test('records a top-level reorder without a parent', async () => {
     ]])
 })
 
+test('commits caller co-writes such as an idempotency receipt last in the relation transaction', async () => {
+  const store = createInMemoryRelationStore({ auditTableName: 'audit-table' })
+  const client = store.createClient()
+  const seen: Array<[string, string]> = []
+  const createReceipt = (requestId: string) => async (
+    relation: { sourceWorkItemId: string; type: string },
+    reciprocal: { sourceWorkItemId: string; type: string },
+  ) => {
+    seen.push([`${relation.sourceWorkItemId}:${relation.type}`, `${reciprocal.sourceWorkItemId}:${reciprocal.type}`])
+    return [{ Put: { TableName: 'idempotency-table', Item: { requestId } } }]
+  }
+
+  await client.createRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'design',
+    targetWorkItemId: 'build',
+    type: 'blocks',
+    expectedGraphRevision: 0,
+    sourceExpectedRevision: 1,
+    targetExpectedRevision: 4,
+  }, [], { ...createRelationAudit('relation-create-co'), createCoWrites: createReceipt('create') })
+  await client.deleteRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'build',
+    targetWorkItemId: 'design',
+    type: 'blockedBy',
+    expectedGraphRevision: 1,
+    sourceExpectedRevision: 4,
+    targetExpectedRevision: 1,
+  }, { ...createRelationAudit('relation-delete-co'), createCoWrites: createReceipt('delete') })
+
+  expect(seen).toEqual([['design:blocks', 'build:blockedBy'], ['build:blockedBy', 'design:blocks']])
+  for (const [index, requestId] of ['create', 'delete'].entries()) {
+    const items = store.transactions[index]?.TransactItems
+    expect(Array.isArray(items) ? items.at(-1) : undefined).toEqual({ Put: { TableName: 'idempotency-table', Item: { requestId } } })
+  }
+})
+
 test('stores notification details only on the blocked endpoint when a blocker is removed', async () => {
   const store = createInMemoryRelationStore({ auditTableName: 'audit-table' })
   const client = store.createClient()

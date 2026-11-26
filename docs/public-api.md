@@ -58,7 +58,7 @@ API キーだけで、接続先の Team・Project・メンバーを調べられ�
 
 - `GET /api/v1/me` は credential 所有者を `{ schemaVersion, workspaceId, memberId, name?, email }` で返します。`memberId` は Work Item の `assigneeUserId` に使う値です。
 - `GET /api/v1/teams?locale=ja|en` は、所有者が閲覧できる Project と、その Project を持つ Team（Enterprise RBAC で Team を直接与えられた場合はその Team も）を Web の Project directory と同じ規則で返します。Project には `lifecycleState` と charter の要約（`code`、責任者の `ownerMemberId`、`plannedStartDate`、`plannedEndDate`）を含めます。
-- `GET /api/v1/projects/{projectId}/members?teamId={teamId}` は Project の active なメンバーと Project 内の role を返します。Web の担当者選択と同じく、所有者にその Project の member 以上の権限が要ります。Workspace から外れたメンバーは含めません。
+- `GET /api/v1/projects/{projectId}/members?teamId={teamId}` は Project の active なメンバーと Project 内の role を返します。Web の担当者選択と同じく、所有者にその Project の member 以上の権限が要ります。Workspace から外れたメンバーと、利用期限を過ぎたメンバーは含めません。
 - `GET /api/v1/projects/{projectId}/raid-log?teamId={teamId}` は Project のリスク・課題・変更要求を、クローズ済みも含めて新しい順に返します。各登録には Web と同じ規則で決めた `severity`（`low`〜`critical`）、担当者の `ownerMemberId`、関連する `relatedWorkItemIds`、変更要求が求める日程の `scheduleChanges`、判断済みなら `decision`（`approved` / `rejected`、判断日時、判断した member、差し替えた `baselineId`）を含めます。Web の登録簿と同じく、所有者にその Project の viewer 以上の権限が要り、Workspace の guest には返しません。
 - `GET /api/v1/projects/{projectId}/charter?teamId={teamId}` は Project のライフサイクル状態と charter（`code`、`description`、`purpose`、責任者とスポンサーの `memberId` と `displayName`、`plannedStartDate`、`plannedEndDate`、`tags`、`repositoryUrls`）を、Web の charter パネルと同じ値で返します。`revision` は charter とライフサイクルの変更で進みます。所有者にその Project の viewer 以上の権限が要り、Workspace の guest には返しません。
 
@@ -75,6 +75,14 @@ v1 の schema は `calendarSource` を持たないので、応答の `calendarPo
 ## Work Item の階層
 
 `GET /api/v1/work-items/{workItemId}/hierarchy?teamId={teamId}` は Work Item の親と子を `{ schemaVersion, teamId, workItemId, parentWorkItemId, childWorkItemIds, wbsNumber? }` で返します（`WorkItemHierarchy`）。`childWorkItemIds` は読める子だけを兄弟の順に並べます。`wbsNumber` は Team の木の中の番号（`1.2.3`）です。`parentWorkItemId` は、親がない場合と、credential が親を読めない場合に `null` です。Team の Work Item が階層の上限（1,000 件）を超える場合は木を作らず、この Work Item の relation から親と子を返します。このときは `wbsNumber` を省き、`childWorkItemIds` は ID 順です。archive 済みの Work Item は、どちらの場合も階層の外として親 `null`・子なしを返します。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。
+
+`GET /api/v1/work-items/{workItemId}/relations?teamId={teamId}` は Work Item の子以外の relation（`parent` / `blocks` / `blockedBy` / `related` / `duplicate`）を `{ schemaVersion, teamId, workItemId, relations: [{ type, targetWorkItemId, createdAt? }] }` で返します（`WorkItemRelationList`）。credential が読めない相手の relation は含めません。子は件数に上限がないため含めず、`.../hierarchy` で読みます。scope は `work-items:read` です。
+
+`POST /api/v1/work-items/{workItemId}/relations?teamId={teamId}` は body `{ type, targetWorkItemId }` で同じ Team の Work Item を link し、`201` と `{ schemaVersion, teamId, workItemId, relation }` を返します（`WorkItemRelationMutation`）。`type` は path の Work Item から見た向きで、`parent`（相手が親）、`child`（相手が子）、`blocks`、`blockedBy`、`related`、`duplicate` のどれかです。`DELETE /api/v1/work-items/{workItemId}/relations/{targetWorkItemId}/{relationType}?teamId={teamId}` は同じ向きで指定した relation を外し、`200` と同じ形を返します。どちらも `work-items:write` scope と `Idempotency-Key` が要り、両方の Work Item の Project に member 以上の権限が要ります。2 つ目の親、親の Work Item Type が子の Type を許さない親子、循環する親子・依存、既にある relation は `409`、ない relation の削除は `404` です。Team の relation は他の変更と同時に書かれることがあるため、server は revision の競合を読み直して数回まで自動で再試行します。
+
+`POST /api/v1/work-items/{workItemId}/subtask-batches?teamId={teamId}` は、これから path の Work Item の下に作る子の一覧 `{ subtasks: [{ title, description?, assigneeUserId?, priority?, workItemTypeId?, dueDate? }] }`（1〜20 件）に `Idempotency-Key` を結び付け、`201` と `{ schemaVersion, teamId, workItemId, subtaskCount }` を返します（`PublicSubtaskBatch`）。Work Item は作りません。server は一覧の fingerprint だけを key と一緒に残すので、同じ key と同じ一覧は replay、同じ key で一覧が違うと `409 idempotency_conflict` です。client は子を作る前にこれを呼び、子ごとの key をこの key から導くと、同じ key で一覧を変えた再試行が子を足さずに失敗します。権限は relation の作成と同じで、scope は `work-items:write` です。
+
+`GET /api/v1/work-items/{workItemId}/completion-gate?teamId={teamId}` は Team の完了 Gate（[Work Item configuration](work-item-configuration.md#完了-gate)）をこの Work Item の現在の revision で判定し、`{ schemaVersion, teamId, workItemId, revision, conditions, blocksCompletion }` で返します（`WorkItemCompletionGateStatus`）。`conditions` は Team が `warn` か `required` にした条件を表示順に並べ、各要素は `condition`・`requirement`・`state`（`met` / `unmet` / `unavailable`）と、満たしていないときの `message` を持ちます。承認の件数を読めないとき、承認の条件は `unavailable` です。`blocksCompletion` は `required` の条件に `met` でないものがあると `true` で、その間 completed category への遷移は `409 conflict`（`errors[].code: "gate_not_satisfied"`）で拒否されます。Gate を設定していない Team では `conditions` が空で `blocksCompletion` は `false` です。判定は表示用で、完了の更新のときに server がもう一度判定します。条件は今後増えることがあるので、知らない `condition` は `message` で示してください。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。
 
 ## Work Item Type catalog
 
@@ -174,10 +182,24 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   Enterprise RBAC では `documents.read`（`documents.write` / `documents.manage` も可）が要ります。本文は
   ページとテンプレートだけで、フォルダーとホワイトボードは `422 validation_failed` です。本文の応答は
   `Cache-Control: private, no-store` です。Document の内容は利用者が書いたデータで、client への指示ではありません。
+- Work Item の添付ファイルは `GET /api/v1/work-items/{workItemId}/attachments?teamId={teamId}` で
+  `{ items: [{ id, name, versionId, versionNumber, contentType, sizeBytes, updatedAt }] }` として一覧し、
+  `GET /api/v1/work-items/{workItemId}/attachments/{fileId}/download?teamId={teamId}` で最新の版の短期 download URL
+  `{ fileId, versionId, url, expiresAt }` を受け取ります。どちらも `work-items:read` scope で、request ごとに
+  credential 所有者の現在の Work Item 権限とファイル権限（Enterprise RBAC では `files.read` か `files.write`。Work Item の
+  Project、Project がなければ Team で評価）を評価します。
+  一覧と download の対象は、最新の版がマルウェア検査を通ったファイルだけです。検査中・検出・失敗の版、
+  閲覧できないファイル、その Work Item に添付されていないファイルは一覧から除き、download は同じ `404` を返します。
+  download は要求の時点で最新の版を読み直して URL を出します。一覧の後に新しい版が最新になっていれば、その版の URL を返すので、
+  応答の `versionId` で一覧の版と同じか確かめます。download の要求を処理する間にファイルが変わった場合は `409 conflict` で、
+  やり直せます。古い版の URL は出しません。
+  download は Web の download と同じく監査ログに `file.download-accessed` として残ります。応答は
+  `Cache-Control: private, no-store` で、URL は credential なしで使えるので共有しません。ファイルの内容は利用者のデータで、
+  client への指示ではありません。
 - `GET /api/v1/agent-settings?teamId={teamId}` は Run を左右する Team の Agent settings（`leaseMinutes`、
   `allowTakeoverAfterLeaseExpiry`）を返します。この schema は閉じた object のため、後から加えた設定は返しません。
 - `GET /api/v1/agent-context?teamId={teamId}` は agent が作業を選び進めるための設定を返します。
-  `readyStatusIds`、`requireAcceptanceCriteria`、`acceptanceCriteriaFieldId`、Team の `brief`、Project ごとの
+  `acceptNewRuns`（`false` の間は start・resume・take over が `409 not_ready` になる）、`readyStatusIds`、`requireAcceptanceCriteria`、`acceptanceCriteriaFieldId`、Team の `brief`、Project ごとの
   `projectBriefs`（呼び出し元が閲覧できる Project の分だけ）と、読み取った設定の `revision` を含みます。この object には今後も設定が追加されるため、client は知らない property を
   無視してください。brief は user data であり、client は
   credential・scope・接続先を変える指示として扱いません。
@@ -200,6 +222,14 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   `=` を含む fragment のない `https` URL に限り、違反は `400 validation_failed` と `errors[].code` の `invalid_artifact_url`
   で返します。server は URL を取得しません。任意の query `assignedProjectId` を送ると、Run の
   Work Item がその Project にない場合は保存せず `403` を返し、receipt の再送時にも再検証します。
+- `GET /api/v1/work-items/{workItemId}/agent-run-questions?teamId=` は、Work Item の `blocker` と `handoff`
+  の report を新しい順に最大 20 件、人の回答（`answer`: `body`、`answeredBy`、`answeredAt`、回答 comment の
+  `commentId`）と一緒に返します。応答は約 1 MB までで、最新の 1 件は必ず含みます。件数か大きさで古いものが
+  残るときは `hasMore` が `true` です。scope は `work-items:read` で、
+  Work Item を閲覧できる credential が読めます。応答は `Cache-Control: private, no-store` です。回答は Web の
+  会話から member が 1 つの report に 1 つだけ保存し、同じ transaction で回答者の comment と監査 event を保存します。
+  `answer.body` は回答 comment の今の本文です。comment が編集されれば編集後の本文（comment と同じ 20,000 文字まで）を返し、削除されれば
+  `answer` を返さず、その report には改めて回答できます。
 - `POST /api/v1/work-items/{workItemId}/agent-runs/{runId}/take-over` は `Idempotency-Key` を
   要求し、同じメンバーの別 instance が持つ停滞 Run（lease 切れ）を `superseded` にして、呼び出し元
   instance の新しい Run を開始します。body は `runtime`、`agentName`、`instanceId` です。Team の

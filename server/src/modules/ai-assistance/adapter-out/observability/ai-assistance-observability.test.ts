@@ -256,6 +256,34 @@ describe('createAiAssistanceEmfObservability', () => {
     })
   })
 
+  test('emits a content-free count when monthly usage accounting fails (#414)', () => {
+    const records: string[] = []
+    const observability = createAiAssistanceEmfObservability({
+      applicationCommitSha: APPLICATION_COMMIT_SHA,
+      sink: (record) => records.push(record),
+    })
+
+    observability.recordUsageAccountingFailure?.({ task: 'summary' })
+
+    expect(JSON.parse(records[0] ?? '')).toEqual({
+      _aws: {
+        Timestamp: expect.any(Number),
+        CloudWatchMetrics: [{
+          Namespace: 'Mukuroji/AIAssistance',
+          Dimensions: [['Service'], ['Service', 'ApplicationCommitSha'], ['Service', 'Task']],
+          Metrics: [{ Name: 'UsageAccountingFailureCount', Unit: 'Count' }],
+        }],
+      },
+      event: 'ai-assistance.usage.accounting-failed',
+      service: 'mukuroji-ai-assistance',
+      Service: 'mukuroji-ai-assistance',
+      ApplicationCommitSha: APPLICATION_COMMIT_SHA,
+      task: 'summary',
+      Task: 'summary',
+      UsageAccountingFailureCount: 1,
+    })
+  })
+
   test('uses one bounded unavailable dimension when commit provenance is omitted', () => {
     const records: string[] = []
     const observability = createAiAssistanceEmfObservability({

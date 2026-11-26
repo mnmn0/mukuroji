@@ -143,6 +143,7 @@ test('stateful resources keep pinned logical IDs and enable retain with PITR', (
         { AttributeName: 'notificationScheduleShard', AttributeType: 'S' },
         { AttributeName: 'notificationDueKey', AttributeType: 'S' },
         { AttributeName: 'customerCompletionPreparationAt', AttributeType: 'S' },
+        { AttributeName: 'startedDirectoryTeamId', AttributeType: 'S' },
       ]),
       KeySchema: [
         { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
@@ -180,6 +181,14 @@ test('stateful resources keep pinned logical IDs and enable retain with PITR', (
             { AttributeName: 'notificationDueKey', KeyType: 'RANGE' },
           ],
           Projection: { ProjectionType: 'ALL' },
+        }),
+        expect.objectContaining({
+          IndexName: 'TeamStartedWorkItemIndex',
+          KeySchema: [
+            { AttributeName: 'startedDirectoryTeamId', KeyType: 'HASH' },
+            { AttributeName: 'updatedAt', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'KEYS_ONLY' },
         }),
         expect.objectContaining({
           IndexName: 'WorkItemCustomerCompletionPreparationIndex',

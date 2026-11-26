@@ -8,6 +8,7 @@ import {
 import { createPortal, flushSync } from 'react-dom'
 import type {
   DocumentChecklistItem,
+  DocumentMention,
   DocumentPresenceSelection,
   WhiteboardNoteObject,
 } from '@mukuroji/contracts'
@@ -131,7 +132,9 @@ import type {
   BuiltInDocumentTemplateKey,
   BuiltInTemplateCreateOptions,
 } from './model/builtInTemplates'
+import { replaceLoadedDocumentComment } from './model/comments'
 import { useBuiltInTemplateDocumentCreation } from './mutations/useBuiltInTemplateDocumentCreation'
+import { useDocumentCommentChanges } from './mutations/useDocumentCommentChanges'
 import { useMarkdownDocumentImport } from './mutations/useMarkdownDocumentImport'
 import type {
   MarkdownDocumentImportRequest,
@@ -254,6 +257,10 @@ export type DocumentScreenData = {
    * Notification deep link から focus する comment ID です。
    */
   focusedCommentId?: string
+  /**
+   * Work Item の承認 link から確認する version ID です。
+   */
+  focusedVersionId?: string
   /**
    * さらに古い comments を取得できるかどうかです。
    */
@@ -404,6 +411,21 @@ export type DocumentScreenActions = {
    * Comment resolve action です。
    */
   resolveComment?: (
+    documentId: string,
+    commentId: string,
+  ) => Promise<void>
+  /**
+   * Edits the body and mentions of the viewer's own comment.
+   */
+  editComment?: (
+    documentId: string,
+    commentId: string,
+    input: { body: string; mentions: DocumentMention[] },
+  ) => Promise<void>
+  /**
+   * Deletes the viewer's own comment.
+   */
+  deleteComment?: (
     documentId: string,
     commentId: string,
   ) => Promise<void>
@@ -576,10 +598,18 @@ export function DocumentPage() {
     [],
   )
   const accessToken = session?.accessToken
+  const commentChanges = useDocumentCommentChanges(accessToken)
   const documentId = params.documentId
   const routeContext = searchParams.get('context')
   const initialContextTab: DocumentContextTab | undefined =
-    routeContext === 'comments' ? 'comments' : undefined
+    routeContext === 'comments'
+      ? 'comments'
+      : routeContext === 'versions'
+        ? 'versions'
+        : undefined
+  const focusedVersionId = routeContext === 'versions'
+    ? searchParams.get('versionId')?.trim() || undefined
+    : undefined
   const focusedCommentId =
     routeContext === 'comments'
       ? readOptionalDocumentCommentId(
@@ -591,7 +621,7 @@ export function DocumentPage() {
       searchParams.get('rootCommentId'),
     ) ?? focusedCommentId
   const contextInstanceKey =
-    `${documentId ?? 'home'}:${routeContext ?? ''}:${focusedCommentId ?? ''}`
+    `${documentId ?? 'home'}:${routeContext ?? ''}:${focusedCommentId ?? ''}:${focusedVersionId ?? ''}`
   const [
     contextPanelSelection,
     setContextPanelSelection,
@@ -1352,6 +1382,37 @@ export function DocumentPage() {
     await mutateComments()
   }
 
+  /**
+   * Edits one comment; the mutation reconciles the cached pages and threads, and the page puts
+   * the server's copy into the older pages it keeps.
+   *
+   * @param selectedId - Document that owns the comment.
+   * @param commentId - Comment to edit.
+   * @param input - New body and mentions.
+   */
+  const handleEditComment = async (
+    selectedId: string,
+    commentId: string,
+    input: { body: string; mentions: DocumentMention[] },
+  ) => {
+    const edited = await commentChanges.editComment(selectedId, commentId, input)
+    if (edited) setOlderComments((current) => replaceLoadedDocumentComment(current, edited))
+  }
+
+  /**
+   * Deletes one comment and puts its placeholder into the older pages the page keeps.
+   *
+   * @param selectedId - Document that owns the comment.
+   * @param commentId - Comment to delete.
+   */
+  const handleDeleteComment = async (
+    selectedId: string,
+    commentId: string,
+  ) => {
+    const deleted = await commentChanges.deleteComment(selectedId, commentId)
+    if (deleted) setOlderComments((current) => replaceLoadedDocumentComment(current, deleted))
+  }
+
   const handleRestoreVersion = async (
     selectedId: string,
     versionId: string,
@@ -1557,6 +1618,8 @@ export function DocumentPage() {
         applyOperations: handleApplyOperations,
         archiveDocument: handleArchiveDocument,
         createComment: handleCreateComment,
+        deleteComment: handleDeleteComment,
+        editComment: handleEditComment,
         createDocument: handleCreateDocument,
         createDocumentFromBuiltInTemplate:
           builtInTemplateCreation.createFromTemplate,
@@ -1599,6 +1662,7 @@ export function DocumentPage() {
         isImportingMarkdown: markdownImport.isImporting,
         documents,
         focusedCommentId,
+        focusedVersionId,
         hasMoreActiveDocuments:
           collection?.activeCursor !== undefined,
         hasMoreArchivedDocuments:
@@ -2364,6 +2428,7 @@ export function DocumentScreen({
                   defaultAnchorId={defaultCommentAnchorId}
                   document={selectedDocument}
                   focusedCommentId={data.focusedCommentId}
+                  focusedVersionId={data.focusedVersionId}
                   hasMoreBacklinks={
                     data.hasMoreBacklinks
                   }
@@ -2438,6 +2503,24 @@ export function DocumentScreen({
                             }],
                           )
                         }
+                      : undefined
+                  }
+                  currentMemberKey={data.currentUserKey}
+                  onEditComment={
+                    selectedDocument.capabilities.canComment &&
+                    !isAiOperationPending &&
+                    actions.editComment
+                      ? (commentId, body, mentions) =>
+                          actions.editComment?.(selectedDocument.id, commentId, { body, mentions }) ??
+                            Promise.resolve()
+                      : undefined
+                  }
+                  onDeleteComment={
+                    selectedDocument.capabilities.canComment &&
+                    !isAiOperationPending &&
+                    actions.deleteComment
+                      ? (commentId) =>
+                          actions.deleteComment?.(selectedDocument.id, commentId) ?? Promise.resolve()
                       : undefined
                   }
                   onResolveComment={
@@ -2523,6 +2606,7 @@ export function DocumentScreen({
       {isShareDialogOpen && selectedDocument ? (
         <DocumentShareDialog
           document={selectedDocument}
+          members={mentionMembers}
           shares={data.shares}
           t={t}
           onClose={() => setIsShareDialogOpen(false)}

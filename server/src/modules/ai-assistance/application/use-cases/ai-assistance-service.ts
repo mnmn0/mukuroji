@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import {
+  AI_ASSISTANCE_MONTHLY_WARNING_RATIO,
   AI_ASSISTANCE_SCHEMA_VERSION,
   type AiAssistanceDraft,
   type AiAssistanceGeneration,
@@ -7,6 +8,9 @@ import {
   type AiAssistanceProvider,
   type AiAssistancePreference,
   type AiAssistanceTask,
+  type AiAssistanceUsage,
+  type AiAssistanceUsageSummary,
+  type AiAssistanceUsageTotals,
   type CreateAiAssistanceFeedbackRequest,
   type DecideAiAssistanceGenerationRequest,
   type GenerateAiAssistanceRequest,
@@ -51,6 +55,8 @@ import type {
   AiAssistanceGenerationExecution,
   AiAssistanceFeedbackWriteResult,
   AiAssistanceGenerationReservation,
+  AiAssistanceMonthlyBudgetCheck,
+  AiAssistanceMonthlyUsage,
   AiAssistanceObservability,
   AiAssistanceProviderAttemptOutcome,
   CompleteAiAssistanceGenerationReservationInput,
@@ -235,6 +241,12 @@ export function createAiAssistanceService(
       defaultModelId: request.defaultModelId,
       enabledTasks: [...request.enabledTasks],
       retentionDays: request.retentionDays,
+      ...(request.monthlyTokenLimit === undefined
+        ? {}
+        : { monthlyTokenLimit: request.monthlyTokenLimit }),
+      ...(request.monthlyCostLimitUsd === undefined
+        ? {}
+        : { monthlyCostLimitUsd: request.monthlyCostLimitUsd }),
       revision: request.expectedRevision + 1,
       updatedAt: now().toISOString(),
     }
@@ -283,6 +295,85 @@ export function createAiAssistanceService(
       }
     }
     return storedPolicy
+  }
+
+  /**
+   * Rejects a new generation while the deployment-wide AI switch is off.
+   *
+   * @throws AiAssistanceError when runtime control pauses AI assistance.
+   */
+  async function requireDeploymentAiAssistanceEnabled(): Promise<void> {
+    if (options.isDeploymentAiAssistanceEnabled === undefined) return
+    if (await options.isDeploymentAiAssistanceEnabled()) return
+    throw new AiAssistanceError(
+      'authorization',
+      'AiAssistanceDeploymentPaused',
+      'AI assistance is paused for every Workspace by the operator.',
+    )
+  }
+
+  /**
+   * Adds one finished attempt's provider usage to the monthly totals.
+   *
+   * Counting never fails the generation: the draft or the attempt error is
+   * already durable, and a lost count only makes the monthly cap later.
+   *
+   * @param completion - Receipt identity of the attempt.
+   * @param task - Workflow the generation served.
+   * @param endedAt - Instant the attempt ended; selects the month.
+   * @param usage - Provider-reported usage and cost estimate.
+   */
+  async function recordUsage(
+    completion: {
+      workspaceId: string
+      memberId: string
+      idempotencyKey: string
+      generationId: string
+    },
+    task: AiAssistanceTask,
+    endedAt: Date,
+    usage: AiAssistanceUsage,
+  ): Promise<void> {
+    if (options.store.recordGenerationUsage === undefined) return
+    try {
+      await options.store.recordGenerationUsage({
+        workspaceId: completion.workspaceId,
+        memberId: completion.memberId,
+        idempotencyKey: completion.idempotencyKey,
+        generationId: completion.generationId,
+        task,
+        month: formatUsageMonth(endedAt),
+        usage,
+      })
+    } catch {
+      // Counting is best effort; see the function documentation. The content-free metric lets
+      // operators see that the monthly caps undercount.
+      recordAiAssistanceObservation(options.observability, (observability) => {
+        observability.recordUsageAccountingFailure?.({ task })
+      })
+    }
+  }
+
+  /** Reads one month's usage, caps, and switch state for a policy manager. */
+  async function getUsage(
+    actor: AiAssistanceActor,
+    month?: string,
+  ): Promise<AiAssistanceUsageSummary> {
+    if (!actor.canManagePolicy) {
+      throw new AiAssistanceError(
+        'authorization',
+        'AiAssistanceDisabled',
+        'The current operator cannot read AI assistance usage.',
+      )
+    }
+    const resolvedMonth = month === undefined ? formatUsageMonth(now()) : parseUsageMonth(month)
+    const [policy, usage, deploymentEnabled] = await Promise.all([
+      readPolicy(actor),
+      options.store.readMonthlyUsage?.(actor.workspaceId, resolvedMonth) ??
+        Promise.resolve(createEmptyMonthlyUsage()),
+      options.isDeploymentAiAssistanceEnabled?.() ?? Promise.resolve(true),
+    ])
+    return createUsageSummary(resolvedMonth, usage, policy, !deploymentEnabled)
   }
 
   /** Reads the explicit or default-enabled current-member preference. */
@@ -454,6 +545,7 @@ export function createAiAssistanceService(
       }
     }
     requireGenerationEnabled(policy, preference, request.task)
+    await requireDeploymentAiAssistanceEnabled()
     const modelId = selectModelId(request.modelId, policy, deploymentAllowedModelIds)
     // Fix the start before the readiness check so key resolution counts toward the deadline.
     const generationRequestStartedAtMs = normalizeGenerationRequestStartedAtMs(
@@ -496,6 +588,7 @@ export function createAiAssistanceService(
         memberTokenLimitPerMinute,
         worstCaseTokensPerGeneration,
       }),
+      ...createMonthlyBudgetCheck(policy, createdAt),
     })
     const completion = {
       workspaceId: actor.workspaceId,
@@ -817,6 +910,7 @@ export function createAiAssistanceService(
           : { providerTraceId: modelResult.providerTraceId }),
       }, generationCommitFence)
       generationPersisted = true
+      await recordUsage(completion, request.task, attemptEndedAt, successfulUsage)
       return {
         generation: await projectStoredGeneration(
           actor,
@@ -887,6 +981,10 @@ export function createAiAssistanceService(
             } catch {
               throw surfacedError
             }
+          }
+          // The finalized attempt keeps the provider usage only when its outcome is known.
+          if (providerOutcome !== 'indeterminate' && reportedUsage !== undefined) {
+            await recordUsage(completion, request.task, failedAt, reportedUsage)
           }
         } else {
           await options.store.failGenerationReservation({
@@ -1173,6 +1271,7 @@ export function createAiAssistanceService(
   return {
     getPolicy,
     updatePolicy,
+    getUsage,
     getPreference,
     updatePreference,
     generate,
@@ -1444,6 +1543,8 @@ function isGenerationConfigurationCurrent(
     initialPolicy.enabled === currentPolicy.enabled &&
     initialPolicy.defaultModelId === currentPolicy.defaultModelId &&
     initialPolicy.retentionDays === currentPolicy.retentionDays &&
+    initialPolicy.monthlyTokenLimit === currentPolicy.monthlyTokenLimit &&
+    initialPolicy.monthlyCostLimitUsd === currentPolicy.monthlyCostLimitUsd &&
     initialPolicy.allowedModelIds.length === currentPolicy.allowedModelIds.length &&
     initialPolicy.allowedModelIds.every((value, index) =>
       value === currentPolicy.allowedModelIds[index]) &&
@@ -2540,4 +2641,121 @@ function applyEffectiveRetention(
   return expiresAt === generation.expiresAt
     ? generation
     : { ...generation, expiresAt }
+}
+
+/** Calendar month in UTC, as `YYYY-MM`. */
+const USAGE_MONTH_PATTERN = /^(\d{4})-(0[1-9]|1[0-2])$/
+
+/**
+ * Formats the UTC calendar month of an instant.
+ *
+ * @param instant - Instant inside the month.
+ * @returns The month as `YYYY-MM`.
+ */
+function formatUsageMonth(instant: Date): string {
+  return `${instant.getUTCFullYear()}-${String(instant.getUTCMonth() + 1).padStart(2, '0')}`
+}
+
+/**
+ * Validates a requested usage month.
+ *
+ * @param value - Month supplied by the caller.
+ * @returns The same month when it is `YYYY-MM` from year 2000 on.
+ * @throws AiAssistanceError when the month is malformed.
+ */
+function parseUsageMonth(value: string): string {
+  const match = USAGE_MONTH_PATTERN.exec(value)
+  if (match === null || Number(match[1]) < 2000) {
+    throw new AiAssistanceError(
+      'validation',
+      'InvalidAiAssistanceRequest',
+      'The usage month must be written as YYYY-MM.',
+    )
+  }
+  return value
+}
+
+/**
+ * Creates the totals of a scope that has no recorded usage.
+ *
+ * @returns Zero totals.
+ */
+function createEmptyUsageTotals(): AiAssistanceUsageTotals {
+  return { generations: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, costUnavailableGenerations: 0 }
+}
+
+/**
+ * Creates a month without recorded usage.
+ *
+ * @returns Zero totals and empty breakdowns.
+ */
+function createEmptyMonthlyUsage(): AiAssistanceMonthlyUsage {
+  return { totals: createEmptyUsageTotals(), tasks: [], members: [] }
+}
+
+/**
+ * Builds the monthly cap check for a new reservation from the Workspace policy.
+ *
+ * @param policy - Effective Workspace policy.
+ * @param requestedAt - Reservation instant; selects the month.
+ * @returns The check to add to the reservation, or nothing when no cap is set.
+ */
+function createMonthlyBudgetCheck(
+  policy: AiAssistancePolicy,
+  requestedAt: Date,
+): { monthlyBudget?: AiAssistanceMonthlyBudgetCheck } {
+  if (policy.monthlyTokenLimit === undefined && policy.monthlyCostLimitUsd === undefined) return {}
+  return {
+    monthlyBudget: {
+      month: formatUsageMonth(requestedAt),
+      ...(policy.monthlyTokenLimit === undefined ? {} : { tokenLimit: policy.monthlyTokenLimit }),
+      ...(policy.monthlyCostLimitUsd === undefined ? {} : { costLimitUsd: policy.monthlyCostLimitUsd }),
+    },
+  }
+}
+
+/**
+ * Applies the policy caps and the switch state to one month's recorded usage.
+ *
+ * @param month - Calendar month in UTC, as `YYYY-MM`.
+ * @param usage - Recorded totals and breakdowns.
+ * @param policy - Effective Workspace policy.
+ * @param deploymentPaused - Whether the deployment-wide AI switch is off.
+ * @returns Summary ordered by estimated cost, then tokens.
+ */
+function createUsageSummary(
+  month: string,
+  usage: AiAssistanceMonthlyUsage,
+  policy: AiAssistancePolicy,
+  deploymentPaused: boolean,
+): AiAssistanceUsageSummary {
+  const tokens = usage.totals.inputTokens + usage.totals.outputTokens
+  const shares = [
+    policy.monthlyTokenLimit === undefined ? undefined : tokens / policy.monthlyTokenLimit,
+    policy.monthlyCostLimitUsd === undefined ? undefined : usage.totals.costUsd / policy.monthlyCostLimitUsd,
+  ].filter((share): share is number => share !== undefined)
+  return {
+    schemaVersion: AI_ASSISTANCE_SCHEMA_VERSION,
+    month,
+    totals: usage.totals,
+    tasks: [...usage.tasks].sort(compareUsage),
+    members: [...usage.members].sort(compareUsage),
+    ...(policy.monthlyTokenLimit === undefined ? {} : { monthlyTokenLimit: policy.monthlyTokenLimit }),
+    ...(policy.monthlyCostLimitUsd === undefined ? {} : { monthlyCostLimitUsd: policy.monthlyCostLimitUsd }),
+    warning: shares.some((share) => share >= AI_ASSISTANCE_MONTHLY_WARNING_RATIO),
+    exhausted: shares.some((share) => share >= 1),
+    deploymentPaused,
+  }
+}
+
+/**
+ * Orders usage rows by estimated cost, then tokens, largest first.
+ *
+ * @param left - First row.
+ * @param right - Second row.
+ * @returns A negative number when `left` comes first.
+ */
+function compareUsage(left: AiAssistanceUsageTotals, right: AiAssistanceUsageTotals): number {
+  return right.costUsd - left.costUsd ||
+    (right.inputTokens + right.outputTokens) - (left.inputTokens + left.outputTokens)
 }

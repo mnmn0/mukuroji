@@ -188,6 +188,7 @@ type TeamIssueCreateContext = {
 export function TeamIssueScreen({
   activeTaskViewId,
   aiAssistanceEnabled = true,
+  aiPlanningAssistanceEnabled = false,
   softwareFactoryEnabled = true,
   accessToken,
   assigneeOptions = [],
@@ -1937,6 +1938,7 @@ export function TeamIssueScreen({
               </section>
               <IssueDetailPane
                 aiAssistanceEnabled={aiAssistanceEnabled}
+                aiPlanningAssistanceEnabled={aiPlanningAssistanceEnabled}
                 softwareFactoryEnabled={softwareFactoryEnabled}
                 accessToken={accessToken}
                 assigneeOptions={assigneeOptions}

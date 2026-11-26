@@ -6,9 +6,13 @@ import {
   AGENT_RUN_VERIFICATION_STATUSES,
   isAgentRunArtifactUrl,
   type AgentRunArtifact,
+  type AgentRunHistoryEntry,
+  type AgentRunHistoryFilters,
   type AgentRunOutcome,
   type AgentRunReport,
+  type AgentRunReportAnswer,
   type AgentRunRuntime,
+  type AgentRunStartedBy,
   type AgentRunUsage,
   type AgentRunVerification,
   type AgentRunView,
@@ -21,6 +25,7 @@ import {
   type FactoryBoardReportSummary,
   type FactoryBoardWorkItem,
   type TeamAgentRunBoardResponse,
+  type TeamAgentRunHistoryResponse,
   type TeamFactoryAnalyticsResponse,
   type WorkItemAgentRunReportsResponse,
   type WorkItemAgentRunsResponse,
@@ -132,10 +137,16 @@ export async function listWorkItemAgentRunReports(
  *
  * @param accessToken - Session access token.
  * @param teamId - Team ID.
- * @returns Board items and the read bounds the server reached.
+ * @param continuation - Token of the previous page, to read the sources it left unread.
+ * @returns Board items, the read bounds the server reached, and the token of the next page.
  */
-export async function getTeamAgentRunBoard(accessToken: string, teamId: string): Promise<TeamAgentRunBoardResponse> {
-  const data = await requestJson(`${apiBaseUrl}/teams/${encodeURIComponent(teamId)}/agent-runs`, accessToken)
+export async function getTeamAgentRunBoard(
+  accessToken: string,
+  teamId: string,
+  continuation?: string,
+): Promise<TeamAgentRunBoardResponse> {
+  const query = continuation === undefined ? '' : `?continuation=${encodeURIComponent(continuation)}`
+  const data = await requestJson(`${apiBaseUrl}/teams/${encodeURIComponent(teamId)}/agent-runs${query}`, accessToken)
   const board = readTeamAgentRunBoard(data)
   if (!board) throw new WorkItemConfigurationApiError(502, 'The Factory board returned an unexpected response.')
   return board
@@ -162,6 +173,88 @@ export async function getTeamFactoryAnalytics(
   const analytics = readTeamFactoryAnalytics(data)
   if (!analytics) throw new WorkItemConfigurationApiError(502, 'Factory analytics returned an unexpected response.')
   return analytics
+}
+
+/**
+ * Reads the runs of a Team that finished in a period on Work Items the viewer can see, newest finish
+ * first. A malformed run fails the whole response instead of being dropped.
+ *
+ * @param accessToken - Session access token.
+ * @param teamId - Team ID.
+ * @param request - UTC ISO 8601 bounds of the period, both inclusive, and optional filters.
+ * @returns Runs of the period and whether more exist.
+ */
+export async function getTeamAgentRunHistory(
+  accessToken: string,
+  teamId: string,
+  request: { from: string; to: string } & AgentRunHistoryFilters,
+): Promise<TeamAgentRunHistoryResponse> {
+  const query = new URLSearchParams()
+  for (const [name, value] of Object.entries(request)) {
+    if (typeof value === 'string' && value !== '') query.set(name, value)
+  }
+  const data = await requestJson(`${apiBaseUrl}/teams/${encodeURIComponent(teamId)}/agent-runs/history?${query}`, accessToken)
+  const history = readTeamAgentRunHistory(data, teamId)
+  if (!history) throw new WorkItemConfigurationApiError(502, 'The Run history returned an unexpected response.')
+  return history
+}
+
+/**
+ * Validates a Run history response.
+ *
+ * @param value - Unknown JSON value.
+ * @param teamId - Team the request named; a response for another Team is rejected.
+ * @returns The history, or undefined when the shape is not supported.
+ */
+function readTeamAgentRunHistory(value: unknown, teamId: string): TeamAgentRunHistoryResponse | undefined {
+  if (!isRecord(value) || value.teamId !== teamId || typeof value.hasMore !== 'boolean' || !Array.isArray(value.runs)) return undefined
+  if (typeof value.from !== 'string' || typeof value.to !== 'string' || !Number.isFinite(Date.parse(value.from)) || !Number.isFinite(Date.parse(value.to))) {
+    return undefined
+  }
+  const runs: AgentRunHistoryEntry[] = []
+  for (const item of value.runs) {
+    const entry = readAgentRunHistoryEntry(item, teamId)
+    if (!entry) return undefined
+    runs.push(entry)
+  }
+  return { teamId, from: value.from, to: value.to, runs, hasMore: value.hasMore }
+}
+
+/**
+ * Validates one finished run of the Run history.
+ *
+ * @param value - Unknown JSON value.
+ * @param teamId - Team of the history.
+ * @returns The entry, or undefined when the shape is not supported.
+ */
+function readAgentRunHistoryEntry(value: unknown, teamId: string): AgentRunHistoryEntry | undefined {
+  if (!isRecord(value) || typeof value.workItemTitle !== 'string') return undefined
+  if (value.projectId !== undefined && (typeof value.projectId !== 'string' || value.projectId === '')) return undefined
+  // The history carries no actions, so the shared run check runs with a fixed, unused release flag.
+  const run = readAgentRunView({ ...value, canRelease: false })
+  if (!run || run.teamId !== teamId || run.state !== 'finished' || run.finishedAt === undefined || run.outcome === undefined) return undefined
+  return {
+    schemaVersion: run.schemaVersion,
+    runId: run.runId,
+    teamId: run.teamId,
+    workItemId: run.workItemId,
+    assigneeUserId: run.assigneeUserId,
+    runtime: run.runtime,
+    agentName: run.agentName,
+    state: run.state,
+    outcome: run.outcome,
+    startRevision: run.startRevision,
+    leaseMinutes: run.leaseMinutes,
+    startedAt: run.startedAt,
+    lastHeartbeatAt: run.lastHeartbeatAt,
+    leaseExpiresAt: run.leaseExpiresAt,
+    stalled: run.stalled,
+    finishedAt: run.finishedAt,
+    ...(run.finishedBy === undefined ? {} : { finishedBy: run.finishedBy }),
+    reportCount: run.reportCount,
+    workItemTitle: value.workItemTitle,
+    ...(typeof value.projectId === 'string' ? { projectId: value.projectId } : {}),
+  }
 }
 
 /**
@@ -326,11 +419,12 @@ function readFactoryAnalyticsUsage(value: unknown): FactoryAnalyticsUsage | unde
  */
 function readTeamAgentRunBoard(value: unknown): TeamAgentRunBoardResponse | undefined {
   if (!isRecord(value) || !Array.isArray(value.items)) return undefined
-  const { generatedAt, activeRunsHasMore, finishedRunsHasMore, startedWorkItemsHasMore } = value
+  const { generatedAt, activeRunsHasMore, finishedRunsHasMore, startedWorkItemsHasMore, continuation } = value
   if (
     typeof generatedAt !== 'string' || !Number.isFinite(Date.parse(generatedAt)) ||
     typeof activeRunsHasMore !== 'boolean' || typeof finishedRunsHasMore !== 'boolean' ||
-    typeof startedWorkItemsHasMore !== 'boolean'
+    typeof startedWorkItemsHasMore !== 'boolean' ||
+    (continuation !== undefined && (typeof continuation !== 'string' || continuation === ''))
   ) {
     return undefined
   }
@@ -340,7 +434,14 @@ function readTeamAgentRunBoard(value: unknown): TeamAgentRunBoardResponse | unde
     if (!item) return undefined
     items.push(item)
   }
-  return { generatedAt, items, activeRunsHasMore, finishedRunsHasMore, startedWorkItemsHasMore }
+  return {
+    generatedAt,
+    items,
+    activeRunsHasMore,
+    finishedRunsHasMore,
+    startedWorkItemsHasMore,
+    ...(continuation === undefined ? {} : { continuation }),
+  }
 }
 
 /**
@@ -454,6 +555,41 @@ export async function releaseAgentRun(
 }
 
 /**
+ * Records a member's answer to a blocker or handoff report. The server saves it on the report and as
+ * the member's comment on the Work Item, so the answer reaches the agent and the conversation.
+ *
+ * @param accessToken - Session access token.
+ * @param teamId - Team that owns the Work Item.
+ * @param report - Report being answered.
+ * @param body - Answer text.
+ * @param mutationContext - Idempotency and correlation identifiers shared by retries.
+ * @returns The answered report.
+ */
+export async function answerAgentRunReport(
+  accessToken: string,
+  teamId: string,
+  report: Pick<AgentRunReport, 'runId' | 'sequence' | 'workItemId'>,
+  body: string,
+  mutationContext: MutationRequestContext,
+): Promise<AgentRunReport> {
+  const data = await requestJson(
+    `${apiBaseUrl}/teams/${encodeURIComponent(teamId)}/work-items/${encodeURIComponent(report.workItemId)}` +
+      `/agent-runs/${encodeURIComponent(report.runId)}/reports/${report.sequence}/answer`,
+    accessToken,
+    {
+      method: 'POST',
+      headers: { ...createMutationHeaders(mutationContext), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    },
+  )
+  const answered = isRecord(data) ? readAgentRunReport(data.report) : undefined
+  if (!answered?.answer || answered.runId !== report.runId || answered.sequence !== report.sequence) {
+    throw new WorkItemConfigurationApiError(502, 'The report answer returned an unexpected response.')
+  }
+  return answered
+}
+
+/**
  * Validates one run from an untrusted response.
  *
  * @param value - Unknown JSON value.
@@ -494,6 +630,8 @@ function readAgentRunView(value: unknown): AgentRunView | undefined {
   const resumedFromRunId = value.resumedFromRunId === undefined ? undefined : text('resumedFromRunId')
   const usage = value.usage === undefined ? undefined : readAgentRunUsage(value.usage)
   if (value.usage !== undefined && usage === undefined) return undefined
+  const startedBy = value.startedBy === undefined ? undefined : readAgentRunStartedBy(value.startedBy)
+  if (value.startedBy !== undefined && startedBy === undefined) return undefined
   if (
     value.schemaVersion !== 1 || !runId || !teamId || !workItemId || !assigneeUserId || !agentName ||
     !runtime || !runtimes.has(runtime) || !state || (outcome !== undefined && !outcomes.has(outcome)) ||
@@ -527,7 +665,27 @@ function readAgentRunView(value: unknown): AgentRunView | undefined {
     canRelease: value.canRelease,
     ...(resumedFromRunId === undefined ? {} : { resumedFromRunId }),
     ...(usage === undefined ? {} : { usage }),
+    ...(startedBy === undefined ? {} : { startedBy }),
   }
+}
+
+/**
+ * Validates the credential and instance that started a run, which only Team managers receive.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The starter, or undefined when the shape is not supported.
+ */
+function readAgentRunStartedBy(value: unknown): AgentRunStartedBy | undefined {
+  if (!isRecord(value)) return undefined
+  const { credentialId, credentialName, instanceIdHash } = value
+  if (
+    typeof credentialId !== 'string' || credentialId === '' ||
+    (credentialName !== undefined && (typeof credentialName !== 'string' || credentialName === '')) ||
+    typeof instanceIdHash !== 'string' || instanceIdHash === ''
+  ) {
+    return undefined
+  }
+  return { credentialId, ...(credentialName === undefined ? {} : { credentialName }), instanceIdHash }
 }
 
 /**
@@ -555,6 +713,8 @@ function readAgentRunReport(value: unknown): AgentRunReport | undefined {
   const validVerifications = verifications.filter((item): item is AgentRunVerification => item !== undefined)
   const validArtifacts = artifacts.filter((item): item is AgentRunArtifact => item !== undefined)
   if (validVerifications.length !== verifications.length || validArtifacts.length !== artifacts.length) return undefined
+  const answer = value.answer === undefined ? undefined : readReportAnswer(value.answer)
+  if (value.answer !== undefined && !answer) return undefined
   return {
     schemaVersion: 1,
     runId,
@@ -567,7 +727,27 @@ function readAgentRunReport(value: unknown): AgentRunReport | undefined {
     artifacts: validArtifacts,
     ...(value.changedFileCount === undefined ? {} : { changedFileCount: value.changedFileCount }),
     createdAt,
+    ...(answer === undefined ? {} : { answer }),
   }
+}
+
+/**
+ * Validates a person's answer saved on a report.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The answer, or undefined when the shape is not supported.
+ */
+function readReportAnswer(value: unknown): AgentRunReportAnswer | undefined {
+  if (!isRecord(value)) return undefined
+  const { body, answeredBy, answeredAt, commentId } = value
+  if (
+    typeof body !== 'string' || body === '' || typeof answeredBy !== 'string' || answeredBy === '' ||
+    typeof answeredAt !== 'string' || !Number.isFinite(Date.parse(answeredAt)) ||
+    typeof commentId !== 'string' || commentId === ''
+  ) {
+    return undefined
+  }
+  return { body, answeredBy, answeredAt, commentId }
 }
 
 /**

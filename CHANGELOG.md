@@ -24,6 +24,48 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Added
 
+- Workspace profile に `list_relations`（親・子・WBS 番号と blocks / blockedBy / related / duplicate の link）、
+  `save_relation`（同じ Team の Work Item を link、`remove: true` で解除）、`create_subtasks`（親の下に親の Project で最大 20 件の
+  子を作る。途中で失敗したら同じ引数と `idempotencyKey` の再試行で残りだけを作る）を追加しました（#360）。
+- server API: `GET /api/v1/work-items/{workItemId}/relations`（scope `work-items:read`）、
+  `POST /api/v1/work-items/{workItemId}/relations` と
+  `DELETE /api/v1/work-items/{workItemId}/relations/{targetWorkItemId}/{relationType}`（scope `work-items:write`、
+  `Idempotency-Key` 必須）を追加しました。権限は Web の relation 操作と同じで、親の Work Item Type が子の Type を
+  許さない link、2 つ目の親、循環する link は `409` です（#360）。
+- MCP: `create_subtasks` が子を作った後に親への link で失敗したときは、その子の ID をエラーに含めます。親の Type が
+  許さない Type なら `save_issue` で Type を変え、同じ引数と `idempotencyKey` で再試行すると link まで済みます（#360）。
+- MCP: `create_subtasks` の再試行で、途中で親の Project が変わって作り済みの子の再生が食い違ったときは、再試行不可の
+  `idempotency_conflict` で、親を元の Project に戻すか `list_relations` で子を確かめる手順を示します（#360）。
+- server API: `POST /api/v1/work-items/{workItemId}/subtask-batches`（scope `work-items:write`、`Idempotency-Key` 必須）を
+  追加しました。親と作る予定の子の一覧に key を結び付けるだけの API で、同じ key で一覧が違うと `409 idempotency_conflict` です。
+  MCP の `create_subtasks` は子を作る前にこれを呼ぶので、同じ `idempotencyKey` で一覧を変えた呼び出しは子を足さずに失敗します（#360）。
+- server API: relation の作成・削除は、認可に使った呼び出し元の Workspace member 行（version・status）と同じ transaction で
+  確かめるので、認可の後に権限が外れた場合は書き込みません（#360）。
+- server API: relation の作成・削除は `Idempotency-Key` の receipt を relation と同じ transaction に残すので、
+  応答が失われた後に同じ key で再試行すると結果を replay します（#360）。
+- server API: `GET /api/v1/work-items/{workItemId}/completion-gate?teamId=` を追加しました。Team の完了 Gate の
+  条件ごとに満たしているか（`met` / `unmet` / `unavailable`）と、完了が拒否される状態か（`blocksCompletion`）を
+  `WorkItemCompletionGateStatus` で返します。scope は既存の `work-items:read` です（#354）。
+- MCP: `get_task` が `completionGate` で Team の完了 Gate の達成状況を返します。server が古いときは `null` です。
+  この client が知らない条件は `conditions` から省き、`blocksCompletion` はそれも含めて判定した値のままです（#354）。
+- MCP: `mcp.mjs --heartbeat` を追加しました。agent の hooks から呼ぶと、MCP server と同じ設定と instance ID で
+  その instance の `active` Run の lease を延長します。instance ごとに 1 分に 1 回までで、失敗しても終了コード 0 で終わります（#356）。
+- server API: `GET /api/v1/agent-context` が `acceptNewRuns` を返します。Team の管理者が新しい Agent Run の受付を
+  止めている間は `false` で、start・resume・take over は `409 not_ready`（pointer `/acceptNewRuns`）になります（#412）。
+- MCP: `get_configuration` の `agentSettings.acceptNewRuns` で受付停止を示し、`get_next_task` は受付停止中に
+  新しいタスクや再開を提示せず `action: none` と `acceptingNewRuns: false` を返します。古い server では常に `true` です（#412）。
+- server API: `GET /api/v1/work-items/{workItemId}/agent-run-questions?teamId=` を追加しました。Work Item の
+  `blocker`・`handoff` report を新しい順に最大 20 件、人の回答（`answer`）付きで返します。scope は既存の
+  `work-items:read` です。質問は新しい `AgentRunQuestion` で返し、既存の `AgentRunReport` は変えていません（#411）。
+- MCP: `get_task` が `questions` で、タスクの `blocker`・`handoff` 報告と人の回答を返します。server が古いとき、
+  読み取りが拒否されたときは `null` です（#411）。
+- server API: `GET /api/v1/work-items/{workItemId}/attachments` と `.../attachments/{fileId}/download` を追加しました。
+  閲覧できて最新の版がマルウェア検査を通った添付ファイルの一覧と、その版の短期 download URL を返します。
+  scope は既存の `work-items:read` で、download は監査ログに残ります（#409）。
+- MCP: `get_task` が download できる添付ファイルを `attachments` で返し、`list_task_attachments` と
+  `get_attachment_download_url` を追加しました。どちらも読み取り専用で、`MUKUROJI_MCP_READ_ONLY=true` でも使えます。
+  古い server では `attachments` が `null`、ツールは `unsupported` です（#409）。
+- `MUKUROJI_MCP_TEAM_IDS` で複数の Team を1つの MCP 設定で扱えるようにしました。`get_configuration` は `teams` を、`get_next_task` は `teamId` を返し、`create_task` は `teamId` を受け取ります。Team が1つの設定は従来どおりです（#410）。
 - server API: `GET /api/v1/projects/{projectId}/charter?teamId=` を追加しました。Web の charter パネルと同じ
   ライフサイクル状態・コード・説明・目的・責任者・スポンサー・計画期間・タグ・関連リポジトリ URL を返します。
   scope は既存の `work-items:read` で、Project の viewer 以上が読めます（#638）。
@@ -57,6 +99,9 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Changed
 
+- server API: `GET /api/v1/agent-context` の `brief` は、Team に自分の brief がないとき Workspace の既定 brief を返します。
+  Team が Agent settings を保存していないときの `requireAcceptanceCriteria` と、`GET /api/v1/agent-settings` の
+  `leaseMinutes`・`allowTakeoverAfterLeaseExpiry` は Workspace の既定値です。MCP と応答の形は変わりません（#412）。
 - MCP API revision を 2 に上げました。server は revision 1〜2 を受け付けます。revision 1 の server に
   接続した新しい MCP は server が古いと警告し、Document を読むツールは使えません。
 - `create_task` が `schedule` を送らず、Workspace の稼働カレンダーで Work Item を作るようにしました。
@@ -64,9 +109,20 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   server が古いと警告し、`create_task` は失敗します。
 - MCP API revision を 4 に上げました。server は revision 1〜4 を受け付けます。revision 3 以前の server に接続した新しい MCP は
   server が古いと警告し、Workspace profile のツールは使えません。
+- MCP API revision を 5 に上げました。server は revision 1〜5 を受け付けます。revision 4 以前の server に接続した新しい MCP は
+  server が古いと警告し、`list_relations`・`save_relation`・`create_subtasks` は使えません（#360）。
 - server API: Software factory が off の deploy でも、本人用 token の確認・発行・再発行
   （`/api/developer/me/agent-connection`、`POST /api/developer/me/api-keys`、`.../rotate`）と、管理者による本人用 token の
   rotate を `503` で断らないようにしました。Web の「agent を接続」は off では Workspace profile の設定例を出します。
+- server API / MCP: `GET /api/v1/work-items/{workItemId}/documents/{documentId}` と `read_document` が返す Markdown で、
+  段落の text を escape せずに Markdown のまま返すようにしました。raw HTML の部分だけを escape し、参照の定義を使う
+  link と画像は inline の link に書き換えて定義を消し、脚注の label は `<block の番号>-<番号>` に付け替えます。
+  定義のない `[^…]` は `[\^…]` と書き、隣の block とつながる段落の間には何も表示しない定義
+  `[mukuroji-block-boundary]: #` を入れます。参照の書き換えで増える長さが 1 回で 1,000,000 文字を超える
+  段落は、書き換えずに平文で書きます。見出し・チェック項目・表の cell・埋め込みのタイトルは、`&` と `~` と
+  見出し末尾の `#` も escape して書いた文字のとおりに表示されるようにし、チェック項目と表の cell の中の
+  ページへの link（`[label](/documents/<id>)`）は escape せず Markdown の link として書きます。
+  response の形と field は変わりません（#422）。
 
 ### Fixed
 

@@ -17,7 +17,19 @@ import {
   type PublicWorkItemEffort,
   type PublicWorkItemKey,
   type PublicWorkItemHierarchy,
+  type CreatePublicSubtaskBatchRequest,
+  type CreatePublicWorkItemRelationRequest,
+  PUBLIC_SUBTASK_BATCH_LIMIT,
+  type PublicSubtaskBatch,
+  type PublicSubtaskBatchEntry,
+  isPublicWorkItemRelationType,
+  type PublicWorkItemRelationList,
+  type PublicWorkItemRelationMutation,
+  type PublicWorkItemRelationType,
+  type PublicWorkItemCompletionGate,
   type PublicDocumentContent,
+  type PublicWorkItemAttachmentDownload,
+  type PublicWorkItemAttachmentList,
   type PublicCredentialOwner,
   type PublicProjectCharter,
   type PublicProjectMemberList,
@@ -66,6 +78,7 @@ import {
   type UpdatePublicWorkItemRequest,
   type WorkItemAcceptanceCriterionInput,
   type WorkItemAcceptanceCriterionMark,
+  type WorkItemAgentRunQuestionsResponse,
   type UpdateWebhookSubscriptionInput,
   isWebhookEventType,
   type WorkItemSchedule,
@@ -334,6 +347,18 @@ export interface PublicWorkItemService {
     workItemId: string,
   ): Promise<PublicWorkItemHierarchy>
   /**
+   * Evaluates the Team's completion Gate against a Work Item after current RBAC checks.
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns Every condition the Team evaluates with whether the Work Item meets it.
+   */
+  getCompletionGate(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<PublicWorkItemCompletionGate>
+  /**
    * Returns active Work Item Types and creation field schemas after current RBAC checks.
    * @param credential - Authenticated developer credential used for current RBAC checks.
    * @param teamId - Team whose current configuration is requested.
@@ -585,6 +610,119 @@ export interface PublicDirectoryService {
   lookupWorkItemKey(credential: AuthenticatedDeveloperCredential, key: string): Promise<PublicWorkItemKeyLookup>
 }
 
+/** Request facts a download records in the audit log. */
+export type PublicReadAuditRequest = {
+  /** Request ID that support and the audit log match on. */
+  requestId: string
+  /** Caller's correlation ID, when it sent one. */
+  correlationId?: string
+}
+
+/** Read-only access to the files attached to Work Items, for the credential owner. */
+export interface PublicAttachmentService {
+  /**
+   * Lists the files attached to a Work Item that the credential owner can view and whose current
+   * version passed the malware scan.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns Downloadable attachments.
+   */
+  listWorkItemAttachments(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<PublicWorkItemAttachmentList>
+  /**
+   * Issues a short-lived download URL for the current version of a Work Item attachment and
+   * records the download in the audit log.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item the file is attached to.
+   * @param fileId - File ID.
+   * @param request - Request facts for the audit log.
+   * @returns The download URL and its expiry.
+   */
+  createWorkItemAttachmentDownload(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    fileId: string,
+    request: PublicReadAuditRequest,
+  ): Promise<PublicWorkItemAttachmentDownload>
+}
+
+/**
+ * Work Item relation adapter of the Public API. Every call re-checks the credential owner's current
+ * Team and Project permissions, as the signed-in relation routes do.
+ */
+export interface PublicWorkItemRelationService {
+  /**
+   * Lists the relations of a Work Item, except children, whose other Work Item the owner can read.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The readable relations.
+   */
+  listRelations(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<PublicWorkItemRelationList>
+  /**
+   * Checks that the owner may change relations of both Work Items, without changing anything.
+   * An idempotent replay calls it before returning the stored response.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns both Work Items.
+   * @param workItemId - Work Item named in the path.
+   * @param targetWorkItemId - Other Work Item.
+   */
+  authorizeRelationChange(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    targetWorkItemId: string,
+  ): Promise<void>
+  /**
+   * Links two Work Items of one Team, checking the parent's allowed child Types for a parent link.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns both Work Items.
+   * @param workItemId - Work Item named in the path.
+   * @param input - Relation type from that Work Item's point of view and the other Work Item.
+   * @param context - Request, correlation, and idempotency identifiers for the audit events.
+   * @param idempotency - Replay receipt committed with the relation, when the request carries one.
+   * @returns The created relation.
+   */
+  createRelation(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    input: CreatePublicWorkItemRelationRequest,
+    context: PublicMutationContext,
+    idempotency?: IdempotencyMutationToken,
+  ): Promise<PublicWorkItemRelationMutation>
+  /**
+   * Removes a relation between two Work Items of one Team.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns both Work Items.
+   * @param workItemId - Work Item named in the path.
+   * @param targetWorkItemId - Other Work Item.
+   * @param type - Relation type from the named Work Item's point of view.
+   * @param context - Request, correlation, and idempotency identifiers for the audit events.
+   * @param idempotency - Replay receipt committed with the deletion, when the request carries one.
+   * @returns The removed relation.
+   */
+  deleteRelation(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    targetWorkItemId: string,
+    type: PublicWorkItemRelationType,
+    context: PublicMutationContext,
+    idempotency?: IdempotencyMutationToken,
+  ): Promise<PublicWorkItemRelationMutation>
+}
+
 export interface PublicDocumentService {
   /**
    * Lists one page of Documents linked to a Work Item that the credential owner can view.
@@ -689,6 +827,18 @@ export interface PublicAgentRunService {
     continuation: string | undefined,
     limit: number,
   ): Promise<PublicAgentRunPage>
+  /**
+   * Lists the newest `blocker` and `handoff` reports of a Work Item with the answers people recorded.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item.
+   * @returns Questions, newest first.
+   */
+  listWorkItemQuestions?(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<WorkItemAgentRunQuestionsResponse>
   /**
    * Lists a Team's runs the caller can see.
    * @param credential - Authenticated developer credential.
@@ -999,6 +1149,12 @@ export type PublicApiDependencies = {
   rateLimits: RateLimitPort
   /** Rejects public access to a closing or closed Workspace. */
   enforceActiveWorkspace(workspaceId: string): Promise<void>
+  /**
+   * Rejects a credential whose owner is no longer an active Workspace member, for example a
+   * deactivated member or one whose access expired (ADR 0095). Every route checks it before its
+   * own authorization; omitted only by tests that do not exercise membership.
+   */
+  requireActiveCredentialSubject?(credential: AuthenticatedDeveloperCredential): Promise<void>
   /** Cognito bearer token と request metadata を current Workspace principal へ解決します。 */
   authenticateManagement(
     authorization: string,
@@ -1012,6 +1168,10 @@ export type PublicApiDependencies = {
   agentTelemetry?: PublicAgentTelemetryService
   /** Read-only Document adapter; Document routes report unavailable when it is not configured. */
   documents?: PublicDocumentService
+  /** Work Item relation adapter; relation routes report unavailable when it is not configured. */
+  workItemRelations?: PublicWorkItemRelationService
+  /** Read-only attachment adapter; attachment routes report unavailable when it is not configured. */
+  attachments?: PublicAttachmentService
   /** Read-only directory adapter; directory routes report unavailable when it is not configured. */
   directory?: PublicDirectoryService
   /** Public OpenAPI 3.1 document です。 */
@@ -1407,6 +1567,35 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     return c.json(document)
   })
 
+  router.get('/v1/work-items/:workItemId/attachments', async (c) => {
+    // Set before any check so error responses carry the same cache policy as the list.
+    c.header('Cache-Control', 'private, no-store')
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const attachments = requireAttachmentService(dependencies)
+    const list = await attachments.listWorkItemAttachments(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    )
+    return c.json(list)
+  })
+
+  router.get('/v1/work-items/:workItemId/attachments/:fileId/download', async (c) => {
+    // Set before any check so error responses carry the same cache policy as the URL.
+    c.header('Cache-Control', 'private, no-store')
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const attachments = requireAttachmentService(dependencies)
+    const correlationId = c.req.header('X-Correlation-Id')?.trim()
+    const download = await attachments.createWorkItemAttachmentDownload(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+      readRouteId(c.req.param('fileId'), 'File ID'),
+      { requestId: c.get('requestId'), ...(correlationId ? { correlationId } : {}) },
+    )
+    return c.json(download)
+  })
+
   router.get('/v1/work-items/:workItemId/key', async (c) => {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     return c.json(await dependencies.workItems.getKey(
@@ -1423,6 +1612,70 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),
     ))
+  })
+
+  router.get('/v1/work-items/:workItemId/completion-gate', async (c) => {
+    c.header('Cache-Control', 'private, no-store')
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await dependencies.workItems.getCompletionGate(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    ))
+  })
+
+  router.get('/v1/work-items/:workItemId/relations', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await requireRelationService(dependencies).listRelations(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    ))
+  })
+
+  router.post('/v1/work-items/:workItemId/relations', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const relations = requireRelationService(dependencies)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const body = readCreatePublicWorkItemRelationRequest(await readJson(c))
+    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, ...body }, async (context, idempotency) => ({
+      status: 201,
+      body: await relations.createRelation(credential, teamId, workItemId, body, context, idempotency),
+    }), {
+      authorizeReplay: () => relations.authorizeRelationChange(credential, teamId, workItemId, body.targetWorkItemId),
+    })
+  })
+
+  router.post('/v1/work-items/:workItemId/subtask-batches', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const relations = requireRelationService(dependencies)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const body = readCreatePublicSubtaskBatchRequest(await readJson(c))
+    // Only the fingerprint of the list is kept with the key, so a later call with the same key and
+    // another list is refused here, before the client creates any subtask.
+    const authorize = () => relations.authorizeRelationChange(credential, teamId, workItemId, workItemId)
+    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, ...body }, async () => {
+      await authorize()
+      const batch: PublicSubtaskBatch = { schemaVersion: 1, teamId, workItemId, subtaskCount: body.subtasks.length }
+      return { status: 201, body: batch }
+    }, { authorizeReplay: authorize })
+  })
+
+  router.delete('/v1/work-items/:workItemId/relations/:targetWorkItemId/:relationType', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const relations = requireRelationService(dependencies)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const targetWorkItemId = readRouteId(c.req.param('targetWorkItemId'), 'Target Work Item ID')
+    const type = readPublicWorkItemRelationType(c.req.param('relationType'))
+    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, targetWorkItemId, type }, async (context, idempotency) => ({
+      status: 200,
+      body: await relations.deleteRelation(credential, teamId, workItemId, targetWorkItemId, type, context, idempotency),
+    }), {
+      authorizeReplay: () => relations.authorizeRelationChange(credential, teamId, workItemId, targetWorkItemId),
+    })
   })
 
   router.get('/v1/work-items/:workItemId/comments', async (c) => {
@@ -1586,6 +1839,21 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       resource: `/v1/work-items/${encodeURIComponent(workItemId)}/agent-runs`,
       filters: { teamId },
     }, (continuation, limit) => agentRuns.listWorkItemRuns(credential, teamId, workItemId, continuation, limit)))
+  })
+
+  router.get('/v1/work-items/:workItemId/agent-run-questions', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const agentRuns = requireAgentRunService(dependencies)
+    if (!agentRuns.listWorkItemQuestions) {
+      throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Agent Run questions are not configured.', true)
+    }
+    const questions = await agentRuns.listWorkItemQuestions(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    )
+    c.header('Cache-Control', 'private, no-store')
+    return c.json(questions)
   })
 
   router.get('/v1/agent-runs', async (c) => {
@@ -3211,6 +3479,7 @@ async function authenticatePublicRequest(
   }
   await validatePublicApiRequestBody(c)
   await dependencies.enforceActiveWorkspace(credential.workspaceId)
+  await dependencies.requireActiveCredentialSubject?.(credential)
   return credential
 }
 
@@ -3797,7 +4066,7 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
     'workItemTypeId',
     'templateId',
   ], 'Work Item body')
-  const description = readOptionalString(body.description, 'description', 100_000)
+  const description = readOptionalString(body.description, 'description', PUBLIC_WORK_ITEM_DESCRIPTION_MAX_LENGTH)
   const templateId = body.templateId === undefined ? undefined : readIdentifier(body.templateId, 'templateId')
   if (body.schedule !== undefined && body.dueDate !== undefined) {
     throw new PublicApiServiceError(400, 'validation_failed', 'Send schedule or dueDate, not both.')
@@ -4244,7 +4513,7 @@ function readExternalLinkFields(body: Record<string, unknown>) {
     ...(createsResource
       ? {}
       : {
-          externalId: readIdentifier(body.externalId, 'externalId'),
+          externalId: readExternalId(body.externalId),
           externalUrl: readHttpsUrl(body.externalUrl, 'externalUrl'),
         }),
     ...(body.displayKey !== undefined
@@ -4669,6 +4938,24 @@ function readIdentifier(value: unknown, label: string) {
     !/^[\p{Letter}\p{Number}][\p{Letter}\p{Number}._:/@+-]*$/u.test(identifier)
   ) {
     throw new PublicApiServiceError(400, 'validation_failed', `${label} is invalid.`)
+  }
+  return identifier
+}
+
+/**
+ * Reads the provider ID of an external resource. It follows the identifier rules and also allows
+ * `#`, which provider IDs such as a GitHub issue's `owner/repository#number` use.
+ *
+ * @param value - Untrusted value.
+ * @returns The external ID.
+ */
+function readExternalId(value: unknown) {
+  const identifier = readRequiredString(value, 'externalId')
+  if (
+    identifier.length > 256 ||
+    !/^[\p{Letter}\p{Number}][\p{Letter}\p{Number}._:/@+#-]*$/u.test(identifier)
+  ) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'externalId is invalid.')
   }
   return identifier
 }
@@ -5562,6 +5849,100 @@ function requireDirectoryService(dependencies: PublicApiDependencies): PublicDir
     throw new PublicApiServiceError(503, 'temporarily_unavailable', 'The directory is not configured.', true)
   }
   return dependencies.directory
+}
+
+/**
+ * Returns the configured attachment service or reports that attachments are unavailable.
+ *
+ * @param dependencies - Router dependencies.
+ * @returns Attachment service.
+ */
+function requireAttachmentService(dependencies: PublicApiDependencies): PublicAttachmentService {
+  if (!dependencies.attachments) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Attachments are not configured.', true)
+  }
+  return dependencies.attachments
+}
+
+/**
+ * Returns the configured relation service or reports that relations are unavailable.
+ *
+ * @param dependencies - Router dependencies.
+ * @returns Relation service.
+ */
+function requireRelationService(dependencies: PublicApiDependencies): PublicWorkItemRelationService {
+  if (!dependencies.workItemRelations) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Work Item relations are not configured.', true)
+  }
+  return dependencies.workItemRelations
+}
+
+/**
+ * Reads a relation type from a request.
+ *
+ * @param value - Untrusted relation type.
+ * @returns The relation type.
+ */
+function readPublicWorkItemRelationType(value: unknown): PublicWorkItemRelationType {
+  if (isPublicWorkItemRelationType(value)) return value
+  throw new PublicApiServiceError(
+    400,
+    'validation_failed',
+    'Relation type must be parent, child, blocks, blockedBy, related, or duplicate.',
+  )
+}
+
+/**
+ * Reads the body of a relation create request.
+ *
+ * @param value - Untrusted JSON body.
+ * @returns The relation type and the other Work Item.
+ */
+function readCreatePublicWorkItemRelationRequest(value: unknown): CreatePublicWorkItemRelationRequest {
+  const body = requireRecord(value, 'Relation body is required.')
+  assertAllowedFields(body, ['type', 'targetWorkItemId'], 'Relation body')
+  return {
+    type: readPublicWorkItemRelationType(body.type),
+    targetWorkItemId: readIdentifier(body.targetWorkItemId, 'targetWorkItemId'),
+  }
+}
+
+/** Fields of one subtask in a batch body. */
+const SUBTASK_BATCH_ENTRY_FIELDS = ['title', 'description', 'assigneeUserId', 'priority', 'workItemTypeId', 'dueDate'] as const
+
+/** Longest description a Work Item created through the Public API may have. */
+const PUBLIC_WORK_ITEM_DESCRIPTION_MAX_LENGTH = 100_000
+
+/**
+ * Reads the body of `POST /api/v1/work-items/{workItemId}/subtask-batches`.
+ *
+ * @param value - Parsed JSON body.
+ * @returns The subtasks in order.
+ * @throws PublicApiServiceError 400 when the list is empty, too long, or has an invalid entry.
+ */
+function readCreatePublicSubtaskBatchRequest(value: unknown): CreatePublicSubtaskBatchRequest {
+  const body = requireRecord(value, 'Subtask batch body is required.')
+  assertAllowedFields(body, ['subtasks'], 'Subtask batch body')
+  if (!Array.isArray(body.subtasks) || body.subtasks.length === 0 || body.subtasks.length > PUBLIC_SUBTASK_BATCH_LIMIT) {
+    throw new PublicApiServiceError(400, 'validation_failed', `subtasks must list 1 to ${PUBLIC_SUBTASK_BATCH_LIMIT} entries.`)
+  }
+  return {
+    subtasks: body.subtasks.map((entry: unknown, index): PublicSubtaskBatchEntry => {
+      const label = `subtasks[${index}]`
+      const record = requireRecord(entry, `${label} must be an object.`)
+      assertAllowedFields(record, SUBTASK_BATCH_ENTRY_FIELDS, label)
+      const optional = Object.fromEntries(SUBTASK_BATCH_ENTRY_FIELDS
+        .filter((field) => field !== 'title')
+        .map((field) => [field, readOptionalString(
+          record[field],
+          `${label}.${field}`,
+          // Each entry takes what `POST /api/v1/work-items` takes, so the reservation never refuses a creatable subtask.
+          field === 'description' ? PUBLIC_WORK_ITEM_DESCRIPTION_MAX_LENGTH : undefined,
+        )])
+        .filter(([, text]) => text !== undefined))
+      return { title: readRequiredString(record.title, `${label}.title`), ...optional }
+    }),
+  }
 }
 
 /**

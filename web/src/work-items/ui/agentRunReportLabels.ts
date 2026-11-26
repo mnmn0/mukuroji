@@ -15,6 +15,30 @@ export type AgentRunReportChipsLabels = {
   changedFiles: string
   /** Hint shown for a blocker or hand-off. */
   decisionNeeded: string
+  /** Text of the answer to a blocker or hand-off. */
+  answer: AgentRunReportAnswerLabels
+}
+
+/** Locale-aware text of the answer to a blocker or hand-off. */
+export type AgentRunReportAnswerLabels = {
+  /** Button that opens the answer form. */
+  open: string
+  /** Accessible name of the answer form and field. */
+  label: string
+  /** Placeholder of the answer field. */
+  placeholder: string
+  /** Button that sends the answer. */
+  submit: string
+  /** Button that closes the form without sending. */
+  cancel: string
+  /** Badge shown once a person answered. */
+  answered: string
+  /** Error shown when the answer could not be saved. */
+  failed: string
+  /** Error shown when another answer was saved first. */
+  conflict: string
+  /** Error shown for an answer over the limit, with a `{max}` placeholder. */
+  tooLong: string
 }
 
 /**
@@ -47,6 +71,17 @@ export function createAgentRunReportChipsLabels(locale: Locale): AgentRunReportC
     },
     changedFiles: t('workItems.agentRunReports.changedFiles'),
     decisionNeeded: t('workItems.agentRunReports.decisionNeeded'),
+    answer: {
+      open: t('workItems.agentRunReports.answer.open'),
+      label: t('workItems.agentRunReports.answer.label'),
+      placeholder: t('workItems.agentRunReports.answer.placeholder'),
+      submit: t('workItems.agentRunReports.answer.submit'),
+      cancel: t('workItems.agentRunReports.answer.cancel'),
+      answered: t('workItems.agentRunReports.answer.answered'),
+      failed: t('workItems.agentRunReports.answer.failed'),
+      conflict: t('workItems.agentRunReports.answer.conflict'),
+      tooLong: t('workItems.agentRunReports.answer.tooLong'),
+    },
   }
 }
 

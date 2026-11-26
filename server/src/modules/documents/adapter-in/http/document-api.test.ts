@@ -2477,6 +2477,125 @@ test('signals content-free Document changes after writes and keeps the write whe
   ])
 })
 
+test('edits and deletes a comment through the author-only comment routes', async () => {
+  const calls: unknown[] = []
+  const comment: DocumentComment = {
+    id: 'comment-1',
+    documentId: 'document-1',
+    anchor: { type: 'document' },
+    body: 'Edited',
+    mentions: [],
+    authorUserId: 'owner@example.com',
+    resolved: false,
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T00:01:00.000Z',
+    editedAt: '2026-07-18T00:01:00.000Z',
+  }
+  const app = createTestApp(createDocumentClient({
+    async getCommentUpdateReplay() {
+      return undefined
+    },
+    async updateComment(input) {
+      calls.push({
+        kind: 'update',
+        commentId: input.commentId,
+        body: input.body,
+        mentions: input.mentions,
+        idempotencyKey: input.idempotencyKey,
+      })
+      return comment
+    },
+    async deleteComment(input) {
+      calls.push({ kind: 'delete', commentId: input.commentId, idempotencyKey: input.idempotencyKey })
+      return { ...comment, body: '', deletedAt: '2026-07-18T00:02:00.000Z' }
+    },
+  }))
+  const headers = { Authorization: 'Bearer token', 'Content-Type': 'application/json' }
+
+  const invalid = await app.request('/api/documents/document-1/comments/comment-1', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ body: '', mentions: [] }),
+  })
+  const edited = await app.request('/api/documents/document-1/comments/comment-1', {
+    method: 'PATCH',
+    headers: { ...headers, 'Idempotency-Key': 'edit-key' },
+    body: JSON.stringify({ body: 'Edited', mentions: [] }),
+  })
+  const deleted = await app.request('/api/documents/document-1/comments/comment-1', {
+    method: 'DELETE',
+    headers: { ...headers, 'Idempotency-Key': 'delete-key' },
+  })
+
+  expect(invalid.status).toBe(400)
+  expect(edited.status).toBe(200)
+  expect(await edited.json()).toMatchObject({ comment: { body: 'Edited' } })
+  expect(deleted.status).toBe(200)
+  expect(await deleted.json()).toMatchObject({ comment: { body: '', deletedAt: '2026-07-18T00:02:00.000Z' } })
+  expect(calls).toEqual([
+    { kind: 'update', commentId: 'comment-1', body: 'Edited', mentions: [], idempotencyKey: 'edit-key' },
+    { kind: 'delete', commentId: 'comment-1', idempotencyKey: 'delete-key' },
+  ])
+})
+
+test('replays a recorded comment edit before revalidating mutable mentioned members', async () => {
+  let memberLookups = 0
+  const replayed: DocumentComment[] = []
+  const comment: DocumentComment = {
+    id: 'comment-1',
+    documentId: 'document-1',
+    anchor: { type: 'document' },
+    body: 'Ask @Mina',
+    mentions: [{ userId: 'mina@example.com', offset: 4, length: 5 }],
+    authorUserId: 'owner@example.com',
+    resolved: false,
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T00:01:00.000Z',
+    editedAt: '2026-07-18T00:01:00.000Z',
+  }
+  const app = createTestApp(
+    createDocumentClient({
+      async getCommentUpdateReplay(input) {
+        if (input.idempotencyKey !== 'edit-key') return undefined
+        replayed.push(comment)
+        return comment
+      },
+      async updateComment() {
+        throw new Error('A recorded edit must not be written again.')
+      },
+    }),
+    {
+      // Mina left the Workspace after the first attempt.
+      getActiveMember: async () => {
+        memberLookups += 1
+        return undefined
+      },
+    },
+  )
+  const request = (idempotencyKey: string) => app.request('/api/documents/document-1/comments/comment-1', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': idempotencyKey,
+    },
+    body: JSON.stringify({
+      body: 'Ask @Mina',
+      mentions: [{ userId: 'mina@example.com', offset: 4, length: 5 }],
+    }),
+  })
+
+  const retried = await request('edit-key')
+  expect(retried.status).toBe(200)
+  expect(await retried.json()).toEqual({ comment })
+  expect(memberLookups).toBe(0)
+  // A new edit still checks that every mentioned member is active.
+  const fresh = await request('edit-key-2')
+  expect(fresh.status).toBe(400)
+  expect(memberLookups).toBe(1)
+  expect(replayed).toHaveLength(1)
+})
+
 test('does not signal a presence heartbeat that only extends the lease', async () => {
   const changes: unknown[] = []
   const app = createTestApp(
@@ -2524,4 +2643,148 @@ test('answers a write without waiting for a stalled change notification', async 
 
   expect(response.status).toBe(200)
   expect(Date.now() - started).toBeLessThan(5_000)
+})
+
+test('requires Document edit permission to request approval of a version', async () => {
+  let requested = false
+  const app = createTestApp(createDocumentClient({
+    async get() {
+      return { ...pageDocument, capabilities: { ...pageDocument.capabilities, canEdit: false } }
+    },
+    async getVersion() {
+      throw new Error('The version must not be read without edit permission.')
+    },
+  }), {
+    async requestVersionApproval() {
+      requested = true
+      throw new Error('The approval must not be requested without edit permission.')
+    },
+  })
+
+  const response = await app.request('/api/documents/document-1/versions/2/approvals', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      teamId: 'core',
+      issueId: 'work-item-1',
+      reviewerMemberKeys: ['reviewer@example.com'],
+      dueAt: '2099-07-20T00:00:00.000Z',
+    }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'DocumentEditDenied' })
+  expect(requested).toBe(false)
+})
+
+test('pins a named version and requests approval only for a pinned version', async () => {
+  const pinnedNames: string[] = []
+  const unpinnedVersion = {
+    schemaVersion: 1,
+    id: 'document-1:2',
+    documentId: 'document-1',
+    revision: 2,
+    kind: 'page',
+    title: 'Roadmap',
+    reason: 'edit',
+    createdByUserId: 'owner@example.com',
+    createdAt: '2026-07-18T00:00:00.000Z',
+  } as const
+  let pinned = false
+  const approvalRequests: unknown[] = []
+  const app = createTestApp(createDocumentClient({
+    async getVersion(input) {
+      expect(input.versionId).toBe('2')
+      return {
+        version: pinned ? { ...unpinnedVersion, name: 'v1.0' } : unpinnedVersion,
+        document: pageDocument,
+      }
+    },
+    async pinVersion(input) {
+      pinnedNames.push(input.name)
+      pinned = true
+      return { ...unpinnedVersion, name: input.name }
+    },
+    async get() {
+      return pageDocument
+    },
+  }), {
+    async requestVersionApproval(_principal, request) {
+      approvalRequests.push(request)
+      return {
+        id: 'approval-1',
+        subjectType: 'document-version',
+        documentId: request.documentId,
+        versionId: request.versionId,
+        teamId: request.teamId,
+        issueId: request.issueId,
+        revision: 1,
+        status: 'pending',
+        reviewers: [{ memberKey: 'reviewer@example.com', status: 'pending' }],
+        dueAt: request.dueAt,
+        requestedByMemberKey: 'owner@example.com',
+        requestedByKind: 'member',
+        createdAt: '2026-07-18T00:00:00.000Z',
+        updatedAt: '2026-07-18T00:00:00.000Z',
+        capabilities: { canDecide: false, canCancel: true },
+      }
+    },
+    async listVersionApprovals(_principal, documentId) {
+      expect(documentId).toBe('document-1')
+      return []
+    },
+  })
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+  const approvalBody = JSON.stringify({
+    teamId: 'core',
+    issueId: 'work-item-1',
+    reviewerMemberKeys: ['reviewer@example.com'],
+    dueAt: '2099-07-20T00:00:00.000Z',
+  })
+
+  const preview = await app.request('/api/documents/document-1/versions/2', { headers })
+  expect(preview.status).toBe(200)
+  expect(await preview.json()).toMatchObject({
+    version: { version: { id: 'document-1:2' }, document: { id: 'document-1' } },
+  })
+
+  const notPinned = await app.request('/api/documents/document-1/versions/2/approvals', {
+    method: 'POST', headers, body: approvalBody,
+  })
+  expect(notPinned.status).toBe(409)
+  expect(await notPinned.json()).toMatchObject({ code: 'DocumentVersionNotPinned' })
+
+  for (const name of ['', '   ', 'x'.repeat(121), 3]) {
+    const invalid = await app.request('/api/documents/document-1/versions/2/pin', {
+      method: 'POST', headers, body: JSON.stringify({ name }),
+    })
+    expect(invalid.status).toBe(400)
+  }
+  const pin = await app.request('/api/documents/document-1/versions/2/pin', {
+    method: 'POST', headers, body: JSON.stringify({ name: '  v1.0 承認版  ' }),
+  })
+  expect(pin.status).toBe(200)
+  expect(pinnedNames).toEqual(['v1.0 承認版'])
+
+  const malformed = await app.request('/api/documents/document-1/versions/2/approvals', {
+    method: 'POST', headers, body: JSON.stringify({ teamId: 'core', reviewerMemberKeys: [1] }),
+  })
+  expect(malformed.status).toBe(400)
+
+  const requested = await app.request('/api/documents/document-1/versions/2/approvals', {
+    method: 'POST', headers, body: approvalBody,
+  })
+  expect(requested.status).toBe(201)
+  expect(approvalRequests).toEqual([{
+    teamId: 'core',
+    issueId: 'work-item-1',
+    reviewerMemberKeys: ['reviewer@example.com'],
+    dueAt: '2099-07-20T00:00:00.000Z',
+    documentId: 'document-1',
+    versionId: 'document-1:2',
+  }])
+
+  const approvals = await app.request('/api/documents/document-1/approvals', { headers })
+  expect(approvals.status).toBe(200)
+  expect(await approvals.json()).toEqual({ approvals: [] })
 })

@@ -154,6 +154,7 @@ export const accountSecurityMessages = {
   'memberSecurity.roleAssignments.scope.workspace': 'Workspace',
   'memberSecurity.roleAssignments.scope.team': 'Team',
   'memberSecurity.roleAssignments.scope.project': 'Project',
+  'memberSecurity.roleAssignments.scope.org-unit': 'OrgUnit',
   'security.sessions.mfaImpact.count':
     '{count} active members have no MFA. After you save, they must register an authenticator app at their next sign-in.',
   'security.sessions.mfaImpact.unknown': 'The status of {count} members could not be checked.',

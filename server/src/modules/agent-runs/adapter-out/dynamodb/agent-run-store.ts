@@ -13,25 +13,35 @@ import {
   AGENT_SETTINGS_SCHEMA_VERSION,
   AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS,
   type AgentRunOutcome,
+  type AgentRunReportAnswer,
   type AgentSettings,
+  type WorkspaceAgentDefaults,
 } from '@mukuroji/contracts'
 import {
+  applyWorkspaceAgentDefaults,
   calculateLeaseExpiry,
   createDefaultAgentSettings,
+  createDefaultWorkspaceAgentDefaults,
   createSavedAgentSettings,
+  createSavedWorkspaceAgentDefaults,
   isAgentRunId,
   type StoredAgentRun,
   type AgentRunRevocation,
   type StoredAgentRunClaim,
   type ValidatedAgentSettingsUpdate,
+  type ResolvedAgentSettings,
+  type ValidatedWorkspaceAgentDefaultsUpdate,
 } from '../../domain/agent-run'
-import { readAgentRunReportDetails, type AgentRunReportDetails, type StoredAgentRunReport } from '../../domain/agent-run-report'
+import { isAgentRunQuestionReport, readAgentRunReportDetails, type AgentRunReportDetails, type StoredAgentRunReport } from '../../domain/agent-run-report'
 import {
   AgentRunError,
   createAgentRunCommitConflictError,
   createAgentRunIntegrityError,
   createAgentRunNotActiveError,
 } from '../../domain/agent-run-error'
+
+/** How far before a run's start the lookup of one of its reports begins, in milliseconds. */
+const reportLookupStartMarginMilliseconds = 60_000
 
 /** One item of a DynamoDB write transaction. */
 export type AgentRunTransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number]
@@ -262,12 +272,37 @@ export interface AgentRunStore {
    */
   isInstanceRevoked(directoryId: string, teamId: string, revocation: AgentRunRevocation): Promise<boolean>
   /**
-   * Strongly reads Team Agent settings.
+   * Strongly reads Team Agent settings with the Workspace defaults applied.
    * @param directoryId - Workspace ID.
    * @param teamId - Team ID.
-   * @returns Saved settings or the defaults at revision 0.
+   * @returns Saved settings, or the Workspace defaults at revision 0, with the Workspace brief.
    */
-  getSettings(directoryId: string, teamId: string): Promise<AgentSettings>
+  getSettings(directoryId: string, teamId: string): Promise<ResolvedAgentSettings>
+  /**
+   * Strongly reads the Workspace agent defaults.
+   * @param directoryId - Workspace ID.
+   * @returns Saved defaults or the built-in ones at revision 0.
+   */
+  getWorkspaceAgentDefaults(directoryId: string): Promise<WorkspaceAgentDefaults>
+  /**
+   * Replaces the Workspace agent defaults with revision CAS. Like Team settings, every committed key
+   * keeps a receipt, so a retry with the same key and values returns what that save committed.
+   * @param directoryId - Workspace ID.
+   * @param update - Validated update including the expected revision.
+   * @param actorMemberKey - Editor.
+   * @param now - Save time.
+   * @param mutationKey - Opaque key of this save.
+   * @param extraItems - Audit writes committed with the defaults.
+   * @returns The saved defaults.
+   */
+  saveWorkspaceAgentDefaults(
+    directoryId: string,
+    update: ValidatedWorkspaceAgentDefaultsUpdate,
+    actorMemberKey: string,
+    now: Date,
+    mutationKey: string,
+    extraItems: readonly AgentRunTransactItem[],
+  ): Promise<WorkspaceAgentDefaults>
   /**
    * Replaces Team Agent settings with revision CAS.
    * @param directoryId - Workspace ID.
@@ -368,13 +403,18 @@ export interface AgentRunStore {
    */
   createClaimAbsentCheck(directoryId: string, teamId: string, workItemId: string): AgentRunTransactItem
   /**
-   * Builds a check that the Team's Agent settings are still at the revision a start read.
+   * Builds checks that the Agent settings a start read are still current. A Team that never saved
+   * settings uses the Workspace defaults, so its check also covers the defaults revision.
    * @param directoryId - Workspace ID.
    * @param teamId - Team ID.
-   * @param revision - Revision the start read; `0` means the defaults were never saved.
-   * @returns ConditionCheck on the settings row.
+   * @param settings - Revisions the start read; Team revision `0` means the Team never saved settings.
+   * @returns ConditionChecks on the settings row and, for an unsaved Team, the Workspace defaults row.
    */
-  createSettingsRevisionCheck(directoryId: string, teamId: string, revision: number): AgentRunTransactItem
+  createSettingsRevisionChecks(
+    directoryId: string,
+    teamId: string,
+    settings: Pick<ResolvedAgentSettings, 'revision' | 'workspaceDefaultsRevision'>,
+  ): AgentRunTransactItem[]
   /**
    * Builds the writes that finish an active run, remove its claim, and, for a release or take over,
    * revoke the run's instance on the Work Item.
@@ -405,6 +445,16 @@ export interface AgentRunStore {
    */
   createReportItems(run: StoredAgentRun, report: StoredAgentRunReport, now: Date): AgentRunTransactItem[]
   /**
+   * Builds the write that records a person's answer on a `blocker` or `handoff` report. It fails when
+   * the report is gone or its answer changed since it was read, so two people never overwrite each
+   * other's answer. A report read with an answer is answered again only in place of that answer, whose
+   * comment the caller found deleted.
+   * @param report - Report as read.
+   * @param answer - Answer to record.
+   * @returns The conditional report update.
+   */
+  createReportAnswerItems(report: StoredAgentRunReport, answer: AgentRunReportAnswer): AgentRunTransactItem[]
+  /**
    * Lists one Work Item's structured reports, newest first, with strongly consistent reads.
    * @param directoryId - Workspace ID.
    * @param teamId - Team ID.
@@ -414,6 +464,14 @@ export interface AgentRunStore {
    * @returns One page of reports.
    */
   listWorkItemReports(directoryId: string, teamId: string, workItemId: string, cursor: string | undefined, limit: number): Promise<AgentRunReportPage>
+  /**
+   * Reads one report of a run with a strongly consistent read. Only the reports written while the run
+   * held its Work Item are searched, so the read does not depend on how many reports the Work Item has.
+   * @param run - Run the report belongs to.
+   * @param sequence - Position of the report within the run.
+   * @returns The report, or undefined when the run has no such report.
+   */
+  getRunReport(run: StoredAgentRun, sequence: number): Promise<StoredAgentRunReport | undefined>
   /**
    * Commits a standalone transaction of Agent Run writes and caller items.
    * @param items - Agent Run writes first, then audit or receipt writes.
@@ -537,6 +595,95 @@ const settingsRecordKey = 'agent-settings'
  */
 function settingsMutationRecordKey(mutationKey: string): string {
   return `agent-settings-mutation#${mutationKey}`
+}
+
+/** Sort key of the Workspace agent defaults row. */
+const workspaceDefaultsRecordKey = 'agent-defaults'
+
+/**
+ * Builds the partition of a Workspace's own agent rows. Team partitions add `#team#`, so the two
+ * never meet.
+ *
+ * @param directoryId - Workspace ID.
+ * @returns Partition key value.
+ */
+function createWorkspaceAgentPartition(directoryId: string): string {
+  return `${directoryId}${workspaceAgentPartitionSuffix}`
+}
+
+/** Suffix of the partition that holds a Workspace's own agent rows. */
+const workspaceAgentPartitionSuffix = '#workspace'
+
+/**
+ * Tells whether a partition holds a Workspace's own agent rows, such as its agent defaults.
+ *
+ * @param partition - Partition key value.
+ * @returns Whether it is a Workspace agent partition.
+ */
+export function isWorkspaceAgentPartition(partition: string): boolean {
+  return partition.endsWith(workspaceAgentPartitionSuffix) &&
+    partition.length > workspaceAgentPartitionSuffix.length &&
+    !partition.includes('#team#')
+}
+
+/**
+ * Builds the sort key of a Workspace defaults save receipt.
+ *
+ * @param mutationKey - Opaque key of the save.
+ * @returns Sort key value.
+ */
+function workspaceDefaultsMutationRecordKey(mutationKey: string): string {
+  return `agent-defaults-mutation#${mutationKey}`
+}
+
+/**
+ * Reads stored Workspace defaults from the defaults row or a save receipt.
+ *
+ * @param item - Stored row.
+ * @param directoryId - Expected Workspace ID.
+ * @returns The defaults.
+ */
+function readStoredWorkspaceDefaults(item: Record<string, unknown>, directoryId: string): WorkspaceAgentDefaults {
+  if (
+    item.schemaVersion !== AGENT_SETTINGS_SCHEMA_VERSION ||
+    item.workspaceId !== directoryId ||
+    typeof item.allowTakeoverAfterLeaseExpiry !== 'boolean' ||
+    typeof item.requireAcceptanceCriteria !== 'boolean' ||
+    (item.brief !== undefined && (typeof item.brief !== 'string' || item.brief === ''))
+  ) {
+    throw createAgentRunIntegrityError()
+  }
+  const revision = storedInteger(item, 'revision')
+  const leaseMinutes = storedInteger(item, 'leaseMinutes')
+  if (revision < 1 || leaseMinutes < 1) throw createAgentRunIntegrityError()
+  return {
+    schemaVersion: AGENT_SETTINGS_SCHEMA_VERSION,
+    revision,
+    leaseMinutes,
+    allowTakeoverAfterLeaseExpiry: item.allowTakeoverAfterLeaseExpiry,
+    requireAcceptanceCriteria: item.requireAcceptanceCriteria,
+    ...(typeof item.brief === 'string' ? { brief: item.brief } : {}),
+    updatedAt: storedTimestamp(item, 'updatedAt'),
+    updatedBy: storedString(item, 'updatedBy'),
+  }
+}
+
+/**
+ * Tells whether a committed Workspace defaults save carried the same values as a retry.
+ *
+ * @param saved - Defaults the earlier save committed.
+ * @param update - Retried update.
+ * @returns Whether the retry replays that save.
+ */
+export function isSameWorkspaceDefaultsSave(
+  saved: WorkspaceAgentDefaults,
+  update: ValidatedWorkspaceAgentDefaultsUpdate,
+): boolean {
+  return saved.revision === update.expectedRevision + 1 &&
+    saved.leaseMinutes === update.leaseMinutes &&
+    saved.allowTakeoverAfterLeaseExpiry === update.allowTakeoverAfterLeaseExpiry &&
+    saved.requireAcceptanceCriteria === update.requireAcceptanceCriteria &&
+    saved.brief === update.brief
 }
 
 /**
@@ -757,6 +904,25 @@ function parseReportDetails(item: Record<string, unknown>): AgentRunReportDetail
 }
 
 /**
+ * Parses the answer stored on a report row and fails closed on any unexpected shape.
+ *
+ * @param value - Stored answer.
+ * @returns The answer.
+ */
+function parseReportAnswer(value: unknown): AgentRunReportAnswer {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw createAgentRunIntegrityError()
+  const record: Record<string, unknown> = { ...value }
+  const answer = {
+    body: storedString(record, 'body'),
+    answeredBy: storedString(record, 'answeredBy'),
+    answeredAt: storedTimestamp(record, 'answeredAt'),
+    commentId: storedString(record, 'commentId'),
+  }
+  if (Object.keys(record).length !== 4) throw createAgentRunIntegrityError()
+  return answer
+}
+
+/**
  * Parses a stored report row and fails closed on any unexpected shape.
  *
  * @param item - Stored row.
@@ -789,9 +955,11 @@ function parseReport(
     ...parseReportDetails(item),
     createdAt: storedTimestamp(item, 'createdAt'),
     createdBy: storedString(item, 'createdBy'),
+    ...(item.answer === undefined ? {} : { answer: parseReportAnswer(item.answer) }),
   }
   if (
     !kind ||
+    (report.answer !== undefined && !isAgentRunQuestionReport(report)) ||
     sequence < 1 ||
     item.directoryTeamId !== createAgentRunPartition(expected.directoryId, expected.teamId) ||
     item.workspaceId !== expected.directoryId ||
@@ -956,6 +1124,8 @@ export function isSameSettingsSave(saved: AgentSettings, update: ValidatedAgentS
     saved.requireAcceptanceCriteria === update.requireAcceptanceCriteria &&
     saved.fileFailedRunsToTriage === update.fileFailedRunsToTriage &&
     saved.fileStalledRunsToTriage === update.fileStalledRunsToTriage &&
+    saved.notifyAssigneeOfRunEvents === update.notifyAssigneeOfRunEvents &&
+    saved.acceptNewRuns === update.acceptNewRuns &&
     saved.acceptanceCriteriaFieldId === update.acceptanceCriteriaFieldId &&
     saved.brief === update.brief &&
     savedProjects.length === updateProjects.length &&
@@ -1034,6 +1204,8 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
     (item.requireAcceptanceCriteria !== undefined && typeof item.requireAcceptanceCriteria !== 'boolean') ||
     (item.fileFailedRunsToTriage !== undefined && typeof item.fileFailedRunsToTriage !== 'boolean') ||
     (item.fileStalledRunsToTriage !== undefined && typeof item.fileStalledRunsToTriage !== 'boolean') ||
+    (item.notifyAssigneeOfRunEvents !== undefined && typeof item.notifyAssigneeOfRunEvents !== 'boolean') ||
+    (item.acceptNewRuns !== undefined && typeof item.acceptNewRuns !== 'boolean') ||
     (item.acceptanceCriteriaFieldId !== undefined &&
       (typeof item.acceptanceCriteriaFieldId !== 'string' || item.acceptanceCriteriaFieldId === '')) ||
     !isRecord(projectBriefs)
@@ -1050,6 +1222,8 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
     teamId,
     revision,
     leaseMinutes,
+    // Rows saved before the switch existed accept new runs.
+    acceptNewRuns: item.acceptNewRuns !== false,
     allowTakeoverAfterLeaseExpiry: item.allowTakeoverAfterLeaseExpiry,
     readyStatusIds,
     resumableStatusIds,
@@ -1059,6 +1233,7 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
     projectBriefs: briefs,
     fileFailedRunsToTriage: item.fileFailedRunsToTriage === true,
     fileStalledRunsToTriage: item.fileStalledRunsToTriage === true,
+    notifyAssigneeOfRunEvents: item.notifyAssigneeOfRunEvents === true,
     updatedAt: storedTimestamp(item, 'updatedAt'),
     updatedBy: storedString(item, 'updatedBy'),
   }
@@ -1153,16 +1328,116 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
-  async getSettings(directoryId: string, teamId: string): Promise<AgentSettings> {
+  async getSettings(directoryId: string, teamId: string): Promise<ResolvedAgentSettings> {
+    const [response, defaults] = await Promise.all([
+      this.#client.send(new GetCommand({
+        TableName: this.#tableName,
+        Key: { directoryTeamId: createAgentRunPartition(directoryId, teamId), recordKey: settingsRecordKey },
+        ConsistentRead: true,
+      })),
+      this.getWorkspaceAgentDefaults(directoryId),
+    ])
+    const item = response.Item
+    if (item !== undefined && item.entityType !== 'agent-settings') throw createAgentRunIntegrityError()
+    const settings = item === undefined ? createDefaultAgentSettings(teamId) : readStoredSettings(item, directoryId, teamId)
+    return applyWorkspaceAgentDefaults(settings, defaults)
+  }
+
+  /** @inheritdoc */
+  async getWorkspaceAgentDefaults(directoryId: string): Promise<WorkspaceAgentDefaults> {
     const response = await this.#client.send(new GetCommand({
       TableName: this.#tableName,
-      Key: { directoryTeamId: createAgentRunPartition(directoryId, teamId), recordKey: settingsRecordKey },
+      Key: { directoryTeamId: createWorkspaceAgentPartition(directoryId), recordKey: workspaceDefaultsRecordKey },
       ConsistentRead: true,
     }))
     const item = response.Item
-    if (item === undefined) return createDefaultAgentSettings(teamId)
-    if (item.entityType !== 'agent-settings') throw createAgentRunIntegrityError()
-    return readStoredSettings(item, directoryId, teamId)
+    if (item === undefined) return createDefaultWorkspaceAgentDefaults()
+    if (item.entityType !== 'agent-defaults') throw createAgentRunIntegrityError()
+    return readStoredWorkspaceDefaults(item, directoryId)
+  }
+
+  /** @inheritdoc */
+  async saveWorkspaceAgentDefaults(
+    directoryId: string,
+    update: ValidatedWorkspaceAgentDefaultsUpdate,
+    actorMemberKey: string,
+    now: Date,
+    mutationKey: string,
+    extraItems: readonly AgentRunTransactItem[],
+  ): Promise<WorkspaceAgentDefaults> {
+    const defaults = createSavedWorkspaceAgentDefaults(update, actorMemberKey, now)
+    const partition = createWorkspaceAgentPartition(directoryId)
+    try {
+      await this.#client.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.#tableName,
+              Item: {
+                directoryTeamId: partition,
+                recordKey: workspaceDefaultsRecordKey,
+                entityType: 'agent-defaults',
+                workspaceId: directoryId,
+                ...defaults,
+              },
+              ConditionExpression: update.expectedRevision === 0 ? 'attribute_not_exists(recordKey)' : '#revision = :expectedRevision',
+              ...(update.expectedRevision === 0
+                ? {}
+                : {
+                    ExpressionAttributeNames: { '#revision': 'revision' },
+                    ExpressionAttributeValues: { ':expectedRevision': update.expectedRevision },
+                  }),
+            },
+          },
+          {
+            // A durable receipt per key: a committed key may only ever replay the save that used it.
+            Put: {
+              TableName: this.#tableName,
+              Item: {
+                directoryTeamId: partition,
+                recordKey: workspaceDefaultsMutationRecordKey(mutationKey),
+                entityType: 'agent-defaults-mutation',
+                workspaceId: directoryId,
+                ...defaults,
+              },
+              ConditionExpression: 'attribute_not_exists(recordKey)',
+            },
+          },
+          ...extraItems,
+        ],
+      }))
+    } catch (error) {
+      if (isLeadingConditionalFailure(error, 2)) {
+        const receipt = await this.#readWorkspaceDefaultsReceipt(directoryId, mutationKey)
+        if (receipt === undefined) {
+          throw new AgentRunError('conflict', 'Workspace agent defaults changed. Reload them before saving.', {
+            pointer: '/expectedRevision',
+          })
+        }
+        if (isSameWorkspaceDefaultsSave(receipt, update)) return receipt
+        throw new AgentRunError('conflict', 'This Idempotency-Key was already used for a different defaults save.')
+      }
+      throw error
+    }
+    return defaults
+  }
+
+  /**
+   * Reads the Workspace defaults an earlier save with this key committed.
+   * @param directoryId - Workspace ID.
+   * @param mutationKey - Opaque key of the save.
+   * @returns The defaults that save committed, or undefined when no save used the key.
+   */
+  async #readWorkspaceDefaultsReceipt(directoryId: string, mutationKey: string): Promise<WorkspaceAgentDefaults | undefined> {
+    const response = await this.#client.send(new GetCommand({
+      TableName: this.#tableName,
+      Key: { directoryTeamId: createWorkspaceAgentPartition(directoryId), recordKey: workspaceDefaultsMutationRecordKey(mutationKey) },
+      ConsistentRead: true,
+    }))
+    const item = response.Item
+    if (item === undefined) return undefined
+    if (item.entityType !== 'agent-defaults-mutation') throw createAgentRunIntegrityError()
+    return readStoredWorkspaceDefaults(item, directoryId)
   }
 
   /** @inheritdoc */
@@ -1189,8 +1464,8 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
                 entityType: 'agent-settings',
                 workspaceId: directoryId,
                 ...settings,
-                // Lists the Team for the Triage worker only while it files runs.
-                ...(settings.fileFailedRunsToTriage || settings.fileStalledRunsToTriage
+                // Lists the Team for the Triage worker only while it files runs or notifies of stalls.
+                ...(settings.fileFailedRunsToTriage || settings.fileStalledRunsToTriage || settings.notifyAssigneeOfRunEvents
                   ? { triageIndexPartition: triageTeamPartition, triageIndexSortKey: partition }
                   : {}),
               },
@@ -1637,6 +1912,72 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
+  async getRunReport(run: StoredAgentRun, sequence: number): Promise<StoredAgentRunReport | undefined> {
+    if (!Number.isSafeInteger(sequence) || sequence < 1 || sequence > run.reportCount) return undefined
+    const partition = createAgentRunPartition(run.directoryId, run.teamId)
+    const prefix = reportRecordKeyPrefix(run.workItemId)
+    // Report keys sort by creation time, and every report of the run was written between its start and
+    // its last report, so only that range is read. '~' sorts after every run ID character.
+    const lastReportAt = run.lastReportAt ?? run.startedAt
+    // A resumed run's start can sit a few milliseconds after the clock when its predecessor started
+    // late, so the range starts a margin earlier; the filter keeps only this run's report.
+    const from = new Date(Date.parse(run.startedAt) - reportLookupStartMarginMilliseconds).toISOString()
+    let next: Record<string, unknown> | undefined
+    do {
+      const response = await this.#client.send(new QueryCommand({
+        TableName: this.#tableName,
+        KeyConditionExpression: '#directoryTeamId = :partition AND #recordKey BETWEEN :from AND :to',
+        FilterExpression: '#runId = :runId AND #sequence = :sequence',
+        ExpressionAttributeNames: {
+          '#directoryTeamId': 'directoryTeamId',
+          '#recordKey': 'recordKey',
+          '#runId': 'runId',
+          '#sequence': 'sequence',
+        },
+        ExpressionAttributeValues: {
+          ':partition': partition,
+          ':from': `${prefix}${from}`,
+          ':to': `${prefix}${lastReportAt}#~`,
+          ':runId': run.runId,
+          ':sequence': sequence,
+        },
+        ConsistentRead: true,
+        ExclusiveStartKey: next,
+      }))
+      const item = response.Items?.[0]
+      if (item !== undefined) {
+        return parseReport(item, { directoryId: run.directoryId, teamId: run.teamId, workItemId: run.workItemId })
+      }
+      next = response.LastEvaluatedKey
+    } while (next !== undefined)
+    return undefined
+  }
+
+  /** @inheritdoc */
+  createReportAnswerItems(report: StoredAgentRunReport, answer: AgentRunReportAnswer): AgentRunTransactItem[] {
+    if (!isAgentRunQuestionReport(report)) {
+      throw new TypeError('createReportAnswerItems requires a blocker or handoff report.')
+    }
+    const previous = report.answer
+    return [{
+      Update: {
+        TableName: this.#tableName,
+        Key: { directoryTeamId: createAgentRunPartition(report.directoryId, report.teamId), recordKey: reportRecordKey(report) },
+        UpdateExpression: 'SET #answer = :answer',
+        ConditionExpression: previous === undefined
+          ? 'attribute_exists(#recordKey) AND #commentId = :commentId AND attribute_not_exists(#answer)'
+          : 'attribute_exists(#recordKey) AND #commentId = :commentId AND #answer.#commentId = :previousCommentId',
+        ExpressionAttributeNames: { '#answer': 'answer', '#recordKey': 'recordKey', '#commentId': 'commentId' },
+        ExpressionAttributeValues: {
+          ':answer': { ...answer },
+          ':commentId': report.commentId,
+          ...(previous === undefined ? {} : { ':previousCommentId': previous.commentId }),
+        },
+      },
+    }]
+  }
+
+  /** @inheritdoc */
   createReportItems(run: StoredAgentRun, report: StoredAgentRunReport, now: Date): AgentRunTransactItem[] {
     if (
       run.state !== 'active' ||
@@ -1794,11 +2135,36 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
-  createSettingsRevisionCheck(directoryId: string, teamId: string, revision: number): AgentRunTransactItem {
-    const conditionCheck = {
-      TableName: this.#tableName,
-      Key: { directoryTeamId: createAgentRunPartition(directoryId, teamId), recordKey: settingsRecordKey },
-    }
+  createSettingsRevisionChecks(
+    directoryId: string,
+    teamId: string,
+    settings: Pick<ResolvedAgentSettings, 'revision' | 'workspaceDefaultsRevision'>,
+  ): AgentRunTransactItem[] {
+    const teamCheck = this.#createRevisionCheck(
+      { directoryTeamId: createAgentRunPartition(directoryId, teamId), recordKey: settingsRecordKey },
+      settings.revision,
+    )
+    if (settings.revision !== 0) return [teamCheck]
+    // The Team inherits the Workspace lease, take over, and acceptance criteria values.
+    return [
+      teamCheck,
+      this.#createRevisionCheck(
+        { directoryTeamId: createWorkspaceAgentPartition(directoryId), recordKey: workspaceDefaultsRecordKey },
+        settings.workspaceDefaultsRevision,
+      ),
+    ]
+  }
+
+  /**
+   * Builds a check that a revisioned row is still at a revision, where `0` means the row is absent.
+   * @param key - Row key.
+   * @param key.directoryTeamId - Partition key value.
+   * @param key.recordKey - Sort key value.
+   * @param revision - Revision that was read.
+   * @returns ConditionCheck on the row.
+   */
+  #createRevisionCheck(key: { directoryTeamId: string, recordKey: string }, revision: number): AgentRunTransactItem {
+    const conditionCheck = { TableName: this.#tableName, Key: key }
     return {
       ConditionCheck: revision === 0
         ? { ...conditionCheck, ConditionExpression: 'attribute_not_exists(#recordKey)', ExpressionAttributeNames: { '#recordKey': 'recordKey' } }

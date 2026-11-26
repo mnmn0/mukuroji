@@ -22,6 +22,8 @@ import {
   type AgentSettings,
   type StartAgentRunRequest,
   type UpdateAgentSettingsRequest,
+  type UpdateWorkspaceAgentDefaultsRequest,
+  type WorkspaceAgentDefaults,
 } from '@mukuroji/contracts'
 import { AgentRunError } from './agent-run-error'
 
@@ -585,6 +587,7 @@ export function createDefaultAgentSettings(teamId: string): AgentSettings {
     teamId,
     revision: 0,
     leaseMinutes: AGENT_RUN_DEFAULT_LEASE_MINUTES,
+    acceptNewRuns: true,
     allowTakeoverAfterLeaseExpiry: false,
     readyStatusIds: [],
     resumableStatusIds: [],
@@ -592,6 +595,7 @@ export function createDefaultAgentSettings(teamId: string): AgentSettings {
     projectBriefs: {},
     fileFailedRunsToTriage: false,
     fileStalledRunsToTriage: false,
+    notifyAssigneeOfRunEvents: false,
   }
 }
 
@@ -686,22 +690,13 @@ function readProjectBriefs(value: unknown): Record<string, string> {
 }
 
 /**
- * Validates an Agent settings update body.
+ * Reads the lease length, take over switch, and acceptance criteria switch shared by Team settings
+ * and Workspace defaults.
  *
  * @param value - Untrusted JSON body.
- * @returns Validated update.
+ * @returns The lease length in minutes.
  */
-export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSettingsUpdate {
-  if (!isRecord(value)) throw new AgentRunError('validation_failed', 'Agent settings body is required.')
-  assertKnownFields(
-    value,
-    [
-      'expectedRevision', 'leaseMinutes', 'allowTakeoverAfterLeaseExpiry', 'readyStatusIds', 'resumableStatusIds',
-      'requireAcceptanceCriteria', 'acceptanceCriteriaFieldId', 'brief', 'projectBriefs',
-      'fileFailedRunsToTriage', 'fileStalledRunsToTriage',
-    ],
-    'Agent settings',
-  )
+function readLeaseAndTakeover(value: Record<string, unknown>): number {
   const leaseMinutes = value.leaseMinutes
   if (
     typeof leaseMinutes !== 'number' ||
@@ -725,7 +720,28 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
       pointer: '/requireAcceptanceCriteria',
     })
   }
-  for (const field of ['fileFailedRunsToTriage', 'fileStalledRunsToTriage'] as const) {
+  return leaseMinutes
+}
+
+/**
+ * Validates an Agent settings update body.
+ *
+ * @param value - Untrusted JSON body.
+ * @returns Validated update.
+ */
+export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSettingsUpdate {
+  if (!isRecord(value)) throw new AgentRunError('validation_failed', 'Agent settings body is required.')
+  assertKnownFields(
+    value,
+    [
+      'expectedRevision', 'leaseMinutes', 'allowTakeoverAfterLeaseExpiry', 'readyStatusIds', 'resumableStatusIds',
+      'requireAcceptanceCriteria', 'acceptanceCriteriaFieldId', 'brief', 'projectBriefs',
+      'fileFailedRunsToTriage', 'fileStalledRunsToTriage', 'notifyAssigneeOfRunEvents', 'acceptNewRuns',
+    ],
+    'Agent settings',
+  )
+  const leaseMinutes = readLeaseAndTakeover(value)
+  for (const field of ['fileFailedRunsToTriage', 'fileStalledRunsToTriage', 'notifyAssigneeOfRunEvents', 'acceptNewRuns'] as const) {
     if (value[field] !== undefined && typeof value[field] !== 'boolean') {
       throw new AgentRunError('validation_failed', `${field} must be a boolean.`, { pointer: `/${field}` })
     }
@@ -739,7 +755,7 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
   return {
     expectedRevision: readRevision(value.expectedRevision, 'expectedRevision', true),
     leaseMinutes,
-    allowTakeoverAfterLeaseExpiry: value.allowTakeoverAfterLeaseExpiry,
+    allowTakeoverAfterLeaseExpiry: value.allowTakeoverAfterLeaseExpiry === true,
     readyStatusIds: readStatusIds(value.readyStatusIds, 'readyStatusIds', AGENT_SETTINGS_MAX_READY_STATUSES),
     resumableStatusIds: readStatusIds(value.resumableStatusIds, 'resumableStatusIds', AGENT_SETTINGS_MAX_RESUMABLE_STATUSES),
     requireAcceptanceCriteria: value.requireAcceptanceCriteria === true,
@@ -748,6 +764,8 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
     projectBriefs,
     fileFailedRunsToTriage: value.fileFailedRunsToTriage === true,
     fileStalledRunsToTriage: value.fileStalledRunsToTriage === true,
+    notifyAssigneeOfRunEvents: value.notifyAssigneeOfRunEvents === true,
+    acceptNewRuns: value.acceptNewRuns !== false,
   }
 }
 
@@ -797,6 +815,10 @@ export type ValidatedAgentSettingsUpdate = UpdateAgentSettingsRequest & {
   fileFailedRunsToTriage: boolean
   /** Whether stalled runs are filed to Triage. */
   fileStalledRunsToTriage: boolean
+  /** Whether the assignee is notified of blocker and handoff reports, failed finishes, and stalls. */
+  notifyAssigneeOfRunEvents: boolean
+  /** Whether agents may start, resume, or take over runs. */
+  acceptNewRuns: boolean
   /**
    * Projects whose briefs were kept from the saved settings because the editor cannot see them;
    * a retry is not compared on these briefs.
@@ -824,6 +846,7 @@ export function createSavedAgentSettings(
     teamId,
     revision: update.expectedRevision + 1,
     leaseMinutes: update.leaseMinutes,
+    acceptNewRuns: update.acceptNewRuns,
     allowTakeoverAfterLeaseExpiry: update.allowTakeoverAfterLeaseExpiry,
     readyStatusIds: [...update.readyStatusIds],
     resumableStatusIds: [...update.resumableStatusIds],
@@ -833,7 +856,126 @@ export function createSavedAgentSettings(
     projectBriefs: { ...update.projectBriefs },
     fileFailedRunsToTriage: update.fileFailedRunsToTriage,
     fileStalledRunsToTriage: update.fileStalledRunsToTriage,
+    notifyAssigneeOfRunEvents: update.notifyAssigneeOfRunEvents,
     updatedAt: now.toISOString(),
     updatedBy: actorMemberKey,
   }
+}
+
+/**
+ * Returns the Workspace agent defaults before any were saved, which match the built-in Team defaults.
+ *
+ * @returns Defaults at revision 0.
+ */
+export function createDefaultWorkspaceAgentDefaults(): WorkspaceAgentDefaults {
+  return {
+    schemaVersion: AGENT_SETTINGS_SCHEMA_VERSION,
+    revision: 0,
+    leaseMinutes: AGENT_RUN_DEFAULT_LEASE_MINUTES,
+    allowTakeoverAfterLeaseExpiry: false,
+    requireAcceptanceCriteria: false,
+  }
+}
+
+/** Validated Workspace defaults save with every optional field resolved. */
+export type ValidatedWorkspaceAgentDefaultsUpdate = UpdateWorkspaceAgentDefaultsRequest & {
+  /** Whether only Work Items with acceptance criteria are ready. */
+  requireAcceptanceCriteria: boolean
+}
+
+/**
+ * Validates a Workspace agent defaults update body.
+ *
+ * @param value - Untrusted JSON body.
+ * @returns Validated update.
+ */
+export function readUpdateWorkspaceAgentDefaultsRequest(value: unknown): ValidatedWorkspaceAgentDefaultsUpdate {
+  if (!isRecord(value)) throw new AgentRunError('validation_failed', 'Workspace agent defaults body is required.')
+  assertKnownFields(
+    value,
+    ['expectedRevision', 'leaseMinutes', 'allowTakeoverAfterLeaseExpiry', 'requireAcceptanceCriteria', 'brief'],
+    'Workspace agent defaults',
+  )
+  const leaseMinutes = readLeaseAndTakeover(value)
+  const brief = readBrief(value.brief, '/brief')
+  return {
+    expectedRevision: readRevision(value.expectedRevision, 'expectedRevision', true),
+    leaseMinutes,
+    allowTakeoverAfterLeaseExpiry: value.allowTakeoverAfterLeaseExpiry === true,
+    requireAcceptanceCriteria: value.requireAcceptanceCriteria === true,
+    ...(brief === undefined ? {} : { brief }),
+  }
+}
+
+/**
+ * Builds the Workspace defaults a save commits.
+ *
+ * @param update - Validated save.
+ * @param actorMemberKey - Editor.
+ * @param now - Save time.
+ * @returns Defaults at the next revision.
+ */
+export function createSavedWorkspaceAgentDefaults(
+  update: ValidatedWorkspaceAgentDefaultsUpdate,
+  actorMemberKey: string,
+  now: Date,
+): WorkspaceAgentDefaults {
+  return {
+    schemaVersion: AGENT_SETTINGS_SCHEMA_VERSION,
+    revision: update.expectedRevision + 1,
+    leaseMinutes: update.leaseMinutes,
+    allowTakeoverAfterLeaseExpiry: update.allowTakeoverAfterLeaseExpiry,
+    requireAcceptanceCriteria: update.requireAcceptanceCriteria,
+    ...(update.brief === undefined ? {} : { brief: update.brief }),
+    updatedAt: now.toISOString(),
+    updatedBy: actorMemberKey,
+  }
+}
+
+/**
+ * Team settings with the Workspace defaults applied, as the server uses them. The Workspace defaults
+ * revision stays on the server: a run of a Team without saved settings conditions its transaction on
+ * it, so defaults saved meanwhile are not missed. API responses drop it.
+ */
+export type ResolvedAgentSettings = AgentSettings & {
+  /** Revision of the Workspace defaults the settings were resolved from; `0` when none were saved. */
+  workspaceDefaultsRevision: number
+}
+
+/**
+ * Applies the Workspace defaults to a Team's settings. A Team that never saved settings uses the
+ * Workspace lease, take over, and acceptance criteria values; every Team sees the Workspace brief,
+ * which agents receive when the Team has no brief of its own.
+ *
+ * @param settings - Team settings as stored, or the built-in defaults at revision 0.
+ * @param defaults - Workspace defaults.
+ * @returns The settings the Team uses.
+ */
+export function applyWorkspaceAgentDefaults(
+  settings: AgentSettings,
+  defaults: WorkspaceAgentDefaults,
+): ResolvedAgentSettings {
+  const inherited = settings.revision === 0
+    ? {
+        leaseMinutes: defaults.leaseMinutes,
+        allowTakeoverAfterLeaseExpiry: defaults.allowTakeoverAfterLeaseExpiry,
+        requireAcceptanceCriteria: defaults.requireAcceptanceCriteria,
+      }
+    : {}
+  return {
+    ...settings,
+    ...inherited,
+    ...(defaults.brief === undefined ? {} : { workspaceBrief: defaults.brief }),
+    workspaceDefaultsRevision: defaults.revision,
+  }
+}
+
+/**
+ * Returns the brief agents receive for a Team: its own brief, or else the Workspace default brief.
+ *
+ * @param settings - Team settings with the Workspace defaults applied.
+ * @returns The brief, if any.
+ */
+export function resolveTeamAgentBrief(settings: Pick<AgentSettings, 'brief' | 'workspaceBrief'>): string | undefined {
+  return settings.brief ?? settings.workspaceBrief
 }

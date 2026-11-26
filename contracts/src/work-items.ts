@@ -787,6 +787,11 @@ export type UpdateWorkItemInput = WorkItemPatch & {
    * 読み込み時点の Work Item revision です。
    */
   expectedRevision: number
+  /**
+   * Team manager override of the completion Gate, sent with an update that completes the Work
+   * Item while a required condition is unmet. Only the Team API accepts it; the reason is audited.
+   */
+  completionGateOverride?: import('./work-item-completion-gate').WorkItemCompletionGateOverrideRequest
 }
 
 /**

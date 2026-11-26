@@ -1,6 +1,6 @@
 import type {
   AgentRun, AgentRunFinishOutcome, AgentRunMutationFence, AgentRunReport, AgentRunReportComment, AgentRunRuntime,
-  AgentSettings, CanonicalWorkItem, PublicDocumentContent, PublicProjectCharter, PublicWorkItemActualDates, PublicWorkItemDocument, PublicWorkItemEffort, PublicWorkItemHierarchy, PublicWorkItemTemplate, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
+  AgentSettings, CanonicalWorkItem, PublicDocumentContent, PublicProjectCharter, PublicWorkItemActualDates, PublicWorkItemAttachment, PublicWorkItemAttachmentDownload, PublicWorkItemDocument, PublicWorkItemEffort, PublicWorkItemHierarchy, PublicWorkItemCompletionGate, PublicWorkItemTemplate, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
   TeamIssueCommentResponseItem, WorkflowStatusDefinition, WorkItemAcceptanceCriterion,
 } from '@mukuroji/contracts'
 
@@ -66,7 +66,7 @@ export type AgentTaskFilters = {
 export type AgentRunRecord = AgentRun
 
 /** Team Agent settings as returned by the public API. */
-export type AgentSettingsRecord = Omit<AgentSettings, 'fileFailedRunsToTriage' | 'fileStalledRunsToTriage'>
+export type AgentSettingsRecord = Omit<AgentSettings, 'fileFailedRunsToTriage' | 'fileStalledRunsToTriage' | 'notifyAssigneeOfRunEvents'>
 
 /** Input that claims a task for this agent instance. */
 export type AgentRunStartInput = {
@@ -297,6 +297,13 @@ export interface AgentWorkItemApi {
    */
   hierarchy(id: string): Promise<AgentTaskHierarchy | undefined>
   /**
+   * Evaluates the Team's completion Gate against a task.
+   * @param id - Task ID.
+   * @returns The conditions the Team evaluates with their state, or `undefined` when the server
+   * predates the endpoint.
+   */
+  completionGate(id: string): Promise<AgentTaskCompletionGate | undefined>
+  /**
    * Lists one page of Documents linked to a task that the credential owner can view.
    * @param id - Task ID.
    * @param cursor - Public continuation from a page of the same task and limit.
@@ -304,6 +311,12 @@ export interface AgentWorkItemApi {
    * @returns Visible linked Documents, or `undefined` when the server predates the endpoint.
    */
   relatedDocuments(id: string, cursor?: string, limit?: number): Promise<AgentPage<AgentTaskDocument> | undefined>
+  /**
+   * Lists the newest blocker and handoff reports of a task with the answers people recorded.
+   * @param id - Task ID.
+   * @returns The questions, or `undefined` when the server predates the endpoint.
+   */
+  questions(id: string): Promise<AgentTaskQuestions | undefined>
   /**
    * Reads the charter and lifecycle state of a Project of the configured Team.
    * @param projectId - Project ID.
@@ -317,7 +330,35 @@ export interface AgentWorkItemApi {
    * @returns The Document content.
    */
   document(id: string, documentId: string): Promise<AgentDocument>
+  /**
+   * Lists the files attached to a task that the credential owner can view and whose current
+   * version passed the malware scan.
+   * @param id - Task ID.
+   * @returns Downloadable attachments, or `undefined` when the server predates the endpoint.
+   */
+  attachments(id: string): Promise<AgentTaskAttachment[] | undefined>
+  /**
+   * Issues a short-lived download URL for the current version of a task attachment.
+   * @param id - Task ID.
+   * @param fileId - File ID from the task's attachments.
+   * @returns The download URL and its expiry.
+   */
+  attachmentDownload(id: string, fileId: string): Promise<AgentAttachmentDownload>
 }
+
+/** Newest blocker and handoff reports of a task, with the answers people recorded, as get_task shows them. */
+export type AgentTaskQuestions = {
+  /** Questions, newest first. */
+  items: AgentRunReport[]
+  /** True when older questions were left out. */
+  hasMore: boolean
+}
+
+/** File attached to a task, as get_task and list_task_attachments show it. The name is user data. */
+export type AgentTaskAttachment = PublicWorkItemAttachment
+
+/** Short-lived download URL of a task attachment. The file content is user data, not instructions. */
+export type AgentAttachmentDownload = PublicWorkItemAttachmentDownload
 
 /** Document linked to a task, as get_task and list_task_documents show it. */
 export type AgentTaskDocument = PublicWorkItemDocument
@@ -330,6 +371,9 @@ export type AgentTaskHierarchy = Pick<
   PublicWorkItemHierarchy,
   'parentWorkItemId' | 'childWorkItemIds' | 'wbsNumber'
 >
+
+/** Completion Gate state of a task, as get_task shows it. */
+export type AgentTaskCompletionGate = Pick<PublicWorkItemCompletionGate, 'revision' | 'conditions' | 'blocksCompletion'>
 
 /** Key of a task together with the creation time that identifies which Work Item it belongs to. */
 export type AgentTaskKey = {

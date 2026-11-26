@@ -122,6 +122,7 @@ import {
   secretDigestsEqual,
 } from '../../domain/platform-identity'
 import { WEBHOOK_MAX_ATTEMPTS } from '../../domain/webhook-policy'
+import { externalIdMatchKey } from '../../domain/external-id-match-key'
 import { createWebhookSignature } from '../../domain/webhook-signature'
 import {
   containsControlCharacter,
@@ -4373,6 +4374,7 @@ abstract class ExternalLinkCapabilityStorage extends ConnectorCapabilityStorage 
     const claimRecordKey = createExternalLinkClaimRecordKey(
       installationId,
       resourceType,
+      installation.provider,
       externalId,
     )
     const claimRecord = createRecord(
@@ -4788,6 +4790,7 @@ abstract class ExternalLinkCapabilityStorage extends ConnectorCapabilityStorage 
       createExternalLinkClaimRecordKey(
         link.installationId,
         link.resourceType,
+        link.provider,
         link.externalId,
       ),
       createExternalLinkIndexRecordKeys(link),
@@ -8235,13 +8238,27 @@ function createWorkItemLinkFenceRecordKey(teamId: string, workItemId: string) {
   return `WORKITEMLINKS#${digestText(`${teamId}\0${workItemId}`)}`
 }
 
+/**
+ * Builds the key of the record that lets one link own an external resource of an installation. The
+ * resource is compared as its provider names it, so a GitHub issue claimed as `acme/app#12` is
+ * already taken for `Acme/App#12`.
+ *
+ * @param installationId - Connector installation ID.
+ * @param resourceType - Linked resource type.
+ * @param provider - Connector provider of the installation; a link stored without one claimed its
+ *   resource by the ID as written.
+ * @param externalId - External resource ID.
+ * @returns The claim record key.
+ */
 function createExternalLinkClaimRecordKey(
   installationId: string,
   resourceType: ExternalWorkItemLink['resourceType'],
+  provider: string | undefined,
   externalId: string,
 ) {
+  const claimedId = provider === undefined ? externalId : externalIdMatchKey(provider, externalId)
   return `EXTERNALCLAIM#${digestText(
-    `${installationId}\0${resourceType}\0${externalId}`,
+    `${installationId}\0${resourceType}\0${claimedId}`,
   )}`
 }
 

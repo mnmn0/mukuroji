@@ -12,6 +12,9 @@ import type {
   AiAssistanceAuthorizationState,
   AiAssistanceCustomFieldDefinition,
   AiAssistanceGenerationBudgetReservation,
+  AiAssistanceMonthlyBudgetCheck,
+  AiAssistanceMonthlyUsage,
+  RecordAiAssistanceGenerationUsageInput,
   AiAssistanceGenerationRequestObservation,
   AiAssistancePolicyAuditInput,
   AiAssistancePlanningDependency,
@@ -194,6 +197,16 @@ type HarnessConfiguration = {
   isModelReady?: (workspaceId: string, modelId: string) => Promise<boolean>
   /** Resolves the provider recorded for the selected model. */
   resolveModelProvider?: (modelId: string) => 'bedrock' | 'anthropic' | 'openai'
+  /** Monthly caps added to the stored Workspace policy. */
+  monthlyLimits?: Pick<AiAssistancePolicy, 'monthlyTokenLimit' | 'monthlyCostLimitUsd'>
+  /** Deployment-wide AI switch read from runtime control. */
+  isDeploymentAiAssistanceEnabled?: () => Promise<boolean>
+  /** Recorded month usage returned by the fake store. */
+  monthlyUsage?: AiAssistanceMonthlyUsage
+  /** Captures usage counted into the monthly totals. */
+  recordedUsage?: RecordAiAssistanceGenerationUsageInput[]
+  /** Makes counting usage fail. */
+  recordUsageError?: unknown
 }
 
 /** Creates a service harness with deterministic fake ports. */
@@ -229,6 +242,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
   let budgetLimited = false
   let budgetReservationCount = 0
   let lastBudget: AiAssistanceGenerationBudgetReservation | undefined
+  let lastMonthlyBudget: AiAssistanceMonthlyBudgetCheck | undefined
   let authorizationState: AiAssistanceAuthorizationState = { current: true }
   let authorizationCheckCount = 0
   const gatewayInputs: AiModelGenerationInput[] = []
@@ -300,6 +314,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
         }
         budgetReservationCount += 1
         lastBudget = input.budget
+        lastMonthlyBudget = input.monthlyBudget
         reservationKey = input.idempotencyKey
         reservationFingerprint = input.inputFingerprint
         reservationGenerationId = input.generationId
@@ -487,9 +502,21 @@ function createHarness(configuration: HarnessConfiguration = {}) {
       }
       return {
         ...createPolicy(),
+        ...configuration.monthlyLimits,
         enabled: policyEnabled,
         retentionDays: policyRetentionDays,
         revision: policyRevision,
+      }
+    },
+    async recordGenerationUsage(input) {
+      if (configuration.recordUsageError !== undefined) throw configuration.recordUsageError
+      configuration.recordedUsage?.push(input)
+    },
+    async readMonthlyUsage() {
+      return configuration.monthlyUsage ?? {
+        totals: { generations: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, costUnavailableGenerations: 0 },
+        tasks: [],
+        members: [],
       }
     },
     async putPolicy(_workspaceId, policy) {
@@ -627,6 +654,9 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     ...(configuration.observability === undefined
       ? {}
       : { observability: configuration.observability }),
+    ...(configuration.isDeploymentAiAssistanceEnabled === undefined
+      ? {}
+      : { isDeploymentAiAssistanceEnabled: configuration.isDeploymentAiAssistanceEnabled }),
     ...(configuration.policyAuditRecords === undefined
       ? {}
       : {
@@ -747,6 +777,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     decisionCommitFences,
     budgetReservationCount: () => budgetReservationCount,
     lastBudget: () => lastBudget,
+    lastMonthlyBudget: () => lastMonthlyBudget,
     reservationLeaseExpiresAt: () => reservationLeaseExpiresAt,
     policyPutCalls: () => policyPutCalls,
     resolveContextCount: () => resolveContextCount,
@@ -825,6 +856,153 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     },
   }
 }
+
+describe('monthly AI usage and the deployment-wide switch (#414)', () => {
+  test('counts the provider usage of a successful generation into its month', async () => {
+    const recordedUsage: RecordAiAssistanceGenerationUsageInput[] = []
+    const harness = createHarness({ recordedUsage })
+
+    await harness.service.generate(createActor(), createSummaryRequest(), harness.authorization, 'usage-key')
+
+    expect(recordedUsage).toEqual([expect.objectContaining({
+      workspaceId: 'workspace-1',
+      memberId: 'operator-1',
+      idempotencyKey: 'usage-key',
+      task: 'summary',
+      month: '2026-08',
+      usage: expect.objectContaining({ inputTokens: 10, outputTokens: 20 }),
+    })])
+  })
+
+  test('keeps the generation when counting its usage fails and reports the miss', async () => {
+    const misses: string[] = []
+    const harness = createHarness({
+      recordUsageError: new Error('counter unavailable'),
+      observability: {
+        recordGenerationRequest() {},
+        recordProviderAttempt() {},
+        recordDecision() {},
+        recordUsageAccountingFailure(observation) {
+          misses.push(observation.task)
+        },
+      },
+    })
+
+    const generation = await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'usage-failure-key',
+    )
+
+    expect(generation.id).toBeString()
+    expect(misses).toEqual(['summary'])
+  })
+
+  test('checks the monthly caps of the policy with the reservation', async () => {
+    const capped = createHarness({ monthlyLimits: { monthlyTokenLimit: 5_000, monthlyCostLimitUsd: 20 } })
+    await capped.service.generate(createActor(), createSummaryRequest(), capped.authorization, 'capped-key')
+    expect(capped.lastMonthlyBudget()).toEqual({ month: '2026-08', tokenLimit: 5_000, costLimitUsd: 20 })
+
+    const uncapped = createHarness()
+    await uncapped.service.generate(createActor(), createSummaryRequest(), uncapped.authorization, 'uncapped-key')
+    expect(uncapped.lastMonthlyBudget()).toBeUndefined()
+  })
+
+  test('refuses a new generation while the deployment-wide switch is off', async () => {
+    const harness = createHarness({ isDeploymentAiAssistanceEnabled: async () => false })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'paused-key',
+    )).rejects.toMatchObject({ category: 'authorization', code: 'AiAssistanceDeploymentPaused' })
+    expect(harness.budgetReservationCount()).toBe(0)
+    expect(harness.gatewayInputs).toHaveLength(0)
+  })
+
+  test('summarizes the month for a manager with the warning and cap state', async () => {
+    const totals = { generations: 4, inputTokens: 3_000, outputTokens: 1_000, costUsd: 9, costUnavailableGenerations: 0 }
+    const harness = createHarness({
+      monthlyLimits: { monthlyTokenLimit: 5_000, monthlyCostLimitUsd: 9 },
+      isDeploymentAiAssistanceEnabled: async () => false,
+      monthlyUsage: {
+        totals,
+        tasks: [
+          { ...totals, task: 'triage', costUsd: 1 },
+          { ...totals, task: 'summary', costUsd: 8 },
+        ],
+        members: [{ ...totals, memberId: 'operator-1' }],
+      },
+    })
+
+    const summary = await harness.service.getUsage(createActor(), '2026-08')
+
+    expect(summary).toMatchObject({
+      month: '2026-08',
+      monthlyTokenLimit: 5_000,
+      monthlyCostLimitUsd: 9,
+      warning: true,
+      exhausted: true,
+      deploymentPaused: true,
+    })
+    expect(summary.tasks.map((task) => task.task)).toEqual(['summary', 'triage'])
+  })
+
+  test('warns at 80% of a cap before it is reached', async () => {
+    const harness = createHarness({
+      monthlyLimits: { monthlyTokenLimit: 10_000 },
+      monthlyUsage: {
+        totals: { generations: 1, inputTokens: 7_000, outputTokens: 1_000, costUsd: 0, costUnavailableGenerations: 1 },
+        tasks: [],
+        members: [],
+      },
+    })
+
+    expect(await harness.service.getUsage(createActor())).toMatchObject({
+      month: '2026-08',
+      warning: true,
+      exhausted: false,
+      deploymentPaused: false,
+    })
+  })
+
+  test('limits usage to policy managers and well-formed months', async () => {
+    const harness = createHarness()
+
+    await expect(harness.service.getUsage({ ...createActor(), canManagePolicy: false }))
+      .rejects.toMatchObject({ category: 'authorization' })
+    await expect(harness.service.getUsage(createActor(), '2026-13'))
+      .rejects.toMatchObject({ code: 'InvalidAiAssistanceRequest' })
+  })
+
+  test('saves and validates the monthly caps of a policy', async () => {
+    const harness = createHarness()
+    const base = {
+      enabled: true,
+      allowedModelIds: ['model-1'],
+      defaultModelId: 'model-1',
+      enabledTasks: ['summary' as const],
+      retentionDays: 30,
+      expectedRevision: 0,
+    }
+
+    expect(await harness.service.updatePolicy(createActor(), {
+      ...base,
+      monthlyTokenLimit: 2_000_000,
+      monthlyCostLimitUsd: 150.25,
+    }, { isCurrent: async () => true })).toMatchObject({
+      monthlyTokenLimit: 2_000_000,
+      monthlyCostLimitUsd: 150.25,
+    })
+    for (const caps of [{ monthlyTokenLimit: 0 }, { monthlyTokenLimit: 1.5 }, { monthlyCostLimitUsd: 0.001 }]) {
+      await expect(harness.service.updatePolicy(createActor(), { ...base, ...caps }, {
+        isCurrent: async () => true,
+      })).rejects.toMatchObject({ code: 'InvalidAiAssistanceRequest' })
+    }
+  })
+})
 
 describe('createAiAssistanceService', () => {
   test('does not expose Workspace policy to a non-manager', async () => {

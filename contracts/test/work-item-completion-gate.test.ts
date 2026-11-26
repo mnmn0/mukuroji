@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import {
+  describeWorkItemCompletionGate,
   evaluateWorkItemCompletionGate,
   hasWorkItemCompletionGateConditions,
   needsWorkItemCompletionGateApprovals,
@@ -55,4 +56,20 @@ test('fails approval conditions closed when approvals are unavailable', () => {
     acceptanceCriteria: [],
     approvalSummary: { ...noApprovals, approvedCount: 1 },
   })).toEqual([])
+})
+
+test('describes met, unmet, and unavailable conditions for a checklist', () => {
+  expect(describeWorkItemCompletionGate(undefined, { acceptanceCriteria: [], approvalSummary: undefined })).toEqual([])
+  expect(describeWorkItemCompletionGate(
+    { acceptanceCriteria: 'required', noPendingApprovals: 'off', humanApproval: 'warn' },
+    { acceptanceCriteria: [{ id: 'a', text: 'Done', satisfied: true }], approvalSummary: undefined },
+  )).toEqual([
+    { condition: 'acceptance-criteria', requirement: 'required', state: 'met' },
+    {
+      condition: 'human-approval',
+      requirement: 'warn',
+      state: 'unavailable',
+      message: 'Approvals could not be read, so the Gate fails closed.',
+    },
+  ])
 })

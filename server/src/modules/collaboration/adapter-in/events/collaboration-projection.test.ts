@@ -42,6 +42,8 @@ import {
   projectCuratedContextSearchEventWithParentFence,
   processCollaborationProjectionBatch,
   projectsSubscribedWatchers,
+  readMemberAccessExpiryNoticeFence,
+  isCurrentMemberAccessExpiryRecipient,
   publishRealtimeInvalidation,
   refreshPlanningScheduledNotificationEvent,
   refreshScheduledNotificationEvent,
@@ -159,6 +161,39 @@ function createRealtimeEnterpriseSnapshot(
 const unscopedRoutingSubject = { eventType: 'comment.created', reasons: ['mention'] }
 
 describe('collaboration projection pure helpers', () => {
+  test('sends an access expiry notice only to a current manager of its Project', () => {
+    const event = {
+      eventType: 'workspace-member.access-expiring', projectId: 'platform', accessExpiryMemberKey: 'guest@example.com',
+    }
+    const guest: ProjectDirectoryItem = {
+      entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'guest@example.com', role: 'viewer',
+    }
+    const directory: ProjectDirectoryItem[] = [
+      { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'lead@example.com', role: 'manager' },
+      { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'former@example.com', role: 'member' },
+      { entryType: 'project-member', teamId: 'core', projectId: 'other', memberKey: 'elsewhere@example.com', role: 'manager' },
+      guest,
+    ]
+
+    expect(isCurrentMemberAccessExpiryRecipient(event, 'Lead@example.com', directory)).toBe(true)
+    expect(isCurrentMemberAccessExpiryRecipient(event, 'former@example.com', directory)).toBe(false)
+    expect(isCurrentMemberAccessExpiryRecipient(event, 'elsewhere@example.com', directory)).toBe(false)
+    expect(isCurrentMemberAccessExpiryRecipient({ eventType: 'comment.created' }, 'former@example.com', directory)).toBe(true)
+    // The expiring member left the Project, or their membership was archived, after the scan.
+    const withoutGuest = directory.filter((item) => item !== guest)
+    expect(isCurrentMemberAccessExpiryRecipient(event, 'lead@example.com', withoutGuest)).toBe(false)
+    expect(isCurrentMemberAccessExpiryRecipient(event, 'lead@example.com', [
+      ...withoutGuest, { ...guest, archivedAt: '2026-11-24T00:00:00.000Z' },
+    ])).toBe(false)
+    // Membership in another Project does not authorize this Project's notice.
+    expect(isCurrentMemberAccessExpiryRecipient(event, 'lead@example.com', [
+      ...withoutGuest, { ...guest, projectId: 'other' },
+    ])).toBe(false)
+    // An event that does not name the expiring member is never sent.
+    expect(isCurrentMemberAccessExpiryRecipient({ ...event, accessExpiryMemberKey: undefined }, 'lead@example.com', directory))
+      .toBe(false)
+  })
+
   test('fans Work Item and Planning update events out to current recipients but not the actor', async () => {
     const keys = [
       'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',
@@ -1841,6 +1876,30 @@ describe('collaboration projection pure helpers', () => {
     })).toMatchObject({ contextItemId: 'context-1', sourceRevision: 4 })
   })
 
+  test('keeps an Agent Run notification for the assignee whose credential the agent used', () => {
+    const event = parseAuditProjectionEvent({
+      eventId: 'evt-agent-blocker',
+      eventType: 'agent-run.reported',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-11-25T12:00:00.000Z',
+      actorUserId: 'member@example.com',
+      entityType: 'agent-run',
+      entityId: 'team/core/agent-run/run-1',
+      metadata: {
+        actorMemberKey: 'member@example.com',
+        teamId: 'core',
+        issueId: 'example',
+        notificationCandidates: [
+          { memberKey: 'member@example.com', reason: 'agent-run-blocker' },
+          { memberKey: 'member@example.com', reason: 'watcher' },
+        ],
+      },
+    })
+    if (!event) throw new Error('The event must parse.')
+    // Only the Agent Run reason survives the actor exclusion.
+    expect(groupNotificationCandidates(event)).toEqual([{ memberKey: 'member@example.com', reasons: ['agent-run-blocker'] }])
+  })
+
   test('parses actor member metadata and preserves suppressed outbox events', () => {
     const event = parseAuditProjectionEvent({
       eventId: 'evt-suppressed',
@@ -3114,6 +3173,154 @@ describe('collaboration projection pure helpers', () => {
     }
   })
 
+  test('drops an access expiry notice whose expiry was cleared or moved after the scan (ADR 0095)', async () => {
+    const keys = [
+      'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',
+      'WORK_ITEMS_TABLE_NAME', 'COLLABORATION_TABLE_NAME', 'PROJECT_DIRECTORY_TABLE_NAME',
+      'PLANNING_TABLE_NAME', 'SYSTEM_ADMIN_GROUPS', 'COGNITO_USER_POOL_ID',
+    ]
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const scannedExpiry = new Date(Date.now() + 3 * 86_400_000).toISOString()
+    let leadRole = 'manager'
+    let guestMembership: Record<string, unknown> | undefined = {
+      entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'guest@example.com', role: 'member',
+    }
+    let guestRow: Record<string, unknown> | undefined = {
+      entryType: 'workspace-member', memberKey: 'guest@example.com', role: 'guest', status: 'active',
+      accessExpiresAt: scannedExpiry,
+    }
+    const notificationTransactions: unknown[][] = []
+    const notifications: Array<Record<string, unknown>> = []
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (command instanceof GetCommand) {
+        if (command.input.TableName === 'WORKSPACE_ACCESS_TABLE_NAME') {
+          const recordKey = String(command.input.Key?.recordKey)
+          if (recordKey === 'MEMBER#guest@example.com') return { Item: guestRow, $metadata: {} }
+          return { Item: { entryType: 'workspace-member', memberKey: recordKey.slice('MEMBER#'.length), role: 'member', status: 'active' }, $metadata: {} }
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof QueryCommand) {
+        if (command.input.TableName === 'COLLABORATION_TABLE_NAME') return { Items: [], $metadata: {} }
+        if (command.input.TableName === 'PROJECT_DIRECTORY_TABLE_NAME') {
+          return { Items: [
+            { entryType: 'team', teamId: 'core' },
+            { entryType: 'project', teamId: 'core', projectId: 'platform' },
+            { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'lead@example.com', role: leadRole },
+            ...(guestMembership ? [guestMembership] : []),
+          ], $metadata: {} }
+        }
+      }
+      if (command instanceof TransactWriteCommand) {
+        const items = command.input.TransactItems ?? []
+        if (items.some((item) => item.Put?.TableName === 'NOTIFICATIONS_TABLE_NAME')) notificationTransactions.push(items)
+        for (const item of items) {
+          if (item.Put?.TableName === 'NOTIFICATIONS_TABLE_NAME' && item.Put.Item) notifications.push(item.Put.Item)
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof PutCommand) return { $metadata: {} }
+      throw new Error('Unexpected projection command')
+    })
+    const dependencies = {
+      deletedFileCleanup: { readFile: async () => undefined, queryRows: async () => [], tagDeletedObjectVersion: async () => {}, expireMetadata: async () => {} },
+      curatedContextSearch: { upsertCurrent: async () => {}, deleteCurrent: async () => {} }, realtime: { publish: async () => {} },
+    }
+    const record = (eventId: string, metadata: Record<string, unknown> = {
+      accessExpiryMemberKey: { S: 'guest@example.com' }, accessExpiresAt: { S: scannedExpiry },
+    }) => ({
+      eventName: 'INSERT', dynamodb: { SequenceNumber: eventId, NewImage: {
+        eventId: { S: eventId }, eventType: { S: 'workspace-member.access-expiring' }, workspaceId: { S: 'workspace-1' },
+        entityType: { S: 'member-access' }, entityId: { S: 'member-access/digest' },
+        occurredAt: { S: '2026-11-24T00:00:00.000Z' }, outboxStatus: { S: 'pending' },
+        metadata: { M: {
+          actorMemberKey: { S: 'system:notification-schedule' }, teamId: { S: 'core' }, projectId: { S: 'platform' },
+          deepLink: { S: '/teams/core/members' },
+          ...metadata,
+          notificationCandidates: { L: [{ M: { memberKey: { S: 'lead@example.com' }, reason: { S: 'member-access-expiry' } } }] },
+        } },
+      } },
+    })
+    const projectedIds = () => notifications.map((item) => item.eventId)
+    try {
+      expect(await processCollaborationProjectionBatch({ Records: [record('current')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      expect(projectedIds()).toEqual(['current'])
+      // External channels reread the same member and expiry before they send.
+      expect(notifications[0]).toMatchObject({ accessExpiryMemberKey: 'guest@example.com', accessExpiresAt: scannedExpiry })
+      // The member row is fenced in the same transaction, so an expiry change before the save cancels it.
+      expect(notificationTransactions[0]?.[0]).toEqual({ ConditionCheck: {
+        TableName: 'WORKSPACE_ACCESS_TABLE_NAME',
+        Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#guest@example.com' },
+        ConditionExpression: '#status = :active AND accessExpiresAt = :accessExpiresAt',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: { ':active': 'active', ':accessExpiresAt': scannedExpiry },
+      } })
+
+      // The admin postponed the expiry between the scan and the projection.
+      guestRow = { ...guestRow, accessExpiresAt: new Date(Date.now() + 20 * 86_400_000).toISOString() }
+      expect(await processCollaborationProjectionBatch({ Records: [record('moved')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      // The admin cleared it.
+      const { accessExpiresAt: _cleared, ...withoutExpiry } = guestRow
+      guestRow = withoutExpiry
+      expect(await processCollaborationProjectionBatch({ Records: [record('cleared')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      // The member was deactivated, or the event does not say which member and expiry it is about.
+      guestRow = { ...withoutExpiry, accessExpiresAt: scannedExpiry, status: 'deactivated' }
+      expect(await processCollaborationProjectionBatch({ Records: [record('deactivated')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      guestRow = { ...guestRow, status: 'active' }
+      expect(await processCollaborationProjectionBatch({ Records: [record('legacy', {})] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      // The recipient stepped down from managing the Project after the scan.
+      leadRole = 'member'
+      expect(await processCollaborationProjectionBatch({ Records: [record('demoted')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      leadRole = 'manager'
+      // The expiring member left the Project, or their membership was archived, after the scan, so
+      // the Project no longer authorizes telling its managers about them.
+      const scannedMembership = guestMembership
+      guestMembership = undefined
+      expect(await processCollaborationProjectionBatch({ Records: [record('left-project')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      guestMembership = { ...scannedMembership, archivedAt: '2026-11-24T00:00:00.000Z' }
+      expect(await processCollaborationProjectionBatch({ Records: [record('archived-membership')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      guestMembership = scannedMembership
+      expect(projectedIds()).toEqual(['current'])
+
+      // The same fence runs again before an external channel sends.
+      const event = parseAuditProjectionEvent({
+        eventId: 'recheck', eventType: 'workspace-member.access-expiring', workspaceId: 'workspace-1',
+        entityType: 'member-access', entityId: 'member-access/digest', occurredAt: '2026-11-24T00:00:00.000Z',
+        outboxStatus: 'pending',
+        metadata: {
+          teamId: 'core', projectId: 'platform', accessExpiryMemberKey: 'guest@example.com', accessExpiresAt: scannedExpiry,
+          notificationCandidates: [{ memberKey: 'lead@example.com', reason: 'member-access-expiry' }],
+        },
+      })
+      if (!event) throw new Error('Expected a parsed event.')
+      expect((await readMemberAccessExpiryNoticeFence(event)).current).toBe(true)
+      const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+      expect(await authorizeNotificationDelivery(event, 'lead@example.com', identity)).toBe(true)
+      // The expiring member left the Project while the delivery was held, so the send is dropped.
+      guestMembership = undefined
+      expect(await authorizeNotificationDelivery(event, 'lead@example.com', identity)).toBe(false)
+      guestMembership = { ...scannedMembership, archivedAt: '2026-11-24T00:00:00.000Z' }
+      expect(await authorizeNotificationDelivery(event, 'lead@example.com', identity)).toBe(false)
+      guestMembership = scannedMembership
+      guestRow = undefined
+      expect((await readMemberAccessExpiryNoticeFence(event)).current).toBe(false)
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+
   test('projects a Team report delivery for a recipient whose Project access is an Enterprise role only', async () => {
     const keys = [
       'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',
@@ -3244,6 +3451,22 @@ describe('collaboration projection pure helpers', () => {
       memberKey: 'active@example.com',
       status: 'active',
     })).toBe(true)
+  })
+
+  test('excludes members whose access expired while a handover keeps them active (ADR 0095)', () => {
+    const now = new Date('2026-11-24T00:00:00.000Z')
+    const guest = (accessExpiresAt: unknown) => ({
+      entryType: 'workspace-member',
+      memberKey: 'guest@example.com',
+      status: 'active',
+      accessExpiresAt,
+    })
+
+    expect(isActiveWorkspaceNotificationMember('guest@example.com', guest('2026-11-23T00:00:00.000Z'), now)).toBe(false)
+    expect(isActiveWorkspaceNotificationMember('guest@example.com', guest('2026-11-24T00:00:00.000Z'), now)).toBe(false)
+    // A malformed expiry fails closed.
+    expect(isActiveWorkspaceNotificationMember('guest@example.com', guest(42), now)).toBe(false)
+    expect(isActiveWorkspaceNotificationMember('guest@example.com', guest('2026-11-25T00:00:00.000Z'), now)).toBe(true)
   })
 
   test('checks every current Cognito group page for the system-admin fallback', async () => {

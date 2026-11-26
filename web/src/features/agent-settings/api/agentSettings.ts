@@ -2,6 +2,8 @@ import {
   AGENT_SETTINGS_SCHEMA_VERSION,
   type AgentSettings,
   type UpdateAgentSettingsRequest,
+  type UpdateWorkspaceAgentDefaultsRequest,
+  type WorkspaceAgentDefaults,
 } from '@mukuroji/contracts'
 import {
   isNonnegativeSafeInteger,
@@ -16,6 +18,9 @@ import { AgentSettingsApiError } from './errors'
 import { resolveApiBaseUrl } from '../../../shared/api/apiBaseUrl'
 
 const apiBaseUrl = resolveApiBaseUrl()
+
+/** Web API path of the Workspace agent defaults. */
+const workspaceAgentDefaultsPath = `${apiBaseUrl}/workspace/agent-defaults`
 
 /**
  * Reads the Agent settings of one Team. Project briefs are limited to Projects the caller can view.
@@ -69,11 +74,13 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
   if (!isRecord(value) || value.schemaVersion !== AGENT_SETTINGS_SCHEMA_VERSION) return undefined
   const {
     acceptanceCriteriaFieldId,
+    acceptNewRuns,
     allowTakeoverAfterLeaseExpiry,
     brief,
     fileFailedRunsToTriage,
     fileStalledRunsToTriage,
     leaseMinutes,
+    notifyAssigneeOfRunEvents,
     readyStatusIds,
     requireAcceptanceCriteria,
     resumableStatusIds,
@@ -81,6 +88,7 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     teamId,
     updatedAt,
     updatedBy,
+    workspaceBrief,
   } = value
   const projectBriefs = readProjectBriefs(value.projectBriefs)
   if (
@@ -96,9 +104,15 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     // Servers older than Triage filing omit the flags, which then read as off.
     (fileFailedRunsToTriage !== undefined && typeof fileFailedRunsToTriage !== 'boolean') ||
     (fileStalledRunsToTriage !== undefined && typeof fileStalledRunsToTriage !== 'boolean') ||
+    // Servers older than Agent Run notifications omit the flag, which then reads as off.
+    (notifyAssigneeOfRunEvents !== undefined && typeof notifyAssigneeOfRunEvents !== 'boolean') ||
+    // Servers older than the switch omit it and always accept new runs.
+    (acceptNewRuns !== undefined && typeof acceptNewRuns !== 'boolean') ||
     (acceptanceCriteriaFieldId !== undefined && !isNonEmptyString(acceptanceCriteriaFieldId)) ||
     (brief !== undefined && typeof brief !== 'string') ||
     !projectBriefs ||
+    // Servers older than Workspace defaults omit the inherited brief.
+    (workspaceBrief !== undefined && typeof workspaceBrief !== 'string') ||
     (updatedAt !== undefined && !(isNonEmptyString(updatedAt) && Number.isFinite(Date.parse(updatedAt)))) ||
     (updatedBy !== undefined && !isNonEmptyString(updatedBy))
   ) {
@@ -109,6 +123,7 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     teamId,
     revision,
     leaseMinutes,
+    acceptNewRuns: acceptNewRuns !== false,
     allowTakeoverAfterLeaseExpiry,
     readyStatusIds: [...readyStatusIds],
     resumableStatusIds: Array.isArray(resumableStatusIds) ? resumableStatusIds.filter(isNonEmptyString) : [],
@@ -116,11 +131,92 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     ...(acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId }),
     ...(brief === undefined ? {} : { brief }),
     projectBriefs,
+    ...(workspaceBrief === undefined ? {} : { workspaceBrief }),
     fileFailedRunsToTriage: fileFailedRunsToTriage === true,
     fileStalledRunsToTriage: fileStalledRunsToTriage === true,
+    notifyAssigneeOfRunEvents: notifyAssigneeOfRunEvents === true,
     ...(updatedAt === undefined ? {} : { updatedAt }),
     ...(updatedBy === undefined ? {} : { updatedBy }),
   }
+}
+
+/**
+ * Reads the Workspace agent defaults. Only Workspace administrators may read them.
+ *
+ * @param accessToken - Session access token of a Workspace administrator.
+ * @returns Validated defaults; revision `0` means they were never saved.
+ */
+export async function getWorkspaceAgentDefaults(accessToken: string): Promise<WorkspaceAgentDefaults> {
+  return requireWorkspaceAgentDefaults(await requestJson(workspaceAgentDefaultsPath, accessToken))
+}
+
+/**
+ * Replaces the Workspace agent defaults. The save is rejected with `409` when `expectedRevision`
+ * is no longer the saved revision.
+ *
+ * @param accessToken - Session access token of a Workspace administrator.
+ * @param input - Complete, revision-fenced replacement.
+ * @param mutationContext - Idempotency and correlation identifiers shared by retries of this save.
+ * @returns The saved defaults as the server returned them.
+ */
+export async function updateWorkspaceAgentDefaults(
+  accessToken: string,
+  input: UpdateWorkspaceAgentDefaultsRequest,
+  mutationContext: MutationRequestContext,
+): Promise<WorkspaceAgentDefaults> {
+  const data = await requestJson(workspaceAgentDefaultsPath, accessToken, {
+    body: JSON.stringify(input),
+    headers: {
+      'Content-Type': 'application/json',
+      ...createMutationHeaders(mutationContext),
+    },
+    method: 'PUT',
+  })
+  return requireWorkspaceAgentDefaults(data)
+}
+
+/**
+ * Validates Workspace agent defaults read from an untrusted response.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The defaults, or undefined when the shape is not supported.
+ */
+export function readWorkspaceAgentDefaults(value: unknown): WorkspaceAgentDefaults | undefined {
+  if (!isRecord(value) || value.schemaVersion !== AGENT_SETTINGS_SCHEMA_VERSION) return undefined
+  const { allowTakeoverAfterLeaseExpiry, brief, leaseMinutes, requireAcceptanceCriteria, revision, updatedAt, updatedBy } = value
+  if (
+    !isNonnegativeSafeInteger(revision) ||
+    !isPositiveSafeInteger(leaseMinutes) ||
+    typeof allowTakeoverAfterLeaseExpiry !== 'boolean' ||
+    typeof requireAcceptanceCriteria !== 'boolean' ||
+    (brief !== undefined && typeof brief !== 'string') ||
+    (updatedAt !== undefined && !(isNonEmptyString(updatedAt) && Number.isFinite(Date.parse(updatedAt)))) ||
+    (updatedBy !== undefined && !isNonEmptyString(updatedBy))
+  ) {
+    return undefined
+  }
+  return {
+    schemaVersion: AGENT_SETTINGS_SCHEMA_VERSION,
+    revision,
+    leaseMinutes,
+    allowTakeoverAfterLeaseExpiry,
+    requireAcceptanceCriteria,
+    ...(brief === undefined ? {} : { brief }),
+    ...(updatedAt === undefined ? {} : { updatedAt }),
+    ...(updatedBy === undefined ? {} : { updatedBy }),
+  }
+}
+
+/**
+ * Validates a Workspace agent defaults response body.
+ *
+ * @param data - Parsed response body.
+ * @returns Validated defaults.
+ */
+function requireWorkspaceAgentDefaults(data: unknown): WorkspaceAgentDefaults {
+  const defaults = readWorkspaceAgentDefaults(data)
+  if (!defaults) throw new AgentSettingsApiError(502, 'Workspace agent defaults returned an unexpected response.')
+  return defaults
 }
 
 /**

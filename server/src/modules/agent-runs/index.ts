@@ -11,7 +11,10 @@ export {
 export {
   calculateLeaseExpiry,
   createActiveAgentRun,
+  applyWorkspaceAgentDefaults,
   createDefaultAgentSettings,
+  createDefaultWorkspaceAgentDefaults,
+  createSavedWorkspaceAgentDefaults,
   describeHoldingRun,
   finishAgentRun,
   hashAgentInstanceId,
@@ -26,6 +29,8 @@ export {
   readStartAgentRunRequest,
   readTakeOverAgentRunRequest,
   readUpdateAgentSettingsRequest,
+  readUpdateWorkspaceAgentDefaultsRequest,
+  resolveTeamAgentBrief,
   assertAgentSettingsBriefLimits,
   splitAgentRunMutationFence,
   toAgentRun,
@@ -37,6 +42,8 @@ export {
   type ValidatedAgentRunStart,
   type ValidatedAgentRunTakeOver,
   type ValidatedAgentSettingsUpdate,
+  type ResolvedAgentSettings,
+  type ValidatedWorkspaceAgentDefaultsUpdate,
 } from './domain/agent-run'
 export {
   calculateFactoryAnalytics,
@@ -47,6 +54,8 @@ export {
 } from './domain/agent-run-analytics'
 export {
   createAgentRunReportCommentBody,
+  isAgentRunQuestionReport,
+  readAnswerAgentRunReportRequest,
   readAgentRunArtifactUrl,
   readReportAgentRunRequest,
   toAgentRunReport,
@@ -61,6 +70,7 @@ export {
   createAgentRunPartition,
   type AgentRunDocumentClient,
   type AgentRunFenceInput,
+  type AgentRunFinishedEntry,
   type AgentRunFinishedGroup,
   type AgentRunPage,
   type AgentRunReportPage,
@@ -116,6 +126,7 @@ export {
   AGENT_RUN_TRIAGE_STALLED_BATCH,
   createAgentRunTriageFiling,
   runAgentRunTriageSweep,
+  type AgentRunStallNotifier,
   type AgentRunTriageFiler,
   type AgentRunTriageFiling,
   type AgentRunTriageReason,
@@ -125,3 +136,9 @@ export {
   type AgentRunTriageWorkItem,
   type AgentRunTriageWorkItemReader,
 } from './adapter-in/schedules/agent-run-triage-sweep'
+export {
+  createAgentRunNotificationMetadata,
+  selectAgentRunFinishNotification,
+  selectAgentRunReportNotification,
+  type AgentRunAssigneeNotification,
+} from './domain/agent-run-notification'

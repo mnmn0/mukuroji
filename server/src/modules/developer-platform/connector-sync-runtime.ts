@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { externalIdMatchKey } from './domain/external-id-match-key'
 import type {
   CanonicalWorkItem,
   ConnectorInstallation,
@@ -55,6 +56,8 @@ export type ConnectorWorkItemSnapshot = {
   description?: string
   /** Provider adapter が理解する normalized status です。 */
   status?: string
+  /** Status category of the workflow status, for providers that store only open or closed. */
+  statusCategory?: string
   /** All-day dates of the Work Item schedule; absent while it is unscheduled. */
   schedule?: ConnectorEventSchedule
   /**
@@ -72,6 +75,11 @@ export type ConnectorWorkItemPatch = {
   description?: string
   /** External status が存在する場合の normalized status です。 */
   status?: string
+  /**
+   * Open or closed state of the resource. The gateway moves a Work Item whose status category
+   * disagrees to the first status of the matching category that its workflow allows.
+   */
+  state?: 'open' | 'closed'
   /**
    * Calendar event dates to move the Work Item to; the gateway keeps the schedule mode and
    * calendar policy.
@@ -105,13 +113,19 @@ export type ConnectorWorkItemApplyResult =
     workItem: ConnectorWorkItemSnapshot
     /**
      * Why the patch was refused: the event dates hold no working day of the Work Item calendar,
-     * or the Work Item has schedule dependencies that a direct date move would break.
+     * the Work Item has schedule dependencies that a direct date move would break, or its workflow
+     * has no status it allows for the open or closed state of the linked resource, or a workflow
+     * rule or completion gate refuses the change.
      */
     reason: ConnectorWorkItemRejection
   }
 
 /** Reasons the Work Item gateway refuses an external patch without writing it. */
-export type ConnectorWorkItemRejection = 'calendar-dates-invalid' | 'schedule-dependency'
+export type ConnectorWorkItemRejection =
+  | 'calendar-dates-invalid'
+  | 'schedule-dependency'
+  | 'state-status-unavailable'
+  | 'workflow-rule-rejected'
 
 /** Connector worker と canonical Work Item service の境界です。 */
 export interface ConnectorWorkItemGateway {
@@ -729,8 +743,8 @@ export class ConnectorSyncEngine {
       operationId,
     })
     if (applied.kind === 'conflict' || applied.kind === 'rejected') {
-      // Dates the Work Item cannot take become a conflict too: the link stops retrying the same
-      // event, other events keep synchronizing, and someone chooses which dates to keep.
+      // Dates or a state the Work Item cannot take become a conflict too: the link stops retrying
+      // the same event, other events keep synchronizing, and someone chooses which side to keep.
       return this.persistConflict(
         input.workspaceId,
         link,
@@ -809,6 +823,7 @@ export class ConnectorSyncEngine {
     }
     let mutation = createOutboundMutation(
       link,
+      installation.provider,
       workItem,
       input.operationId,
       this.originSigningSecret,
@@ -846,6 +861,7 @@ export class ConnectorSyncEngine {
       validateLinkRecordBinding(link, latest)
       mutation = createOutboundMutation(
         link,
+        installation.provider,
         workItem,
         input.operationId,
         this.originSigningSecret,
@@ -1004,7 +1020,7 @@ export class ConnectorSyncEngine {
             link.syncDirection === 'bidirectional'
           )
         )
-        .map((link) => [link.externalId, link]),
+        .map((link) => [externalIdMatchKey(installation.provider, link.externalId), link]),
     )
     const maximumPages = input.maximumPages ?? 10
     if (!Number.isSafeInteger(maximumPages) || maximumPages < 1 || maximumPages > 100) {
@@ -1033,12 +1049,13 @@ export class ConnectorSyncEngine {
           adapter.pull(credential, input.resourceType, cursor),
       )
       for (const record of page.items) {
-        const link = linkByExternalId.get(record.externalId)
+        const link = linkByExternalId.get(externalIdMatchKey(installation.provider, record.externalId))
         if (!link) continue
         results.push(await this.processInbound({
           workspaceId: input.workspaceId,
           link,
-          record,
+          // The match key proved the IDs name the same resource; the record takes the link's spelling.
+          record: record.externalId === link.externalId ? record : { ...record, externalId: link.externalId },
           ...(link.syncStatus === 'pending'
             ? { pollGeneration: link.updatedAt }
             : {}),
@@ -1235,12 +1252,23 @@ export class ConnectorSyncEngine {
       }
       if (applied.kind === 'rejected') {
         await release()
-        throw new ConnectorRuntimeError(
-          'ConnectorSyncConflictDatesRejected',
-          applied.reason === 'schedule-dependency'
-            ? 'The Work Item has schedule dependencies, so its dates cannot be moved from the calendar.'
-            : 'The chosen dates hold no working day of the Work Item calendar.',
-        )
+        if (applied.reason === 'workflow-rule-rejected') {
+          throw new ConnectorRuntimeError(
+            'ConnectorSyncConflictWorkflowRejected',
+            'A workflow rule, completion gate, or required field of the Work Item refuses this change.',
+          )
+        }
+        throw applied.reason === 'state-status-unavailable'
+          ? new ConnectorRuntimeError(
+            'ConnectorSyncConflictStateRejected',
+            'The Work Item workflow has no status it allows for the open or closed state of the linked resource.',
+          )
+          : new ConnectorRuntimeError(
+            'ConnectorSyncConflictDatesRejected',
+            applied.reason === 'schedule-dependency'
+              ? 'The Work Item has schedule dependencies, so its dates cannot be moved from the calendar.'
+              : 'The chosen dates hold no working day of the Work Item calendar.',
+          )
       }
       synchronizedWorkItem = applied.workItem
     }
@@ -1251,6 +1279,7 @@ export class ConnectorSyncEngine {
     if (!keepsUndatedLocal && (resolution.resolution === 'use-local' || resolution.resolution === 'merge')) {
       const mutation = createOutboundMutation(
         link,
+        installation.provider,
         synchronizedWorkItem,
         operationId,
         this.originSigningSecret,
@@ -1889,6 +1918,7 @@ export function createConnectorWorkItemSnapshot(
     title: workItem.title,
     description: workItem.description,
     status: workItem.workflowStatusId,
+    statusCategory: workItem.statusCategory,
     ...toConnectorEventScheduleField(workItem.schedule),
   }
 }
@@ -1942,6 +1972,7 @@ function createPersistedConnectorExternalRecord(
  * Builds the write of a Work Item to its linked resource.
  *
  * @param link - Link of the resource.
+ * @param provider - Provider of the link's installation.
  * @param workItem - Work Item contents to write.
  * @param operationId - Stable operation ID of the write.
  * @param originSigningSecret - Secret that signs the origin marker.
@@ -1952,6 +1983,7 @@ function createPersistedConnectorExternalRecord(
  */
 function createOutboundMutation(
   link: ExternalWorkItemLink,
+  provider: ConnectorInstallation['provider'],
   workItem: ConnectorWorkItemSnapshot,
   operationId: string,
   originSigningSecret: string,
@@ -1959,6 +1991,9 @@ function createOutboundMutation(
   alwaysConditional = false,
 ): ConnectorOutboundMutation {
   const calendar = link.resourceType === 'calendar-event'
+  // GitHub checks the version itself before it writes, so like a calendar it conditions only the
+  // writes it reads back.
+  const conditionalWhenBidirectional = calendar || provider === 'github'
   return {
     externalId: link.externalId,
     resourceType: readWorkItemResourceType(link.resourceType),
@@ -1966,6 +2001,7 @@ function createOutboundMutation(
     title: workItem.title,
     description: workItem.description,
     ...(calendar ? {} : { status: workItem.status }),
+    ...(!calendar && workItem.statusCategory !== undefined ? { statusCategory: workItem.statusCategory } : {}),
     ...(calendar && workItem.schedule ? { schedule: workItem.schedule } : {}),
     originMarker: createConnectorOriginMarker(
       link.installationId,
@@ -1975,11 +2011,11 @@ function createOutboundMutation(
       originSigningSecret,
     ),
     operationId,
-    // A calendar write is conditional only when both sides sync: an outbound-only link is meant to
+    // A calendar or GitHub write is conditional only when both sides sync: an outbound-only link is meant to
     // overwrite the event, and a refused write would never be read back. A conflict resolution
     // always is, so it does not overwrite an event moved after the conflict was shown.
     ...(expectedExternalVersion &&
-        (!calendar || alwaysConditional || link.syncDirection === 'bidirectional')
+        (!conditionalWhenBidirectional || alwaysConditional || link.syncDirection === 'bidirectional')
       ? { expectedExternalVersion }
       : {}),
   }
@@ -2068,6 +2104,9 @@ function createConflictFields(
     appendConflictField(fields, 'title', workItem.title, record.title)
     appendConflictField(fields, 'description', workItem.description, record.description)
     appendConflictField(fields, 'status', workItem.status, record.status)
+    if (record.state !== undefined) {
+      appendConflictField(fields, 'state', toConnectorState(workItem.statusCategory), record.state)
+    }
   }
   if (fields.length === 0) {
     fields.push({
@@ -2077,6 +2116,17 @@ function createConflictFields(
     })
   }
   return fields
+}
+
+/**
+ * Converts a status category to the open or closed state of a two-state provider resource.
+ *
+ * @param category - Status category of the Work Item, when known.
+ * @returns `closed` for completed and canceled, `open` for the other categories.
+ */
+export function toConnectorState(category: string | undefined): 'open' | 'closed' | undefined {
+  if (category === undefined) return undefined
+  return category === 'completed' || category === 'canceled' ? 'closed' : 'open'
 }
 
 function appendConflictField(
@@ -2101,6 +2151,7 @@ function recordToPatch(record: ConnectorExternalRecord): ConnectorWorkItemPatch 
     ...(record.title !== undefined ? { title: record.title } : {}),
     ...(record.description !== undefined ? { description: record.description } : {}),
     ...(record.status !== undefined ? { status: record.status } : {}),
+    ...(record.state !== undefined ? { state: record.state } : {}),
   }
 }
 
@@ -2145,7 +2196,7 @@ function validateConflictResolution(
   }
   if (
     keys.length === 0 ||
-    keys.some((key) => !['title', 'description', 'status'].includes(key))
+    keys.some((key) => !['title', 'description', 'status', 'state'].includes(key))
   ) {
     throw new ConnectorRuntimeError(
       'ConnectorSyncResolutionInvalid',
@@ -2155,6 +2206,18 @@ function validateConflictResolution(
   const mergedValues: ConnectorWorkItemPatch = {}
   for (const key of keys) {
     const value = input.mergedValues[key]
+    if (key === 'state') {
+      // A two-state resource (a GitHub issue) merges its open / closed state, which the gateway
+      // maps to a status of the matching category.
+      if (value !== 'open' && value !== 'closed') {
+        throw new ConnectorRuntimeError(
+          'ConnectorSyncResolutionInvalid',
+          'Merged state must be open or closed.',
+        )
+      }
+      mergedValues.state = value
+      continue
+    }
     if (typeof value !== 'string' || value.length > 100_000 || value.includes('\0')) {
       throw new ConnectorRuntimeError(
         'ConnectorSyncResolutionInvalid',

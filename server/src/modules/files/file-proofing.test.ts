@@ -50,24 +50,42 @@ class MemoryDocumentClient {
   /** 実行した scope query の record key prefixes です。 */
   readonly queryPrefixes: Array<string | undefined> = []
 
+  /** BatchGetItem request ごとの key 数です。 */
+  readonly batchGetKeyCounts: number[] = []
+
+  /** 次の BatchGetItem request で末尾から UnprocessedKeys として返す key 数です。 */
+  nextBatchGetUnprocessedCount = 0
+
   async send(command: unknown) {
     if (command instanceof BatchGetCommand) {
       const requestItems = command.input.RequestItems
       if (!requestItems) {
         throw new Error('BatchGetCommand requires request items.')
       }
+      const unprocessedCount = this.nextBatchGetUnprocessedCount
+      this.nextBatchGetUnprocessedCount = 0
+      const unprocessed: Record<string, { Keys: Record<string, unknown>[] }> = {}
       const responses = Object.fromEntries(Object.entries(requestItems).map(
         ([tableName, request]) => {
           if (!request.Keys) {
             throw new Error(`BatchGetCommand requires keys for ${tableName}.`)
           }
-          return [tableName, request.Keys.flatMap((key) => {
+          // DynamoDB rejects a BatchGetItem request with more than 100 keys.
+          if (request.Keys.length > 100) {
+            throw new Error('ValidationException: Too many items requested for the BatchGetItem call.')
+          }
+          this.batchGetKeyCounts.push(request.Keys.length)
+          const served = request.Keys.slice(0, request.Keys.length - unprocessedCount)
+          if (served.length < request.Keys.length) {
+            unprocessed[tableName] = { Keys: request.Keys.slice(served.length) }
+          }
+          return [tableName, served.flatMap((key) => {
             const item = this.items.get(createMemoryKey(key as Record<string, unknown>))
             return item ? [item] : []
           })]
         },
       ))
-      return { Responses: responses }
+      return { Responses: responses, UnprocessedKeys: unprocessed }
     }
     if (command instanceof GetCommand) {
       const input = command.input
@@ -564,6 +582,212 @@ const writer: FileProofingActor = {
 }
 
 describe('file proofing domain', () => {
+  test('requests approval of a pinned Document version on the deliverable Work Item', async () => {
+    const { client, documentClient } = createClient()
+    await expect(client.createDocumentVersionApproval(
+      scope,
+      manager,
+      {
+        documentId: 'doc-1',
+        versionId: 'doc-2:3',
+        reviewerMemberKeys: ['reviewer@example.com'],
+        dueAt: '2099-07-20T00:00:00.000Z',
+      },
+    )).rejects.toMatchObject({ status: 400, code: 'InvalidApprovalSubject' })
+
+    const approval = await client.createDocumentVersionApproval(
+      scope,
+      manager,
+      {
+        documentId: 'doc-1',
+        versionId: 'doc-1:3',
+        reviewerMemberKeys: ['reviewer@example.com'],
+        dueAt: '2099-07-20T00:00:00.000Z',
+      },
+      createAuditContext('document-version-approval'),
+    )
+    expect(approval).toMatchObject({
+      subjectType: 'document-version',
+      documentId: 'doc-1',
+      versionId: 'doc-1:3',
+      teamId: scope.teamId,
+      issueId: scope.issueId,
+      status: 'pending',
+    })
+    expect(approval).not.toHaveProperty('fileId')
+    expect([...documentClient.items.values()].filter((item) =>
+      item.entryType === 'document-approval-index' && item.approvalId === approval.id
+    )).toEqual([expect.objectContaining({
+      scopeKey: 'WORKSPACE#workspace-1#DOCUMENT#doc-1',
+      documentId: 'doc-1',
+      versionId: 'doc-1:3',
+    })])
+
+    const reviewer: FileProofingActor = {
+      memberKey: 'reviewer@example.com',
+      guest: false,
+      canWrite: false,
+      canManage: false,
+    }
+    expect((await client.list(scope, manager)).approvals.map(({ id }) => id)).toContain(approval.id)
+    expect((await client.listReviewerApprovals(scope.workspaceId, reviewer)).approvals)
+      .toEqual([expect.objectContaining({ id: approval.id, capabilities: { canDecide: true, canCancel: false } })])
+    expect(await client.getApprovalSummary(scope)).toMatchObject({ pendingCount: 1 })
+
+    await client.decideApproval(
+      scope,
+      reviewer,
+      approval.id,
+      { decision: 'approve', expectedRevision: approval.revision },
+      createAuditContext('approve-document-version'),
+    )
+    expect(await client.listDocumentApprovals(scope.workspaceId, 'doc-1', manager)).toEqual([
+      expect.objectContaining({ id: approval.id, status: 'approved', subjectType: 'document-version' }),
+    ])
+    expect(await client.listDocumentApprovals(scope.workspaceId, 'doc-other', manager)).toEqual([])
+    expect(await client.listDocumentApprovals(
+      scope.workspaceId,
+      'doc-1',
+      { ...reviewer, guest: true },
+    )).toEqual([])
+    expect(await client.getApprovalSummary(scope)).toMatchObject({ pendingCount: 0, approvedCount: 1 })
+  })
+
+  test('rejects a Document version approval when the Work Item moves or Document access changes', async () => {
+    const { client, documentClient } = createClient('work-items')
+    const projectScope: FileProofingScope = { ...scope, projectId: 'project-1' }
+    const documentCheck = {
+      ConditionCheck: {
+        TableName: 'documents',
+        Key: { workspaceId: 'workspace-1', recordKey: 'DOCUMENT#doc-1' },
+        ConditionExpression: 'attribute_exists(workspaceId)',
+      },
+    }
+    const input = {
+      documentId: 'doc-1',
+      versionId: 'doc-1:3',
+      reviewerMemberKeys: ['reviewer@example.com'],
+      dueAt: '2099-07-20T00:00:00.000Z',
+    }
+    // Main approval, Document index, one reviewer projection, and the summary come first.
+    const guardIndex = 4
+    documentClient.nextTransactionError = createTransactionCancelledError(
+      Array.from({ length: 8 }, (_value, index) => ({
+        Code: index === guardIndex ? 'ConditionalCheckFailed' : 'None',
+      })),
+    )
+
+    await expect(client.createDocumentVersionApproval(
+      projectScope,
+      manager,
+      input,
+      createAuditContext('document-version-approval-moved'),
+      [documentCheck],
+    )).rejects.toMatchObject({ status: 409, code: 'ApprovalAuthorizationChanged' })
+    const items = documentClient.transactionInputs.at(-1)?.TransactItems ?? []
+    expect(items[guardIndex]?.ConditionCheck).toMatchObject({
+      TableName: 'work-items',
+      Key: { directoryTeamId: 'workspace-1#team#core', issueId: 'work-item-1' },
+      ConditionExpression: 'attribute_exists(issueId) AND #assignedProjectId = :projectId',
+      ExpressionAttributeValues: { ':projectId': 'project-1' },
+    })
+    expect(items[guardIndex + 1]).toEqual(documentCheck)
+
+    // Without a Project, the Work Item must still have no Project when the approval is saved.
+    const approval = await client.createDocumentVersionApproval(
+      scope,
+      manager,
+      input,
+      createAuditContext('document-version-approval-unassigned'),
+      [documentCheck],
+    )
+    expect(approval).toMatchObject({ status: 'pending', subjectType: 'document-version' })
+    expect(documentClient.transactionInputs.at(-1)?.TransactItems?.[guardIndex]?.ConditionCheck)
+      .toMatchObject({
+        TableName: 'work-items',
+        ConditionExpression: 'attribute_exists(issueId) AND attribute_not_exists(#assignedProjectId)',
+      })
+  })
+
+  test('replays a saved Document version approval after its due date has passed', async () => {
+    const { client, documentClient } = createClient()
+    const input = {
+      documentId: 'doc-1',
+      versionId: 'doc-1:3',
+      reviewerMemberKeys: ['reviewer@example.com'],
+      dueAt: '2099-07-20T00:00:00.000Z',
+    }
+    const approval = await client.createDocumentVersionApproval(
+      scope,
+      manager,
+      input,
+      createAuditContext('document-version-approval-replay', input),
+    )
+    // The saved due date has passed by the time the lost response is retried.
+    for (const [key, item] of documentClient.items) {
+      if (item.entryType === 'approval' && item.id === approval.id) {
+        documentClient.items.set(key, { ...item, dueAt: '2020-01-01T00:00:00.000Z' })
+      }
+    }
+    const transactions = documentClient.transactionInputs.length
+
+    await expect(client.createDocumentVersionApproval(
+      scope,
+      manager,
+      { ...input, dueAt: '2020-01-01T00:00:00.000Z' },
+      createAuditContext('document-version-approval-replay', input),
+    )).resolves.toMatchObject({ id: approval.id })
+    expect(documentClient.transactionInputs).toHaveLength(transactions)
+    await expect(client.createDocumentVersionApproval(
+      scope,
+      manager,
+      { ...input, dueAt: '2020-01-01T00:00:00.000Z' },
+      createAuditContext('document-version-approval-past-due', input),
+    )).rejects.toMatchObject({ status: 400 })
+  })
+
+  test('lists more Document version approvals than one BatchGetItem request can read', async () => {
+    const { client, documentClient } = createClient()
+    const approval = await client.createDocumentVersionApproval(
+      scope,
+      manager,
+      {
+        documentId: 'doc-1',
+        versionId: 'doc-1:3',
+        reviewerMemberKeys: ['reviewer@example.com'],
+        dueAt: '2099-07-20T00:00:00.000Z',
+      },
+      createAuditContext('document-version-approval-many'),
+    )
+    const stored = [...documentClient.items.values()]
+    const pointer = stored.find((item) =>
+      item.entryType === 'document-approval-index' && item.approvalId === approval.id
+    )
+    const main = stored.find((item) =>
+      item.id === approval.id && pointer !== undefined && item.scopeKey === pointer.sourceScopeKey
+    )
+    if (!pointer || !main) throw new Error('The approval rows were not written.')
+    // Copies the approval under new IDs, so the Document has 150 approvals in all.
+    for (let index = 1; index < 150; index += 1) {
+      const id = `${approval.id}-copy-${index}`
+      for (const row of [
+        { ...main, id, recordKey: String(main.recordKey).replace(approval.id, id) },
+        { ...pointer, approvalId: id, recordKey: String(pointer.recordKey).replace(approval.id, id) },
+      ]) {
+        documentClient.items.set(createMemoryKey(row), row)
+      }
+    }
+    documentClient.batchGetKeyCounts.length = 0
+    documentClient.nextBatchGetUnprocessedCount = 3
+
+    const approvals = await client.listDocumentApprovals(scope.workspaceId, 'doc-1', manager)
+
+    expect(approvals).toHaveLength(150)
+    expect(new Set(approvals.map(({ id }) => id)).size).toBe(150)
+    // The first chunk of 100 keys retries its 3 unprocessed keys before the last 50 are read.
+    expect(documentClient.batchGetKeyCounts).toEqual([100, 3, 50])
+  })
+
   test('resolves a visible file through the File ID reverse index', async () => {
     const { client, session } = await createAvailableFile()
 
@@ -1185,6 +1409,18 @@ describe('file proofing domain', () => {
     )
     expect(completed.version.scanStatus).toBe('blocked')
     expect(completed.file.currentVersion.id).toBe(replacement.version.id)
+    // A caller that offers only the current version is refused the replaced one; history access still works.
+    await expect(client.createAccess(
+      scope,
+      manager,
+      session.file.id,
+      session.version.id,
+      'attachment',
+      undefined,
+      { requireCurrentVersion: true },
+    )).rejects.toMatchObject({ code: 'FileVersionConflict', status: 409 })
+    await expect(client.createAccess(scope, manager, session.file.id, session.version.id, 'attachment'))
+      .resolves.toMatchObject({ url: expect.any(String) })
     await expect(client.createAccess(
       scope,
       manager,
@@ -2217,11 +2453,12 @@ describe('file proofing domain', () => {
     expect(completionUpdate?.UpdateExpression).toContain(
       '#actualStartDate = :actualStartDate, #actualEndDate = :actualEndDate',
     )
-    // Completing the Work Item takes it out of the notification due index in the same update.
+    // Completing the Work Item takes it out of the notification due index and the Team started
+    // index in the same update.
     expect(completionUpdate?.UpdateExpression).toContain(
       '#notificationScheduleShard = :notificationScheduleShard',
     )
-    expect(completionUpdate?.UpdateExpression).toMatch(/ REMOVE #notificationDueKey$/)
+    expect(completionUpdate?.UpdateExpression).toMatch(/ REMOVE #notificationDueKey, #startedDirectoryTeamId$/)
     expect(state.documentClient.items.get(createMemoryKey({
       workspaceId: scope.workspaceId,
       recordKey: 'META',

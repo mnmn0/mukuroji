@@ -4,6 +4,7 @@ import {
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEMA_VERSION,
   type AgentRun,
+  type AgentRunReport,
   type ApiScope,
   type CanonicalWorkItem,
   type CustomFieldDefinition,
@@ -46,7 +47,9 @@ import {
   type PublicImportSourceInput,
   type PublicAgentRunService,
   type PublicAgentTelemetryService,
+  type PublicAttachmentService,
   type PublicDocumentService,
+  type PublicWorkItemRelationService,
   type PublicDirectoryService,
   type PublicWorkItemService,
 } from './public-api'
@@ -141,6 +144,9 @@ function createDefaultWorkItemService(
     },
     async getHierarchy(_credential, teamId, workItemId) {
       return { schemaVersion: 1, teamId, workItemId, parentWorkItemId: null, childWorkItemIds: [], wbsNumber: '1' }
+    },
+    async getCompletionGate(_credential, teamId, workItemId) {
+      return { schemaVersion: 1, teamId, workItemId, revision: workItem.revision, conditions: [], blocksCompletion: false }
     },
     async listComments() { return { items: [], hasMore: false } },
     async authorizeComment() {},
@@ -246,6 +252,10 @@ function createTestRouter(input: {
   agentTelemetry?: PublicAgentTelemetryService
   /** Document service used by Document route tests. */
   documents?: PublicDocumentService
+  /** Relation service used by relation route tests. */
+  workItemRelations?: PublicWorkItemRelationService
+  /** Attachment service used by attachment route tests. */
+  attachments?: PublicAttachmentService
   /** Directory service used by Team, Project member, and key route tests. */
   directory?: PublicDirectoryService
   connectorAuthorization?: ConnectorAuthorizationService
@@ -258,6 +268,8 @@ function createTestRouter(input: {
   authenticateManagement?: PublicApiDependencies['authenticateManagement']
   /** Workspace lifecycle guard used by the focused router test. */
   enforceActiveWorkspace?: PublicApiDependencies['enforceActiveWorkspace']
+  /** Credential owner membership guard used by the deactivated-owner test. */
+  requireActiveCredentialSubject?: PublicApiDependencies['requireActiveCredentialSubject']
   /** Credential request limiter used by admission-order tests. */
   rateLimits?: PublicApiDependencies['rateLimits']
   platform?: InMemoryDeveloperPlatformStorage
@@ -274,10 +286,15 @@ function createTestRouter(input: {
     authenticateManagement: input.authenticateManagement ??
       (async () => input.managementPrincipal ?? managementPrincipal),
     enforceActiveWorkspace: input.enforceActiveWorkspace ?? (async () => undefined),
+    ...(input.requireActiveCredentialSubject
+      ? { requireActiveCredentialSubject: input.requireActiveCredentialSubject }
+      : {}),
     workItems: input.workItems ?? createDefaultWorkItemService(),
     ...(input.agentRuns ? { agentRuns: input.agentRuns } : {}),
     ...(input.agentTelemetry ? { agentTelemetry: input.agentTelemetry } : {}),
     ...(input.documents ? { documents: input.documents } : {}),
+    ...(input.workItemRelations ? { workItemRelations: input.workItemRelations } : {}),
+    ...(input.attachments ? { attachments: input.attachments } : {}),
     ...(input.directory ? { directory: input.directory } : {}),
     openApiDocument: { openapi: '3.1.0' },
     cursorSecret: 'public-api-test-cursor-secret-at-least-32-bytes',
@@ -544,6 +561,30 @@ describe('public API router', () => {
     expect(observations).toEqual(['workspace-1'])
   })
 
+  test('refuses a credential whose owner is no longer an active member', async () => {
+    const subjects: string[] = []
+    let ownerActive = true
+    const { platform, router } = createTestRouter({
+      async requireActiveCredentialSubject(credential) {
+        subjects.push(`${credential.workspaceId}/${credential.subjectUserId}`)
+        if (!ownerActive) {
+          throw new PublicApiServiceError(403, 'forbidden', 'The credential owner is not an active Workspace member.')
+        }
+      },
+    })
+    const apiKey = await createApiKey(platform, ['work-items:read'])
+    const request = () => router.request('http://localhost/v1/work-items?teamId=team-1', {
+      headers: { Authorization: `Bearer ${apiKey.secret}` },
+    })
+
+    expect((await request()).status).toBe(200)
+    ownerActive = false
+    const refused = await request()
+    expect(refused.status).toBe(403)
+    expect(await refused.json()).toMatchObject({ code: 'forbidden' })
+    expect(subjects).toEqual(['workspace-1/user-1', 'workspace-1/user-1'])
+  })
+
   test('returns canonical schedules, including explicitly unscheduled Work Items', async () => {
     const scheduled = createWorkItem('scheduled')
     const unscheduled: CanonicalWorkItem = {
@@ -633,6 +674,51 @@ describe('public API router', () => {
     expect(reads).toEqual(['team-1/work-item-1'])
   })
 
+  test('returns the completion Gate status from its own read-scoped endpoint', async () => {
+    const reads: string[] = []
+    const { platform, router } = createTestRouter({
+      workItems: createDefaultWorkItemService({
+        async getCompletionGate(_credential, teamId, workItemId) {
+          reads.push(`${teamId}/${workItemId}`)
+          return {
+            schemaVersion: 1,
+            teamId,
+            workItemId,
+            revision: 3,
+            conditions: [
+              { condition: 'acceptance-criteria', requirement: 'required', state: 'unmet', message: '1 of 1 acceptance criteria are not satisfied.' },
+            ],
+            blocksCompletion: true,
+          }
+        },
+      }),
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+
+    const response = await router.request('http://localhost/v1/work-items/work-item-1/completion-gate?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const denied = await router.request('http://localhost/v1/work-items/work-item-1/completion-gate?teamId=team-1', {
+      headers: { Authorization: `Bearer ${writer.secret}` },
+    })
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(await response.json()).toEqual({
+      schemaVersion: 1,
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      revision: 3,
+      conditions: [
+        { condition: 'acceptance-criteria', requirement: 'required', state: 'unmet', message: '1 of 1 acceptance criteria are not satisfied.' },
+      ],
+      blocksCompletion: true,
+    })
+    expect(denied.status).toBe(403)
+    expect(reads).toEqual(['team-1/work-item-1'])
+  })
+
   test('returns the Work Item key from its own read-scoped endpoint', async () => {
     const reads: string[] = []
     const { platform, router } = createTestRouter({
@@ -692,6 +778,123 @@ describe('public API router', () => {
     expect(denied.status).toBe(403)
     expect(missingTeam.status).toBe(400)
     expect(reads).toEqual(['team-1/work-item-1'])
+  })
+
+  test('reads and changes Work Item relations with the matching scopes and replays an idempotent create', async () => {
+    const calls: string[] = []
+    const { platform, router } = createTestRouter({
+      workItemRelations: {
+        async listRelations(_credential, teamId, workItemId) {
+          calls.push(`list ${teamId}/${workItemId}`)
+          return { schemaVersion: 1, teamId, workItemId, relations: [{ type: 'blockedBy', targetWorkItemId: 'task-2' }] }
+        },
+        async authorizeRelationChange(_credential, teamId, workItemId, targetWorkItemId) {
+          calls.push(`authorize ${teamId}/${workItemId}->${targetWorkItemId}`)
+        },
+        async createRelation(_credential, teamId, workItemId, input, context, idempotency) {
+          calls.push(`create ${teamId}/${workItemId} ${input.type} ${input.targetWorkItemId} ${context.idempotencyKey} ${idempotency?.idempotencyKey}`)
+          return { schemaVersion: 1, teamId, workItemId, relation: { type: input.type, targetWorkItemId: input.targetWorkItemId } }
+        },
+        async deleteRelation(_credential, teamId, workItemId, targetWorkItemId, type, _context, idempotency) {
+          calls.push(`delete ${teamId}/${workItemId} ${type} ${targetWorkItemId} ${idempotency?.idempotencyKey}`)
+          return { schemaVersion: 1, teamId, workItemId, relation: { type, targetWorkItemId } }
+        },
+      },
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+    const write = (path: string, method: string, key: string, body?: unknown) => router.request(`http://localhost${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${writer.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+
+    const listed = await router.request('http://localhost/v1/work-items/task-1/relations?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const listDenied = await router.request('http://localhost/v1/work-items/task-1/relations?teamId=team-1', {
+      headers: { Authorization: `Bearer ${writer.secret}` },
+    })
+    const created = await write('/v1/work-items/task-1/relations?teamId=team-1', 'POST', 'relation-key', { type: 'child', targetWorkItemId: 'task-3' })
+    const replayed = await write('/v1/work-items/task-1/relations?teamId=team-1', 'POST', 'relation-key', { type: 'child', targetWorkItemId: 'task-3' })
+    const invalidType = await write('/v1/work-items/task-1/relations?teamId=team-1', 'POST', 'invalid-key', { type: 'sibling', targetWorkItemId: 'task-3' })
+    const extraField = await write('/v1/work-items/task-1/relations?teamId=team-1', 'POST', 'extra-key', { type: 'related', targetWorkItemId: 'task-3', expectedGraphRevision: 2 })
+    const createDenied = await router.request('http://localhost/v1/work-items/task-1/relations?teamId=team-1', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${reader.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'reader-key' },
+      body: JSON.stringify({ type: 'related', targetWorkItemId: 'task-3' }),
+    })
+    const deleted = await write('/v1/work-items/task-1/relations/task-2/blockedBy?teamId=team-1', 'DELETE', 'delete-key')
+    const deleteInvalid = await write('/v1/work-items/task-1/relations/task-2/sibling?teamId=team-1', 'DELETE', 'delete-invalid-key')
+
+    expect(listed.status).toBe(200)
+    expect(await listed.json()).toEqual({
+      schemaVersion: 1, teamId: 'team-1', workItemId: 'task-1', relations: [{ type: 'blockedBy', targetWorkItemId: 'task-2' }],
+    })
+    expect(listDenied.status).toBe(403)
+    expect(created.status).toBe(201)
+    expect(replayed.status).toBe(201)
+    expect(replayed.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(await replayed.json()).toEqual({
+      schemaVersion: 1, teamId: 'team-1', workItemId: 'task-1', relation: { type: 'child', targetWorkItemId: 'task-3' },
+    })
+    expect(invalidType.status).toBe(400)
+    expect(extraField.status).toBe(400)
+    expect(createDenied.status).toBe(403)
+    expect(deleted.status).toBe(200)
+    expect(deleteInvalid.status).toBe(400)
+    expect(calls).toEqual([
+      'list team-1/task-1',
+      'create team-1/task-1 child task-3 relation-key relation-key',
+      'authorize team-1/task-1->task-3',
+      'delete team-1/task-1 blockedBy task-2 delete-key',
+    ])
+  })
+
+  test('binds a subtask batch key to the parent and the whole list, and refuses another list with the same key', async () => {
+    const calls: string[] = []
+    const { platform, router } = createTestRouter({
+      workItemRelations: {
+        async listRelations() { throw new Error('not used') },
+        async authorizeRelationChange(_credential, teamId, workItemId, targetWorkItemId) {
+          calls.push(`authorize ${teamId}/${workItemId}->${targetWorkItemId}`)
+        },
+        async createRelation() { throw new Error('not used') },
+        async deleteRelation() { throw new Error('not used') },
+      },
+    })
+    const writer = await createApiKey(platform, ['work-items:write'])
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const reserve = (key: string, body: unknown, secret = writer.secret) => router.request('http://localhost/v1/work-items/task-1/subtask-batches?teamId=team-1', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
+      body: JSON.stringify(body),
+    })
+    const list = { subtasks: [{ title: 'Design', assigneeUserId: 'owner', priority: 'medium' }] }
+
+    const reserved = await reserve('batch-key', list)
+    const replayed = await reserve('batch-key', list)
+    const changed = await reserve('batch-key', { subtasks: [...list.subtasks, { title: 'Build' }] })
+    const empty = await reserve('empty-key', { subtasks: [] })
+    const tooMany = await reserve('many-key', { subtasks: Array.from({ length: 21 }, (_, index) => ({ title: `Task ${index}` })) })
+    const unknownField = await reserve('field-key', { subtasks: [{ title: 'Design', parentId: 'task-9' }] })
+    const untitled = await reserve('title-key', { subtasks: [{ description: 'No title' }] })
+    const denied = await reserve('reader-key', list, reader.secret)
+    // An entry takes the same description length as creating a Work Item.
+    const longDescription = await reserve('long-key', { subtasks: [{ title: 'Design', description: 'x'.repeat(100_000) }] })
+    const tooLongDescription = await reserve('too-long-key', { subtasks: [{ title: 'Design', description: 'x'.repeat(100_001) }] })
+
+    expect(reserved.status).toBe(201)
+    expect(await reserved.json()).toEqual({ schemaVersion: 1, teamId: 'team-1', workItemId: 'task-1', subtaskCount: 1 })
+    expect(replayed.status).toBe(201)
+    expect(replayed.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(changed.status).toBe(409)
+    expect(await changed.json()).toMatchObject({ code: 'idempotency_conflict', retryable: false })
+    expect([empty.status, tooMany.status, unknownField.status, untitled.status]).toEqual([400, 400, 400, 400])
+    expect(denied.status).toBe(403)
+    expect([longDescription.status, tooLongDescription.status]).toEqual([201, 400])
+    // The first request and the replay both check that the caller may still link children to the parent.
+    expect(calls).toEqual(['authorize team-1/task-1->task-1', 'authorize team-1/task-1->task-1', 'authorize team-1/task-1->task-1'])
   })
 
   test('lists Documents linked to a Work Item with the read scope and signs the continuation', async () => {
@@ -789,6 +992,72 @@ describe('public API router', () => {
     expect(hidden.status).toBe(404)
     expect(denied.status).toBe(403)
     expect(reads).toEqual(['team-1/work-item-1/document-1', 'team-1/work-item-1/document-2'])
+  })
+
+  test('lists attachments and issues download URLs with the read scope and never caches them', async () => {
+    const calls: string[] = []
+    const { platform, router } = createTestRouter({
+      attachments: {
+        async listWorkItemAttachments(credential, teamId, workItemId) {
+          expect(credential.workspaceId).toBe('workspace-1')
+          calls.push(`list ${teamId}/${workItemId}`)
+          return {
+            items: [{
+              id: 'file-1', name: 'spec.pdf', versionId: 'version-2', versionNumber: 2,
+              contentType: 'application/pdf', sizeBytes: 2048, updatedAt: NOW.toISOString(),
+            }],
+          }
+        },
+        async createWorkItemAttachmentDownload(_credential, teamId, workItemId, fileId, request) {
+          calls.push(`download ${teamId}/${workItemId}/${fileId} ${request.correlationId ?? '-'}`)
+          expect(request.requestId).toBeTruthy()
+          if (fileId !== 'file-1') throw new PublicApiServiceError(404, 'not_found', 'Attachment was not found.')
+          return { fileId, versionId: 'version-2', url: 'https://files.example.test/file-1', expiresAt: NOW.toISOString() }
+        },
+      },
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+
+    const list = await router.request('http://localhost/v1/work-items/work-item-1/attachments?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const download = await router.request('http://localhost/v1/work-items/work-item-1/attachments/file-1/download?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}`, 'X-Correlation-Id': 'corr-1' },
+    })
+    const hidden = await router.request('http://localhost/v1/work-items/work-item-1/attachments/file-2/download?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const denied = await router.request('http://localhost/v1/work-items/work-item-1/attachments?teamId=team-1', {
+      headers: { Authorization: `Bearer ${writer.secret}` },
+    })
+    const missingTeam = await router.request('http://localhost/v1/work-items/work-item-1/attachments', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+
+    expect(list.status).toBe(200)
+    expect(list.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(await list.json()).toEqual({
+      items: [{
+        id: 'file-1', name: 'spec.pdf', versionId: 'version-2', versionNumber: 2,
+        contentType: 'application/pdf', sizeBytes: 2048, updatedAt: NOW.toISOString(),
+      }],
+    })
+    expect(download.status).toBe(200)
+    expect(download.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(await download.json()).toEqual({
+      fileId: 'file-1', versionId: 'version-2', url: 'https://files.example.test/file-1', expiresAt: NOW.toISOString(),
+    })
+    expect(hidden.status).toBe(404)
+    expect(denied.status).toBe(403)
+    expect(missingTeam.status).toBe(400)
+    // Error responses carry the same cache policy as the successful ones.
+    for (const failed of [hidden, denied, missingTeam]) expect(failed.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(calls).toEqual([
+      'list team-1/work-item-1',
+      'download team-1/work-item-1/file-1 corr-1',
+      'download team-1/work-item-1/file-2 -',
+    ])
   })
 
   test('reports Document routes as unavailable when no Document service is configured', async () => {
@@ -1956,7 +2225,7 @@ describe('public API router', () => {
         body: JSON.stringify({
           installationId: installation.id,
           resourceType: 'issue',
-          externalId: 'GH-29',
+          externalId: 'mnmn0/mukuroji#29',
           externalUrl: 'https://github.com/mnmn0/mukuroji/issues/29',
           displayKey: '#29',
           syncDirection: 'bidirectional',
@@ -1966,6 +2235,24 @@ describe('public API router', () => {
     expect(created.status).toBe(201)
     const link = await created.json() as { id: string }
     expect(link.id).toBeString()
+
+    // `#` is allowed for provider IDs such as a GitHub issue's owner/repository#number, but an ID
+    // still has to start with a letter or digit.
+    const badId = await router.request(
+      'http://localhost/v1/work-items/work-item-1/external-links?teamId=team-1',
+      {
+        method: 'POST',
+        headers: { ...authorization, 'Content-Type': 'application/json', 'Idempotency-Key': 'link-bad-external-id' },
+        body: JSON.stringify({
+          installationId: installation.id,
+          resourceType: 'issue',
+          externalId: '#29',
+          externalUrl: 'https://github.com/mnmn0/mukuroji/issues/29',
+          syncDirection: 'bidirectional',
+        }),
+      },
+    )
+    expect(badId.status).toBe(400)
 
     // A calendar event link is always created by Mukuroji, so an existing event ID is refused.
     const existingEvent = await router.request(
@@ -4038,6 +4325,34 @@ describe('public Agent Run routes', () => {
     ])
     expect((await router.request('/v1/agent-runs?teamId=team-1&state=stalled', { headers })).status).toBe(400)
     expect((await router.request('/v1/agent-runs?teamId=team-1&state=finished&workItemId=work-item-1', { headers })).status).toBe(400)
+  })
+
+  test('lists a Work Item\'s agent questions with their answers without caching them', async () => {
+    const question = {
+      schemaVersion: 1, runId: agentRunFixture.runId, teamId: 'team-1', workItemId: 'work-item-1', sequence: 2, kind: 'blocker',
+      commentId: 'cmt_2', verifications: [], artifacts: [], createdAt: NOW.toISOString(),
+      answer: { body: 'Use staging.', answeredBy: 'user-1', answeredAt: NOW.toISOString(), commentId: 'cmt_3' },
+    } satisfies AgentRunReport
+    const { platform, router } = createTestRouter({ agentRuns: createAgentRunService({
+      async listWorkItemQuestions(_credential, teamId, workItemId) {
+        expect([teamId, workItemId]).toEqual(['team-1', 'work-item-1'])
+        return { items: [question], hasMore: false }
+      },
+    }) })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const listed = await router.request('/v1/work-items/work-item-1/agent-run-questions?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    expect(listed.status).toBe(200)
+    expect(listed.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(await listed.json()).toEqual({ items: [question], hasMore: false })
+    expect((await router.request('/v1/work-items/work-item-1/agent-run-questions', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })).status).toBe(400)
+    const unconfigured = createTestRouter({ platform, agentRuns: createAgentRunService() })
+    expect((await unconfigured.router.request('/v1/work-items/work-item-1/agent-run-questions?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })).status).toBe(503)
   })
 
   test('passes Agent Run fences to updates and comments without changing the patch', async () => {

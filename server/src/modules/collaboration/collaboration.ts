@@ -44,6 +44,7 @@ import {
   type MutationAuditContext,
 } from '../audit'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
+import { createOrgStructureRevisionConditionCheck } from '../directory'
 
 /** Comment 本文に保存できる文字数です。 */
 export const COLLABORATION_COMMENT_MAX_LENGTH = 20_000
@@ -208,6 +209,8 @@ export type CuratedContextAuthorizationSnapshot = {
   workspaceMemberVersion: number
   /** Enterprise Identity authorization generation observed during authorization. */
   enterpriseControlRevision?: number
+  /** OrgUnit structure revision that expanded the caller's OrgUnit scopes (ADR 0097). */
+  orgStructureRevision?: number
 }
 
 /**
@@ -5272,7 +5275,10 @@ function assertCuratedContextAuthorizationSnapshot(
     snapshot.workspaceMemberVersion < 0 ||
     (snapshot.enterpriseControlRevision !== undefined &&
       (!Number.isSafeInteger(snapshot.enterpriseControlRevision) ||
-        snapshot.enterpriseControlRevision < 0))
+        snapshot.enterpriseControlRevision < 0)) ||
+    (snapshot.orgStructureRevision !== undefined &&
+      (!Number.isSafeInteger(snapshot.orgStructureRevision) ||
+        snapshot.orgStructureRevision < 0))
   ) {
     throw new CollaborationError(
       400,
@@ -5486,6 +5492,14 @@ function curatedContextAuthorizationConditions(
         },
       },
     })
+  }
+  if (snapshot.orgStructureRevision !== undefined) {
+    // OrgUnit roles reach Teams through the structure, so its revision fences them (ADR 0097).
+    conditions.push(createOrgStructureRevisionConditionCheck(
+      readEnvironment('PROJECT_DIRECTORY_TABLE_NAME') ?? 'mukuroji-project-directory-local',
+      input.workspaceId,
+      snapshot.orgStructureRevision,
+    ))
   }
   return conditions
 }

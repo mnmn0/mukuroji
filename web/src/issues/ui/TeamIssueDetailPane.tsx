@@ -23,6 +23,8 @@ import {
 } from 'react'
 import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
 import { AiSummaryAssistant } from '../../features/ai-assistance/ui/AiSummaryAssistant'
+import { AiWorkItemPlanningAssistant } from '../../features/ai-assistance/ui/AiWorkItemPlanningAssistant'
+import { resolveAllowedChildWorkItemTypes } from '../../features/ai-assistance/mutations/useAiPlanningStructureAdoption'
 import { IssueArtifactsPanel } from '../../files/ui/IssueArtifactsPanel'
 import { type FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { type Locale, type MessageKey } from '../../shared/i18n/i18n'
@@ -95,6 +97,7 @@ import {
 import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
 import { readAcceptanceCriteriaDraftSubmission } from '../../work-items/model/acceptanceCriteria'
 import { WorkItemAcceptanceCriteriaEditor } from '../../work-items/ui/WorkItemAcceptanceCriteriaEditor'
+import { WorkItemCompletionGateStatus } from '../../work-items/ui/WorkItemCompletionGateStatus'
 import { useAcceptanceCriteriaDraft } from '../../work-items/ui/useAcceptanceCriteriaDraft'
 import {
   type CanManageWorkItemDependencyEndpoint,
@@ -111,6 +114,7 @@ import { usePromoteProjectRisk } from '../../projects/mutations/usePromoteProjec
  */
 export function IssueDetailPane({
   aiAssistanceEnabled = true,
+  aiPlanningAssistanceEnabled = false,
   softwareFactoryEnabled = true,
   accessToken,
   assigneeOptions,
@@ -150,6 +154,8 @@ export function IssueDetailPane({
 }: {
   /** Whether the saved Workspace AI policy permits the Summary workflow. */
   aiAssistanceEnabled?: boolean
+  /** Whether the saved Workspace AI policy permits the Planning workflow. */
+  aiPlanningAssistanceEnabled?: boolean
   /** Whether the deployment serves Software factory: agent handoff, Agent Run history, and report chips. */
   softwareFactoryEnabled?: boolean
   accessToken?: string
@@ -211,6 +217,7 @@ export function IssueDetailPane({
   return (
     <IssueDetailContent
       aiAssistanceEnabled={aiAssistanceEnabled}
+      aiPlanningAssistanceEnabled={aiPlanningAssistanceEnabled}
       softwareFactoryEnabled={softwareFactoryEnabled}
       accessToken={accessToken}
       assigneeOptions={assigneeOptions}
@@ -254,6 +261,7 @@ export function IssueDetailPane({
 
 function IssueDetailContent({
   aiAssistanceEnabled = true,
+  aiPlanningAssistanceEnabled = false,
   softwareFactoryEnabled = true,
   accessToken,
   assigneeOptions,
@@ -293,6 +301,8 @@ function IssueDetailContent({
 }: {
   /** Whether the saved Workspace AI policy permits the Summary workflow. */
   aiAssistanceEnabled?: boolean
+  /** Whether the saved Workspace AI policy permits the Planning workflow. */
+  aiPlanningAssistanceEnabled?: boolean
   /** Whether the deployment serves Software factory: agent handoff, Agent Run history, and report chips. */
   softwareFactoryEnabled?: boolean
   /** Related Documents を取得する access token です。 */
@@ -374,6 +384,23 @@ function IssueDetailContent({
   })
   const workItemKeyPrefixes = useWorkItemKeyPrefixes()
   const commentDraftDirtyRef = useRef(false)
+  // Each assistant of this Work Item reports its own pending state; the shared save guard stays on
+  // while any of them is in flight, so one finishing cannot release another's guard.
+  const aiOperationPendingRef = useRef(new Set<string>())
+  /**
+   * Records one assistant's pending state and reports whether any assistant is still in flight.
+   *
+   * @param operation - Assistant that changed state.
+   * @param pending - Whether that assistant is in flight.
+   */
+  const reportAiOperationPending = (operation: 'brief' | 'collaboration' | 'planning', pending: boolean) => {
+    if (pending) aiOperationPendingRef.current.add(operation)
+    else aiOperationPendingRef.current.delete(operation)
+    onAiSummaryOperationPendingChange?.(
+      createTaskViewItemKey(issue.teamId, issue.id),
+      aiOperationPendingRef.current.size > 0,
+    )
+  }
   const [isCommentDraftDirty, setIsCommentDraftDirty] = useState(false)
   /** Reports this Team Issue's comment dirtiness to the owning screen. */
   const handleCommentDraftDirtyChange = useCallback((isDirty: boolean) => {
@@ -383,8 +410,10 @@ function IssueDetailContent({
   }, [issue.id, onCommentDraftDirtyChange])
   const agentRunReports = useAgentRunReportCommentDetails({
     accessToken: softwareFactoryEnabled ? accessToken : undefined,
+    canAnswer: collaboration?.capabilities.canComment ?? false,
     commentCount: collaboration?.comments.length ?? 0,
     locale,
+    onAnswered: collaboration?.refresh,
     teamId: issue.teamId,
     workItemId: issue.id,
   })
@@ -409,10 +438,7 @@ function IssueDetailContent({
             onAdopt={onAdopt}
             onAuthenticatedApiError={onAuthenticatedApiError}
             onOperationPendingChange={(pending) => {
-              onAiSummaryOperationPendingChange?.(
-                createTaskViewItemKey(issue.teamId, issue.id),
-                pending,
-              )
+              reportAiOperationPending('brief', pending)
               onOperationPendingChange?.(createAiAssistantSessionKey(aiSummarySource), pending)
             }}
             sources={[aiSummarySource]}
@@ -732,6 +758,21 @@ function IssueDetailContent({
   }
 
   /**
+   * Saves only a new workflow status for the handoff Ready action, under the same pending lock as the editor form.
+   *
+   * @param workflowStatusId - Target workflow status ID.
+   */
+  const moveToWorkflowStatus = async (workflowStatusId: string) => {
+    if (!onUpdateIssue || isAiSummaryOperationPending || isIssueUpdatePending) return
+    setIssueUpdatePending(true)
+    try {
+      await onUpdateIssue(issue.id, { workflowStatusId })
+    } finally {
+      setIssueUpdatePending(false)
+    }
+  }
+
+  /**
    * Saves the estimate, remaining effort, and manual progress on their own, outside the editor form.
    *
    * @param change - Validated effort and progress change.
@@ -882,6 +923,12 @@ function IssueDetailContent({
         key={`acceptance-criteria:${editorIdentity}`}
         locale={locale}
         readOnly={isIssueReadOnly}
+      />
+      <WorkItemCompletionGateStatus
+        acceptanceCriteria={issue.acceptanceCriteria}
+        approvalSummary={issue.approvalSummary}
+        locale={locale}
+        policy={configuration?.completionGate}
       />
     </>
   )
@@ -1053,7 +1100,7 @@ function IssueDetailContent({
                 className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
                 defaultValue={isWorkItemTypeChangeRequested ? selectedTypeWorkflowStatusId : currentWorkflowStatusId}
                 form={editorFormId}
-                key={editorIdentity + ':workflow:' + selectedWorkItemTypeId}
+                key={editorIdentity + ':workflow:' + selectedWorkItemTypeId + ':' + currentWorkflowStatusId}
                 name="workflowStatusId"
               >
                 {workflowStatuses.map((status) => (
@@ -1199,12 +1246,7 @@ function IssueDetailContent({
             focusedRootCommentId={focusedRootCommentId}
             locale={locale}
             members={workspaceMembers}
-            onAiSummaryOperationPendingChange={(pending) => {
-              onAiSummaryOperationPendingChange?.(
-                createTaskViewItemKey(issue.teamId, issue.id),
-                pending,
-              )
-            }}
+            onAiSummaryOperationPendingChange={(pending) => reportAiOperationPending('collaboration', pending)}
             onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
             onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
             readOnlyMessage={collaborationReadOnlyMessage}
@@ -1267,7 +1309,44 @@ function IssueDetailContent({
           </div>
         </div>
         {softwareFactoryEnabled ? (
-          <TaskHandoffPanel accessToken={accessToken} configuration={configuration} includeDescription={hasDescriptionSection} t={t} task={issue} />
+          <TaskHandoffPanel
+            accessToken={accessToken}
+            configuration={configuration}
+            includeDescription={hasDescriptionSection}
+            onMoveToStatus={onUpdateIssue && !isIssueUpdatePending && !isAiSummaryOperationPending ? moveToWorkflowStatus : undefined}
+            t={t}
+            task={issue}
+          />
+        ) : null}
+        {aiPlanningAssistanceEnabled && accessToken ? (
+          <AiWorkItemPlanningAssistant
+            accessToken={accessToken}
+            isMutationPending={isIssueUpdatePending || isAiSummaryOperationPending}
+            key={createAiAssistantSessionKey(aiSummarySource)}
+            locale={locale}
+            onAuthenticatedApiError={onAuthenticatedApiError}
+            // Decisions and structure adoption hold the same save guard as the Summary assistant,
+            // so a save cannot change the source revision and remount this assistant mid-way.
+            onOperationPendingChange={(pending) => reportAiOperationPending('planning', pending)}
+            resolveWorkItemLabel={(endpoint) => planningSnapshot?.workItems.find(
+              (workItem) => workItem.teamId === endpoint.teamId && workItem.id === endpoint.workItemId,
+            )?.title ?? `${endpoint.teamId} / ${endpoint.workItemId}`}
+            source={aiSummarySource}
+            structureAdoption={isIssueReadOnly
+              ? undefined
+              : {
+                  childTypes: resolveAllowedChildWorkItemTypes(workItemTypes, currentWorkItemTypeId)
+                    .map((type) => ({ id: type.id, name: type.name })),
+                  parent: {
+                    ...(issue.assignedProjectId ? { assignedProjectId: issue.assignedProjectId } : {}),
+                    assigneeUserId: issue.assigneeUserId,
+                    teamId: issue.teamId,
+                    workItemId: issue.id,
+                    workItemTypeId: currentWorkItemTypeId,
+                  },
+                }}
+            t={t}
+          />
         ) : null}
         <div className="grid min-w-0 gap-4">
           {!hasOverviewSection ? renderWorkItemTypeControl() : null}
@@ -1327,7 +1406,8 @@ function pickTeamIssueDraftFields(item: TeamIssue): unknown {
     item.assignedProjectId,
     item.assigneeUserId,
     item.priority,
-    item.workflowStatusId,
+    // The status select is keyed by the saved status instead, so a status-only save, such as the
+    // Ready action, refreshes that select without discarding the other unsaved input.
     item.workItemTypeId,
     item.customFieldValues,
     item.contributorAssignments,

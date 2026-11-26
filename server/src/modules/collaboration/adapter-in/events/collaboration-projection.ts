@@ -20,6 +20,7 @@ import {
 import {
   AUTOMATION_EXECUTION_DEAD_LETTERED_EVENT_TYPE,
   AUTOMATION_RULE_RATE_LIMITED_EVENT_TYPE,
+  isAgentRunNotificationReason,
   isCanonicalWorkItemKey,
   parseNotificationMessage,
   type EnterpriseIdentitySnapshot,
@@ -33,6 +34,7 @@ import {
   REQUEST_REQUESTER_EVENT_TYPE_PREFIX,
   REQUEST_REQUESTER_NOTIFICATION_REASON,
 } from '../../../request-intake'
+import { isWorkspaceMemberRowActive } from '../../../workspace-access'
 import { isCanonicalWorkItemRecord, workItemScheduleInstantToLocalDate } from '../../../work-items'
 import {
   evaluateEnterpriseAccess,
@@ -53,6 +55,8 @@ import {
   createNotificationDeliveryPlan,
   parsePlanningUpdateTargetScheduleProjection,
   parseStoredNotificationPreferences,
+  MEMBER_ACCESS_EXPIRING_EVENT_TYPE,
+  MEMBER_ACCESS_EXPIRY_REASON,
   TIMESHEET_REMINDER_EVENT_TYPE,
   WEEKLY_REPORT_ESCALATION_EVENT_TYPE,
   WEEKLY_REPORT_ESCALATION_REASON,
@@ -188,6 +192,10 @@ export type AuditProjectionEvent = {
   weeklyReportWeekStart?: string
   /** Lower-case member key of the author of an unsubmitted weekly report. */
   weeklyReportAuthorMemberKey?: string
+  /** Lower-case member key of the member whose access ends, when this is an access expiry notice. */
+  accessExpiryMemberKey?: string
+  /** Access expiry an access expiry notice announces, as stored on the member row when scanned. */
+  accessExpiresAt?: string
   /** notification/realtime consumer へ配送する event かどうかです。 */
   outboxStatus: 'pending' | 'suppressed'
 }
@@ -888,7 +896,13 @@ async function processRecord(
   )
   const timesheetReminder = await readTimesheetReminderFence(event, dependencies.timesheetReminders)
   const weeklyReportReminder = await readWeeklyReportReminderFence(event, dependencies.weeklyReportReminders)
-  if (!workItemAuthorizationEvent || !timesheetReminder.current || !weeklyReportReminder.current) {
+  const accessExpiryNotice = await readMemberAccessExpiryNoticeFence(event)
+  if (
+    !workItemAuthorizationEvent ||
+    !timesheetReminder.current ||
+    !weeklyReportReminder.current ||
+    !accessExpiryNotice.current
+  ) {
     await markProjectionProcessed(event.eventId)
     return
   }
@@ -934,7 +948,10 @@ async function processRecord(
         authorizationEvent,
         currentScope,
       )
-    : undefined) ?? timesheetReminder.condition ?? weeklyReportReminder.condition
+    : undefined) ??
+    timesheetReminder.condition ??
+    weeklyReportReminder.condition ??
+    accessExpiryNotice.condition
   const watcherCandidates = await readSubscribedWatcherCandidates(authorizationEvent)
   const memberDirectory = notifiesPlanningUpdateProjectMembers(authorizationEvent)
     ? await readProjectDirectory(authorizationEvent.workspaceId)
@@ -964,6 +981,7 @@ async function processRecord(
       candidates.map(async (candidate) =>
         isCurrentEscalationManager(authorizationEvent, candidate.memberKey, directoryItems) &&
         isCurrentWeeklyReportRecipient(authorizationEvent, candidate.memberKey, directoryItems) &&
+        isCurrentMemberAccessExpiryRecipient(authorizationEvent, candidate.memberKey, directoryItems) &&
         await isEligibleRecipient(
           authorizationEvent,
           candidate.memberKey,
@@ -1618,6 +1636,7 @@ export async function publishRealtimeInvalidation(
 
 /**
  * notification candidate を canonical member key でまとめ、actor 自身を除外します。
+ * Agent Run の通知 reason は、agent が担当者の credential で動くため actor 本人にも届けます。
  */
 export function groupNotificationCandidates(event: AuditProjectionEvent) {
   const actorKey = normalizeMemberKey(event.actorMemberKey ?? event.actorUserId)
@@ -1626,7 +1645,7 @@ export function groupNotificationCandidates(event: AuditProjectionEvent) {
   for (const candidate of event.notificationCandidates) {
     const memberKey = normalizeMemberKey(candidate.memberKey)
 
-    if (!memberKey || memberKey === actorKey) {
+    if (!memberKey || (memberKey === actorKey && !isAgentRunNotificationReason(candidate.reason))) {
       continue
     }
 
@@ -1798,6 +1817,9 @@ export function createNotificationProjectionItem(
     // External channels recheck the author's Project membership and reread the week before they send.
     weeklyReportAuthorMemberKey: event.weeklyReportAuthorMemberKey,
     weeklyReportWeekStart: event.weeklyReportWeekStart,
+    // External channels reread the member's expiry before they send, so a cleared or moved expiry is not announced.
+    accessExpiryMemberKey: event.accessExpiryMemberKey,
+    accessExpiresAt: event.accessExpiresAt,
     // External channels reread these entries before they send, so a submitted timesheet is not reminded.
     timeEntryIds: event.timeEntryIds,
     timesheetDueBefore: event.timesheetDueBefore,
@@ -1927,6 +1949,60 @@ export async function readWeeklyReportReminderFence(
     weekStart: event.weeklyReportWeekStart,
   })
   return condition ? { current: true, condition } : { current: false }
+}
+
+/**
+ * Revalidates a member access expiry notice against the member's current row (ADR 0095).
+ *
+ * The notice must name the member whose access ends, the expiry it announces, and exactly one
+ * recipient with the access expiry reason. It is dropped when the member was deactivated, when the
+ * expiry was cleared or moved since the schedule scanned it, or once the expiry has passed. A
+ * current notice carries a condition on the member row, written in the same transaction as the
+ * notification, so an expiry change that lands before the save cancels it and the stream retry
+ * drops the notice. Events from before the notice carried its member and expiry are dropped too.
+ *
+ * @param event - Parsed audit event.
+ * @param now - Instant the expiry is compared with.
+ * @returns Whether the event should still be projected, and the condition for an access expiry notice.
+ */
+export async function readMemberAccessExpiryNoticeFence(
+  event: AuditProjectionEvent,
+  now: Date = new Date(),
+): Promise<{ current: boolean; condition?: ProjectionConditionCheck }> {
+  if (event.eventType !== MEMBER_ACCESS_EXPIRING_EVENT_TYPE) return { current: true }
+  const [recipient] = event.notificationCandidates
+  const memberKey = normalizeMemberKey(event.accessExpiryMemberKey)
+  const accessExpiresAt = event.accessExpiresAt
+  if (
+    !memberKey ||
+    !accessExpiresAt ||
+    event.notificationCandidates.length !== 1 ||
+    recipient?.reason !== MEMBER_ACCESS_EXPIRY_REASON
+  ) {
+    return { current: false }
+  }
+  const tableName = requireEnv('WORKSPACE_ACCESS_TABLE_NAME')
+  const key = { workspaceId: event.workspaceId, recordKey: `MEMBER#${memberKey}` }
+  const result = await documentClient.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true }))
+  const member = result.Item
+  if (
+    !isActiveWorkspaceNotificationMember(memberKey, member, now) ||
+    member.accessExpiresAt !== accessExpiresAt
+  ) {
+    return { current: false }
+  }
+  return {
+    current: true,
+    condition: {
+      ConditionCheck: {
+        TableName: tableName,
+        Key: key,
+        ConditionExpression: '#status = :active AND accessExpiresAt = :accessExpiresAt',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: { ':active': 'active', ':accessExpiresAt': accessExpiresAt },
+      },
+    },
+  }
 }
 
 /**
@@ -2120,6 +2196,40 @@ export function toPlanningUpdateProjectMemberCandidates(
       ? [{ memberKey, reason: 'project-member' }]
       : []
   })
+}
+
+/**
+ * Reports whether a recipient may still receive a member access expiry notice (ADR 0095).
+ *
+ * The notice is for the managers of the Project it was scanned for, and that Project is what
+ * authorizes telling them about the expiring member. So a recipient who stepped down from managing
+ * that Project after the scan is not told, and neither is anyone once the expiring member has left
+ * the Project (or had their membership archived) after the scan. The same check runs at projection
+ * and again before an external channel sends.
+ *
+ * @param event - Event whose Project the notice is authorized against, naming the expiring member.
+ * @param memberKey - Recipient member key.
+ * @param directoryItems - Current Project directory rows.
+ * @returns True for other events, or when the recipient still manages the event's Project and the
+ *   expiring member still belongs to it.
+ */
+export function isCurrentMemberAccessExpiryRecipient(
+  event: Pick<AuditProjectionEvent, 'eventType' | 'projectId' | 'accessExpiryMemberKey'>,
+  memberKey: string,
+  directoryItems: ProjectDirectoryItem[],
+) {
+  if (event.eventType !== MEMBER_ACCESS_EXPIRING_EVENT_TYPE) return true
+  const recipient = normalizeMemberKey(memberKey)
+  const target = normalizeMemberKey(event.accessExpiryMemberKey)
+  if (!event.projectId || !recipient || !target) return false
+  const isCurrentProjectMember = (key: string, managerOnly: boolean) => directoryItems.some((item) =>
+    item.entryType === 'project-member' &&
+    item.projectId === event.projectId &&
+    (!managerOnly || item.role === 'manager') &&
+    item.archivedAt === undefined &&
+    normalizeMemberKey(item.memberKey) === key
+  )
+  return isCurrentProjectMember(recipient, true) && isCurrentProjectMember(target, false)
 }
 
 /**
@@ -2958,6 +3068,7 @@ export async function authorizeNotificationDelivery(
   }
   if (!isCurrentEscalationManager(refreshed, memberKey, directory)) return false
   if (!isCurrentWeeklyReportRecipient(refreshed, memberKey, directory)) return false
+  if (!isCurrentMemberAccessExpiryRecipient(refreshed, memberKey, directory)) return false
   if (
     currentPlanningActivityEvent &&
     !hasSamePlanningScope(refreshed, currentPlanningActivityEvent) &&
@@ -2983,14 +3094,25 @@ function readWorkspaceNotificationRole(
     : undefined
 }
 
-/** Workspace member row が現在も notification recipient として有効かを判定します。 */
+/**
+ * Workspace member row が現在も notification recipient として有効かを判定します。
+ *
+ * A member whose access expiry has passed receives nothing, even while a pending handover keeps
+ * the row active (ADR 0095).
+ *
+ * @param memberKey - Normalized recipient member key.
+ * @param member - Stored Workspace member row.
+ * @param now - Current instant used for the access expiry.
+ * @returns Whether the row is the recipient's active, unexpired membership.
+ */
 export function isActiveWorkspaceNotificationMember(
   memberKey: string,
   member: Record<string, unknown> | undefined,
+  now: Date = new Date(),
 ): member is Record<string, unknown> {
   return member !== undefined &&
     member.entryType === 'workspace-member' &&
-    member.status === 'active' &&
+    isWorkspaceMemberRowActive(member, now) &&
     normalizeMemberKey(String(member.memberKey ?? member.email ?? '')) === memberKey
 }
 
@@ -3307,6 +3429,10 @@ export function parseAuditProjectionEvent(
     ...(readString(metadata.weeklyReportAuthorMemberKey)
       ? { weeklyReportAuthorMemberKey: readString(metadata.weeklyReportAuthorMemberKey) }
       : {}),
+    ...(readString(metadata.accessExpiryMemberKey)
+      ? { accessExpiryMemberKey: readString(metadata.accessExpiryMemberKey) }
+      : {}),
+    ...(readTimestamp(metadata.accessExpiresAt) ? { accessExpiresAt: readTimestamp(metadata.accessExpiresAt) } : {}),
     outboxStatus: value.outboxStatus === 'suppressed' ? 'suppressed' : 'pending',
   }
 }

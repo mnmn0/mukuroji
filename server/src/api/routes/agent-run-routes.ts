@@ -1,9 +1,11 @@
 import type { Context, Hono } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
-import { AgentRunError, readAgentRunId } from '../../modules/agent-runs'
+import { AgentRunError, readAgentRunId, readAnswerAgentRunReportRequest } from '../../modules/agent-runs'
+import { CollaborationError } from '../../modules/collaboration'
 import { ProjectDataError } from '../../modules/directory'
 import { isTeamIssueNotFoundError } from '../../modules/work-items'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
+import { toCollaborationErrorResponse } from '../shared/collaboration-access'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { createRequestMutationContext, readBearerAccessToken, readJson } from '../shared/http'
 import { toProjectDataErrorResponse } from '../shared/project-access'
@@ -11,13 +13,18 @@ import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
 import {
   getWebAgentSettings,
+  getWebWorkspaceAgentDefaults,
   listWebTeamAgentRunBoard,
+  readFactoryBoardContinuation,
   listWebWorkItemAgentRunReports,
   listWebWorkItemAgentRuns,
   releaseWebAgentRun,
   updateWebAgentSettings,
+  updateWebWorkspaceAgentDefaults,
 } from './web-agent-run-service'
+import { answerWebAgentRunReport } from './web-agent-run-answer-service'
 import { getWebTeamFactoryAnalytics, readFactoryAnalyticsPeriod } from './web-agent-run-analytics-service'
+import { getWebTeamAgentRunHistory, readAgentRunHistoryRequest } from './web-agent-run-history-service'
 
 /** Default number of runs in a Work Item history page. */
 const defaultHistoryPageSize = 20
@@ -36,6 +43,8 @@ function toAgentRunErrorResponse(c: Context, error: unknown): Response {
   if (error instanceof CognitoServiceError) return toCognitoDirectoryErrorResponse(c, error)
   if (error instanceof WorkspaceAccessError) return toWorkspaceAccessErrorResponse(c, error)
   if (error instanceof ProjectDataError || isTeamIssueNotFoundError(error)) return toProjectDataErrorResponse(c, error)
+  // An answer saves a comment, whose authorization and condition failures keep their 403 or 409.
+  if (error instanceof CollaborationError) return toCollaborationErrorResponse(c, error)
   if (!(error instanceof AgentRunError)) {
     console.error(error)
     return c.json({ code: 'AgentRunsUnavailable', message: 'Agent Runs are unavailable.' }, 502)
@@ -107,7 +116,13 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
     if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-      return c.json(await listWebTeamAgentRunBoard(principal, c.req.param('teamId'), c.req.header('X-Correlation-Id')?.trim() || undefined))
+      const continuation = c.req.query('continuation')
+      return c.json(await listWebTeamAgentRunBoard(
+        principal,
+        c.req.param('teamId'),
+        c.req.header('X-Correlation-Id')?.trim() || undefined,
+        continuation === undefined ? undefined : readFactoryBoardContinuation(continuation, principal, c.req.param('teamId')),
+      ))
     } catch (error) {
       return toAgentRunErrorResponse(c, error)
     }
@@ -120,6 +135,52 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       const period = readFactoryAnalyticsPeriod(c.req.query('from'), c.req.query('to'))
       return c.json(await getWebTeamFactoryAnalytics(principal, c.req.param('teamId'), period))
+    } catch (error) {
+      return toAgentRunErrorResponse(c, error)
+    }
+  })
+
+  routeApp.post('/api/teams/:teamId/work-items/:workItemId/agent-runs/:runId/reports/:sequence/answer', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const runId = readAgentRunId(c.req.param('runId'), '/runId')
+      const sequence = Number(c.req.param('sequence'))
+      if (!/^[1-9]\d{0,5}$/u.test(c.req.param('sequence'))) {
+        throw new AgentRunError('validation_failed', 'sequence must be a positive integer.', { pointer: '/sequence' })
+      }
+      const body = readAnswerAgentRunReportRequest(await readJson(c.req))
+      const teamId = c.req.param('teamId')
+      const workItemId = c.req.param('workItemId')
+      return c.json(await answerWebAgentRunReport(
+        principal,
+        teamId,
+        workItemId,
+        { runId, sequence },
+        body,
+        createRequestMutationContext(c, principal.directoryId, principal.actorId, principal.userKey, { runId, sequence, body }),
+      ), 201)
+    } catch (error) {
+      return toAgentRunErrorResponse(c, error)
+    }
+  })
+
+  routeApp.get('/api/teams/:teamId/agent-runs/history', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const request = readAgentRunHistoryRequest({
+        from: c.req.query('from'),
+        to: c.req.query('to'),
+        outcome: c.req.query('outcome'),
+        assigneeUserId: c.req.query('assigneeUserId'),
+        runtime: c.req.query('runtime'),
+        projectId: c.req.query('projectId'),
+      })
+      c.header('Cache-Control', 'private, no-store')
+      return c.json(await getWebTeamAgentRunHistory(principal, c.req.param('teamId'), request))
     } catch (error) {
       return toAgentRunErrorResponse(c, error)
     }
@@ -148,6 +209,33 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       return c.json(await getWebAgentSettings(principal, c.req.param('teamId')))
+    } catch (error) {
+      return toAgentRunErrorResponse(c, error)
+    }
+  })
+
+  routeApp.get('/api/workspace/agent-defaults', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      return c.json(await getWebWorkspaceAgentDefaults(principal))
+    } catch (error) {
+      return toAgentRunErrorResponse(c, error)
+    }
+  })
+
+  routeApp.put('/api/workspace/agent-defaults', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const body = await readJson(c.req)
+      return c.json(await updateWebWorkspaceAgentDefaults(
+        principal,
+        body,
+        createRequestMutationContext(c, principal.directoryId, principal.actorId, principal.userKey, body),
+      ))
     } catch (error) {
       return toAgentRunErrorResponse(c, error)
     }

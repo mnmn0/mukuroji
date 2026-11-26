@@ -1,7 +1,12 @@
 import type { AgentRunReport, AgentRunView, FactoryBoardItem, FactoryBoardLane, TeamAgentRunBoardResponse } from '@mukuroji/contracts'
 import { useCallback, useId, useRef, useState, type MouseEvent } from 'react'
 import { ChevronIcon, ClockIcon, ExternalLinkIcon } from '../../../shared/ui/icons'
-import { readAgentRunDisplayState, type AgentRunDisplayState } from '../../../work-items/model/agentRunDisplay'
+import {
+  formatAgentRunCredential,
+  readAgentRunDisplayState,
+  shortenAgentInstanceHash,
+  type AgentRunDisplayState,
+} from '../../../work-items/model/agentRunDisplay'
 import { AgentRunReportChips } from '../../../work-items/ui/AgentRunReportChips'
 import {
   FACTORY_BOARD_FILTER_ALL,
@@ -55,6 +60,10 @@ export type FactoryBoardProps = {
   isRefreshing?: boolean
   /** Reads the board again. */
   onRefresh: () => void
+  /** Reads the rest of the sources that reached a read bound; the action is hidden when absent. */
+  onLoadMore?: () => void
+  /** Whether the rest of the board is being read. */
+  isLoadingMore?: boolean
   /** Locale-aware text. */
   labels: FactoryBoardLabels
   /** Project names by ID, for filters and details. */
@@ -123,6 +132,8 @@ function isBrowserHandledClick(event: MouseEvent<HTMLAnchorElement>): boolean {
  */
 export function FactoryBoard({
   board,
+  isLoadingMore = false,
+  onLoadMore,
   errorMessage,
   formatDateTime,
   getWorkItemHref,
@@ -316,7 +327,20 @@ export function FactoryBoard({
       ) : null}
 
       {board && isFactoryBoardIncomplete(board) ? (
-        <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-fg-amber-800" role="note">{labels.incomplete}</p>
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-fg-amber-800" role="note">
+          <span>{labels.incomplete}</span>
+          {onLoadMore && board.continuation ? (
+            <button
+              className="workbench-button-secondary min-h-[44px] px-3"
+              data-testid="factory-board-load-more"
+              disabled={isLoadingMore}
+              onClick={onLoadMore}
+              type="button"
+            >
+              {isLoadingMore ? labels.loadingMore : labels.loadMore}
+            </button>
+          ) : null}
+        </div>
       ) : null}
 
       {!board ? (
@@ -826,6 +850,12 @@ function FactoryBoardDetail({ formatDateTime, item, labels, lane, now, onNavigat
             {run.state === 'active'
               ? <DetailField label={labels.runs.leaseExpiresAt} value={formatDateTime(run.leaseExpiresAt)} />
               : run.finishedAt ? <DetailField label={labels.runs.finishedAt} value={formatDateTime(run.finishedAt)} /> : null}
+            {run.startedBy ? (
+              <>
+                <DetailField label={labels.runs.startedByCredential} value={formatAgentRunCredential(run.startedBy)} wrap />
+                <DetailField label={labels.runs.startedByInstance} value={shortenAgentInstanceHash(run.startedBy.instanceIdHash)} />
+              </>
+            ) : null}
           </dl>
           {run.state === 'active' && readLeaseMinutesRemaining(run.leaseExpiresAt, now) <= 0 ? (
             <p className="text-xs font-semibold text-[var(--workbench-muted)]">{labels.runs.stalledHint}</p>
@@ -879,16 +909,18 @@ function FactoryBoardDetail({ formatDateTime, item, labels, lane, now, onNavigat
  * @param props - Label and value.
  * @returns Definition list entry.
  */
-function DetailField({ label, value }: {
+function DetailField({ label, value, wrap = false }: {
   /** Field label. */
   label: string
   /** Display value. */
   value: string
+  /** Wraps a long value instead of cutting it off, so its end stays readable. */
+  wrap?: boolean
 }) {
   return (
     <div className="grid min-w-0 gap-0.5">
       <dt className="font-semibold text-[var(--workbench-muted)]">{label}</dt>
-      <dd className="truncate font-medium text-[var(--workbench-text)]">{value}</dd>
+      <dd className={`${wrap ? '[overflow-wrap:anywhere]' : 'truncate'} font-medium text-[var(--workbench-text)]`}>{value}</dd>
     </div>
   )
 }

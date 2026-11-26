@@ -356,6 +356,17 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
   expect(actionsForTable('AuditEventsTable0723963E')).toEqual([
     'dynamodb:PutItem',
   ]);
+  // A directory reactivation revokes the member's old API keys and OAuth apps
+  // (ADR 0095); revocation needs no KMS key.
+  expect(actionsForTable('DeveloperPlatformTable772E085C')).toEqual([
+    'dynamodb:ConditionCheckItem',
+    'dynamodb:DeleteItem',
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+    'dynamodb:Query',
+    'dynamodb:UpdateItem',
+  ]);
+  expect(serializedPolicies).not.toContain('kms:');
   expect(actionsForTable('TenantAdministrationTable621D59EB')).toEqual([
     'dynamodb:ConditionCheckItem',
     'dynamodb:GetItem',
@@ -2333,6 +2344,20 @@ test('AI observability consumes only terminal AI rows with bounded stream retrie
     MetricName: 'ProjectionFailureCount',
     Namespace: 'Mukuroji/AIAssistance',
     Period: 300,
+    Statistic: 'Sum',
+    Threshold: 1,
+    TreatMissingData: 'notBreaching',
+  });
+
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects AI attempts missing from the monthly usage counters that enforce monthly caps.',
+    Dimensions: [{
+      Name: 'Service',
+      Value: 'mukuroji-ai-assistance',
+    }],
+    MetricName: 'UsageAccountingFailureCount',
+    Namespace: 'Mukuroji/AIAssistance',
     Statistic: 'Sum',
     Threshold: 1,
     TreatMissingData: 'notBreaching',

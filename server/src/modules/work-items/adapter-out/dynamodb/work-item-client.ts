@@ -27,7 +27,9 @@ import type {
 } from '../../../developer-platform'
 import {
   createDirectoryProjectId,
+  createOrgStructureKey,
   normalizeProjectMemberKey,
+  ORG_STRUCTURE_ENTRY_TYPE,
   ProjectDataError,
 } from '../../../directory'
 import {
@@ -44,6 +46,7 @@ import { isStoredAcceptanceCriterionList } from '../../domain/acceptance-criteri
 import {
   WORK_ITEM_CUSTOMER_COMPLETION_PREPARATION_INDEX_NAME,
   WORK_ITEM_NOTIFICATION_DUE_INDEX_NAME,
+  WORK_ITEM_TEAM_STARTED_INDEX_NAME,
   createWorkItemNotificationScheduleAttributes,
   createWorkItemNotificationScheduleUpdate,
 } from '../../work-item-notification-schedule-index'
@@ -133,6 +136,7 @@ import type {
   WorkflowStatusCategory,
   WorkItemPriority,
   WorkItemAcceptanceCriterion,
+  WorkItemCompletionGateOverrideRecord,
   WorkItemContributorAssignment,
   WorkItemRelation,
   WorkItemSchedule,
@@ -266,6 +270,8 @@ export type WorkItemAuthorizationSnapshot = {
   planningRevision: number
   /** Enterprise Identity control revision observed during authorization. */
   enterpriseControlRevision?: number
+  /** OrgUnit structure revision that expanded the caller's OrgUnit scopes (ADR 0097). */
+  orgStructureRevision?: number
 }
 
 /** Result of measuring one Work Item change against its Project's active schedule baseline. */
@@ -298,7 +304,7 @@ function createScheduleBaselineChangedConflictError() {
 /** Source-of-truth row converted only inside the DynamoDB adapter. */
 type WorkItemAuthorizationGenerationGuard = {
   /** Stable semantic purpose used to classify transaction cancellations safely. */
-  kind: 'workspace-member' | 'planning' | 'enterprise-control'
+  kind: 'workspace-member' | 'planning' | 'enterprise-control' | 'org-structure'
   /** DynamoDB table containing the authorization row. */
   tableName: string
   /** Complete primary key of the authorization row. */
@@ -487,6 +493,21 @@ function createAuthorizationSnapshotConditionEntries(
             : {}),
         } satisfies WorkItemAuthorizationGenerationGuard]
       : []),
+    ...(snapshot.orgStructureRevision !== undefined &&
+        Number.isSafeInteger(snapshot.orgStructureRevision) &&
+        snapshot.orgStructureRevision >= 0
+      ? [{
+          kind: 'org-structure',
+          tableName: environment.PROJECT_DIRECTORY_TABLE_NAME ?? 'mukuroji-project-directory-local',
+          key: createOrgStructureKey(snapshot.workspaceId),
+          generationAttribute: 'revision',
+          expectedGeneration: snapshot.orgStructureRevision,
+          requiredAttributes: { entryType: ORG_STRUCTURE_ENTRY_TYPE },
+          ...(snapshot.orgStructureRevision === 0
+            ? { allowMissingWhenExpectedZero: true }
+            : {}),
+        } satisfies WorkItemAuthorizationGenerationGuard]
+      : []),
   ]
   const transactWriteItems = createDynamoDbWorkItemAuthorizationConditionChecks(guards)
   return guards.flatMap((guard, index) => {
@@ -575,7 +596,8 @@ function throwAuthorizationConditionFailureIfPresent(
   ))
   if (
     failureKinds.has('workspace-member') ||
-    failureKinds.has('enterprise-control')
+    failureKinds.has('enterprise-control') ||
+    failureKinds.has('org-structure')
   ) {
     throw createWorkItemAuthorizationChangedError()
   }
@@ -838,6 +860,22 @@ export type WorkItemListReadOptions = {
    * `consistentRead` and a finite `limit`.
    */
   limitEvaluatedRows?: boolean
+}
+
+/** Read options of one page of a Team's started Work Item IDs. */
+export type StartedWorkItemPageReadOptions = {
+  /** Most rows the index Query reads, from 1 to 100. */
+  limit: number
+  /** Opaque cursor of the previous page, bound to the Team. */
+  cursor?: string
+}
+
+/** One page of a Team's started Work Item IDs. */
+export type StartedWorkItemIdPage = {
+  /** Work Item IDs, most recently updated first. */
+  workItemIds: string[]
+  /** Opaque cursor of the next page; absent once the index has no more rows. */
+  nextCursor?: string
 }
 
 /** Public Work Item の DynamoDB-backed bounded page read options です。 */
@@ -1320,6 +1358,11 @@ export type PublicUpdateTeamIssueRequestBody = {
   actualStartDate?: unknown
   /** Manager correction of the actual end date; the API handler moves it to `actualDateCorrection`. */
   actualEndDate?: unknown
+  /**
+   * Team manager override of an unmet completion Gate; the API handler authorizes it and records
+   * it as `completionGateOverridden`.
+   */
+  completionGateOverride?: unknown
 }
 
 /**
@@ -1347,6 +1390,8 @@ export type UpdateTeamIssueRequestBody = PublicUpdateTeamIssueRequestBody & {
   archivedBy?: unknown
   /** Team manager correction of the actual dates, authorized by the API handler. */
   actualDateCorrection?: WorkItemActualDateCorrection
+  /** Completion Gate override a Team manager used for this update, authorized by the API handler. */
+  completionGateOverridden?: WorkItemCompletionGateOverrideRecord
   /**
    * ISO instant that dates the status transition, set by an internal caller that predicted the
    * resulting actual dates at that instant. Defaults to the update time.
@@ -1571,6 +1616,21 @@ export type TeamIssuesClient = {
    * @returns The Team's prefix state after the change.
    */
   changeTeamWorkItemKeyPrefix(input: ChangeTeamWorkItemKeyPrefixInput): Promise<TeamWorkItemKeyPrefixState>
+  /**
+   * Lists one page of a Team's started, unarchived Work Item IDs, most recently updated first,
+   * from the sparse started index (ADR 0098). The index is eventually consistent, so callers read
+   * each Work Item again before they show it.
+   *
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param options - Page size and the cursor of the previous page.
+   * @returns Work Item IDs and the cursor of the next page.
+   */
+  listStartedWorkItemIds(
+    directoryId: string,
+    teamId: string,
+    options: StartedWorkItemPageReadOptions,
+  ): Promise<StartedWorkItemIdPage>
   /** Public API 用の bounded canonical Work Item page を取得します。 */
   getPublicWorkItemPage(
     directoryId: string,
@@ -2272,6 +2332,47 @@ export class DynamoDbTeamIssuesClient {
       if (error instanceof ProjectDataError) {
         throw error
       }
+      throw toProjectDataError(error)
+    }
+  }
+
+  /** @inheritdoc */
+  async listStartedWorkItemIds(
+    directoryId: string,
+    teamId: string,
+    options: StartedWorkItemPageReadOptions,
+  ): Promise<StartedWorkItemIdPage> {
+    await this.ensureLocalTables()
+    const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
+    const limit = normalizePublicWorkItemPageLimit(options.limit)
+    const exclusiveStartKey = decodeStartedWorkItemPageCursor(options.cursor, directoryTeamId)
+    try {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.issueTableName,
+        IndexName: WORK_ITEM_TEAM_STARTED_INDEX_NAME,
+        KeyConditionExpression: '#startedDirectoryTeamId = :startedDirectoryTeamId',
+        ExpressionAttributeNames: { '#startedDirectoryTeamId': 'startedDirectoryTeamId' },
+        ExpressionAttributeValues: { ':startedDirectoryTeamId': directoryTeamId },
+        ExclusiveStartKey: exclusiveStartKey,
+        ScanIndexForward: false,
+        Limit: limit,
+      }))
+      // A row of another Team or without an ID under this Team's partition is broken, so the read
+      // fails instead of returning a page that looks complete.
+      const workItemIds = (response.Items ?? []).map((item) => {
+        if (item.directoryTeamId !== directoryTeamId || typeof item.issueId !== 'string') {
+          throw new ProjectDataError(503, 'InvalidTeamIssue', 'Started Work Item index row is invalid.')
+        }
+        return item.issueId
+      })
+      return {
+        workItemIds,
+        ...(response.LastEvaluatedKey
+          ? { nextCursor: encodeStartedWorkItemPageCursor(response.LastEvaluatedKey, directoryTeamId) }
+          : {}),
+      }
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
       throw toProjectDataError(error)
     }
   }
@@ -3799,7 +3900,9 @@ export class DynamoDbTeamIssuesClient {
         issueId,
         eventType: 'updated',
         actorUserId,
-        summary: 'Issue was updated.',
+        summary: input.completionGateOverridden
+          ? createCompletionGateOverrideSummary(input.completionGateOverridden)
+          : 'Issue was updated.',
         createdAt: expressionAttributeValues[':updatedAt'] as string,
       })
       const baselineRead = await this.readWorkItemBaselineSlip(
@@ -3861,6 +3964,14 @@ export class DynamoDbTeamIssuesClient {
           ...(completionTransition ? { completionTransition: true } : {}),
           ...(leavesCompletion ? { completionReopened: true } : {}),
           ...(input.actualDateCorrection ? { actualDateCorrection: true } : {}),
+          ...(input.completionGateOverridden
+            ? {
+                completionGateOverride: {
+                  reason: input.completionGateOverridden.reason,
+                  conditions: [...input.completionGateOverridden.conditions],
+                },
+              }
+            : {}),
         },
       })
       const idempotencyCompletion = await idempotency?.prepare({
@@ -4814,6 +4925,7 @@ async function ensureLocalTeamIssuesTable(
           { AttributeName: 'notificationScheduleShard', AttributeType: 'S' },
           { AttributeName: 'notificationDueKey', AttributeType: 'S' },
           { AttributeName: 'customerCompletionPreparationAt', AttributeType: 'S' },
+          { AttributeName: 'startedDirectoryTeamId', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
@@ -4833,6 +4945,14 @@ async function ensureLocalTeamIssuesTable(
             KeySchema: [
               { AttributeName: 'notificationScheduleShard', KeyType: 'HASH' },
               { AttributeName: 'customerCompletionPreparationAt', KeyType: 'RANGE' },
+            ],
+            Projection: { ProjectionType: 'KEYS_ONLY' },
+          },
+          {
+            IndexName: WORK_ITEM_TEAM_STARTED_INDEX_NAME,
+            KeySchema: [
+              { AttributeName: 'startedDirectoryTeamId', KeyType: 'HASH' },
+              { AttributeName: 'updatedAt', KeyType: 'RANGE' },
             ],
             Projection: { ProjectionType: 'KEYS_ONLY' },
           },
@@ -6384,6 +6504,37 @@ function encodePublicWorkItemPageCursor(
   return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
 }
 
+/**
+ * Encodes the continuation key of the started index as an opaque cursor bound to the Team.
+ *
+ * @param key - LastEvaluatedKey of the started index Query.
+ * @param directoryTeamId - Team partition the Query read.
+ * @returns Opaque cursor.
+ * @throws ProjectDataError when the key does not belong to the Team partition.
+ */
+function encodeStartedWorkItemPageCursor(key: Record<string, unknown>, directoryTeamId: string): string {
+  const updatedAt = typeof key.updatedAt === 'string' ? key.updatedAt : undefined
+  const issueId = typeof key.issueId === 'string' ? key.issueId : undefined
+  if (key.directoryTeamId !== directoryTeamId || key.startedDirectoryTeamId !== directoryTeamId || !updatedAt || !issueId) {
+    throw new ProjectDataError(503, 'InvalidWorkItemPageCursor', 'Started Work Item page did not include a valid continuation key.')
+  }
+  const cursor: PublicWorkItemPageCursor = { version: 1, directoryTeamId, updatedAt, issueId }
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+/**
+ * Validates a started index cursor and turns it back into the DynamoDB key.
+ *
+ * @param value - Opaque cursor, possibly from a client.
+ * @param directoryTeamId - Team partition the caller reads.
+ * @returns ExclusiveStartKey, or undefined for the first page.
+ * @throws ProjectDataError when the cursor is malformed or belongs to another Team.
+ */
+function decodeStartedWorkItemPageCursor(value: string | undefined, directoryTeamId: string) {
+  const key = decodePublicWorkItemPageCursor(value, directoryTeamId)
+  return key ? { ...key, startedDirectoryTeamId: directoryTeamId } : undefined
+}
+
 /** Public Work Item store cursor を検証し DynamoDB key に戻します。 */
 function decodePublicWorkItemPageCursor(
   value: string | undefined,
@@ -6593,4 +6744,15 @@ function getEnv(name: string) {
  */
 function isClosedWorkItemState(statusCategory: WorkflowStatusCategory, archivedAt: unknown) {
   return statusCategory === 'completed' || statusCategory === 'canceled' || archivedAt !== undefined
+}
+
+/**
+ * Builds the activity summary of an update that completed a Work Item through a manager's
+ * completion Gate override.
+ *
+ * @param override - Override the manager used.
+ * @returns Summary naming the unmet conditions and the reason.
+ */
+function createCompletionGateOverrideSummary(override: WorkItemCompletionGateOverrideRecord): string {
+  return `Completed by overriding the completion Gate (${override.conditions.join(', ')}): ${override.reason}`
 }

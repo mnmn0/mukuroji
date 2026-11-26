@@ -99,6 +99,7 @@ import {
   type WorkItemDependencyScheduleState,
   type WorkItemRelationNotificationEndpoint,
 } from '../../modules/work-items'
+import { isWorkspaceMemberRowActive, type WorkspaceMemberStatus } from '../../modules/workspace-access'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import {
   CollaborationError,
@@ -302,6 +303,8 @@ import {
   readWorkItemActualDateCorrection,
   requireWorkItemActualDateCorrectionPermission,
 } from '../shared/work-item-actual-dates'
+import { readWorkItemCompletionGateOverride } from '../shared/work-item-completion-gate-override'
+import { requireWorkItemManagerPermission } from '../shared/work-item-manager-access'
 import {
   projectAccessAllows,
   readWorkspaceMemberNames,
@@ -2408,8 +2411,22 @@ async function hydrateProjectMemberUpdateResponse(
   } satisfies UpdateProjectMemberResponse
 }
 
+/**
+ * Adds the Cognito profile, member-set name, and assignable Workspace status to a Project member.
+ *
+ * A member whose access expiry has passed keeps an `active` row until handover or the scheduled
+ * job deactivates it, but work can no longer be assigned to them, so they are reported as
+ * `deactivated` here, matching the assignee check (ADR 0095).
+ *
+ * @param member - Project member row from the directory.
+ * @param directoryId - Workspace that owns the Project.
+ * @returns The member with profile fields and the Workspace status assignment pickers read.
+ */
 async function hydrateProjectMember(member: ProjectMemberResponseItem, directoryId: string) {
   const workspaceMember = await workspaceDependencies.workspaceAccess.getMember(directoryId, member.id)
+  const workspaceStatus: WorkspaceMemberStatus = workspaceMember && isWorkspaceMemberRowActive(workspaceMember, new Date())
+    ? 'active'
+    : 'deactivated'
 
   try {
     const profile = await authenticationDependencies.cognito.getUserProfile(member.id)
@@ -2425,14 +2442,14 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem, directory
       name,
       enabled: profile.enabled,
       status: profile.status,
-      workspaceStatus: workspaceMember?.status ?? 'deactivated',
+      workspaceStatus,
     } satisfies ProjectMemberResponseItem
   } catch (error) {
     if (isCognitoUserNotFoundError(error)) {
       return {
         ...member,
         ...(workspaceMember ? { name: workspaceMember.name?.trim() || undefined } : {}),
-        workspaceStatus: workspaceMember?.status ?? 'deactivated',
+        workspaceStatus,
       }
     }
 
@@ -2440,7 +2457,7 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem, directory
     return {
       ...member,
       ...(workspaceMember ? { name: workspaceMember.name?.trim() || undefined } : {}),
-      workspaceStatus: workspaceMember?.status ?? 'deactivated',
+      workspaceStatus,
     }
   }
 }
@@ -4590,7 +4607,14 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       await requireProjectPermission(principal, projectId, 'manager')
       const body = await readJson<UpdateProjectMemberRequestBody>(c.req)
       const profile = await authenticationDependencies.cognito.getUserProfile(memberKey)
-      const workspaceMember = await workspaceDependencies.workspaceAccess.getActiveMember(principal.directoryId, profile.id)
+      const activeMember = await workspaceDependencies.workspaceAccess.getActiveMember(principal.directoryId, profile.id)
+      // A member whose access expired keeps an active row until their roles are handed over, so
+      // their Project role can still be lowered, but never raised or newly given (ADR 0095).
+      const expiredMember = activeMember
+        ? undefined
+        : await workspaceDependencies.workspaceAccess.getMember(principal.directoryId, profile.id)
+      const workspaceMember = activeMember ??
+        (expiredMember?.status === 'active' ? expiredMember : undefined)
 
       if (!workspaceMember) {
         throw new WorkspaceAccessError(
@@ -4618,6 +4642,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
               memberKey: profile.id,
               ...body,
             }),
+            activeMember ? {} : { demotionOnly: true },
           ),
           principal.directoryId,
         ),
@@ -5292,8 +5317,10 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       requireWorkspaceBusinessWrite(principal)
       const context = await requireTeamPermission(principal, teamId, 'member')
       // Built from public fields only; the raw body never reaches the adapter input.
-      const input = readPublicWorkItemUpdateBody(await readJson<unknown>(c.req) ?? {})
-      const actualDateRequest = readWorkItemActualDateCorrection(input)
+      const overrideRequest = readWorkItemCompletionGateOverride(
+        readPublicWorkItemUpdateBody(await readJson<unknown>(c.req) ?? {}),
+      )
+      const actualDateRequest = readWorkItemActualDateCorrection(overrideRequest.body)
       const body = normalizeTeamIssueInput(
         actualDateRequest.body,
         context.team,
@@ -5325,6 +5352,34 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         }
       }
 
+      if (overrideRequest.reason !== undefined) {
+        // Only a manager of the Work Item may complete it past the Team's completion Gate. An update
+        // that also moves it to another Project needs the manager role on both sides of the move.
+        // An enterprise service account can hold manager permissions, but the override is for people.
+        if (principal.principalKind === 'service-account') {
+          throw new ProjectDataError(
+            403,
+            'ProjectAccessDenied',
+            'Only a person can override the completion Gate.',
+          )
+        }
+        const projectIds = new Set([
+          detail.issue.assignedProjectId,
+          'assignedProjectId' in body
+            ? readAssignedProjectId(body.assignedProjectId) ?? undefined
+            : detail.issue.assignedProjectId,
+        ])
+        for (const projectId of projectIds) {
+          await requireWorkItemManagerPermission(
+            principal,
+            teamId,
+            context,
+            projectId,
+            'Only a manager of the assigned Project or the Team can override the completion Gate.',
+          )
+        }
+      }
+
       const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
         principal.directoryId,
         teamId,
@@ -5336,6 +5391,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         body,
         resolvedConfiguration,
         createPersonWorkflowRulePrincipal(principal, context),
+        overrideRequest.reason === undefined ? {} : { completionGateOverrideReason: overrideRequest.reason },
       )
 
       let authorizationSnapshot: WorkItemAuthorizationSnapshot | undefined
@@ -5747,6 +5803,9 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           ...(principal.enterpriseIdentityControlRevision === undefined
             ? {}
             : { enterpriseControlRevision: principal.enterpriseIdentityControlRevision }),
+          ...(principal.enterpriseOrgStructureRevision === undefined
+            ? {}
+            : { orgStructureRevision: principal.enterpriseOrgStructureRevision }),
         },
         kind: request.kind,
         title: request.title,
@@ -5871,6 +5930,9 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           ...(principal.enterpriseIdentityControlRevision === undefined
             ? {}
             : { enterpriseControlRevision: principal.enterpriseIdentityControlRevision }),
+          ...(principal.enterpriseOrgStructureRevision === undefined
+            ? {}
+            : { orgStructureRevision: principal.enterpriseOrgStructureRevision }),
         },
         expectedRevision: request.expectedRevision,
         ...(request.kind ? { kind: request.kind } : {}),

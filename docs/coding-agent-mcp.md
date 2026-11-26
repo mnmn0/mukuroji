@@ -59,7 +59,8 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 | --- | --- | --- |
 | `MUKUROJI_MCP_URL` | 必須 | Mukurojiのorigin。`/api` を含めず、HTTPSを使用。開発時はloopbackのみHTTP可 |
 | `MUKUROJI_MCP_TOKEN` | 必須 | APIキーまたは有効なOAuth access token |
-| `MUKUROJI_MCP_TEAM_ID` | 必須 | この接続で扱うTeam |
+| `MUKUROJI_MCP_TEAM_ID` | 必須（`TEAM_IDS` を使う場合は任意） | この接続で扱うTeam |
+| `MUKUROJI_MCP_TEAM_IDS` | 任意 | 複数のTeamを扱う場合に、Team IDをカンマ区切りで最大10件。`TEAM_ID` があればその後ろに足します |
 | `MUKUROJI_MCP_ASSIGNEE_ID` | 必須 | 作業選択・作成・更新の対象となる担当メンバー |
 | `MUKUROJI_MCP_PROJECT_ID` | 任意 | 全操作を一つのProjectに限定 |
 | `MUKUROJI_MCP_AGENT_NAME` | 任意 | コメントに付ける表示名。既定 `coding-agent`、最大64文字 |
@@ -67,6 +68,20 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 | `MUKUROJI_MCP_RUNTIME` | 任意 | Agent Runに記録するクライアント種別。`claude-code`、`codex`、`kiro`、`other`。既定 `other` |
 | `MUKUROJI_MCP_PROFILE` | 任意 | `tasks`（既定、この表の値を使う）か `workspace`（下の「Workspace profile」。URL と token だけを読む） |
 | `MUKUROJI_MCP_INSTANCE_ID` | 任意 | このエージェントインスタンスを区別する安定ID。最大256文字。未指定時はホスト名・OSユーザー名・runtime・担当者から導出したSHA-256だけを送ります。サーバーはさらにハッシュ化して保存し、元の値を返しません |
+
+### 複数のTeamを扱う
+
+`MUKUROJI_MCP_TEAM_IDS` で2つ以上のTeamを指定すると、1つのMCP設定で、すべてのTeamの担当タスクを扱います。
+Team が1つだけなら、ツールと結果は従来と同じです。Project は1つの Team に属するため、`MUKUROJI_MCP_PROJECT_ID` は Team が1つのときだけ指定できます。
+
+- `get_configuration` は、各Teamの設定・brief・catalog を `teams` に並べて返します。
+- `get_next_task` は全Teamを調べ、自分の実行中Run、再開、新しい作業の順に選びます。同じ順位なら新しいRunを受け付けているTeam、次に先に書いたTeamを優先し、選んだタスクのTeamを `teamId` で返します。`acceptingNewRuns: false` は、すべてのTeamが新しいRunの受付を止めているときだけ返します。
+- `list_tasks` は指定した順にTeamを続けて読みます。`nextCursor` には次に読むTeamが含まれます。
+- `get_work_status` は全Teamの件数を足し、進行中のタスクに `teamId` を付けます。
+- タスクIDやRun IDを受け取るツールは、そのタスクやRunを持つTeamを自分で探します。ステータスIDは、そのタスクのTeamのcatalogから選んでください。
+  タスクIDは Team ごとに一意なので、同じIDのタスクを2つ以上のTeamが持つ場合は、どちらにも振り分けずにエラーにします。そのタスクは、そのTeamだけを指定したMCP設定で扱ってください。
+- Project の brief（`mukuroji://project/{projectId}/brief`）は、その Project を持つ Team の brief と Project brief を返します。
+- `create_task` は `teamId` を受け取ります。省略すると、最初に書いたTeamに作ります。
 
 同じメンバーが複数のエージェントを同時に使う場合も、`INSTANCE_ID` が異なれば別のインスタンスとして扱います。
 同じマシン・同じOSユーザーで同じruntimeを複数起動する場合は、プロセスごとに異なる `INSTANCE_ID` を指定してください。
@@ -92,11 +107,17 @@ Software factory が無効な環境でも使えます（Agent Run の API を呼
 | `list_comments` | Work Item のコメントを新しい順にページ取得。key だけでも指せる |
 | `save_issue` | `id` なしで Work Item を作成（`teamId` と `title` が必須、担当者の既定は `me`）。`id`（key か ID と `teamId`）ありで更新し、渡した項目だけを変える。更新には `get_issue` で読んだ `expectedRevision` が要る。`dueDate` は作成時だけ。`description` は作成時 100000 文字、更新時 4096 文字まで |
 | `save_comment` | Work Item にコメント（4096 文字まで）を追加。key だけでも指せる |
+| `list_relations` | Work Item の親・子（兄弟の順）・WBS 番号と、blocks / blockedBy / related / duplicate の link を読む。読めない相手の link は返さない |
+| `save_relation` | 同じ Team の 2 つの Work Item を link する。`type` は 1 つ目から見た向き（`parent` は相手が親になる、`blockedBy` は相手に止められる）。`remove: true` で解除。親は 1 つだけで、親の Work Item Type が子の Type を許さない link と循環する link は競合で失敗する |
+| `create_subtasks` | 親の下に、親と同じ Project で最大 20 件の子を作る（担当者の既定は `me`）。1 件ずつ作って親に付け、途中で失敗したら同じ引数と `idempotencyKey` で再試行すると、済んだ子を作り直さずに残りを作る。親の Type が許さない Type の子は作られた後で link に失敗し、エラーがその子の ID を示すので、`save_issue` で Type を変えてから同じ引数で再試行する。同じ `idempotencyKey` で親か子の一覧を変えると、子を作る前に再試行不可の `idempotency_conflict` で止まる（一覧を変えるなら新しい key を使う）。途中で親の Project が変わると、作り済みの子の再生が `idempotency_conflict` になるので、親を元の Project に戻して同じ引数で再試行するか、`list_relations` で子を確かめてから新しい `idempotencyKey` で残りを作る |
 
 書き込みのツールは、毎回新しい UUID の `idempotencyKey` を要求します。応答が不確かなときは、同じ引数と key で再試行します。
 更新が revision の競合で失敗したら、`get_issue` で読み直してから改めて判断します。権限の判定は Web と同じで、
 token の持ち主が編集できない Work Item は変えられません。
 同じ MCP クライアントに tasks profile と並べて登録する場合は、サーバー名を分けます（例: `mukuroji` と `mukuroji-tasks`）。
+
+作業の分解（`create_subtasks`）は、分け方を人が確認してから行う運用にします。WBS 番号は server が木から導くので、
+title に番号を書かせません。schedule の依存関係（Gantt の矢印）と Document の link はまだ MCP から作れないため、Web で設定します。
 
 ### 自分用token
 
@@ -212,6 +233,49 @@ Kiro IDEは、承認していない環境変数を `${VAR}` から展開しま�
 設定の書式は各クライアントの更新で変わることがあります。登録後は `claude mcp get mukuroji-tasks`、
 `codex mcp list`、KiroのMCP一覧などで接続を確認し、`get_configuration` で `runtime` と担当者を確かめます。
 
+### hooks からの heartbeat
+
+agent が MCP tool を呼ばずに長く作業すると、lease が切れて Run が「停滞」と表示されます。
+agent の hooks から `node /absolute/path/to/mcp.mjs --heartbeat` を実行すると、tool 呼び出しの合間にも lease を延長できます。
+
+- MCP server と同じ `MUKUROJI_MCP_*`（URL、token、Team、担当者、`MUKUROJI_MCP_RUNTIME`、指定している場合は `MUKUROJI_MCP_INSTANCE_ID`）を読みます。
+  instance ID も MCP server と同じ方法で求めるので、延長するのは同じマシン・アカウント・runtime・担当者で始めた `active` Run だけです。
+  `MUKUROJI_MCP_PROJECT_ID` を指定している場合は、その Project のタスクの Run だけを延長します。
+- 同じ instance・Team・Project の heartbeat は 1 分に 1 回までです。それより早く呼ばれたときは API を呼ばずに終わります。最後に成功した時刻は `~/.cache/mukuroji-mcp`（`XDG_CACHE_HOME` を設定していればその下）に空の file として残します。
+  server 側の rate limit（Run ごとに 10 秒に 1 回）と lease の契約は変わりません。
+- 直前の heartbeat から 10 秒以内で server に断られた Run は、Run の最後の heartbeat が 30 秒以内なら `recent` と数えます。それ以外の rate limit、読み切れないほど多い Run、読み取りの失敗は `failed` と数え、時刻を残さないので次の hook で再試行します。
+- 結果は stderr に 1 行出し、失敗しても常に終了コード 0 で終わるので、hook が agent を止めることはありません。
+- hooks は MCP の `env` を引き継ぎません。値はクライアントを起動するシェルで export するか、
+  次のような小さな script に書きます（token は書かず、シェルの `MUKUROJI_MCP_TOKEN` を使います）。
+
+```sh
+#!/bin/sh
+# ~/.local/bin/mukuroji-heartbeat
+MUKUROJI_MCP_URL=https://your-mukuroji.example.com \
+MUKUROJI_MCP_TEAM_ID=your-team-id \
+MUKUROJI_MCP_ASSIGNEE_ID=your-workspace-member-id \
+MUKUROJI_MCP_RUNTIME=claude-code \
+exec node /absolute/path/to/mcp.mjs --heartbeat
+```
+
+Claude Code（`~/.claude/settings.json` またはプロジェクトの `.claude/settings.json`）では、
+tool 呼び出しのたびに実行される `PostToolUse` hook に登録します。
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "~/.local/bin/mukuroji-heartbeat", "timeout": 30 }] }
+    ]
+  }
+}
+```
+
+Kiro では、agent hook の action に同じ command を指定します（`MUKUROJI_MCP_RUNTIME=kiro`）。
+hook の作り方と書式は Kiro のバージョンで変わるため、Kiro の hook 画面の案内に従ってください。
+Codex は tool 呼び出しごとの hook の有無を実機で確かめていないため、ここでは例を示しません。
+Codex では従来どおり、長い作業の途中で `heartbeat` tool を呼びます。
+
 ### トークン使用量の送信（Claude Code、OpenTelemetry）
 
 Claude Code が OpenTelemetry で出す request ごとのトークン数と推定費用を Mukuroji に送ると、MCP で着手した
@@ -261,14 +325,16 @@ Run とそのタスクに積み上がります（[ADR 0061](adr/0061-agent-token
 
 | ツール | 用途 |
 | --- | --- |
-| `get_configuration` | 接続先Team・担当者、Agent settings（lease、引き継ぎ可否、Ready status、再開できるstatus）、agent brief、設定Projectのcharter（`projectCharter`）、利用可能なType、status ID、設定Projectに適用されるcustom field・必須条件を確認 |
+| `get_configuration` | 接続先Team・担当者、Agent settings（新しい Run の受付可否 `acceptNewRuns`、lease、引き継ぎ可否、Ready status、再開できるstatus）、agent brief、設定Projectのcharter（`projectCharter`）、利用可能なType、status ID、設定Projectに適用されるcustom field・必須条件を確認 |
 | `list_tasks` | 権限内のタスクを担当者・Project・Type・statusで絞り込み、ページ取得 |
-| `get_task` | タスク本文・revision・現在状態・受け入れ条件・schedule（見積を含む）、`effort`（見積・残工数・進捗率と読んだ revision。工数 endpoint のない古い server では `null`）、`actualDates`（実績開始日・実績終了日と読んだ revision。実績日 endpoint のない古い server では `null`）、未解決blockerの件数、実行中のAgent Runと自インスタンスの保持かどうか、`hierarchy`（親・子・WBS 番号。階層 endpoint のない古い server では `null`）、`relatedDocuments`（link された Document のうち credential 所有者が閲覧できるものの最初の 1 ページ。続きは `list_task_documents`。Document endpoint のない古い server と、所有者が Document を読めない場合は `null`）を取得。タスクの `key`（例: `ABC-123`）は branch 名・commit message・PR title に使う（key を持たない古いタスクは `id` を使う） |
-| `get_next_task` | 自インスタンスのAgent Runがあるstartedタスクを優先表示し、次にTeamが再開できるstatusを設定している場合はそのstatusにある `paused` で止めた・差し戻されたstartedタスクを `action: resume` で示し、なければAgent Runのない未着手候補を選択。TeamがReady statusを設定している場合はそのstatusのタスクだけを選ぶ。他インスタンスのRun（`otherRuns`）と除外した候補（`skipped`。理由は `blocked`・`active_run`・`not_ready`・`resume_unchecked`）も返す。再開候補の確認は 1 回 20 件の読み取りまでで、それを超えたときや rate limit のときは最初に確認できなかったタスクを `resume_unchecked` として返す |
+| `get_task` | タスク本文・revision・現在状態・受け入れ条件・schedule（見積を含む）、`effort`（見積・残工数・進捗率と読んだ revision。工数 endpoint のない古い server では `null`）、`actualDates`（実績開始日・実績終了日と読んだ revision。実績日 endpoint のない古い server では `null`）、未解決blockerの件数、実行中のAgent Runと自インスタンスの保持かどうか、`hierarchy`（親・子・WBS 番号。階層 endpoint のない古い server では `null`）、`relatedDocuments`（link された Document のうち credential 所有者が閲覧できるものの最初の 1 ページ。続きは `list_task_documents`。Document endpoint のない古い server と、所有者が Document を読めない場合は `null`）、`questions`（このタスクの `blocker`・`handoff` 報告を新しい順に最大 20 件。人が回答した報告は `answer` に回答を持つ。回答 endpoint のない古い server と、読み取りが拒否された場合は `null`）、`attachments`（download できる添付ファイル。添付 endpoint のない古い server と、所有者がファイルを読めない場合は `null`）、`completionGate`（Team の完了 Gate の条件ごとの達成状況と、完了が拒否される状態かを示す `blocksCompletion`。Gate endpoint のない古い server では `null`）を取得。タスクの `key`（例: `ABC-123`）は branch 名・commit message・PR title に使う（key を持たない古いタスクは `id` を使う） |
+| `get_next_task` | 自インスタンスのAgent Runがあるstartedタスクを優先表示し、次にTeamが再開できるstatusを設定している場合はそのstatusにある `paused` で止めた・差し戻されたstartedタスクを `action: resume` で示し、なければAgent Runのない未着手候補を選択。TeamがReady statusを設定している場合はそのstatusのタスクだけを選ぶ。他インスタンスのRun（`otherRuns`）と除外した候補（`skipped`。理由は `blocked`・`active_run`・`not_ready`・`resume_unchecked`）も返す。再開候補の確認は 1 回 20 件の読み取りまでで、それを超えたときや rate limit のときは最初に確認できなかったタスクを `resume_unchecked` として返す。Teamが新しいRunの受付を止めている間は、自インスタンスのRun以外を提示せず `action: none` と `acceptingNewRuns: false` を返す |
 | `get_work_status` | 担当タスクの未着手・作業中・完了・取り消し件数と作業中一覧 |
 | `list_progress` | タスクのcanonicalコメント・返信を新しい順にページ取得 |
 | `list_task_documents` | タスクに link された Document のうち credential 所有者が閲覧できるものを `{ id, title }` でページ取得。見えない Document は除くため、`hasMore: true` の空ページもある |
 | `read_document` | タスクに link された Document（ページ・テンプレート）の本文を Markdown で取得。link されていない Document と閲覧できない Document は `not_found`、フォルダーとホワイトボードは `unsupported_document` |
+| `list_task_attachments` | タスクの添付ファイルのうち、credential 所有者が閲覧でき、最新の版がマルウェア検査を通ったものを `{ id, name, versionId, versionNumber, contentType, sizeBytes, updatedAt }` で取得。添付 endpoint のない古い server では `unsupported` |
+| `get_attachment_download_url` | 添付ファイルの最新の版の短期 download URL を `{ fileId, versionId, url, expiresAt }` で取得。添付されていない・閲覧できない・検査を通っていないファイルは `not_found`。download は監査ログに残る |
 | `create_task` | 担当者付きタスクを作成。期限省略時は未スケジュール。稼働日は Workspace の稼働カレンダーで数える。`templateId`（`get_configuration` の `catalog.templates`。Public API の `GET /api/v1/work-item-templates` から読む）を渡すと、テンプレートが省略した説明・Type・状態・優先度を埋め、custom field と受け入れ条件を付ける |
 | `update_task` | タイトル・説明・優先度・custom field・見積（`plannedEffortMinutes`）・残工数（`remainingEffortMinutes`）・手入力の進捗率（`progressPercent`）をrevision付きで更新（`null` で消す）。見積は Public API の `plannedEffortMinutes` として送り、server が保存済みの schedule に書き込むため、変更時は `expectedRevision` が最新の revision と一致している必要がある。応答を失った再試行は、途中で期限が動いても同じ request として replay される。受け入れ条件はIDごとに満たした・満たしていないを付けられる（条件の追加・削除・文言変更は人だけ） |
 | `start_task` | Agent Runを開始し、同じtransactionでbacklog/unstartedからstartedへ遷移。blockerを再確認し、同時更新と他インスタンスの着手を排除 |
@@ -295,7 +361,7 @@ link された Document は読むたびに credential 所有者のその時点�
 4. `action: resume` は、前のRunを `paused` などで閉じたままstartedに残っているタスクです。`resumedFromRun` と `list_progress` で前回の状況を読み、候補の `revision`、`resumedFromRun.runId`（`previousRunId`）と新規UUIDの `idempotencyKey` を `resume_task` に渡します。`conflict` になった場合は、その間に別のRunがあったため `get_next_task` からやり直します。レビュー待ちなどから作業中へ戻す場合は続けて `move_task` を呼びます。Teamが再開できるstatusを設定していない場合は提示されないため、ユーザーが続きを指示したときだけ `resume_task` を呼びます。`skipped` に `resume_unchecked` があれば、再開候補の確認がそこで止まっています。そのタスクを `get_task` と `list_progress` で確かめるか、少し待って `get_next_task` を呼び直します。startedのタスクに `start_task` を呼ぶと `invalid_transition` になります。
 5. `action: start` の場合、候補の `revision`、startedカテゴリーの `workflowStatusId`、新規UUIDの `idempotencyKey` を `start_task` に渡します。成功するとタスクとRunが返ります。成功後に作業を開始します。候補取得だけでは着手済みになりません。TeamがReady statusを設定していて、タスクがそのstatusにない場合、`start_task` は `not_ready` を返します。そのタスクには着手せず、別の候補を選ぶかユーザーに確認します。
 6. `report_progress` に実装方針・進捗・blocker・検証結果・成果物リンクを記録します。タスクの説明は変更しません。既存コメントは `list_progress` で読みます。更新と進捗報告はleaseを延長します。ツールを呼ばない長い作業ではlease切れの前に `heartbeat` を呼びます。
-   自インスタンスのRunがある間は、実行した検証コマンドと結果を `verifications`、PR・branch・commit・URLを `artifacts`（credential・query・`=` を含むfragmentのない `https` URLのみ。presigned URLは送らない）に入れます。人の判断が必要な場合は `kind` を `blocker` または `handoff` にし、statusも変える場合は別途 `move_task` を呼びます。Runがある場合の戻り値は `{ comment, report, run }`、Runがなくメッセージだけの場合は `{ comment }` です。Runがないのに `verifications`・`artifacts`・`changedFileCount`、または `progress` 以外の `kind` を送ると、何も保存せず `agent_run_not_active` を返します（`kind: progress` だけなら通常のコメントとして保存します）。Runがある間は `runId` も渡してください。応答を失った報告を同じ `runId` と `idempotencyKey` で再送すると、MCP processの再起動後やRunが閉じた後でも、最初に送ったRunのreportとして再生されます。Runがない間に送ったメッセージだけの報告は、再起動後に新しいRunが始まっていても、最初のコメントとして再生されます。
+   自インスタンスのRunがある間は、実行した検証コマンドと結果を `verifications`、PR・branch・commit・URLを `artifacts`（credential・query・`=` を含むfragmentのない `https` URLのみ。presigned URLは送らない）に入れます。人の判断が必要な場合は `kind` を `blocker` または `handoff` にし、statusも変える場合は別途 `move_task` を呼びます。人は Web の会話からその報告に回答でき、agent は `get_task` の `questions.items[].answer` で読みます。Runがある場合の戻り値は `{ comment, report, run }`、Runがなくメッセージだけの場合は `{ comment }` です。Runがないのに `verifications`・`artifacts`・`changedFileCount`、または `progress` 以外の `kind` を送ると、何も保存せず `agent_run_not_active` を返します（`kind: progress` だけなら通常のコメントとして保存します）。Runがある間は `runId` も渡してください。応答を失った報告を同じ `runId` と `idempotencyKey` で再送すると、MCP processの再起動後やRunが閉じた後でも、最初に送ったRunのreportとして再生されます。Runがない間に送ったメッセージだけの報告は、再起動後に新しいRunが始まっていても、最初のコメントとして再生されます。
 7. レビュー待ちなどは該当するstatusを設定し、要求と必要な検証が満たされたら `complete_task` を呼びます。進捗コメントだけでは完了になりません。
 8. `complete_task` の後に `finish_run` を `outcome: completed` で呼びます。完了せずに止める場合は、レビュー待ち・blocker・ユーザーの指示なら `paused`、完了できないと判断した場合は `failed` で閉じます。
 

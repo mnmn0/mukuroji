@@ -26,7 +26,7 @@ import type {
   DocumentRecord,
   DocumentVersion,
 } from '../api'
-import { resolveDocumentMentions } from '../model/comments'
+import { resolveDocumentMentions, resolveEditedDocumentMentions } from '../model/comments'
 import type { MentionableMember, MentionSuggestionsFailure } from '../../shared/lib/memberMentions'
 import { MemberMentionTextarea, type MemberMentionDraft } from '../../shared/ui/MemberMentionTextarea'
 import {
@@ -38,6 +38,10 @@ import {
   focusFirstModalElement,
   trapModalFocus,
 } from './modalFocus'
+import { useDocumentApprovals, useDocumentVersionDetail } from '../queries/useDocumentVersionReview'
+import { useDocumentVersionReviewMutations } from '../mutations/useDocumentVersionReviewMutations'
+import { DocumentVersionReviewDialog } from './DocumentVersionReview'
+import { resolveApprovalStatusClassName } from '../model/versionApprovals'
 import { createDocumentOperationId } from '../model/document'
 import { createDocumentRelationTargetKey } from '../model/linkTargets'
 import {
@@ -141,6 +145,18 @@ export type DocumentContextPanelProps = {
    */
   onResolveComment?: (commentId: string) => Promise<void>
   /**
+   * Normalized member key of the viewer, used to offer edit and delete on their own comments.
+   */
+  currentMemberKey?: string
+  /**
+   * Edits the body and mentions of the viewer's own comment.
+   */
+  onEditComment?: (commentId: string, body: string, mentions: DocumentMention[]) => Promise<void>
+  /**
+   * Deletes the viewer's own comment.
+   */
+  onDeleteComment?: (commentId: string) => Promise<void>
+  /**
    * 次の comment page を取得する callback です。
    */
   onLoadMoreComments?: () => Promise<void>
@@ -176,6 +192,8 @@ export type DocumentContextPanelProps = {
   mentionMembers?: readonly MentionableMember[]
   /** Set when the mention candidates failed to load. */
   mentionSuggestionsFailure?: MentionSuggestionsFailure
+  /** Version whose review dialog opens first, from a deep link. */
+  focusedVersionId?: string
 }
 
 /**
@@ -190,6 +208,7 @@ export function DocumentContextPanel({
   defaultAnchorId,
   document,
   focusedCommentId,
+  focusedVersionId,
   hasMoreBacklinks = false,
   hasMoreComments = false,
   hasMoreVersions = false,
@@ -209,6 +228,9 @@ export function DocumentContextPanel({
   onLoadMoreBacklinks,
   onLoadMoreComments,
   onLoadMoreVersions,
+  currentMemberKey,
+  onDeleteComment,
+  onEditComment,
   onResolveComment,
   onRestoreVersion,
   onTabChange,
@@ -385,7 +407,10 @@ export function DocumentContextPanel({
             mentionMembers={mentionMembers ?? emptyMentionMembers}
             mentionSuggestionsFailure={mentionSuggestionsFailure}
             t={t}
+            currentMemberKey={currentMemberKey}
             onCreateComment={onCreateComment}
+            onDeleteComment={onDeleteComment}
+            onEditComment={onEditComment}
             onLoadMore={onLoadMoreComments}
             onResolveComment={onResolveComment}
           />
@@ -431,6 +456,12 @@ export function DocumentContextPanel({
         ) : null}
         {!isLoading && resolvedActiveTab === 'versions' ? (
           <VersionsPanel
+            document={document}
+            focusedVersionId={focusedVersionId}
+            locale={locale}
+            members={mentionMembers}
+            onNavigate={onNavigate}
+            reviewAccessToken={linkAccessToken}
             currentRevision={document.revision}
             hasMore={hasMoreVersions}
             onLoadMore={onLoadMoreVersions}
@@ -478,11 +509,14 @@ const emptyCommentDraft: MemberMentionDraft = { body: '', mentionMemberKeys: [] 
 
 function CommentsPanel({
   comments,
+  currentMemberKey,
   defaultAnchorId,
   document,
   focusedCommentId,
   hasMore,
   onCreateComment,
+  onDeleteComment,
+  onEditComment,
   onLoadMore,
   onResolveComment,
   mentionMembers,
@@ -490,6 +524,12 @@ function CommentsPanel({
   t,
 }: {
   comments: DocumentComment[]
+  /** Normalized member key of the viewer. */
+  currentMemberKey?: string
+  /** Edits the viewer's own comment. */
+  onEditComment?: (commentId: string, body: string, mentions: DocumentMention[]) => Promise<void>
+  /** Deletes the viewer's own comment. */
+  onDeleteComment?: (commentId: string) => Promise<void>
   defaultAnchorId?: string
   mentionMembers: readonly MentionableMember[]
   mentionSuggestionsFailure?: MentionSuggestionsFailure
@@ -564,6 +604,14 @@ function CommentsPanel({
   }
   const hasVisibleComments =
     rootComments.length > 0 || orphanReplies.length > 0
+  /** Shared props that let a card show its author and change the viewer's own comment. */
+  const cardProps = {
+    currentMemberKey,
+    mentionMembers,
+    mentionSuggestionsFailure,
+    onDelete: onDeleteComment,
+    onEdit: onEditComment,
+  }
 
   const handleReplySubmit = async (
     event: FormEvent<HTMLFormElement>,
@@ -685,6 +733,7 @@ function CommentsPanel({
           {rootComments.map((root) => (
             <section className="grid gap-2" key={root.id}>
               <CommentCard
+                {...cardProps}
                 comment={root}
                 focused={focusedCommentId === root.id}
                 t={t}
@@ -709,6 +758,7 @@ function CommentsPanel({
                 >
                   {(repliesByRoot.get(root.id) ?? []).map((reply) => (
                     <CommentCard
+                      {...cardProps}
                       comment={reply}
                       focused={focusedCommentId === reply.id}
                       isReply
@@ -772,6 +822,7 @@ function CommentsPanel({
               key={reply.id}
             >
               <CommentCard
+                {...cardProps}
                 comment={reply}
                 focused={focusedCommentId === reply.id}
                 isReply
@@ -796,21 +847,99 @@ function CommentsPanel({
   )
 }
 
+/**
+ * One comment with its author's display name, and edit and delete actions on the viewer's own
+ * comment.
+ *
+ * @param props - Comment, viewer, and actions.
+ * @returns The comment card.
+ */
 function CommentCard({
   comment,
+  currentMemberKey,
   focused = false,
   isReply = false,
+  mentionMembers,
+  mentionSuggestionsFailure,
+  onDelete,
+  onEdit,
   onReply,
   onResolve,
   t,
 }: {
+  /** Comment to show. */
   comment: DocumentComment
+  /** Normalized member key of the viewer. */
+  currentMemberKey?: string
+  /** Whether a deep link points at the comment. */
   focused?: boolean
+  /** Whether the comment is a reply. */
   isReply?: boolean
+  /** Members whose names stand in for member keys and are offered as mentions. */
+  mentionMembers: readonly MentionableMember[]
+  /** Why mention suggestions could not be read, if they could not. */
+  mentionSuggestionsFailure?: MentionSuggestionsFailure
+  /** Deletes the viewer's own comment. */
+  onDelete?: (commentId: string) => Promise<void>
+  /** Edits the viewer's own comment. */
+  onEdit?: (commentId: string, body: string, mentions: DocumentMention[]) => Promise<void>
+  /** Starts a reply. */
   onReply?: () => void
+  /** Resolves the thread. */
   onResolve?: () => Promise<void>
+  /** Translator. */
   t: (key: MessageKey) => string
 }) {
+  const [editDraft, setEditDraft] = useState<MemberMentionDraft>()
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
+  const [error, setError] = useState(false)
+  const authorName = resolveCommentAuthorName(comment.authorUserId, mentionMembers)
+  const deleted = comment.deletedAt !== undefined
+  const own = !deleted &&
+    currentMemberKey !== undefined &&
+    comment.authorUserId.trim().toLowerCase() === currentMemberKey.trim().toLowerCase()
+  const canEdit = own && onEdit !== undefined
+  const canDelete = own && onDelete !== undefined
+
+  /**
+   * Runs one change of the comment and keeps the form open with an error when it fails.
+   *
+   * @param change - Server request to run.
+   * @returns Whether the change succeeded.
+   */
+  const runChange = async (change: () => Promise<void>) => {
+    setIsSaving(true)
+    setError(false)
+    try {
+      await change()
+      return true
+    } catch {
+      setError(true)
+      return false
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  /**
+   * Saves the edited body and its mentions, and closes the form when the save succeeds.
+   *
+   * @param event - Submit event of the edit form.
+   * @returns A promise that settles when the save has finished or been skipped.
+   */
+  const handleEditSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const body = editDraft?.body.trim() ?? ''
+    if (!editDraft || !onEdit || !body || isSaving) return
+    const submitted = editDraft
+    const saved = await runChange(() =>
+      onEdit(comment.id, body, resolveEditedDocumentMentions(comment, body, submitted.mentionMemberKeys, mentionMembers)),
+    )
+    // Text typed while the save ran was not sent, so the form stays open with it.
+    if (saved) setEditDraft((current) => current === submitted ? undefined : current)
+  }
+
   return (
     <article
       className={`rounded-lg border p-3 outline-none ${
@@ -827,15 +956,19 @@ function CommentCard({
       tabIndex={-1}
     >
       <div className="flex items-start gap-3">
-        <span className="grid h-8 w-8 flex-none place-items-center rounded-full bg-tone-e5f7f4 text-xs font-bold text-[var(--workbench-primary-text)]">
-          {comment.authorUserId.charAt(0).toUpperCase()}
+        <span
+          aria-hidden="true"
+          className="grid h-8 w-8 flex-none place-items-center rounded-full bg-tone-e5f7f4 text-xs font-bold text-[var(--workbench-primary-text)]"
+        >
+          {authorName.charAt(0).toUpperCase()}
         </span>
         <div className="min-w-0 flex-1">
-          <p className="m-0 truncate text-xs font-bold text-[var(--workbench-text)]">
-            {comment.authorUserId}
+          <p className="m-0 truncate text-xs font-bold text-[var(--workbench-text)]" title={comment.authorUserId}>
+            {authorName}
           </p>
           <time className="mt-0.5 block text-[11px] font-medium text-[var(--workbench-muted)]">
             {formatTimestamp(comment.createdAt)}
+            {comment.editedAt && !deleted ? ` · ${t('documents.comments.edited')}` : ''}
           </time>
         </div>
         {isReply ? (
@@ -844,15 +977,84 @@ function CommentCard({
           </span>
         ) : null}
       </div>
-      <p className="m-0 mt-3 whitespace-pre-wrap text-sm font-medium leading-6 text-[var(--workbench-text)]">
-        {renderCommentBody(comment)}
-      </p>
+      {editDraft ? (
+        <form className="mt-3 grid gap-2" onSubmit={(event) => void handleEditSubmit(event)}>
+          <MemberMentionTextarea
+            ariaLabel={t('documents.comments.editBody')}
+            autoFocus
+            className="workbench-input min-h-20 w-full resize-y p-3 text-sm"
+            draft={editDraft}
+            members={mentionMembers}
+            suggestionsFailure={mentionSuggestionsFailure}
+            suggestionsLabel={t('documents.comments.mentionSuggestions')}
+            onDraftChange={setEditDraft}
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              className="workbench-button min-h-8 px-3"
+              onClick={() => {
+                setEditDraft(undefined)
+                setError(false)
+              }}
+              type="button"
+            >
+              {t('documents.comments.cancelEdit')}
+            </button>
+            <button
+              className="workbench-button-primary min-h-8 px-3 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!editDraft.body.trim() || isSaving}
+              type="submit"
+            >
+              {isSaving ? t('documents.comments.saving') : t('documents.comments.saveEdit')}
+            </button>
+          </div>
+        </form>
+      ) : deleted ? (
+        <p className="m-0 mt-3 text-sm font-medium italic text-[var(--workbench-muted)]">
+          {t('documents.comments.deleted')}
+        </p>
+      ) : (
+        <p className="m-0 mt-3 whitespace-pre-wrap text-sm font-medium leading-6 text-[var(--workbench-text)]">
+          {renderCommentBody(comment)}
+        </p>
+      )}
       {comment.anchor.type !== 'document' ? (
         <span className="workbench-badge mt-3">
           #{readCommentAnchorId(comment.anchor)}
         </span>
       ) : null}
-      {onReply || onResolve ? (
+      {error ? (
+        <p className="m-0 mt-2 text-xs font-semibold text-[var(--workbench-danger)]" role="alert">
+          {t('documents.comments.changeError')}
+        </p>
+      ) : null}
+      {isConfirmingDelete ? (
+        <div className="mt-3 flex flex-wrap items-center gap-3" role="group" aria-label={t('documents.comments.deleteConfirm')}>
+          <span className="text-xs font-semibold text-[var(--workbench-text)]">
+            {t('documents.comments.deleteConfirm')}
+          </span>
+          <button
+            className="text-xs font-semibold text-[var(--workbench-danger)] hover:underline disabled:opacity-50"
+            disabled={isSaving}
+            onClick={() => {
+              if (!onDelete) return
+              void runChange(() => onDelete(comment.id)).then((done) => {
+                if (done) setIsConfirmingDelete(false)
+              })
+            }}
+            type="button"
+          >
+            {t('documents.comments.confirmDelete')}
+          </button>
+          <button
+            className="text-xs font-semibold text-[var(--workbench-muted)] hover:underline"
+            onClick={() => setIsConfirmingDelete(false)}
+            type="button"
+          >
+            {t('documents.comments.cancelEdit')}
+          </button>
+        </div>
+      ) : !editDraft && (onReply || onResolve || canEdit || canDelete) ? (
         <div className="mt-3 flex items-center gap-3">
           {onReply ? (
             <button
@@ -872,10 +1074,49 @@ function CommentCard({
               {t('documents.comments.resolve')}
             </button>
           ) : null}
+          {canEdit ? (
+            <button
+              className="text-xs font-semibold text-[var(--workbench-primary-text)] hover:underline"
+              onClick={() => {
+                setError(false)
+                // Only members picked during the edit are listed; the stored mentions are kept from
+                // the comment itself, so a renamed member's old token is not read as a new pick.
+                setEditDraft({ body: comment.body, mentionMemberKeys: [] })
+              }}
+              type="button"
+            >
+              {t('documents.comments.edit')}
+            </button>
+          ) : null}
+          {canDelete ? (
+            <button
+              className="text-xs font-semibold text-[var(--workbench-danger)] hover:underline"
+              onClick={() => {
+                setError(false)
+                setIsConfirmingDelete(true)
+              }}
+              type="button"
+            >
+              {t('documents.comments.delete')}
+            </button>
+          ) : null}
         </div>
       ) : null}
     </article>
   )
+}
+
+/**
+ * Resolves the name shown for a comment author, falling back to the member key.
+ *
+ * @param memberKey - Stored author member key.
+ * @param members - Workspace members with display names.
+ * @returns The author's display name or member key.
+ */
+function resolveCommentAuthorName(memberKey: string, members: readonly MentionableMember[]) {
+  const normalized = memberKey.trim().toLowerCase()
+  const member = members.find((candidate) => candidate.memberKey.trim().toLowerCase() === normalized)
+  return member?.name?.trim() || memberKey
 }
 
 function renderCommentBody(comment: DocumentComment) {
@@ -1098,22 +1339,73 @@ function BacklinksPanel({
 
 function VersionsPanel({
   currentRevision,
+  document,
+  focusedVersionId,
   hasMore,
+  locale,
+  members,
   onLoadMore,
+  onNavigate,
   onRestoreVersion,
+  reviewAccessToken,
   t,
   versions,
 }: {
   currentRevision: number
+  /** Current Document whose versions are listed. */
+  document: DocumentRecord
+  /** Version whose review dialog opens first, from a deep link. */
+  focusedVersionId?: string
   hasMore: boolean
+  /** Locale used by the version review. */
+  locale: Locale
+  /** Members offered as approval reviewers. */
+  members?: readonly MentionableMember[]
   onLoadMore?: () => Promise<void>
+  /** Opens an application path. */
+  onNavigate?: (path: string) => void
   onRestoreVersion?: (versionId: string) => Promise<void>
+  /** Documents API token; omission hides preview, comparison, pinning, and approvals. */
+  reviewAccessToken?: string
   t: (key: MessageKey) => string
   versions: DocumentVersion[]
 }) {
   const [confirmVersionId, setConfirmVersionId] = useState<string>()
   const [restoringVersionId, setRestoringVersionId] = useState<string>()
   const [restoreErrorMessage, setRestoreErrorMessage] = useState<string>()
+  const [reviewingVersionId, setReviewingVersionId] = useState<string | undefined>(focusedVersionId)
+  const approvalsQuery = useDocumentApprovals(reviewAccessToken, document.id)
+  const approvals = approvalsQuery.data ?? []
+  const reviewMutations = useDocumentVersionReviewMutations(reviewAccessToken, document.id)
+  const listedReviewingVersion = versions.find((version) => version.id === reviewingVersionId)
+  // A deep link or a version from a later history page is not in the loaded list, so it is
+  // read through the version detail; a pin that reloads the first page keeps the dialog open.
+  const reviewingVersionDetail = useDocumentVersionDetail(
+    reviewAccessToken,
+    document.id,
+    listedReviewingVersion === undefined ? reviewingVersionId : undefined,
+  )
+  const resolvedReviewingVersion = listedReviewingVersion ?? reviewingVersionDetail.data?.version
+  // After a pin, the history reloads only its first page, so a version from a later page is read
+  // again through its detail. The last resolved copy keeps the dialog and its tab mounted meanwhile.
+  const [lastReviewingVersion, setLastReviewingVersion] = useState<DocumentVersion>()
+  if (resolvedReviewingVersion !== undefined && resolvedReviewingVersion !== lastReviewingVersion) {
+    setLastReviewingVersion(resolvedReviewingVersion)
+  }
+  const reviewingVersion = resolvedReviewingVersion ??
+    (lastReviewingVersion?.id === reviewingVersionId ? lastReviewingVersion : undefined)
+  const canEdit = document.capabilities.canEdit
+
+  /**
+   * Opens the review dialog of one version and reads the approvals again, since a decision made
+   * on the Work Item since the last read changes their status.
+   *
+   * @param versionId - Version to review.
+   */
+  const openReview = (versionId: string) => {
+    setReviewingVersionId(versionId)
+    void approvalsQuery.mutate()
+  }
 
   return (
     <div className="grid gap-3 p-4">
@@ -1128,6 +1420,60 @@ function VersionsPanel({
           {restoreErrorMessage}
         </p>
       ) : null}
+      {reviewAccessToken && approvalsQuery.error ? (
+        <div
+          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2"
+          role="alert"
+        >
+          <p className="m-0 text-xs font-semibold leading-5 text-fg-red-800">
+            {/* A failed refresh keeps the last approvals, which may no longer be current. */}
+            {t(approvalsQuery.data ? 'documents.versions.approvalsStale' : 'documents.versions.approvalsError')}
+          </p>
+          <button
+            className="workbench-button-secondary min-h-8 px-2.5 text-xs"
+            onClick={() => void approvalsQuery.mutate()}
+            type="button"
+          >
+            {t('documents.versions.retry')}
+          </button>
+        </div>
+      ) : null}
+      {reviewAccessToken && approvalsQuery.isLoading ? (
+        <p className="m-0 text-xs font-medium text-[var(--workbench-muted)]" role="status">
+          {t('documents.versions.approvalsLoading')}
+        </p>
+      ) : null}
+      {reviewingVersionId && !reviewingVersion && reviewingVersionDetail.isLoading ? (
+        <p className="m-0 text-xs font-medium text-[var(--workbench-muted)]" role="status">
+          {t('documents.versions.versionLoading')}
+        </p>
+      ) : null}
+      {reviewingVersionId && !reviewingVersion && reviewingVersionDetail.error ? (
+        <div
+          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2"
+          role="alert"
+        >
+          <p className="m-0 text-xs font-semibold leading-5 text-fg-red-800">
+            {t('documents.versions.versionError')}
+          </p>
+          <span className="flex gap-2">
+            <button
+              className="workbench-button-secondary min-h-8 px-2.5 text-xs"
+              onClick={() => void reviewingVersionDetail.mutate()}
+              type="button"
+            >
+              {t('documents.versions.retry')}
+            </button>
+            <button
+              className="workbench-button-secondary min-h-8 px-2.5 text-xs"
+              onClick={() => setReviewingVersionId(undefined)}
+              type="button"
+            >
+              {t('documents.action.cancel')}
+            </button>
+          </span>
+        </div>
+      ) : null}
       {versions.length > 0 ? (
         versions.map((version) => {
           const current = version.revision === currentRevision
@@ -1138,18 +1484,42 @@ function VersionsPanel({
             >
               <span className="absolute -left-[6px] top-4 h-2.5 w-2.5 rounded-full border-2 border-surface bg-[var(--workbench-primary)]" />
               <div className="flex items-center justify-between gap-3">
-                <strong className="text-sm text-[var(--workbench-text)]">
-                  {t('documents.versions.revision').replace(
+                <strong className="min-w-0 truncate text-sm text-[var(--workbench-text)]">
+                  {version.name ?? t('documents.versions.revision').replace(
                     '{revision}',
                     String(version.revision),
                   )}
                 </strong>
-                {current ? (
-                  <span className="workbench-badge-primary">
-                    {t('documents.versions.current')}
-                  </span>
-                ) : null}
+                <span className="flex flex-none gap-1">
+                  {version.name !== undefined ? (
+                    <span className="workbench-badge" title={t('documents.versions.pinnedDescription')}>
+                      {t('documents.versions.pinned')}
+                    </span>
+                  ) : null}
+                  {current ? (
+                    <span className="workbench-badge-primary">
+                      {t('documents.versions.current')}
+                    </span>
+                  ) : null}
+                </span>
               </div>
+              {version.name !== undefined ? (
+                <p className="m-0 mt-1 text-xs font-medium text-[var(--workbench-muted)]">
+                  {t('documents.versions.revision').replace('{revision}', String(version.revision))}
+                </p>
+              ) : null}
+              {approvals.some((approval) => approval.versionId === version.id) ? (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {approvals
+                    .filter((approval) => approval.versionId === version.id)
+                    .map((approval) => (
+                      <span className={resolveApprovalStatusClassName(approval.status)} key={approval.id}>
+                        {t('documents.versions.approvalStatus')
+                          .replace('{status}', t(`approval.status.${approval.status}`))}
+                      </span>
+                    ))}
+                </div>
+              ) : null}
               <time className="mt-1 block text-xs font-medium text-[var(--workbench-muted)]">
                 {formatTimestamp(version.createdAt)}
               </time>
@@ -1162,6 +1532,15 @@ function VersionsPanel({
                 <p className="m-0 mt-2 text-sm font-medium leading-5 text-[var(--workbench-text)]">
                   {version.summary}
                 </p>
+              ) : null}
+              {reviewAccessToken ? (
+                <button
+                  className="mr-3 mt-2 text-xs font-semibold text-[var(--workbench-primary-text)] hover:underline"
+                  onClick={() => openReview(version.id)}
+                  type="button"
+                >
+                  {t('documents.versions.review')}
+                </button>
               ) : null}
               {!current && onRestoreVersion ? (
                 confirmVersionId === version.id ? (
@@ -1226,6 +1605,36 @@ function VersionsPanel({
         <LoadMoreButton
           onLoadMore={onLoadMore}
           t={t}
+        />
+      ) : null}
+      {reviewAccessToken && reviewingVersion ? (
+        <DocumentVersionReviewDialog
+          accessToken={reviewAccessToken}
+          approvals={approvals.filter((approval) => approval.versionId === reviewingVersion.id)}
+          approvalsStatus={approvalsQuery.error
+            ? {
+                kind: approvalsQuery.data ? 'stale' : 'error',
+                onRetry: () => void approvalsQuery.mutate(),
+              }
+            : approvalsQuery.isLoading
+              ? { kind: 'loading' }
+              : undefined}
+          document={document}
+          initialTab={reviewingVersion.id === focusedVersionId ? 'approval' : 'preview'}
+          isRequestingApproval={reviewMutations.isRequestingApproval(reviewingVersion.id)}
+          locale={locale}
+          members={members}
+          onClose={() => setReviewingVersionId(undefined)}
+          onNavigate={onNavigate}
+          onPin={canEdit
+            ? (name) => reviewMutations.pinVersion(reviewingVersion.id, name)
+            : undefined}
+          onRequestApproval={canEdit
+            ? (input) => reviewMutations.requestApproval(reviewingVersion.id, input)
+            : undefined}
+          t={t}
+          version={reviewingVersion}
+          versions={versions}
         />
       ) : null}
     </div>

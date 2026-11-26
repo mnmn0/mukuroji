@@ -121,6 +121,7 @@ export function AgentSettingsPanel({
   const validation = draft ? validateAgentSettingsDraft(draft) : undefined
   const disabled = readOnly || isSaving
   const leaseHelpId = `${idPrefix}-lease-help`
+  const intakeHelpId = `${idPrefix}-intake-help`
   const leaseErrorId = `${idPrefix}-lease-error`
 
   /**
@@ -209,6 +210,23 @@ export function AgentSettingsPanel({
               </button>
             </div>
           ) : null}
+
+          <fieldset className="grid gap-3 border-t border-[var(--workbench-border)] px-5 py-6 sm:px-7" disabled={disabled}>
+            <legend className="text-base font-semibold text-[var(--workbench-text)]">{t('agentSettings.intake.title')}</legend>
+            <label className="flex min-h-[44px] items-center gap-3 text-sm font-semibold text-[var(--workbench-text)]">
+              <input
+                aria-describedby={intakeHelpId}
+                checked={draft.acceptNewRuns}
+                className="h-5 w-5 accent-[var(--workbench-primary)]"
+                type="checkbox"
+                onChange={(event) => onDraftChange({ ...draft, acceptNewRuns: event.target.checked })}
+              />
+              {t('agentSettings.intake.accept')}
+            </label>
+            <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]" id={intakeHelpId}>
+              {t('agentSettings.intake.help')}
+            </p>
+          </fieldset>
 
           <fieldset className="grid gap-4 border-t border-[var(--workbench-border)] px-5 py-6 sm:px-7" disabled={disabled}>
             <legend className="text-base font-semibold text-[var(--workbench-text)]">{t('agentSettings.lease.title')}</legend>
@@ -401,6 +419,23 @@ export function AgentSettingsPanel({
                     {t('agentSettings.triage.stalled')}
                   </label>
                 </fieldset>
+
+                <fieldset className="grid gap-3" disabled={disabled}>
+                  <legend className="text-base font-semibold text-[var(--workbench-text)]">{t('agentSettings.notifications.title')}</legend>
+                  <label className="flex min-h-[44px] items-start gap-3 text-sm font-semibold text-[var(--workbench-text)]">
+                    <input
+                      aria-describedby={`${idPrefix}-notifications-help`}
+                      checked={draft.notifyAssigneeOfRunEvents}
+                      className="mt-0.5 h-5 w-5 accent-[var(--workbench-primary)]"
+                      type="checkbox"
+                      onChange={(event) => onDraftChange({ ...draft, notifyAssigneeOfRunEvents: event.target.checked })}
+                    />
+                    {t('agentSettings.notifications.assignee')}
+                  </label>
+                  <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]" id={`${idPrefix}-notifications-help`}>
+                    {t('agentSettings.notifications.help')}
+                  </p>
+                </fieldset>
               </div>
             ) : null}
           </div>
@@ -421,6 +456,14 @@ export function AgentSettingsPanel({
               value={draft.brief}
               onChange={(brief) => onDraftChange({ ...draft, brief })}
             />
+            {settings.workspaceBrief && draft.brief.trim() === '' ? (
+              <div className="grid gap-1" data-testid="agent-settings-workspace-brief">
+                <p className="text-xs font-semibold text-[var(--workbench-muted)]">{t('agentSettings.briefs.inherited')}</p>
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded border border-[var(--workbench-border)] px-3 py-2 font-mono text-xs text-[var(--workbench-muted)]">
+                  {settings.workspaceBrief}
+                </pre>
+              </div>
+            ) : null}
             {projectBriefTargets.length === 0 ? (
               <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('agentSettings.briefs.noProjects')}</p>
             ) : projectBriefTargets.map((target, index) => {

@@ -12,6 +12,7 @@ import type {
   DocumentTableBlock,
 } from '@mukuroji/contracts'
 import { DocumentLinkedText } from './DocumentLinkedText'
+import { SafeMarkdown } from '../../shared/ui/SafeMarkdown'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { DocumentRecord } from '../api'
 import {
@@ -143,7 +144,20 @@ export function DocumentEditor({
   saveStatus,
   t,
 }: DocumentEditorProps) {
-  const [isInsertMenuOpen, setIsInsertMenuOpen] = useState(false)
+  const [insertIndex, setInsertIndex] = useState<number>()
+  const [isPreviewing, setIsPreviewing] = useState(false)
+  const canEditBlocks = editable && !isPreviewing
+
+  /**
+   * Inserts a new block of the chosen type at the open insertion point.
+   *
+   * @param type - Block type to insert.
+   */
+  const insertBlock = (type: DocumentBlock['type']) => {
+    const index = insertIndex ?? document.blocks.length
+    setInsertIndex(undefined)
+    onUpsertBlock(createDocumentBlock(type), index)
+  }
 
   return (
     <article
@@ -164,37 +178,69 @@ export function DocumentEditor({
         </p>
         {!editable ? (
           <span className="workbench-badge">{t('documents.readOnly')}</span>
-        ) : null}
+        ) : (
+          <button
+            aria-pressed={isPreviewing}
+            className="workbench-button-secondary min-h-8 px-3 text-xs"
+            onClick={() => {
+              setInsertIndex(undefined)
+              setIsPreviewing((current) => !current)
+            }}
+            type="button"
+          >
+            {isPreviewing ? t('documents.editor.backToEdit') : t('documents.editor.preview')}
+          </button>
+        )}
       </div>
 
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
+        {canEditBlocks && document.blocks.length > 0 ? (
+          <div className="grid min-w-0 gap-2">
+            <button
+              aria-expanded={insertIndex === 0}
+              className="justify-self-start rounded-md px-2 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)]"
+              onClick={() => setInsertIndex((current) => current === 0 ? undefined : 0)}
+              type="button"
+            >
+              <span aria-hidden="true">+ </span>
+              {t('documents.editor.insertAtTop')}
+            </button>
+            {insertIndex === 0 ? <InsertBlockMenu onInsert={insertBlock} t={t} /> : null}
+          </div>
+        ) : null}
         {document.blocks.map((block, index) => (
-          <EditableBlock
-            block={block}
-            checklistWorkItems={checklistWorkItems}
-            editable={editable}
-            index={index}
-            key={block.id}
-            lastIndex={document.blocks.length - 1}
-            t={t}
-            onActiveAnchorChange={onActiveAnchorChange}
-            onChange={onUpsertBlock}
-            onDelete={() => onDeleteBlock(block.id)}
-            onMove={(nextIndex) => onMoveBlock(block.id, nextIndex)}
-            onOpenComments={
-              onOpenComments ? () => onOpenComments(block.id) : undefined
-            }
-          />
+          <div className="grid min-w-0 gap-2" key={block.id}>
+            <EditableBlock
+              block={block}
+              checklistWorkItems={checklistWorkItems}
+              editable={canEditBlocks}
+              index={index}
+              lastIndex={document.blocks.length - 1}
+              t={t}
+              onActiveAnchorChange={onActiveAnchorChange}
+              onChange={onUpsertBlock}
+              onDelete={() => onDeleteBlock(block.id)}
+              onInsertBelow={() => setInsertIndex((current) => current === index + 1 ? undefined : index + 1)}
+              onMove={(nextIndex) => onMoveBlock(block.id, nextIndex)}
+              onOpenComments={
+                onOpenComments ? () => onOpenComments(block.id) : undefined
+              }
+            />
+            {canEditBlocks && insertIndex === index + 1 && index < document.blocks.length - 1 ? (
+              <InsertBlockMenu onInsert={insertBlock} t={t} />
+            ) : null}
+          </div>
         ))}
       </div>
 
-      {editable ? (
+      {canEditBlocks ? (
         <div className="relative mt-5">
           <button
-            aria-expanded={isInsertMenuOpen}
-            aria-haspopup="menu"
+            aria-expanded={insertIndex === document.blocks.length}
             className="flex min-h-10 items-center gap-2 rounded-md px-3 text-sm font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)]"
-            onClick={() => setIsInsertMenuOpen((current) => !current)}
+            onClick={() =>
+              setInsertIndex((current) =>
+                current === document.blocks.length ? undefined : document.blocks.length)}
             type="button"
           >
             <span
@@ -205,39 +251,56 @@ export function DocumentEditor({
             </span>
             {t('documents.editor.addBlock')}
           </button>
-          {isInsertMenuOpen ? (
-            <div
-              className="absolute left-0 top-12 z-20 grid w-[min(520px,calc(100vw-44px))] grid-cols-2 gap-1 rounded-lg border border-[var(--workbench-border)] bg-surface p-2 shadow-[0_18px_50px_rgba(23,32,29,0.16)] sm:grid-cols-3"
-              role="menu"
-            >
-              {insertableBlockTypes.map((type) => (
-                <button
-                  className="flex min-h-12 items-center gap-3 rounded-md px-3 text-left text-sm font-semibold text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]"
-                  key={type}
-                  onClick={() => {
-                    setIsInsertMenuOpen(false)
-                    onUpsertBlock(
-                      createDocumentBlock(type),
-                      document.blocks.length,
-                    )
-                  }}
-                  role="menuitem"
-                  type="button"
-                >
-                  <span
-                    aria-hidden="true"
-                    className="grid h-7 w-7 place-items-center rounded bg-[var(--workbench-surface-muted)] text-xs text-[var(--workbench-primary-text)]"
-                  >
-                    {blockGlyphs[type]}
-                  </span>
-                  {t(`documents.block.${type}`)}
-                </button>
-              ))}
+          {insertIndex === document.blocks.length ? (
+            <div className="absolute left-0 top-12 z-20">
+              <InsertBlockMenu onInsert={insertBlock} t={t} />
             </div>
           ) : null}
         </div>
       ) : null}
     </article>
+  )
+}
+
+/**
+ * Buttons of the block types that can be inserted at one position, as a labelled group: each is
+ * an ordinary button reached with Tab.
+ *
+ * @param props - Insert callback and translator.
+ * @returns The block type menu.
+ */
+function InsertBlockMenu({
+  onInsert,
+  t,
+}: {
+  /** Inserts a block of the chosen type. */
+  onInsert: (type: DocumentBlock['type']) => void
+  /** Translator. */
+  t: (key: MessageKey) => string
+}) {
+  return (
+    <div
+      aria-label={t('documents.editor.addBlock')}
+      className="grid w-[min(520px,calc(100vw-44px))] grid-cols-2 gap-1 rounded-lg border border-[var(--workbench-border)] bg-surface p-2 shadow-[0_18px_50px_rgba(23,32,29,0.16)] sm:grid-cols-3"
+      role="group"
+    >
+      {insertableBlockTypes.map((type) => (
+        <button
+          className="flex min-h-12 items-center gap-3 rounded-md px-3 text-left text-sm font-semibold text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]"
+          key={type}
+          onClick={() => onInsert(type)}
+          type="button"
+        >
+          <span
+            aria-hidden="true"
+            className="grid h-7 w-7 place-items-center rounded bg-[var(--workbench-surface-muted)] text-xs text-[var(--workbench-primary-text)]"
+          >
+            {blockGlyphs[type]}
+          </span>
+          {t(`documents.block.${type}`)}
+        </button>
+      ))}
+    </div>
   )
 }
 
@@ -273,6 +336,34 @@ export function DocumentReadOnlyContent({
   )
 }
 
+/**
+ * Props of {@link DocumentReadOnlyBlock}.
+ */
+export type DocumentReadOnlyBlockProps = {
+  /**
+   * Members that name a checklist owner. A key without a matching member is shown as the key, so
+   * an owner or deadline change stays visible when the member list is missing.
+   */
+  assignees?: readonly ChecklistAssigneeOption[]
+  /** Block to render. */
+  block: DocumentBlock
+  /** Translator. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Renders one block with the safe read-only renderer, for version comparisons.
+ *
+ * A comparison always shows the saved checklist owner and deadline, because a change to either
+ * one counts as a change of the block.
+ *
+ * @param props - Block, owner names, and translator.
+ * @returns The read-only block.
+ */
+export function DocumentReadOnlyBlock({ assignees, block, t }: DocumentReadOnlyBlockProps) {
+  return <ReadOnlyBlock block={block} checklistAssignees={assignees ?? []} t={t} />
+}
+
 function EditableBlock({
   block,
   checklistWorkItems,
@@ -282,6 +373,7 @@ function EditableBlock({
   onActiveAnchorChange,
   onChange,
   onDelete,
+  onInsertBelow,
   onMove,
   onOpenComments,
   t,
@@ -290,6 +382,10 @@ function EditableBlock({
    * 描画対象 block です。
    */
   block: DocumentBlock
+  /**
+   * Opens the block type menu below this block.
+   */
+  onInsertBelow: () => void
   /**
    * Checklist item から Work Item を作成・表示する操作です。
    */
@@ -366,6 +462,14 @@ function EditableBlock({
       ) : null}
       {editable ? (
         <div className="absolute -right-1 top-1 hidden items-center gap-1 group-hover:flex group-focus-within:flex">
+          <button
+            aria-label={t('documents.editor.insertBelow')}
+            className="grid h-7 w-7 place-items-center rounded bg-surface text-xs text-[var(--workbench-muted)] shadow-sm hover:text-[var(--workbench-primary-text)]"
+            onClick={onInsertBelow}
+            type="button"
+          >
+            +
+          </button>
           {onOpenComments ? (
             <button
               aria-label={t('documents.context.comments')}
@@ -592,6 +696,33 @@ function TableBlockEditor({
     })
   }
 
+  /**
+   * Removes one row from the table.
+   *
+   * @param rowIndex - Index of the row to remove.
+   * @returns Nothing; the changed block is passed to `onChange`.
+   */
+  const deleteRow = (rowIndex: number) => {
+    onChange({ ...block, rows: block.rows.filter((_, index) => index !== rowIndex) })
+  }
+  /**
+   * Removes one column and its cell in every row. The last remaining column is kept.
+   *
+   * @param columnIndex - Index of the column to remove.
+   * @returns Nothing; the changed block is passed to `onChange`.
+   */
+  const deleteColumn = (columnIndex: number) => {
+    if (block.columns.length <= 1) return
+    onChange({
+      ...block,
+      columns: block.columns.filter((_, index) => index !== columnIndex),
+      rows: block.rows.map((row) => ({
+        ...row,
+        cells: row.cells.filter((_, index) => index !== columnIndex),
+      })),
+    })
+  }
+
   return (
     <div className="overflow-hidden rounded-lg border border-[var(--workbench-border)]">
       <div className="overflow-x-auto">
@@ -603,16 +734,25 @@ function TableBlockEditor({
                   className="border-b border-r border-[var(--workbench-border)] p-0 last:border-r-0"
                   key={`${block.id}-column-${columnIndex}`}
                 >
-                  <input
-                    aria-label={`${t('documents.editor.column')} ${columnIndex + 1}`}
-                    className="w-full border-0 bg-transparent px-3 py-2.5 text-left text-xs font-bold text-[var(--workbench-muted)] outline-none"
-                    onChange={(event) =>
-                      updateColumn(columnIndex, event.target.value)
-                    }
-                    value={column}
-                  />
+                  <div className="flex items-center">
+                    <input
+                      aria-label={`${t('documents.editor.column')} ${columnIndex + 1}`}
+                      className="min-w-0 flex-1 border-0 bg-transparent px-3 py-2.5 text-left text-xs font-bold text-[var(--workbench-muted)] outline-none"
+                      onChange={(event) =>
+                        updateColumn(columnIndex, event.target.value)
+                      }
+                      value={column}
+                    />
+                    {block.columns.length > 1 ? (
+                      <TableRemoveButton
+                        label={`${t('documents.editor.deleteColumn')} ${columnIndex + 1}`}
+                        onClick={() => deleteColumn(columnIndex)}
+                      />
+                    ) : null}
+                  </div>
                 </th>
               ))}
+              <th aria-hidden="true" className="w-8 border-b border-[var(--workbench-border)]" />
             </tr>
           </thead>
           <tbody>
@@ -633,6 +773,12 @@ function TableBlockEditor({
                     />
                   </td>
                 ))}
+                <td className="w-8 border-b border-[var(--workbench-border)] p-0 text-center">
+                  <TableRemoveButton
+                    label={`${t('documents.editor.deleteRow')} ${rowIndex + 1}`}
+                    onClick={() => deleteRow(rowIndex)}
+                  />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -1072,7 +1218,7 @@ function DiagramBlockEditor({
           value={block.format}
         >
           <option value="text">text</option>
-          <option value="mermaid">mermaid</option>
+          {block.format === 'mermaid' ? <option value="mermaid">mermaid</option> : null}
         </select>
         <textarea
           aria-label={t('documents.block.diagram')}
@@ -1084,17 +1230,28 @@ function DiagramBlockEditor({
           value={block.source}
         />
       </div>
-      <DiagramPreview source={block.source} title={t('documents.editor.preview')} />
+      <DiagramPreview
+        format={block.format}
+        source={block.source}
+        t={t}
+        title={t('documents.editor.preview')}
+      />
     </div>
   )
 }
 
 function ReadOnlyBlock({
   block,
+  checklistAssignees,
   checklistWorkItems,
   t,
 }: {
   block: DocumentBlock
+  /**
+   * Members that name a checklist owner when the checklist controls offer none. Passing it shows
+   * the saved owner and deadline even without the controls.
+   */
+  checklistAssignees?: readonly ChecklistAssigneeOption[]
   /** Open actions for checklist items with a Work Item; creation is never offered here. */
   checklistWorkItems?: ChecklistWorkItemControls
   t: (key: MessageKey) => string
@@ -1155,6 +1312,7 @@ function ReadOnlyBlock({
 
   if (block.type === 'checklist') {
     const today = formatLocalCalendarDate(new Date())
+    const ownershipAssignees = checklistWorkItems?.assignees ?? checklistAssignees
     return (
       <ul className="m-0 grid list-none gap-2 p-0">
         {block.items.map((item) => (
@@ -1164,9 +1322,9 @@ function ReadOnlyBlock({
               <span className={item.checked ? 'text-[var(--workbench-muted)] line-through' : ''}>
                 <DocumentLinkedText text={item.text} />
               </span>
-              {checklistWorkItems?.assignees ? (
+              {ownershipAssignees ? (
                 <ChecklistItemOwnershipSummary
-                  assignees={checklistWorkItems.assignees}
+                  assignees={ownershipAssignees}
                   item={item}
                   t={t}
                   today={today}
@@ -1204,17 +1362,60 @@ function ReadOnlyBlock({
   }
 
   if (block.type === 'diagram') {
-    return <DiagramPreview source={block.source} title={t('documents.block.diagram')} />
+    return (
+      <DiagramPreview
+        format={block.format}
+        source={block.source}
+        t={t}
+        title={t('documents.block.diagram')}
+      />
+    )
   }
 
   return (
-    <p className="m-0 whitespace-pre-wrap text-[1rem] font-medium leading-8 text-[var(--workbench-text)]">
-      <DocumentLinkedText text={block.text} />
-    </p>
+    <SafeMarkdown
+      bodyMarkdown={block.text}
+      className="text-[1rem] leading-8 [&_p]:m-0 [&_p]:whitespace-pre-wrap"
+      complexityNotice={t('documents.editor.markdownTooComplex')}
+      rawHtml="escape"
+    />
   )
 }
 
-function DiagramPreview({ source, title }: { source: string; title: string }) {
+/**
+ * Draws a text flow diagram (`A → B`). Mermaid source is shown as source, because no Mermaid
+ * renderer is bundled and drawing it as a flow would misrepresent it.
+ *
+ * @param props - Diagram format, source, and caption.
+ * @returns The diagram figure.
+ */
+function DiagramPreview({
+  format,
+  source,
+  t,
+  title,
+}: {
+  /** Stored diagram format. */
+  format: DocumentDiagramBlock['format']
+  /** Diagram source. */
+  source: string
+  /** Translator. */
+  t: (key: MessageKey) => string
+  /** Accessible caption. */
+  title: string
+}) {
+  if (format === 'mermaid') {
+    return (
+      <figure className="m-0 grid gap-2 bg-tone-f8fffd p-4">
+        <figcaption className="text-xs font-semibold text-[var(--workbench-muted)]">
+          {t('documents.editor.mermaidSource')}
+        </figcaption>
+        <pre className="m-0 overflow-x-auto rounded-md bg-slate-900 p-3 font-mono text-xs leading-6 text-fg-slate-100">
+          <code>{source}</code>
+        </pre>
+      </figure>
+    )
+  }
   const steps = source
     .split(/(?:→|->|\n)/u)
     .map((step) => step.trim())
@@ -1244,6 +1445,34 @@ function DiagramPreview({ source, title }: { source: string; title: string }) {
         )}
       </div>
     </figure>
+  )
+}
+
+/**
+ * Small button that removes one table row or column.
+ *
+ * @param props - Accessible label and click handler.
+ * @returns The remove button.
+ */
+function TableRemoveButton({
+  label,
+  onClick,
+}: {
+  /** Accessible label naming the row or column. */
+  label: string
+  /** Removes the row or column. */
+  onClick: () => void
+}) {
+  return (
+    <button
+      aria-label={label}
+      className="grid h-7 w-7 flex-none place-items-center rounded text-xs text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-danger)]"
+      onClick={onClick}
+      title={label}
+      type="button"
+    >
+      ×
+    </button>
   )
 }
 

@@ -10,6 +10,7 @@ import {
   DEFAULT_WORK_ITEM_TYPE,
   DEFAULT_WORK_ITEM_TYPE_ID,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
+  parseOrgStructure,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
 import {
@@ -101,6 +102,7 @@ const knownProjectDirectoryAuxiliaryEntryTypes = new Set([
   'project-code',
   'project-id',
   'project-member',
+  'org-structure',
   'project-quick-access',
   'team-grant-request',
   'webhook-team-grant',
@@ -1218,6 +1220,17 @@ function validateProjectDirectoryAuxiliaryRow(
     if (
       directoryId !== `PROJECT_ID#${encodeURIComponent(workspaceId)}` ||
       entryKey !== `PROJECT#${projectId}`
+    ) normalizationFailure()
+    return
+  }
+  if (row.entryType === 'org-structure') {
+    const workspaceId = requireText(row.workspaceId)
+    requireCanonicalTimestamp(row.updatedAt)
+    if (
+      !isPositiveSafeInteger(row.revision) ||
+      parseOrgStructure(row) === undefined ||
+      directoryId !== `ORG_STRUCTURE#${encodeURIComponent(workspaceId)}` ||
+      entryKey !== 'STRUCTURE'
     ) normalizationFailure()
     return
   }

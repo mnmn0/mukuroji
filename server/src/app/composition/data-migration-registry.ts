@@ -1,4 +1,5 @@
 import type { DataMigrationDefinition } from '../../modules/data-migration'
+import { documentCommentParticipantIndexMigration } from '../../modules/documents'
 import { workItemMemberIndexMigration } from '../../modules/work-items'
 
 /**
@@ -10,4 +11,5 @@ import { workItemMemberIndexMigration } from '../../modules/work-items'
  */
 export const dataMigrationRegistry: readonly DataMigrationDefinition[] = [
   workItemMemberIndexMigration,
+  documentCommentParticipantIndexMigration,
 ]

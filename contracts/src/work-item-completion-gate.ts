@@ -81,6 +81,26 @@ export type WorkItemCompletionGateErrorResponse = {
   unmetConditions: WorkItemCompletionGateUnmetCondition[]
 }
 
+/** Longest reason a manager can give when overriding the completion Gate. */
+export const WORK_ITEM_COMPLETION_GATE_OVERRIDE_REASON_MAX_LENGTH = 1000
+
+/**
+ * Manager override sent with a Team Work Item update that completes the Work Item while a required
+ * completion Gate condition is unmet.
+ */
+export type WorkItemCompletionGateOverrideRequest = {
+  /** Why the Work Item is completed without meeting the Gate; required, trimmed, at most 1,000 characters. */
+  reason: string
+}
+
+/** Manager override recorded on the Work Item update that it allowed. */
+export type WorkItemCompletionGateOverrideRecord = {
+  /** Reason the manager gave. */
+  reason: string
+  /** Required conditions that were unmet when the override completed the Work Item. */
+  conditions: WorkItemCompletionGateConditionId[]
+}
+
 /** Approval counts a completion Gate reads; a subset of the Work Item approval summary. */
 export type WorkItemCompletionGateApprovalCounts = {
   /** Approvals waiting for a decision. */
@@ -179,6 +199,51 @@ export function evaluateWorkItemCompletionGate(
     if (failure) unmet.push({ condition, requirement, ...failure })
   }
   return unmet
+}
+
+/**
+ * State of one completion Gate condition the Team evaluates.
+ *
+ * - `met`: the condition holds.
+ * - `unmet`: the state was read and does not meet the condition.
+ * - `unavailable`: the state could not be read, so the condition counts as unmet.
+ */
+export type WorkItemCompletionGateConditionState = 'met' | WorkItemCompletionGateFailureReason
+
+/** One `warn` or `required` completion Gate condition with whether the Work Item meets it. */
+export type WorkItemCompletionGateConditionStatus = {
+  /** Condition the Team evaluates. */
+  condition: WorkItemCompletionGateConditionId
+  /** Requirement the Team set for the condition. */
+  requirement: Exclude<WorkItemCompletionGateRequirement, 'off'>
+  /** Whether the Work Item meets the condition. */
+  state: WorkItemCompletionGateConditionState
+  /** Short English explanation of an unmet or unavailable condition; absent when it is met. */
+  message?: string
+}
+
+/**
+ * Lists every condition a completion Gate evaluates with whether the Work Item meets it, for a
+ * checklist that shows met conditions as well as unmet ones.
+ *
+ * @param policy - Team completion Gate, if any.
+ * @param state - Acceptance criteria and approval counts of the Work Item.
+ * @returns Every `warn` or `required` condition in display order; empty when the Gate is off.
+ */
+export function describeWorkItemCompletionGate(
+  policy: WorkItemCompletionGatePolicy | undefined,
+  state: WorkItemCompletionGateState,
+): WorkItemCompletionGateConditionStatus[] {
+  const statuses: WorkItemCompletionGateConditionStatus[] = []
+  for (const condition of WORK_ITEM_COMPLETION_GATE_CONDITIONS) {
+    const requirement = getWorkItemCompletionGateRequirement(policy, condition)
+    if (requirement === 'off') continue
+    const failure = evaluateWorkItemCompletionGateCondition(condition, state)
+    statuses.push(failure
+      ? { condition, requirement, state: failure.reason, message: failure.message }
+      : { condition, requirement, state: 'met' })
+  }
+  return statuses
 }
 
 /**

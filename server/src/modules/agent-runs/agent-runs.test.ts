@@ -171,7 +171,12 @@ describe('Agent Run domain', () => {
     expect(() => readHeartbeatAgentRunRequest({})).toThrow(AgentRunError)
     expect(() => readHeartbeatAgentRunRequest(undefined)).toThrow(AgentRunError)
     expect(readUpdateAgentSettingsRequest({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false }))
-      .toEqual({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false })
+      .toEqual({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false, notifyAssigneeOfRunEvents: false, acceptNewRuns: true })
+    // The switch is on unless a save turns it off; anything but a boolean is refused.
+    expect(readUpdateAgentSettingsRequest({ expectedRevision: 1, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, acceptNewRuns: false }))
+      .toMatchObject({ acceptNewRuns: false })
+    expect(() => readUpdateAgentSettingsRequest({ expectedRevision: 1, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, acceptNewRuns: 'no' }))
+      .toThrow(AgentRunError)
     // Ready statuses and briefs are optional; empty briefs are dropped.
     expect(readUpdateAgentSettingsRequest({
       expectedRevision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
@@ -179,7 +184,7 @@ describe('Agent Run domain', () => {
     })).toEqual({
       expectedRevision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
       readyStatusIds: ['ready'], resumableStatusIds: [], requireAcceptanceCriteria: false, brief: 'Run bun test.', projectBriefs: { web: 'Use Storybook.' },
-      fileFailedRunsToTriage: false, fileStalledRunsToTriage: false,
+      fileFailedRunsToTriage: false, fileStalledRunsToTriage: false, notifyAssigneeOfRunEvents: false, acceptNewRuns: true,
     })
     const base = { expectedRevision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false }
     // A `__proto__` key stays an own entry instead of replacing the prototype.
@@ -676,9 +681,9 @@ describe('DynamoDB Agent Run store', () => {
     }
     const old = createClient([{ Item: legacy }])
     expect(await new DynamoDbAgentRunStore(old.client, 'AgentRuns').getSettings('workspace-1', 'core'))
-      .toEqual({ schemaVersion: 1, teamId: 'core', revision: 3, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false, updatedAt: now.toISOString(), updatedBy: 'member-1' })
+      .toEqual({ schemaVersion: 1, teamId: 'core', revision: 3, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false, notifyAssigneeOfRunEvents: false, acceptNewRuns: true, updatedAt: now.toISOString(), updatedBy: 'member-1', workspaceDefaultsRevision: 0 })
     // An explicit null is corrupt rather than absent: it must not lift the Ready gate.
-    for (const corrupt of [{ readyStatusIds: [7] }, { readyStatusIds: null }, { resumableStatusIds: [''] }, { resumableStatusIds: null }, { requireAcceptanceCriteria: 'yes' }, { acceptanceCriteriaFieldId: '' }, { brief: '' }, { brief: null }, { projectBriefs: { web: 3 } }, { projectBriefs: [] }, { projectBriefs: null }]) {
+    for (const corrupt of [{ readyStatusIds: [7] }, { readyStatusIds: null }, { resumableStatusIds: [''] }, { resumableStatusIds: null }, { requireAcceptanceCriteria: 'yes' }, { acceptNewRuns: 'no' }, { acceptNewRuns: null }, { acceptanceCriteriaFieldId: '' }, { brief: '' }, { brief: null }, { projectBriefs: { web: 3 } }, { projectBriefs: [] }, { projectBriefs: null }]) {
       const client = createClient([{ Item: { ...legacy, ...corrupt } }])
       await expect(new DynamoDbAgentRunStore(client.client, 'AgentRuns').getSettings('workspace-1', 'core'))
         .rejects.toMatchObject({ category: 'temporarily_unavailable' })
@@ -698,7 +703,7 @@ describe('DynamoDB Agent Run store', () => {
       })
     }
     const first = createClient([{}])
-    const update = { expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: ['ready'], resumableStatusIds: ['doing'], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance', brief: 'Brief', projectBriefs: { web: 'Web brief' }, fileFailedRunsToTriage: true, fileStalledRunsToTriage: false }
+    const update = { expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: ['ready'], resumableStatusIds: ['doing'], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance', brief: 'Brief', projectBriefs: { web: 'Web brief' }, fileFailedRunsToTriage: true, fileStalledRunsToTriage: false, notifyAssigneeOfRunEvents: false, acceptNewRuns: true }
     const saved = await new DynamoDbAgentRunStore(first.client, 'AgentRuns').saveSettings('workspace-1', 'core', update, 'member-1', now, 'key-1', [])
     expect(saved).toMatchObject({ revision: 1, leaseMinutes: 45, updatedBy: 'member-1' })
     const command = first.commands[0]
@@ -727,6 +732,51 @@ describe('DynamoDB Agent Run store', () => {
       ConditionExpression: '#revision = :expectedRevision',
       ExpressionAttributeValues: { ':expectedRevision': 1 },
     } }, { Put: { Item: { recordKey: 'agent-settings-mutation#key-2' } } }] })
+  })
+})
+
+describe('Workspace agent defaults', () => {
+  test('saves the defaults with revision CAS and applies them to a Team without settings', async () => {
+    const first = createClient([{}])
+    const update = { expectedRevision: 0, leaseMinutes: 60, allowTakeoverAfterLeaseExpiry: true, requireAcceptanceCriteria: true, brief: 'Workspace brief' }
+    const saved = await new DynamoDbAgentRunStore(first.client, 'AgentRuns').saveWorkspaceAgentDefaults('workspace-1', update, 'admin-1', now, 'key-1', [])
+    expect(saved).toEqual({ schemaVersion: 1, revision: 1, leaseMinutes: 60, allowTakeoverAfterLeaseExpiry: true, requireAcceptanceCriteria: true, brief: 'Workspace brief', updatedAt: now.toISOString(), updatedBy: 'admin-1' })
+    const command = first.commands[0]
+    if (!(command instanceof TransactWriteCommand)) throw new Error('The save must be a transaction.')
+    // The Workspace row lives outside every Team partition.
+    expect(command.input).toMatchObject({ TransactItems: [
+      { Put: { Item: { directoryTeamId: 'workspace-1#workspace', recordKey: 'agent-defaults', entityType: 'agent-defaults' }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
+      { Put: { Item: { recordKey: 'agent-defaults-mutation#key-1', entityType: 'agent-defaults-mutation' }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
+    ] })
+    const row = command.input.TransactItems?.[0]?.Put?.Item
+
+    // A Team without settings reads the Workspace values at revision 0; a saved Team keeps its own.
+    const unsaved = createClient([{}, { Item: row }])
+    expect(await new DynamoDbAgentRunStore(unsaved.client, 'AgentRuns').getSettings('workspace-1', 'core')).toMatchObject({
+      revision: 0, leaseMinutes: 60, allowTakeoverAfterLeaseExpiry: true, requireAcceptanceCriteria: true, workspaceBrief: 'Workspace brief',
+    })
+    const teamRow = {
+      directoryTeamId: 'workspace-1#team#core', recordKey: 'agent-settings', entityType: 'agent-settings', workspaceId: 'workspace-1',
+      schemaVersion: 1, teamId: 'core', revision: 2, leaseMinutes: 15, allowTakeoverAfterLeaseExpiry: false,
+      updatedAt: now.toISOString(), updatedBy: 'member-1',
+    }
+    const savedTeam = createClient([{ Item: teamRow }, { Item: row }])
+    expect(await new DynamoDbAgentRunStore(savedTeam.client, 'AgentRuns').getSettings('workspace-1', 'core')).toMatchObject({
+      revision: 2, leaseMinutes: 15, allowTakeoverAfterLeaseExpiry: false, requireAcceptanceCriteria: false, workspaceBrief: 'Workspace brief',
+    })
+    // A run of a Team that inherits the defaults is fenced on them too; a saved Team only on its own row.
+    const fence = new DynamoDbAgentRunStore(createClient([]).client, 'AgentRuns')
+    expect(fence.createSettingsRevisionChecks('workspace-1', 'core', { revision: 0, workspaceDefaultsRevision: 3 })).toMatchObject([
+      { ConditionCheck: { Key: { directoryTeamId: 'workspace-1#team#core', recordKey: 'agent-settings' }, ConditionExpression: 'attribute_not_exists(#recordKey)' } },
+      { ConditionCheck: { Key: { directoryTeamId: 'workspace-1#workspace', recordKey: 'agent-defaults' }, ConditionExpression: '#revision = :revision', ExpressionAttributeValues: { ':revision': 3 } } },
+    ])
+    expect(fence.createSettingsRevisionChecks('workspace-1', 'core', { revision: 0, workspaceDefaultsRevision: 0 })[1])
+      .toMatchObject({ ConditionCheck: { ConditionExpression: 'attribute_not_exists(#recordKey)' } })
+    expect(fence.createSettingsRevisionChecks('workspace-1', 'core', { revision: 2, workspaceDefaultsRevision: 3 })).toHaveLength(1)
+    // A corrupt Workspace row is not read as defaults.
+    const corrupt = createClient([{ Item: { ...row, leaseMinutes: 'long' } }])
+    await expect(new DynamoDbAgentRunStore(corrupt.client, 'AgentRuns').getWorkspaceAgentDefaults('workspace-1'))
+      .rejects.toMatchObject({ category: 'temporarily_unavailable' })
   })
 })
 

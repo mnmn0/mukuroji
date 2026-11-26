@@ -4,7 +4,7 @@ import type {
   AiAssistanceGeneration,
   CreateAiAssistanceFeedbackRequest,
 } from '@mukuroji/contracts'
-import { useEffect, useId, useState, type ReactNode } from 'react'
+import { useId, type ReactNode } from 'react'
 import type { MessageKey } from '../../../shared/i18n/i18n'
 import { isSafeApplicationPath } from '../../../shared/routing/applicationPath'
 import {
@@ -16,6 +16,7 @@ import {
 import type { AiAssistanceErrorKind } from '../mutations/useAiAssistanceController'
 import { isAiAssistanceRetentionWindowCurrent } from '../model/aiGenerationValidation'
 import { ConfidenceBadge } from './ConfidenceBadge'
+import { useAiGenerationExpiryRerender } from './useAiGenerationExpiryRerender'
 
 /**
  * Permission-safe content passed to a workflow-specific draft renderer.
@@ -39,6 +40,11 @@ export type AiAssistanceAvailableReview = {
 export type AiAssistanceReviewProps = {
   /** Label for the workflow-specific adopt action. */
   adoptLabel?: string
+  /**
+   * Keeps the Adopt action next to an approved decision, for a workflow that can approve a draft
+   * without adopting it, so its values can still be applied afterwards.
+   */
+  adoptAfterApproval?: boolean
   /** Safe error category selected by the controller. */
   errorKind?: AiAssistanceErrorKind
   /** Feedback already accepted by the server. */
@@ -81,6 +87,7 @@ export type AiAssistanceReviewProps = {
  * @returns A flat proposal rail, or null while idle.
  */
 export function AiAssistanceReview({
+  adoptAfterApproval = false,
   adoptLabel,
   errorKind,
   feedbackRating,
@@ -100,20 +107,7 @@ export function AiAssistanceReview({
 }: AiAssistanceReviewProps) {
   const reviewTitleId = useId()
   const citationsTitleId = useId()
-  const [expiryTick, setExpiryTick] = useState(0)
-
-  /** Re-renders the review when the retained generation crosses its expiry boundary. */
-  useEffect(() => {
-    if (!generation?.expiresAt) return
-    const delay = Date.parse(generation.expiresAt) - Date.now()
-    if (!Number.isFinite(delay) || delay <= 0) return
-    // Browser timers clamp delays above a signed 32-bit integer; wake up again
-    // after the safe maximum when a retention window spans more than 24 days.
-    const timeoutId = setTimeout(() => {
-      setExpiryTick((tick) => tick + 1)
-    }, Math.min(delay, 2_147_000_000))
-    return () => clearTimeout(timeoutId)
-  }, [generation?.expiresAt, generation?.id, expiryTick])
+  useAiGenerationExpiryRerender(generation)
 
   if (!generation && !isGenerating && !errorKind) return null
 
@@ -227,7 +221,20 @@ export function AiAssistanceReview({
                 )}
                 {t(decision.outcome === 'approved' ? 'ai.review.approved' : 'ai.review.rejected')}
               </p>
-            ) : onAdopt || onReject ? (
+            ) : null}
+            {decision?.outcome === 'approved' && adoptAfterApproval && onAdopt ? (
+              <div className="flex flex-wrap justify-end gap-2 max-[520px]:grid max-[520px]:grid-cols-1">
+                <button
+                  className="workbench-button-primary min-h-[44px] px-4 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={isDecisionPending || isFeedbackPending}
+                  onClick={() => void onAdopt()}
+                  type="button"
+                >
+                  {adoptLabel ?? t('ai.review.adopt')}
+                </button>
+              </div>
+            ) : null}
+            {!decision && (onAdopt || onReject) ? (
               <div className="flex flex-wrap justify-end gap-2 max-[520px]:grid max-[520px]:grid-cols-1">
                 {onReject ? (
                   <button
