@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { ProjectExpense } from '@mukuroji/contracts'
 import { createProjectExpense, readProjectExpenseList } from '../src/features/time-tracking/api/projectExpenses'
+import { createProjectExpenseSubmitter } from '../src/features/time-tracking/mutations/useProjectExpenseMutations'
 import { projectBudgetReportFixture } from '../src/features/time-tracking/reportFixtures'
 import { ProjectBudgetReportPanel } from '../src/features/time-tracking/ui/ProjectBudgetReportPanel'
 import { ProjectExpensesPanel } from '../src/features/time-tracking/ui/ProjectExpensesPanel'
@@ -96,6 +97,44 @@ describe('Project expenses', () => {
     expect(stored.id).toBe('x1')
     expect(headers?.get('Idempotency-Key')).toBe('key-1')
     expect(body).toMatchObject({ amountMinor: 120_000, receiptFileIds: ['file-1'] })
+  })
+
+  test('retries an unanswered submission with the same key and the receipt already uploaded', async () => {
+    const calls: string[] = []
+    const expenseKeys: (string | null)[] = []
+    let failExpense = true
+    globalThis.fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      calls.push(`${method} ${url.replace(/^.*\/projects\/atlas/u, '')}`)
+      if (url.startsWith('https://upload.example/')) return new Response(null, { status: 200 })
+      if (url.endsWith('/expenses')) {
+        expenseKeys.push(new Headers(init?.headers).get('Idempotency-Key'))
+        if (failExpense) throw new TypeError('network')
+        return Response.json({ expense: submitted }, { status: 201 })
+      }
+      if (url.endsWith('/complete')) return Response.json({ file: { id: 'file-1' }, version: { id: 'v1' } })
+      return Response.json({
+        file: { id: 'file-1' },
+        version: { id: 'v1' },
+        upload: { url: 'https://upload.example/receipt', method: 'PUT', headers: {}, maxSizeBytes: 1_000 },
+      }, { status: 201 })
+    }, { preconnect: originalFetch.preconnect })
+    const submitter = createProjectExpenseSubmitter()
+    const input = { date: '2026-11-19', category: '外注費', amountMinor: 120_000, currency: 'JPY' }
+    const receipt = new File(['x'], 'receipt.pdf', { type: 'application/pdf', lastModified: 1 })
+
+    await expect(submitter.submit('token', 'core-team', 'atlas', input, [receipt])).rejects.toBeDefined()
+    failExpense = false
+    const stored = await submitter.submit('token', 'core-team', 'atlas', input, [receipt])
+
+    expect(stored.id).toBe('x1')
+    expect(calls.filter((call) => call.startsWith('PUT'))).toHaveLength(1)
+    expect(expenseKeys).toHaveLength(2)
+    expect(expenseKeys[1]).toBe(expenseKeys[0])
+    // A new submission after the stored one is a new request.
+    await submitter.submit('token', 'core-team', 'atlas', input, [receipt])
+    expect(expenseKeys[2]).not.toBe(expenseKeys[0])
   })
 
   test('shows approved expenses in the actual cost of the budget report and pending ones apart', () => {

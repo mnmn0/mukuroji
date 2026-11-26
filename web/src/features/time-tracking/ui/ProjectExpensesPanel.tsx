@@ -256,7 +256,9 @@ function ExpenseForm({
     <form
       aria-label={t('timeTracking.projectExpenses.formLabel')}
       className="grid gap-3 text-sm min-[600px]:grid-cols-6"
-      key={formKey}
+      // The budget currency may arrive after the form first renders; a new currency starts a new form
+      // so its field shows the currency instead of the fallback.
+      key={`${formKey}-${defaultCurrency}`}
       onSubmit={(event) => { void submit(event) }}
     >
       <label className="grid gap-1 min-[600px]:col-span-2" htmlFor={`${id}-date`}>

@@ -10,6 +10,7 @@ import {
   type ProjectExpenseCallerAuthorizationCheck,
   type ProjectExpenseReferences,
 } from '../../modules/project-budget'
+import type { FileProofingActor } from '../../modules/files/file-proofing'
 import { createWorkItemProjectAssignmentConditionCheck } from '../../modules/work-items'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { readBearerAccessToken, readJson } from '../shared/http'
@@ -276,18 +277,23 @@ async function verifyExpenseReferences(
       projectId,
     ))
   }
+  const actor: FileProofingActor = { memberKey: principal.userKey, kind: 'member', guest: false, canWrite: false, canManage: false }
+  let projectFileIds: Set<string> | undefined
   for (const fileId of references.addedReceiptFileIds) {
-    const lookup = await workItemDependencies.fileProofing.findFileById(
-      principal.directoryId,
-      { memberKey: principal.userKey, kind: 'member', guest: false, canWrite: false, canManage: false },
-      fileId,
-    )
-    if (
-      !lookup ||
-      lookup.scope.kind !== 'project' ||
-      lookup.scope.teamId !== teamId ||
-      lookup.scope.projectId !== projectId
-    ) {
+    const lookup = await workItemDependencies.fileProofing.findFileById(principal.directoryId, actor, fileId)
+    if (lookup) {
+      if (lookup.scope.kind !== 'project' || lookup.scope.teamId !== teamId || lookup.scope.projectId !== projectId) {
+        throw new ProjectDataError(400, 'InvalidProjectExpense', `Receipt "${fileId}" is not a file of this Project.`)
+      }
+      continue
+    }
+    // The File ID index is eventually consistent, so a receipt uploaded just before the request may
+    // not be in it yet. The Project's own files are read consistently before refusing it.
+    projectFileIds ??= new Set((await workItemDependencies.fileProofing.list(
+      { workspaceId: principal.directoryId, teamId, kind: 'project', projectId },
+      actor,
+    )).files.map((file) => file.id))
+    if (!projectFileIds.has(fileId)) {
       throw new ProjectDataError(400, 'InvalidProjectExpense', `Receipt "${fileId}" is not a file of this Project.`)
     }
   }

@@ -15,7 +15,7 @@ import type {
 } from '@mukuroji/contracts'
 import { afterEach, expect, test } from 'bun:test'
 import { createMutationAuditContext } from '../../modules/audit'
-import type { FileProofingFileLookup } from '../../modules/files'
+import type { FileProofingFileLookup, FileProofingScope } from '../../modules/files'
 import { InMemoryProjectExpenseStore } from '../../modules/project-budget'
 
 const workspaceId = 'user#demo@example.com'
@@ -61,12 +61,21 @@ function request(path: string, method = 'GET', body?: unknown, idempotencyKey?: 
  * Replaces the file lookup so the named files belong to the given Project scope.
  *
  * @param files - File ID to the Team and Project that own it.
+ * @param projectFileIds - Files the consistent Project file list returns while the File ID index
+ * has not caught up.
  */
-function stubFiles(files: Record<string, { teamId: string; projectId: string }>) {
+function stubFiles(files: Record<string, { teamId: string; projectId: string }>, projectFileIds: readonly string[] = []) {
   const fileProofing = getTestAppDependencies().workItems.fileProofing
   setTestAppDependencies({
     fileProofing: new Proxy(fileProofing, {
       get(target, property, receiver) {
+        if (property === 'list') {
+          return async (scope: FileProofingScope) => ({
+            scope,
+            files: projectFileIds.map((id) => ({ id })),
+            approvals: [],
+          })
+        }
         if (property !== 'findFileById') return Reflect.get(target, property, receiver)
         return async (_workspaceId: string, _actor: unknown, fileId: string): Promise<FileProofingFileLookup | undefined> => {
           const owner = files[fileId]
@@ -172,6 +181,11 @@ test('refuses a receipt or a Work Item of another Project and an invalid amount'
   expect(foreignReceipt.status).toBe(400)
   const missingReceipt = await request(path, 'POST', { ...base, receiptFileIds: ['missing'] }, 'bad-2')
   expect(missingReceipt.status).toBe(400)
+  // A receipt the File ID index does not show yet is found in the Project's own file list.
+  stubFiles({}, ['fresh-receipt'])
+  const freshReceipt = await request(path, 'POST', { ...base, receiptFileIds: ['fresh-receipt'] }, 'fresh-1')
+  expect(freshReceipt.status).toBe(201)
+  stubFiles({ 'other-receipt': { teamId: 'other-team', projectId } })
   const missingWorkItem = await request(path, 'POST', { ...base, workItemId: 'wireframe' }, 'bad-3')
   expect(missingWorkItem.status).toBe(400)
   const { issues } = await getTestAppDependencies().workItems.teamIssues.getTeamIssues(workspaceId, 'core-team')
