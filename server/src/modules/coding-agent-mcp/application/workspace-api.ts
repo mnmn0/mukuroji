@@ -1,10 +1,14 @@
 import {
   createWorkItemTitleMatcher,
   parseWorkItemKey,
+  type CreatePublicDocumentRequest,
   type CreatePublicSubtaskBatchRequest,
   type CreatePublicWorkItemRequest,
   type PublicCredentialOwner,
   type PublicProjectCharter,
+  type PublicDocumentContent,
+  type PublicDocumentSummary,
+  type PublicWorkItemDocument,
   type PublicProjectMemberList,
   type PublicSubtaskBatch,
   type PublicTeamList,
@@ -18,8 +22,23 @@ import {
   type PublicWorkItemWebLinkMutation,
   type TeamIssueCommentResponseItem,
   type CustomFieldValue,
+  type UpdatePublicDocumentRequest,
   type UpdatePublicWorkItemRequest,
   type WorkflowStatusCategory,
+  type CreatePublicMilestoneRequest,
+  type CreatePublicPlanningStatusUpdateRequest,
+  type PlanningEntityStatus,
+  type PlanningHealth,
+  type PlanningRisk,
+  type PlanningUpdateTarget,
+  type PublicPlanningEntityList,
+  type PublicPlanningEntityMutation,
+  type PublicPlanningEntityType,
+  type PublicPlanningStatusUpdateMutation,
+  type PublicPlanningStatusUpdatePage,
+  type PublicWorkItemPlanning,
+  type UpdatePublicMilestoneRequest,
+  type UpdatePublicWorkItemPlanningRequest,
 } from '@mukuroji/contracts'
 import { AgentTaskError, type AgentCatalog, type AgentPage, type AgentTask } from './work-item-api'
 
@@ -227,6 +246,127 @@ export interface WorkspaceApi {
     input: CreatePublicSubtaskBatchRequest,
     key: string,
   ): Promise<PublicSubtaskBatch>
+  /**
+   * Lists the unarchived Planning entities of one type that the owner can read.
+   * @param type - Entity type.
+   * @param scope - Optional Team, or Team and Project.
+   * @returns The entities and the Planning revision.
+   */
+  planningEntities(type: PublicPlanningEntityType, scope: { teamId?: string, projectId?: string }): Promise<PublicPlanningEntityList>
+  /**
+   * Creates a Milestone.
+   * @param input - Milestone fields.
+   * @param key - Idempotency key of the logical write.
+   * @returns The created Milestone.
+   */
+  createMilestone(input: CreatePublicMilestoneRequest, key: string): Promise<PublicPlanningEntityMutation>
+  /**
+   * Changes the named fields of a Milestone.
+   * @param milestoneId - Milestone ID.
+   * @param input - Changed fields.
+   * @param key - Idempotency key of the logical write.
+   * @returns The updated Milestone.
+   */
+  updateMilestone(milestoneId: string, input: UpdatePublicMilestoneRequest, key: string): Promise<PublicPlanningEntityMutation>
+  /**
+   * Reads the Cycle and Milestone of a Work Item.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The Planning link.
+   */
+  workItemPlanning(teamId: string, workItemId: string): Promise<PublicWorkItemPlanning>
+  /**
+   * Puts a Work Item in a Cycle or Milestone, or takes it out.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param input - Cycle and Milestone changes.
+   * @param key - Idempotency key of the logical write.
+   * @returns The Planning link after the write.
+   */
+  updateWorkItemPlanning(teamId: string, workItemId: string, input: UpdatePublicWorkItemPlanningRequest, key: string): Promise<PublicWorkItemPlanning>
+  /**
+   * Lists one page of a target's health updates, newest first.
+   * @param target - Project, Team, or Initiative.
+   * @param cursor - Cursor of the previous page.
+   * @param limit - Page size.
+   * @returns One page of updates.
+   */
+  statusUpdates(target: PlanningUpdateTarget, cursor?: string, limit?: number): Promise<PublicPlanningStatusUpdatePage>
+  /**
+   * Publishes a health update.
+   * @param input - Health update.
+   * @param key - Idempotency key of the logical write.
+   * @returns The published update.
+   */
+  publishStatusUpdate(input: CreatePublicPlanningStatusUpdateRequest, key: string): Promise<PublicPlanningStatusUpdateMutation>
+  /**
+   * Lists one page of the Workspace's Documents that the credential owner can view.
+   * @param filters - Optional Project and folder restrictions.
+   * @param cursor - Cursor of the previous page.
+   * @param limit - Page size.
+   * @returns One page of Documents.
+   */
+  listDocuments(filters: WorkspaceDocumentFilters, cursor?: string, limit?: number): Promise<AgentPage<PublicDocumentSummary>>
+  /**
+   * Lists one page of the Documents linked to a Work Item.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param cursor - Cursor of the previous page.
+   * @param limit - Page size.
+   * @returns One page of linked Documents.
+   */
+  workItemDocuments(teamId: string, workItemId: string, cursor?: string, limit?: number): Promise<AgentPage<PublicWorkItemDocument>>
+  /**
+   * Reads a page or template as Markdown.
+   * @param documentId - Document ID.
+   * @returns The Document content.
+   */
+  getDocument(documentId: string): Promise<PublicDocumentContent>
+  /**
+   * Creates a page from Markdown.
+   * @param input - Title, Markdown body, destination, and Work Item link.
+   * @param key - Idempotency key of the logical write.
+   * @returns Summary of the created page.
+   */
+  createDocument(input: CreatePublicDocumentRequest, key: string): Promise<PublicDocumentSummary>
+  /**
+   * Changes a Document's title or replaces its Markdown body.
+   * @param documentId - Document ID.
+   * @param input - Expected revision and the changes.
+   * @param key - Idempotency key of the logical write.
+   * @returns Summary of the changed Document.
+   */
+  updateDocument(documentId: string, input: UpdatePublicDocumentRequest, key: string): Promise<PublicDocumentSummary>
+}
+
+/** Filters for listing the Workspace's Documents through the Workspace tools. */
+export type WorkspaceDocumentFilters = {
+  /** Only Documents of this Project. */
+  projectId?: string
+  /** Only Documents directly in this folder. */
+  parentId?: string
+}
+
+/** Fields of `save_document`; an `id` updates that Document, no `id` creates a page. */
+export type WorkspaceDocumentSaveInput = {
+  /** Document to update; omitted creates a page. */
+  id?: string
+  /** Title; required when creating. */
+  title?: string
+  /** Markdown body; required when creating, and replaces the whole body when updating. */
+  content?: string
+  /** Project of a new page. */
+  projectId?: string
+  /** Folder of a new page. */
+  parentId?: string
+  /** Work Item a new page links, by key such as `ABC-123`, or by ID with `teamId`. */
+  issueId?: string
+  /** Team of a Work Item ID. */
+  teamId?: string
+  /** Revision read before the update; required when updating. */
+  expectedRevision?: number
+  /** Idempotency key of the logical write. */
+  idempotencyKey: string
 }
 
 /** One Work Item `create_subtasks` creates under the parent. */
@@ -275,7 +415,67 @@ export type WorkspaceIssueSaveInput = {
    * only the named fields change and null clears a field.
    */
   customFields?: Record<string, CustomFieldValue | null>
-  /** Revision read before the update; required when updating. */
+  /** Revision read before the update; required when updating other fields than the Cycle and Milestone. */
+  expectedRevision?: number
+  /** Cycle to put the Work Item in; null takes it out of its Cycle. */
+  cycleId?: string | null
+  /** Milestone the Work Item contributes to; null removes it. */
+  milestoneId?: string | null
+  /** Idempotency key of the logical write. */
+  idempotencyKey: string
+}
+
+/** Fields of `save_milestone`; an `id` updates that Milestone, no `id` creates one. */
+export type WorkspaceMilestoneSaveInput = {
+  /** Milestone to update; omitted creates one. */
+  id?: string
+  /** Title; required when creating. */
+  title?: string
+  /** Description; null removes it when updating. */
+  description?: string | null
+  /** Team scope of a new Milestone. */
+  teamId?: string
+  /** Project scope of a new Milestone, inside `teamId`. */
+  projectId?: string
+  /** Parent of a new Milestone: a Phase, Goal, Initiative, or Roadmap; required when creating. */
+  parentId?: string
+  /** Owner member ID, or `me`. */
+  ownerId?: string
+  /** Lifecycle status. */
+  status?: PlanningEntityStatus
+  /** Health. */
+  health?: PlanningHealth
+  /** Risk level. */
+  risk?: PlanningRisk
+  /** Target date as `YYYY-MM-DD`; required when creating. */
+  targetDate?: string
+  /** Baseline date as `YYYY-MM-DD`; a new Milestone defaults to `targetDate`. */
+  baselineDate?: string
+  /** Planning revision read before the write; omitted applies the write to the latest. */
+  expectedRevision?: number
+  /** Idempotency key of the logical write. */
+  idempotencyKey: string
+}
+
+/** Fields of `save_status_update`. */
+export type WorkspaceStatusUpdateSaveInput = {
+  /** Project, Team, or Initiative the update is about. */
+  target: PlanningUpdateTarget
+  /** Health. */
+  health: PlanningHealth
+  /** Risk level. */
+  risk?: PlanningRisk
+  /** Summary. */
+  summary: string
+  /** Background and impact of the risk. */
+  riskSummary?: string
+  /** Decisions made. */
+  decisionSummary?: string
+  /** Help needed. */
+  helpNeeded?: string
+  /** Next action. */
+  nextAction?: string
+  /** Planning revision read before the write; omitted applies the write to the latest. */
   expectedRevision?: number
   /** Idempotency key of the logical write. */
   idempotencyKey: string
@@ -429,7 +629,120 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
     return memberId === 'me' ? (await api.me()).memberId : memberId
   }
 
+  /**
+   * Puts a saved Work Item in the Cycle or Milestone that `save_issue` names, after the Work Item
+   * itself was saved. Its key derives from the call's key, so a retry with the same arguments and
+   * key replays the Work Item write and finishes this one.
+   * @param teamId - Team of the saved Work Item.
+   * @param workItemId - Saved Work Item ID.
+   * @param input - The `save_issue` input.
+   * @returns The Planning link, or nothing when the call changes neither field.
+   */
+  async function planningAfterWrite(
+    teamId: string,
+    workItemId: string,
+    input: Pick<WorkspaceIssueSaveInput, 'cycleId' | 'milestoneId' | 'idempotencyKey'>,
+  ): Promise<{ cycleId?: string, milestoneId?: string } | Record<string, never>> {
+    const change: UpdatePublicWorkItemPlanningRequest | undefined = input.cycleId !== undefined
+      ? { cycleId: input.cycleId, ...(input.milestoneId === undefined ? {} : { milestoneId: input.milestoneId }) }
+      : input.milestoneId !== undefined
+        ? { milestoneId: input.milestoneId }
+        : undefined
+    if (change === undefined) return {}
+    try {
+      const link = await api.updateWorkItemPlanning(teamId, workItemId, change, `${input.idempotencyKey}.planning`)
+      return {
+        ...(link.cycleId === undefined ? {} : { cycleId: link.cycleId }),
+        ...(link.milestoneId === undefined ? {} : { milestoneId: link.milestoneId }),
+      }
+    } catch (error) {
+      const message = error instanceof AgentTaskError ? error.message : 'The request failed.'
+      throw new AgentTaskError(
+        error instanceof AgentTaskError ? error.code : 'transport',
+        `Work Item ${workItemId} was saved, but its Cycle or Milestone was not changed: ${message} Retry with the same arguments and idempotencyKey to finish without duplicates.`,
+        error instanceof AgentTaskError ? error.retryable : true,
+      )
+    }
+  }
+
   return {
+    /**
+     * Lists one page of Documents: the Workspace's, filtered by Project or folder, or those linked to
+     * one Work Item when `issueId` is given.
+     * @param input - Filters, or the Work Item whose linked Documents to list.
+     * @returns One page of Documents.
+     */
+    async listDocuments(input: WorkspaceDocumentFilters & {
+      /** Work Item whose linked Documents to list, by key or by ID with `teamId`. */
+      issueId?: string
+      /** Team of a Work Item ID. */
+      teamId?: string
+      /** Cursor of the previous page. */
+      cursor?: string
+      /** Page size. */
+      limit?: number
+    }) {
+      if (input.issueId === undefined) {
+        if (input.teamId !== undefined) {
+          throw new AgentTaskError('invalid_request', 'teamId applies only with issueId.')
+        }
+        return api.listDocuments({
+          ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+          ...(input.parentId === undefined ? {} : { parentId: input.parentId }),
+        }, input.cursor, input.limit)
+      }
+      if (input.projectId !== undefined || input.parentId !== undefined) {
+        throw new AgentTaskError('invalid_request', 'Pass issueId alone, or projectId and parentId without issueId.')
+      }
+      const resolved = await resolveIssue(input.issueId, input.teamId)
+      return { ...resolved, ...await api.workItemDocuments(resolved.teamId, resolved.workItemId, input.cursor, input.limit) }
+    },
+    /**
+     * Reads a page or template as Markdown.
+     * @param documentId - Document ID.
+     * @returns The Document content.
+     */
+    getDocument: (documentId: string) => api.getDocument(documentId),
+    /**
+     * Creates a page from Markdown when no `id` is given, otherwise updates the named Document.
+     * @param input - Fields to save.
+     * @returns The saved Document.
+     */
+    async saveDocument(input: WorkspaceDocumentSaveInput) {
+      if (input.id === undefined) {
+        if (input.title === undefined || input.content === undefined) {
+          throw new AgentTaskError('invalid_request', 'Creating a Document needs title and content. Pass id to update one instead.')
+        }
+        if (input.expectedRevision !== undefined) {
+          throw new AgentTaskError('invalid_request', 'expectedRevision applies only to updates. Pass id to update a Document.')
+        }
+        if (input.teamId !== undefined && input.issueId === undefined) {
+          throw new AgentTaskError('invalid_request', 'teamId applies only with issueId.')
+        }
+        const workItem = input.issueId === undefined ? undefined : await resolveIssue(input.issueId, input.teamId)
+        return api.createDocument({
+          title: input.title,
+          content: input.content,
+          ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+          ...(input.parentId === undefined ? {} : { parentId: input.parentId }),
+          ...(workItem === undefined ? {} : { workItem }),
+        }, input.idempotencyKey)
+      }
+      if (input.expectedRevision === undefined) {
+        throw new AgentTaskError('invalid_request', 'Updating needs expectedRevision. Read it with get_document first.')
+      }
+      if (input.projectId !== undefined || input.parentId !== undefined || input.issueId !== undefined || input.teamId !== undefined) {
+        throw new AgentTaskError('invalid_request', 'projectId, parentId, and issueId apply only when creating a Document.')
+      }
+      if (input.title === undefined && input.content === undefined) {
+        throw new AgentTaskError('invalid_request', 'Pass title, content, or both.')
+      }
+      return api.updateDocument(input.id, {
+        expectedRevision: input.expectedRevision,
+        ...(input.title === undefined ? {} : { title: input.title }),
+        ...(input.content === undefined ? {} : { content: input.content }),
+      }, input.idempotencyKey)
+    },
     /** Reads the credential owner. */
     whoami: () => api.me(),
     /** Lists readable Teams with their Projects. */
@@ -627,10 +940,8 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
           // Without a schedule the server uses the Workspace working calendar, as the Web does.
           ...(input.dueDate === undefined ? {} : { dueDate: input.dueDate }),
         }, input.idempotencyKey)
-        return { ...created, ...await keyAfterWrite(created.teamId, created.id) }
-      }
-      if (input.expectedRevision === undefined) {
-        throw new AgentTaskError('invalid_request', 'Updating needs expectedRevision. Read it with get_issue first.')
+        const createdPlanning = await planningAfterWrite(created.teamId, created.id, input)
+        return { ...created, ...await keyAfterWrite(created.teamId, created.id), ...createdPlanning }
       }
       if (input.dueDate !== undefined) {
         throw new AgentTaskError('invalid_request', 'dueDate can be set only when creating a Work Item.')
@@ -640,8 +951,7 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
         throw new AgentTaskError('invalid_request', `An updated description can be at most ${UPDATE_DESCRIPTION_MAX_LENGTH} characters.`)
       }
       const resolved = await resolveIssue(input.id, input.teamId)
-      const patch: UpdatePublicWorkItemRequest = {
-        expectedRevision: input.expectedRevision,
+      const fields: Omit<UpdatePublicWorkItemRequest, 'expectedRevision'> = {
         ...(input.title === undefined ? {} : { title: input.title }),
         ...(input.description === undefined ? {} : { description: input.description }),
         ...(input.projectId === undefined ? {} : { assignedProjectId: input.projectId }),
@@ -651,11 +961,24 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
         ...(input.priority === undefined ? {} : { priority: input.priority }),
         ...(input.customFields === undefined || Object.keys(input.customFields).length === 0 ? {} : { customFieldValues: input.customFields }),
       }
-      if (Object.keys(patch).length === 1) {
-        throw new AgentTaskError('invalid_request', 'Pass at least one field to change.')
+      if (Object.keys(fields).length === 0) {
+        if (input.cycleId === undefined && input.milestoneId === undefined) {
+          throw new AgentTaskError('invalid_request', 'Pass at least one field to change.')
+        }
+        // Only the Cycle or Milestone changes, which the Planning link guards with its own revision.
+        const planning = await planningAfterWrite(resolved.teamId, resolved.workItemId, input)
+        const current = await api.getIssue(resolved.teamId, resolved.workItemId)
+        return { ...current, ...await keyAfterWrite(resolved.teamId, resolved.workItemId), ...planning }
       }
-      const updated = await api.updateIssue(resolved.teamId, resolved.workItemId, patch, input.idempotencyKey)
-      return { ...updated, ...await keyAfterWrite(resolved.teamId, resolved.workItemId) }
+      if (input.expectedRevision === undefined) {
+        throw new AgentTaskError('invalid_request', 'Updating needs expectedRevision. Read it with get_issue first.')
+      }
+      const updated = await api.updateIssue(resolved.teamId, resolved.workItemId, {
+        expectedRevision: input.expectedRevision,
+        ...fields,
+      }, input.idempotencyKey)
+      const planning = await planningAfterWrite(resolved.teamId, resolved.workItemId, input)
+      return { ...updated, ...await keyAfterWrite(resolved.teamId, resolved.workItemId), ...planning }
     },
     /**
      * Adds a comment to a Work Item by key or ID.
@@ -776,6 +1099,96 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
       const resolved = await resolveIssue(reference, teamId)
       const removed = await api.deleteWebLink(resolved.teamId, resolved.workItemId, attachmentId, idempotencyKey)
       return { ...resolved, removed: true, attachment: toAttachment(removed.link) }
+
+    },
+    /**
+     * Lists the unarchived Milestones the owner can read.
+     * @param scope - Optional Team, or Team and Project.
+     * @returns The Milestones and the Planning revision.
+     */
+    listMilestones: (scope: { teamId?: string, projectId?: string }) => api.planningEntities('milestone', scope),
+    /**
+     * Lists the unarchived Cycles the owner can read.
+     * @param scope - Optional Team, or Team and Project.
+     * @returns The Cycles and the Planning revision.
+     */
+    listCycles: (scope: { teamId?: string, projectId?: string }) => api.planningEntities('cycle', scope),
+    /**
+     * Lists the unarchived Planning entities of one type, such as Initiatives to publish updates for
+     * or to hold a new Milestone.
+     * @param type - Entity type.
+     * @param scope - Optional Team, or Team and Project.
+     * @returns The entities and the Planning revision.
+     */
+    listPlanningEntities: (type: PublicPlanningEntityType, scope: { teamId?: string, projectId?: string }) => api.planningEntities(type, scope),
+    /**
+     * Creates a Milestone when no `id` is given, otherwise changes the named fields of one.
+     * @param input - Fields to save.
+     * @returns The saved Milestone and the Planning revision.
+     */
+    async saveMilestone(input: WorkspaceMilestoneSaveInput) {
+      const ownerMemberId = input.ownerId === undefined ? undefined : await resolveMember(input.ownerId)
+      const revision = input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }
+      if (input.id === undefined) {
+        if (input.title === undefined || input.targetDate === undefined || input.parentId === undefined) {
+          throw new AgentTaskError('invalid_request', 'Creating a Milestone needs title, targetDate, and parentId (an Initiative, Roadmap, Phase, or Goal from list_planning_entities). Pass id to update one instead.')
+        }
+        if (input.description === null) {
+          throw new AgentTaskError('invalid_request', 'Omit description to create a Milestone without one.')
+        }
+        if (input.projectId !== undefined && input.teamId === undefined) {
+          throw new AgentTaskError('invalid_request', 'projectId needs teamId.')
+        }
+        return api.createMilestone({
+          title: input.title,
+          ...(input.description === undefined ? {} : { description: input.description }),
+          ...(input.teamId === undefined ? {} : { teamId: input.teamId }),
+          ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+          parentId: input.parentId,
+          ...(ownerMemberId === undefined ? {} : { ownerMemberId }),
+          ...(input.status === undefined ? {} : { status: input.status }),
+          ...(input.health === undefined ? {} : { health: input.health }),
+          ...(input.risk === undefined ? {} : { risk: input.risk }),
+          targetDate: input.targetDate,
+          ...(input.baselineDate === undefined ? {} : { baselineDate: input.baselineDate }),
+          ...revision,
+        }, input.idempotencyKey)
+      }
+      if (input.teamId !== undefined || input.projectId !== undefined || input.parentId !== undefined) {
+        throw new AgentTaskError('invalid_request', 'teamId, projectId, and parentId can be set only when creating a Milestone.')
+      }
+      const patch: UpdatePublicMilestoneRequest = {
+        ...revision,
+        ...(input.title === undefined ? {} : { title: input.title }),
+        ...(input.description === undefined ? {} : { description: input.description }),
+        ...(ownerMemberId === undefined ? {} : { ownerMemberId }),
+        ...(input.status === undefined ? {} : { status: input.status }),
+        ...(input.health === undefined ? {} : { health: input.health }),
+        ...(input.risk === undefined ? {} : { risk: input.risk }),
+        ...(input.targetDate === undefined ? {} : { targetDate: input.targetDate }),
+        ...(input.baselineDate === undefined ? {} : { baselineDate: input.baselineDate }),
+      }
+      if (Object.keys(patch).every((field) => field === 'expectedRevision')) {
+        throw new AgentTaskError('invalid_request', 'Pass at least one field to change.')
+      }
+      return api.updateMilestone(input.id, patch, input.idempotencyKey)
+    },
+    /**
+     * Lists one page of a target's health updates, newest first.
+     * @param target - Project, Team, or Initiative.
+     * @param cursor - Cursor of the previous page.
+     * @param limit - Page size.
+     * @returns One page of updates and the Planning revision.
+     */
+    getStatusUpdates: (target: PlanningUpdateTarget, cursor?: string, limit?: number) => api.statusUpdates(target, cursor, limit),
+    /**
+     * Publishes a health update for a Project, Team, or Initiative.
+     * @param input - Health update.
+     * @returns The published update.
+     */
+    saveStatusUpdate(input: WorkspaceStatusUpdateSaveInput) {
+      const { idempotencyKey, ...update } = input
+      return api.publishStatusUpdate(update, idempotencyKey)
     },
     /**
      * Creates Work Items under a parent, one by one, each with a key derived from the call's key, so

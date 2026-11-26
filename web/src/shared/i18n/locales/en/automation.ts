@@ -68,6 +68,7 @@ export const automationMessages = {
   'automation.trigger.assigneeChange': 'Assignee changed',
   'automation.trigger.dueDate': 'Due date changed or reached',
   'automation.trigger.baselineSlip': 'Behind baseline',
+  'automation.trigger.budgetThreshold': 'Budget use reaches alert',
   'automation.trigger.customFieldChange': 'Custom field changed',
   'automation.trigger.workItemTypeChange': 'Work Item Type changed',
   'automation.trigger.comment': 'Comment added',

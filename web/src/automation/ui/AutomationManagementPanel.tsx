@@ -62,6 +62,7 @@ const triggerTypeLabelKeys: Record<string, MessageKey> = {
   assignee: 'automation.trigger.assigneeChange',
   due: 'automation.trigger.dueDate',
   'baseline-slip': 'automation.trigger.baselineSlip',
+  'budget-threshold': 'automation.trigger.budgetThreshold',
   'custom-field': 'automation.trigger.customFieldChange',
   'work-item-type': 'automation.trigger.workItemTypeChange',
   comment: 'automation.trigger.comment',

@@ -379,6 +379,38 @@ describe('TimeTrackingService', () => {
     expect(budget.revision).toBe(1)
   })
 
+  test('keeps the alert percentage of a Project default budget across saves that omit it (ADR 0105)', async () => {
+    const { service } = createFixture()
+    const base = {
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      scopeType: 'project' as const,
+      scopeId: 'project-1',
+      amountMinor: 10_000,
+      currency: 'JPY',
+      updatedBy: 'manager-1',
+    }
+    const saved = await service.saveBudget({ ...base, alertPercent: 80, expectedRevision: 0 })
+    expect(saved.alertPercent).toBe(80)
+    const edited = await service.saveBudget({ ...base, amountMinor: 20_000, expectedRevision: 1 })
+    expect(edited).toMatchObject({ amountMinor: 20_000, alertPercent: 80 })
+    expect((await service.getBudget('workspace-1', 'team-1', 'project', 'project-1'))?.alertPercent).toBe(80)
+    for (const alertPercent of [0, 1001, 12.5]) {
+      await expect(service.saveBudget({ ...base, alertPercent, expectedRevision: 2 }))
+        .rejects.toMatchObject({ status: 400, code: 'InvalidBudgetAlertPercent' })
+    }
+    await expect(service.saveBudget({ ...base, scopeType: 'team', scopeId: 'team-1', alertPercent: 90, expectedRevision: 0 }))
+      .rejects.toMatchObject({ code: 'InvalidBudgetAlertPercent' })
+    await expect(service.saveBudget({
+      ...base,
+      periodFrom: '2026-04-01',
+      periodTo: '2027-03-31',
+      periodBudget: true,
+      alertPercent: 90,
+      expectedRevision: 0,
+    })).rejects.toMatchObject({ code: 'InvalidBudgetAlertPercent' })
+  })
+
   test('clips report totals and keeps mixed-currency costs separate', async () => {
     const { service } = createFixture()
     await service.createEntry({

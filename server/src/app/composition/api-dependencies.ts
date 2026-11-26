@@ -13,6 +13,10 @@ import {
   InMemoryProjectRaidLogStore,
 } from '../../modules/project-raid-log'
 import {
+  DynamoDbProjectExpenseStore,
+  InMemoryProjectExpenseStore,
+} from '../../modules/project-budget'
+import {
   DynamoDbCalendarFeedStore,
   InMemoryCalendarFeedStore,
 } from '../../modules/calendar-feeds'
@@ -154,8 +158,10 @@ import { SecretsManagerSlackDestinationSecretStore } from '../../modules/notific
 import { createSlackTestMessageSender } from '../../modules/notifications/adapter-out/slack/slack-channel-post-sender'
 import { getConfiguredNotificationsTableName } from '../../modules/notifications/notifications'
 import {
+  DynamoDbAgentRunArtifactStatusStore,
   DynamoDbAgentRunStore,
   DynamoDbAgentRunUsageStore,
+  InMemoryAgentRunArtifactStatusStore,
   InMemoryAgentRunStore,
   InMemoryAgentRunUsageStore,
 } from '../../modules/agent-runs'
@@ -708,6 +714,10 @@ export function createProductionWorkItemDependencies(
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
     ),
+    agentRunArtifactStatuses: new DynamoDbAgentRunArtifactStatusStore(
+      createDynamoDbDocumentClient(),
+      loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
+    ),
     focusState: createFocusStateClient(),
     workspaceSearch: new DynamoDbWorkspaceSearchClient(),
     documents: new DynamoDbDocumentsClient(),
@@ -723,6 +733,11 @@ export function createProductionWorkItemDependencies(
       createDynamoDbDocumentClient(),
     ),
     projectRaidLogs: new DynamoDbProjectRaidLogStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      getConfiguredAuditTableName(),
+    ),
+    projectExpenses: new DynamoDbProjectExpenseStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
       getConfiguredAuditTableName(),
@@ -2062,6 +2077,7 @@ export function createTestAppDependencies(): AppDependencies {
       updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
       savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
       projectRaidLogs: new InMemoryProjectRaidLogStore(),
+      projectExpenses: new InMemoryProjectExpenseStore(),
       calendarFeeds: new InMemoryCalendarFeedStore(),
       projectStatusShares: new InMemoryProjectStatusShareStore(),
       weeklyReports: new InMemoryWeeklyReportStore(),
@@ -2076,6 +2092,7 @@ export function createTestAppDependencies(): AppDependencies {
       analytics: new InMemoryAnalyticsRepository(),
       agentRuns: new InMemoryAgentRunStore(),
       agentRunUsage: new InMemoryAgentRunUsageStore(),
+      agentRunArtifactStatuses: new InMemoryAgentRunArtifactStatusStore(),
       requestIntake,
     },
     automation,
@@ -2189,6 +2206,7 @@ export function overrideAppDependencies(
         : {}),
       ...(overrides.agentRuns ? { agentRuns: overrides.agentRuns } : {}),
       ...(overrides.agentRunUsage ? { agentRunUsage: overrides.agentRunUsage } : {}),
+      ...(overrides.agentRunArtifactStatuses ? { agentRunArtifactStatuses: overrides.agentRunArtifactStatuses } : {}),
       ...(overrides.focusState ? { focusState: overrides.focusState } : {}),
       ...(overrides.workspaceSearch
         ? { workspaceSearch: overrides.workspaceSearch }
@@ -2207,6 +2225,7 @@ export function overrideAppDependencies(
       ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
       ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
       ...(overrides.projectRaidLogs ? { projectRaidLogs: overrides.projectRaidLogs } : {}),
+      ...(overrides.projectExpenses ? { projectExpenses: overrides.projectExpenses } : {}),
       ...(overrides.calendarFeeds ? { calendarFeeds: overrides.calendarFeeds } : {}),
       ...(overrides.projectStatusShares ? { projectStatusShares: overrides.projectStatusShares } : {}),
       ...(overrides.weeklyReports ? { weeklyReports: overrides.weeklyReports } : {}),

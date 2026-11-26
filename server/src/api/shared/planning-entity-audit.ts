@@ -77,19 +77,22 @@ const PLANNING_ENTITY_AUDIT_SUMMARY_VERBS: Readonly<Record<PlanningEntityChangeA
  * @param workspaceId - Canonical Workspace ID.
  * @param auditContext - Request audit context of the mutation.
  * @param actorMemberKey - Workspace member key of the caller.
- * @returns The audit transaction, or `undefined` when audit is not configured.
+ * @param receipt - Idempotency receipt that commits with the change; it is never rebased.
+ * @returns The audit transaction, or `undefined` when neither audit nor a receipt is configured.
  */
 export function createPlanningEntityAuditTransaction(
   workspaceId: string,
   auditContext: MutationAuditContext,
   actorMemberKey: string,
+  receipt?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
 ): PlanningMutationTransaction<PlanningEntityTransactionResult> | undefined {
   const transaction = withPlanningAuditOutbox<PlanningEntityTransactionResult>(
-    undefined,
+    receipt,
     auditContext,
     (result) => createPlanningEntityAuditEvent({ workspaceId, actorMemberKey, result }),
   )
-  return transaction && { prepare: (result) => transaction.prepare(result), rebaseSafe: true }
+  // A durable receipt is prepared for one exact revision, so only the audit event alone rebases.
+  return transaction && { prepare: (result) => transaction.prepare(result), rebaseSafe: receipt === undefined }
 }
 
 /**

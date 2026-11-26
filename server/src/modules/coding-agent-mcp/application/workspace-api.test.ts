@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import { createWorkItemTitleMatcher } from '@mukuroji/contracts'
 import { AgentTaskError, type AgentTask } from './work-item-api'
+import type { PublicPlanningEntity } from '@mukuroji/contracts'
 import { createWorkspaceIssues, type WorkspaceApi } from './workspace-api'
 
 /** Creates a minimal validated canonical Work Item. */
@@ -43,6 +44,18 @@ function apiWithFailingKeyRead() {
     webLinks: unexpected,
     createWebLink: unexpected,
     deleteWebLink: unexpected,
+    planningEntities: unexpected,
+    createMilestone: unexpected,
+    updateMilestone: unexpected,
+    workItemPlanning: unexpected,
+    updateWorkItemPlanning: unexpected,
+    statusUpdates: unexpected,
+    publishStatusUpdate: unexpected,
+    listDocuments: unexpected,
+    workItemDocuments: unexpected,
+    getDocument: unexpected,
+    createDocument: unexpected,
+    updateDocument: unexpected,
   }
   return { api, writes }
 }
@@ -390,4 +403,174 @@ test('list_issues without a Team skips a Team whose Work Items are not readable 
   expect(second.hasMore).toBe(false)
 
   await expect(createWorkspaceIssues(failing('unavailable')).listIssues(undefined, {})).rejects.toMatchObject({ code: 'unavailable' })
+})
+
+/** Creates a Milestone as the Public API returns it. */
+function milestone(patch: Partial<PublicPlanningEntity> = {}): PublicPlanningEntity {
+  return {
+    id: 'ms-1', type: 'milestone', title: 'Beta', ownerMemberId: 'owner', status: 'planned', health: 'unknown', risk: 'none',
+    progress: 0, linkedWorkItemCount: 0,
+    baseline: { startDate: '2026-12-01', endDate: '2026-12-10' }, forecast: { startDate: '2026-12-01', endDate: '2026-12-10' },
+    createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z', ...patch,
+  }
+}
+
+/**
+ * Builds a Workspace API that records Planning writes.
+ * @returns The API and the writes it received.
+ */
+function apiForPlanning() {
+  const writes: Array<{ call: string, input: unknown, key?: string }> = []
+  const { api: base } = apiWithFailingKeyRead()
+  const api: WorkspaceApi = {
+    ...base,
+    getKey: async () => 'ABC-1',
+    getIssue: async (_teamId, workItemId) => task({ id: workItemId }),
+    planningEntities: async () => ({ schemaVersion: 1, revision: 7, items: [milestone()] }),
+    createMilestone: async (input, key) => {
+      writes.push({ call: 'createMilestone', input, key })
+      return { schemaVersion: 1, revision: 8, item: milestone({ title: input.title }) }
+    },
+    updateMilestone: async (milestoneId, input, key) => {
+      writes.push({ call: 'updateMilestone', input, key })
+      return { schemaVersion: 1, revision: 8, item: milestone({ id: milestoneId }) }
+    },
+    updateWorkItemPlanning: async (teamId, workItemId, input, key) => {
+      writes.push({ call: 'updateWorkItemPlanning', input, key })
+      return {
+        schemaVersion: 1, revision: 9, teamId, workItemId, goalIds: [],
+        ...(input.cycleId ? { cycleId: input.cycleId } : {}),
+        ...(input.milestoneId ? { milestoneId: input.milestoneId } : {}),
+      }
+    },
+    publishStatusUpdate: async (input, key) => {
+      writes.push({ call: 'publishStatusUpdate', input, key })
+      return {
+        schemaVersion: 1, revision: 10,
+        item: {
+          id: 'pu-1', version: 1, target: input.target, health: input.health, risk: input.risk ?? 'none', summary: input.summary,
+          riskSummary: '', decisionSummary: '', helpNeeded: '', nextAction: '', progress: { percent: 0, linkedWorkItemCount: 0 },
+          authorMemberId: 'owner', coveredDueAt: '2026-11-27T00:00:00.000Z', createdAt: '2026-11-26T00:00:00.000Z',
+        },
+      }
+    },
+  }
+  return { api, writes }
+}
+
+test('save_milestone creates a Milestone from a target date, owned by me by default', async () => {
+  const { api, writes } = apiForPlanning()
+  const saved = await createWorkspaceIssues(api).saveMilestone({
+    title: 'Beta', parentId: 'initiative', teamId: 'team', targetDate: '2026-12-10', ownerId: 'me', idempotencyKey: 'key-1',
+  })
+  expect(saved.item.title).toBe('Beta')
+  expect(writes).toEqual([{
+    call: 'createMilestone',
+    input: { title: 'Beta', parentId: 'initiative', teamId: 'team', ownerMemberId: 'owner', targetDate: '2026-12-10' },
+    key: 'key-1',
+  }])
+})
+
+test('save_milestone changes only the fields passed', async () => {
+  const { api, writes } = apiForPlanning()
+  await createWorkspaceIssues(api).saveMilestone({ id: 'ms-1', targetDate: '2026-12-20', health: 'at-risk', idempotencyKey: 'key-2' })
+  expect(writes).toEqual([{ call: 'updateMilestone', input: { health: 'at-risk', targetDate: '2026-12-20' }, key: 'key-2' }])
+})
+
+test('save_milestone refuses creation-only fields on an update and an empty update', async () => {
+  const { api, writes } = apiForPlanning()
+  const issues = createWorkspaceIssues(api)
+  await expect(issues.saveMilestone({ id: 'ms-1', teamId: 'team', idempotencyKey: 'key-3' })).rejects.toThrow('only when creating')
+  await expect(issues.saveMilestone({ id: 'ms-1', expectedRevision: 3, idempotencyKey: 'key-4' })).rejects.toThrow('at least one field')
+  await expect(issues.saveMilestone({ title: 'No date', parentId: 'initiative', idempotencyKey: 'key-5' })).rejects.toThrow('targetDate')
+  await expect(issues.saveMilestone({ title: 'No parent', targetDate: '2026-12-10', idempotencyKey: 'key-5' })).rejects.toThrow('parentId')
+  expect(writes).toEqual([])
+})
+
+test('save_issue puts a new Work Item in a Cycle with a key derived from the call', async () => {
+  const { api, writes } = apiForPlanning()
+  const saved = await createWorkspaceIssues(api).saveIssue({ teamId: 'team', title: 'Ship', cycleId: 'cycle-1', idempotencyKey: 'key-6' })
+  expect(saved).toMatchObject({ key: 'ABC-1', cycleId: 'cycle-1' })
+  expect(writes).toEqual([{ call: 'updateWorkItemPlanning', input: { cycleId: 'cycle-1' }, key: 'key-6.planning' }])
+})
+
+test('save_issue changes only the Milestone without a Work Item revision', async () => {
+  const { api, writes } = apiForPlanning()
+  const saved = await createWorkspaceIssues(api).saveIssue({ id: 'ABC-1', milestoneId: null, idempotencyKey: 'key-7' })
+  expect(saved).toMatchObject({ id: 'task', key: 'ABC-1' })
+  expect(writes).toEqual([{ call: 'updateWorkItemPlanning', input: { milestoneId: null }, key: 'key-7.planning' }])
+})
+
+test('save_issue reports a saved Work Item whose Cycle could not be set, so a retry finishes it', async () => {
+  const { api: base, writes } = apiForPlanning()
+  const { api: issueApi, writes: issueWrites } = apiWithFailingKeyRead()
+  let failures = 1
+  const api: WorkspaceApi = {
+    ...base,
+    createIssue: issueApi.createIssue,
+    updateWorkItemPlanning: async (...args) => {
+      if (failures-- > 0) throw new AgentTaskError('conflict', 'Planning changed.', false)
+      return base.updateWorkItemPlanning(...args)
+    },
+  }
+  const issues = createWorkspaceIssues(api)
+  const input = { teamId: 'team', title: 'Ship', cycleId: 'cycle-1', idempotencyKey: 'key-8' }
+  await expect(issues.saveIssue(input)).rejects.toThrow('Work Item task was saved, but its Cycle or Milestone was not changed')
+
+  // The retry sends the same key, which the server replays for the Work Item, and finishes the link.
+  const saved = await issues.saveIssue(input)
+  expect(saved).toMatchObject({ cycleId: 'cycle-1' })
+  expect(issueWrites).toEqual(['create:key-8', 'create:key-8'])
+  expect(writes).toEqual([{ call: 'updateWorkItemPlanning', input: { cycleId: 'cycle-1' }, key: 'key-8.planning' }])
+})
+
+test('save_status_update publishes the update without the idempotency key in the body', async () => {
+  const { api, writes } = apiForPlanning()
+  const target = { type: 'project' as const, teamId: 'team', projectId: 'web' }
+  const saved = await createWorkspaceIssues(api).saveStatusUpdate({ target, health: 'on-track', summary: 'On plan.', idempotencyKey: 'key-9' })
+  expect(saved.item.target).toEqual(target)
+  expect(writes).toEqual([{ call: 'publishStatusUpdate', input: { target, health: 'on-track', summary: 'On plan.' }, key: 'key-9' }])
+})
+
+test('save_document creates a page linked to a Work Item by key and updates it with the expected revision', async () => {
+  const calls: string[] = []
+  const { api: base } = apiWithFailingKeyRead()
+  const issues = createWorkspaceIssues({
+    ...base,
+    createDocument: async (input, key) => { calls.push(`create:${key}:${JSON.stringify(input)}`); return { id: 'doc-1', kind: 'page', title: 'Plan', scope: { type: 'workspace' }, revision: 1 } },
+    updateDocument: async (documentId, input, key) => { calls.push(`update:${key}:${documentId}:${JSON.stringify(input)}`); return { id: documentId, kind: 'page', title: 'Plan', scope: { type: 'workspace' }, revision: 2 } },
+  })
+
+  expect(await issues.saveDocument({ title: 'Plan', content: '# Plan', projectId: 'web', issueId: 'ABC-1', idempotencyKey: 'k1' }))
+    .toMatchObject({ id: 'doc-1', revision: 1 })
+  expect(await issues.saveDocument({ id: 'doc-1', content: 'New', expectedRevision: 1, idempotencyKey: 'k2' }))
+    .toMatchObject({ id: 'doc-1', revision: 2 })
+  expect(calls).toEqual([
+    `create:k1:${JSON.stringify({ title: 'Plan', content: '# Plan', projectId: 'web', workItem: { teamId: 'team', workItemId: 'task' } })}`,
+    `update:k2:doc-1:${JSON.stringify({ expectedRevision: 1, content: 'New' })}`,
+  ])
+  await expect(issues.saveDocument({ title: 'Plan', idempotencyKey: 'k3' })).rejects.toMatchObject({ code: 'invalid_request' })
+  await expect(issues.saveDocument({ id: 'doc-1', title: 'Plan', idempotencyKey: 'k4' })).rejects.toMatchObject({ code: 'invalid_request' })
+  await expect(issues.saveDocument({ id: 'doc-1', expectedRevision: 2, idempotencyKey: 'k5' })).rejects.toMatchObject({ code: 'invalid_request' })
+  await expect(issues.saveDocument({ id: 'doc-1', expectedRevision: 2, title: 'Plan', projectId: 'web', idempotencyKey: 'k6' }))
+    .rejects.toMatchObject({ code: 'invalid_request' })
+  expect(calls).toHaveLength(2)
+})
+
+test('list_documents lists the Workspace with filters, or the Documents linked to a Work Item', async () => {
+  const calls: string[] = []
+  const { api: base } = apiWithFailingKeyRead()
+  const issues = createWorkspaceIssues({
+    ...base,
+    listDocuments: async (filters, cursor, limit) => { calls.push(`workspace:${JSON.stringify(filters)}:${cursor}:${limit}`); return { items: [], hasMore: false } },
+    workItemDocuments: async (teamId, workItemId) => { calls.push(`linked:${teamId}/${workItemId}`); return { items: [{ id: 'doc-1', title: 'Spec' }], hasMore: false } },
+  })
+
+  await issues.listDocuments({ projectId: 'web', cursor: 'c', limit: 10 })
+  expect(await issues.listDocuments({ issueId: 'ABC-1' })).toEqual({
+    teamId: 'team', workItemId: 'task', items: [{ id: 'doc-1', title: 'Spec' }], hasMore: false,
+  })
+  await expect(issues.listDocuments({ issueId: 'ABC-1', projectId: 'web' })).rejects.toMatchObject({ code: 'invalid_request' })
+  await expect(issues.listDocuments({ teamId: 'team' })).rejects.toMatchObject({ code: 'invalid_request' })
+  expect(calls).toEqual(['workspace:{"projectId":"web"}:c:10', 'linked:team/task'])
 })

@@ -58,7 +58,7 @@ import type {
   NotificationDestinationSecrets,
   NotificationDestinationTestSender,
 } from '../../modules/notifications/application/notification-destinations'
-import type { AgentRunStore, AgentRunUsageStore } from '../../modules/agent-runs'
+import type { AgentRunArtifactStatusStore, AgentRunStore, AgentRunUsageStore } from '../../modules/agent-runs'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
 import type { CycleScheduleBaselineStore } from '../../modules/planning'
@@ -71,6 +71,7 @@ import type { TriageClient } from '../../modules/triage'
 import type { ProjectScheduleBaselineStore, TeamIssuesClient, WorkItemWebLinkStore } from '../../modules/work-items'
 import type { TeamPortfolioSnapshotStore } from '../../modules/portfolio-dashboard'
 import type { ProjectRaidLogStore } from '../../modules/project-raid-log'
+import type { ProjectExpenseStore } from '../../modules/project-budget'
 import type { CalendarFeedStore } from '../../modules/calendar-feeds'
 import type { MutationAuditContext } from '../../modules/audit'
 import type { ProjectStatusShareStore } from '../../modules/project-status-shares'
@@ -213,6 +214,8 @@ export interface WorkItemDependencies {
   agentRuns: AgentRunStore
   /** Provides agent telemetry usage persistence, attributed to Agent Runs when read. */
   agentRunUsage: AgentRunUsageStore
+  /** Provides the stored verification of pull requests reported by Agent Runs (ADR 0103). */
+  agentRunArtifactStatuses: AgentRunArtifactStatusStore
   /** Provides Focus policy and recipient snooze persistence. */
   focusState: FocusStateClient
   /** Provides Workspace search persistence. */
@@ -231,6 +234,8 @@ export interface WorkItemDependencies {
   savedUpdateFeeds: SavedUpdateFeedsPersistence
   /** Provides each Project's risk, issue, and change request log. */
   projectRaidLogs: ProjectRaidLogStore
+  /** Provides each Project's expenses other than people's time (ADR 0104). */
+  projectExpenses: ProjectExpenseStore
   /** Provides members' signed calendar feeds and their token lookup rows. */
   calendarFeeds: CalendarFeedStore<MutationAuditContext, AutomationCompositionTransactionItem>
   /** Provides each Project's read-only status report share links. */

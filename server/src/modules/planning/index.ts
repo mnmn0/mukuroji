@@ -20,6 +20,7 @@ export {
   type PlanningEntityChangeAction,
   type PlanningEntityDuplication,
   type PlanningEntityTransactionResult,
+  type PlanningWorkItemLinkTransactionResult,
   type PlanningEntityTransactionSnapshot,
   type PlanningMutationTransaction,
   type PlanningMutationTransactionResult,

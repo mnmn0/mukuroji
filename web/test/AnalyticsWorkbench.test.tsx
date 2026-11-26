@@ -521,6 +521,38 @@ describe('AnalyticsWorkbench', () => {
     expect(html).not.toContain('Completed work items in the selected period.')
   })
 
+  test('shows Agent token and cost widgets with their units and warnings', () => {
+    const [base] = analyticsSnapshotFixture.widgets
+    if (base === undefined) throw new Error('Expected a fixture widget.')
+    const usageResult = (metric: 'agent-tokens' | 'agent-cost', unit: 'tokens' | 'usd', value: number, warnings: string[]) => ({
+      ...base,
+      widgetId: 'metric-throughput',
+      metric,
+      definition: { ...base.definition, key: metric, label: metric, unit },
+      value,
+      warnings,
+    })
+    const render = (result: ReturnType<typeof usageResult>) => renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        locale="ja"
+        snapshot={{ ...analyticsSnapshotFixture, widgets: [result] }}
+        widgets={[{ ...analyticsWidgetFixtures[0]!, metric: result.metric }]}
+      />,
+    )
+    const tokens = render(usageResult('agent-tokens', 'tokens', 1_234_567, [
+      '2 Agent Run(s) had more usage than one read returns, so the total is a lower bound.',
+    ]))
+    expect(tokens).toContain('1,234,567 トークン')
+    expect(tokens).toContain('一度に読める量を超えた Agent Run が 2件あるため')
+    const cost = render(usageResult('agent-cost', 'usd', 12.345, [
+      '1 Agent Run(s) of Teams you do not manage were left out of the estimated cost.',
+    ]))
+    expect(cost).toContain('$12.35')
+    expect(cost).toContain('自分が manager ではない Team の Agent Run 1件は推定費用に含めていません。')
+    expect(cost).toContain('coding agent の見積もりで、請求額とは一致しません。')
+  })
+
   test('renders reproducible forecast baseline date controls', () => {
     const html = renderToStaticMarkup(
       <AnalyticsWorkbench {...baseProps} />,

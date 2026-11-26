@@ -50,7 +50,7 @@
 | [0022](0022-work-item-notification-due-index.md) | 期限通知の schedule を Work Items table の sparse な期限 index で読む | 提案 |
 | [0023](0023-member-direct-role-assignment.md) | メンバー個人への role 割り当てを、Workspace role の代わりに評価する | 提案 |
 | [0024](0024-project-raid-log-storage.md) | Project のリスク・課題・変更要求を Planning table の1登録1行で持つ | 提案 |
-| [0025](0025-public-work-item-documents-read-scope.md) | Work Item に link された Document を `work-items:read` で Work Item 経由だけ読ませる | 提案 |
+| [0025](0025-public-work-item-documents-read-scope.md) | Work Item に link された Document を `work-items:read` で Work Item 経由だけ読ませる | 一部を置き換え済み（0106） |
 | [0026](0026-work-item-child-restore-guard-row.md) | 子の復元を親ごとの guard row で数え、親の archive を固定数の項目で fence する | 提案 |
 | [0027](0027-time-entry-visibility-and-team-time-managers.md) | Project なしの工数を Team の工数管理者が扱い、集計は一般メンバーには本人分だけ返す | 提案 |
 | [0028](0028-project-permission-team-qualified-match.md) | Project 単位の権限確認を Team と Project の組で照合し、Team を決められない旧形式の権限は効かせない | 提案 |
@@ -123,4 +123,10 @@
 | [0100](0100-completion-gate-manager-override.md) | 完了 Gate の override は Work Item の manager だけが Web の更新で理由付きで行い、更新の監査と活動履歴に残す | 提案 |
 | [0101](0101-ai-assistance-monthly-usage-and-deployment-switch.md) | AI の月次利用量を AI table の月ごとの counter row で数え、全体停止を runtime control の任意 field で持つ | 提案 |
 | [0102](0102-retire-mail-and-storage-connector-providers.md) | Gmail・Outlook・Google Drive・OneDrive・Dropbox を connector の選択肢から外す | 提案 |
+| [0103](0103-verify-reported-pull-requests.md) | agent が報告した pull request を Workspace の connector で照会し、状態を保存する | 提案 |
+| [0104](0104-project-expense-entries.md) | Project の経費を Planning table に1件1行で保存し、申請者以外の Project manager の承認で予算の実績に入れる | 提案 |
+| [0105](0105-project-budget-threshold-alerts.md) | Project 予算の消化率を毎日1回調べ、通知の閾値に達した予算ごとに1回だけ通知と Automation trigger を出す | 提案 |
+| [0106](0106-public-workspace-documents-markdown.md) | Workspace の Document を Public API と MCP で Markdown として一覧・作成・更新し、scope は既存の `work-items:read` / `work-items:write` を使う | 提案 |
+| [0107](0107-planning-public-api.md) | Planning の Public API は `work-items:read` / `work-items:write` で受け、権限判定は Web の `planning.read` / `planning.write` と同じにする | 提案 |
+| [0108](0108-analytics-agent-usage-metrics.md) | Analytics の `agent-tokens` / `agent-cost` は query のたびに終了済み Run と usage 行を読み、費用を見られる Team を snapshot の scope に固定する | 提案 |
 | [0109](0109-work-item-web-links-in-planning-table.md) | Work Item の URL リンクを Planning table の 1 row に置き、Public API と MCP から work-items scope で読み書きする | 提案 |

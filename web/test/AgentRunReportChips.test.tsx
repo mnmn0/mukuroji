@@ -1,15 +1,21 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { answerAgentRunReport, listWorkItemAgentRunReports } from '../src/work-items/api/agentRuns'
+import { answerAgentRunReport, listWorkItemAgentRunReports, listWorkItemArtifactStatuses } from '../src/work-items/api/agentRuns'
 import { agentRunHandoffReportFixture, agentRunReportFixture } from '../src/work-items/agentRunFixtures'
 import {
   indexAgentRunReportsByComment,
   isAgentRunReportAwaitingDecision,
   readAgentRunArtifactText,
+  selectAgentRunReportLoadFailure,
   selectAgentRunReportsForWorkItem,
 } from '../src/work-items/model/agentRunReportDisplay'
 import { AgentRunReportChips, AgentRunReportsLoadNotice } from '../src/work-items/ui/AgentRunReportChips'
-import { createAgentRunReportChipsLabels, createAgentRunReportsNoticeLabels } from '../src/work-items/ui/agentRunReportLabels'
+import {
+  createAgentRunArtifactStatusIncompleteNoticeLabels,
+  createAgentRunArtifactStatusNoticeLabels,
+  createAgentRunReportChipsLabels,
+  createAgentRunReportsNoticeLabels,
+} from '../src/work-items/ui/agentRunReportLabels'
 import { IssueCollaborationPanel } from '../src/issues/ui/IssueCollaborationPanel'
 import { collaborationWorkspaceMemberFixtures, issueCollaborationControllerFixture } from '../src/issues/fixtures'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -54,6 +60,64 @@ describe('Agent Run report API', () => {
       answerWith({ items, hasMore: false })
       await expect(listWorkItemAgentRunReports('token', 'core', 'task-1')).rejects.toMatchObject({ status: 502 })
     }
+  })
+})
+
+describe('Reported pull request statuses', () => {
+  const verified = {
+    url: 'https://github.com/example/repo/pull/12', provider: 'github', repository: 'example/repo', number: 12,
+    verification: 'verified', checkedAt: '2026-11-26T00:00:00.000Z',
+    pullRequest: { state: 'merged', draft: false, headSha: 'a'.repeat(40), checks: 'success', review: 'approved', mergedAt: '2026-11-25T00:00:00.000Z' },
+  } as const
+
+  test('reads the statuses from the Web route and rejects a malformed item', async () => {
+    const requests: string[] = []
+    answerWith({ teamId: 'core', workItemId: 'task-1', items: [verified] }, requests)
+    expect(await listWorkItemArtifactStatuses('token', 'core', 'task-1')).toEqual({ teamId: 'core', workItemId: 'task-1', items: [verified] })
+    expect(requests[0]).toEndWith('/teams/core/work-items/task-1/artifact-statuses')
+    for (const item of [
+      { ...verified, pullRequest: undefined },
+      { ...verified, verification: 'unverified' },
+      { ...verified, provider: 'bitbucket' },
+    ]) {
+      answerWith({ teamId: 'core', workItemId: 'task-1', items: [item] })
+      await expect(listWorkItemArtifactStatuses('token', 'core', 'task-1')).rejects.toMatchObject({ status: 502 })
+    }
+    answerWith({ teamId: 'core', workItemId: 'other', items: [] })
+    await expect(listWorkItemArtifactStatuses('token', 'core', 'task-1')).rejects.toMatchObject({ status: 502 })
+    // A read that stopped early keeps the flag, and any other value is rejected.
+    answerWith({ teamId: 'core', workItemId: 'task-1', items: [verified], incomplete: true })
+    expect(await listWorkItemArtifactStatuses('token', 'core', 'task-1'))
+      .toEqual({ teamId: 'core', workItemId: 'task-1', items: [verified], incomplete: true })
+    answerWith({ teamId: 'core', workItemId: 'task-1', items: [verified], incomplete: false })
+    await expect(listWorkItemArtifactStatuses('token', 'core', 'task-1')).rejects.toMatchObject({ status: 502 })
+  })
+
+  test('shows the provider state next to the pull request link, and marks one that was not checked', () => {
+    const merged = renderToStaticMarkup(
+      <AgentRunReportChips artifactStatuses={new Map([[verified.url, verified]])} labels={labels} report={agentRunReportFixture} />,
+    )
+    expect(merged).toContain(labels.artifactStatus.states.merged)
+    expect(merged).toContain(labels.artifactStatus.reviews.approved)
+    // A merged pull request no longer shows its checks.
+    expect(merged).not.toContain(labels.artifactStatus.checks.success)
+
+    const unchecked = renderToStaticMarkup(
+      <AgentRunReportChips
+        artifactStatuses={new Map([[verified.url, {
+          url: verified.url, provider: 'github', repository: 'example/repo', number: 12,
+          verification: 'unverified', unverifiedReason: 'repository-not-allowed', checkedAt: verified.checkedAt,
+        }]])}
+        labels={labels}
+        report={agentRunReportFixture}
+      />,
+    )
+    expect(unchecked).toContain(labels.artifactStatus.unverified)
+    expect(unchecked).toContain(labels.artifactStatus.unverifiedReasons['repository-not-allowed'].replaceAll("'", '&#x27;'))
+
+    const plain = renderToStaticMarkup(<AgentRunReportChips labels={labels} report={agentRunReportFixture} />)
+    expect(plain).not.toContain(labels.artifactStatus.unverified)
+    expect(plain).not.toContain('data-testid="agent-run-artifact-state"')
   })
 })
 
@@ -196,5 +260,33 @@ describe('AgentRunReportsLoadNotice', () => {
     expect(html).toContain(noticeLabels.loadError)
     expect(html).toContain(`>${noticeLabels.retry}</button>`)
     expect(createAgentRunReportsNoticeLabels('ja').retry).toBe(createTranslator('ja')('workItems.agentRunReports.retry'))
+  })
+
+  test('tells the viewer when pull request statuses could not be checked, with its own retry', () => {
+    const statusLabels = createAgentRunArtifactStatusNoticeLabels('en')
+    const html = renderToStaticMarkup(
+      <AgentRunReportsLoadNotice labels={statusLabels} onRetry={() => undefined} testId="agent-run-artifact-status-load-notice" />,
+    )
+    expect(html).toContain('data-testid="agent-run-artifact-status-load-notice"')
+    expect(html).toContain(statusLabels.loadError)
+    // A failed report read wins; a failed status read matters only when a report lists a pull request.
+    expect(selectAgentRunReportLoadFailure({ reportsFailed: true, statusesFailed: true, hasPullRequests: true })).toBe('reports')
+    expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: true, hasPullRequests: true })).toBe('artifact-statuses')
+    expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: true, hasPullRequests: false })).toBeUndefined()
+    expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: false, hasPullRequests: true })).toBeUndefined()
+  })
+
+  test('tells the viewer when only some pull requests were checked', () => {
+    const incompleteLabels = createAgentRunArtifactStatusIncompleteNoticeLabels('en')
+    expect(incompleteLabels.loadError).toBe(createTranslator('en')('workItems.agentRunReports.artifactStatus.incomplete'))
+    expect(createAgentRunArtifactStatusIncompleteNoticeLabels('ja').loadError)
+      .toBe(createTranslator('ja')('workItems.agentRunReports.artifactStatus.incomplete'))
+    expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: false, hasPullRequests: true, statusesIncomplete: true }))
+      .toBe('artifact-statuses-incomplete')
+    // A failed read wins over an incomplete one, and nothing is said without a pull request.
+    expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: true, hasPullRequests: true, statusesIncomplete: true }))
+      .toBe('artifact-statuses')
+    expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: false, hasPullRequests: false, statusesIncomplete: true }))
+      .toBeUndefined()
   })
 })

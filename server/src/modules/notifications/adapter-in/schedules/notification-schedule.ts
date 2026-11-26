@@ -26,6 +26,7 @@ import { createPlanningUpdatePublicTargetKey } from '../../../collaboration'
 import { isCanonicalWorkItemRecord, isWorkItemKeyRegistryRecord } from '../../../work-items'
 import {
   NOTIFICATION_REMINDER_DAYS_MAXIMUM,
+  PROJECT_BUDGET_THRESHOLD_REACHED_EVENT_TYPE,
   createNotificationMessage,
   formatNotificationMessage,
   type NotificationMessage,
@@ -47,6 +48,11 @@ import {
   type TimesheetReminderCandidate,
 } from '../../application/timesheet-reminders'
 import type { ScheduledWeeklyReportReader } from '../../application/ports/weekly-report-reminder-reader'
+import {
+  evaluateBudgetThresholdAlerts,
+  type BudgetThresholdAlertCandidate,
+  type ScheduledBudgetThresholdReader,
+} from '../../application/budget-threshold-alerts'
 import {
   evaluateMemberAccessExpiryNotices,
   type MemberAccessExpiryNoticeCandidate,
@@ -157,6 +163,11 @@ export type NotificationScheduleRunOptions = {
    * expiry notice is emitted.
    */
   memberAccessExpiryReader?: ScheduledMemberAccessExpiryReader
+  /**
+   * Reads the budget use of active Projects; without it no budget threshold alert is emitted
+   * (ADR 0105).
+   */
+  budgetThresholdReader?: ScheduledBudgetThresholdReader
   /**
    * Workspace Audit pseudonym key that names the member in an access expiry notice. Without it the
    * key is read from `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` when a notice is due.
@@ -302,6 +313,18 @@ export const MEMBER_ACCESS_EXPIRY_REASON = 'member-access-expiry'
 /** Days before a member's access ends when the managers of their Projects are told. */
 export const MEMBER_ACCESS_EXPIRY_NOTICE_DAYS = 7
 
+/** Audit event type of a Project budget threshold alert (ADR 0105). */
+export const BUDGET_THRESHOLD_REACHED_EVENT_TYPE = PROJECT_BUDGET_THRESHOLD_REACHED_EVENT_TYPE
+
+/** Recipient reason of a budget threshold alert to a Project manager. */
+export const BUDGET_THRESHOLD_REASON = 'budget-threshold'
+
+/** Local hour, in the Workspace time zone, of the one hourly run per day that checks budget use. */
+export const BUDGET_THRESHOLD_CHECK_HOUR = 9
+
+/** Audit summary of a budget threshold alert, which names no amount or percentage. */
+const BUDGET_THRESHOLD_AUDIT_SUMMARY = 'Project budget reached its alert threshold'
+
 const scheduleActorId = 'system:notification-schedule'
 const scheduleActorMemberKey = 'system'
 const defaultScanPageSize = 100
@@ -320,6 +343,7 @@ const maximumPlanningNotificationOffsetHours = 24 * 365
  * @param timesheetReader Optional unsubmitted time entry reader for timesheet reminders.
  * @param weeklyReportReader Optional roster and submission reader for weekly report reminders.
  * @param memberAccessExpiryReader Optional reader of members whose access ends soon.
+ * @param budgetThresholdReader Optional reader of Project budget use for threshold alerts.
  * @returns An EventBridge-compatible notification schedule handler.
  */
 export function createNotificationScheduleHandler(
@@ -331,6 +355,7 @@ export function createNotificationScheduleHandler(
   timesheetReader?: ScheduledTimesheetReader,
   weeklyReportReader?: ScheduledWeeklyReportReader,
   memberAccessExpiryReader?: ScheduledMemberAccessExpiryReader,
+  budgetThresholdReader?: ScheduledBudgetThresholdReader,
 ) {
   return async (
     event: NotificationScheduleEvent = {},
@@ -367,6 +392,7 @@ export function createNotificationScheduleHandler(
       timesheetReminderHour: readTimesheetReminderHour(),
       ...(weeklyReportReader ? { weeklyReportReader } : {}),
       ...(memberAccessExpiryReader ? { memberAccessExpiryReader } : {}),
+      ...(budgetThresholdReader ? { budgetThresholdReader } : {}),
       reminderPolicy: readReminderPolicyDefaultsFromEnvironment(),
     })
 }
@@ -672,8 +698,8 @@ export async function runNotificationSchedule(
     }
   }
 
-  // Weekly report reminders run last, so a failure here cannot hold back the other notifications
-  // of the run; a retry of the same scheduled event reaches the same slot again.
+  // Weekly report reminders run after the notifications above (only the daily budget check follows),
+  // so a failure here cannot hold them back; a retry of the same scheduled event reaches the same slot again.
   const weeklyReportReader = options.weeklyReportReader
   if (weeklyReportReader) {
     // Each Workspace chooses its own hours, so its settings are read on every run; the rosters
@@ -708,6 +734,33 @@ export async function runNotificationSchedule(
         }
       }
     }
+  }
+
+  // Budget use is checked once a day, after every other notification of the run, so a failed read
+  // cannot hold them back. Each alert has one event per budget and threshold, so a Project past its
+  // threshold is told once, and again only after its budget changes. One Workspace failing does not
+  // stop the others; the run still fails afterwards, and its retry finds the alerts already written.
+  const budgetThresholdReader = options.budgetThresholdReader
+  if (budgetThresholdReader && isTimesheetReminderHour(now, BUDGET_THRESHOLD_CHECK_HOUR)) {
+    const workspaceIds = [...new Set((await listTeams()).map((team) => team.workspaceId))].sort()
+    let failure: unknown
+    for (const workspaceId of workspaceIds) {
+      try {
+        const statuses = await budgetThresholdReader.listProjectBudgetStatuses(workspaceId, now)
+        for (const candidate of evaluateBudgetThresholdAlerts(workspaceId, statuses)) {
+          await putScheduledAuditEvent(
+            options.documentClient,
+            auditEventsTableName,
+            createBudgetThresholdAuditEvent(candidate, now, auditRetentionDays, options.requestId),
+            result,
+          )
+        }
+      } catch (error) {
+        console.error('Budget threshold check failed for a Workspace.', error instanceof Error ? error.name : 'unknown error')
+        failure ??= error
+      }
+    }
+    if (failure !== undefined) throw failure
   }
 
   return result
@@ -1560,6 +1613,84 @@ function createMemberAccessExpiryAuditEvent(
       accessExpiryMemberKey: candidate.memberKey,
       accessExpiresAt: candidate.accessExpiresAt,
       notificationCandidates: [{ memberKey: candidate.recipientMemberKey, reason: MEMBER_ACCESS_EXPIRY_REASON }],
+    },
+    expiresAt: calculateAuditExpiresAt(occurredAt, auditRetentionDays),
+    outboxStatus: 'pending',
+  })
+}
+
+/**
+ * Creates the audit event that records a Project budget reaching its alert percentage.
+ *
+ * The event ID is derived from the Workspace, Project, budget period, amount, currency, and
+ * threshold, so later daily runs are duplicates until the budget changes. The event carries no
+ * amount: only the percentages, which the Project managers it notifies may read.
+ *
+ * @param candidate - Project, threshold, use, and recipients.
+ * @param now - Schedule execution instant.
+ * @param auditRetentionDays - Audit event retention.
+ * @param requestId - Schedule execution ID.
+ * @returns Audit event row.
+ */
+function createBudgetThresholdAuditEvent(
+  candidate: BudgetThresholdAlertCandidate,
+  now: Date,
+  auditRetentionDays: number,
+  requestId?: string,
+) {
+  const entityId = `team/${candidate.teamId}/project/${candidate.projectId}/budget`
+  const occurredAt = now.toISOString()
+  const idempotencyDigest = createHash('sha256').update([
+    candidate.workspaceId,
+    entityId,
+    BUDGET_THRESHOLD_REACHED_EVENT_TYPE,
+    candidate.budgetKey,
+  ].join('\0')).digest('hex')
+  const context = createMutationAuditContext({
+    workspaceId: candidate.workspaceId,
+    actor: {
+      id: scheduleActorId,
+      kind: 'system',
+      displayName: 'Mukuroji notification schedule',
+    },
+    idempotencyKey: `notification-schedule-v1:${idempotencyDigest}`,
+    occurredAt,
+    request: {
+      method: 'SCHEDULE',
+      path: '/internal/notification-schedule',
+      body: { entityId, projectId: candidate.projectId, reason: BUDGET_THRESHOLD_REASON },
+    },
+    source: {
+      kind: 'system',
+      method: 'SCHEDULE',
+      route: '/internal/notification-schedule',
+      ...(requestId ? { requestId } : {}),
+    },
+  })
+  const message = createNotificationMessage('project-budget.threshold-reached', {
+    percent: String(candidate.consumedPercent),
+    threshold: String(candidate.thresholdPercent),
+  })
+  return createAuditEvent({
+    context,
+    eventType: BUDGET_THRESHOLD_REACHED_EVENT_TYPE,
+    entity: { type: 'project-budget', id: entityId },
+    action: 'threshold-reached',
+    changes: [],
+    // Audit readers need not manage the Project, so the summary leaves out the confidential
+    // percentages; the notification carries them in its permission-checked message (ADR 0105).
+    summary: BUDGET_THRESHOLD_AUDIT_SUMMARY,
+    metadata: {
+      notificationMessage: message,
+      actorMemberKey: scheduleActorMemberKey,
+      teamId: candidate.teamId,
+      // Recipients must still manage this Project when the notification is delivered.
+      projectId: candidate.projectId,
+      // The Project overview holds the budget report.
+      deepLink: `/projects/${encodeURIComponent(candidate.projectId)}/overview?${new URLSearchParams({ teamId: candidate.teamId }).toString()}`,
+      budgetThresholdPercent: candidate.thresholdPercent,
+      budgetConsumedPercent: candidate.consumedPercent,
+      notificationCandidates: candidate.recipientMemberKeys.map((memberKey) => ({ memberKey, reason: BUDGET_THRESHOLD_REASON })),
     },
     expiresAt: calculateAuditExpiresAt(occurredAt, auditRetentionDays),
     outboxStatus: 'pending',

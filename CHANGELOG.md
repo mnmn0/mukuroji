@@ -32,13 +32,18 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   custom field の定義を追加しました（#705）。
 - server API: `GET /api/v1/work-items` に `query`（1〜200 文字のタイトルの語）を追加しました。page ごとに絞るため、空の page でも
   `hasMore: true` になることがあります（#705）。
-- MCP API revision を 6 に上げました。`query` を知らない server は語を無視して全件を返すため、新しい MCP は revision 6 未満の
-  server を古いと判定します（#705）。
 - Workspace profile に `list_attachments`（Work Item に付けた URL）、`save_attachment`（http / https の URL とタイトルを付ける。
   1 件の Work Item に 50 件まで、同じ URL は 1 回）、`delete_attachment`（ID で外す）を追加しました（#705）。
 - server API: `GET /api/v1/work-items/{workItemId}/web-links`（scope `work-items:read`）、
   `POST /api/v1/work-items/{workItemId}/web-links` と `DELETE /api/v1/work-items/{workItemId}/web-links/{linkId}`
   （scope `work-items:write`、`Idempotency-Key` 必須）を追加しました。同じ URL と 51 件目は `409` です（#705、ADR 0109）。
+- Workspace profile に `list_documents`（Workspace の Document の一覧。`issueId` でその Work Item に link された Document）、
+  `get_document`（ページ・テンプレートを Markdown で読む）、`save_document`（Markdown からページを作って Work Item に link する、
+  または title・本文を置き換える）を追加しました。`save_document` は `MUKUROJI_MCP_READ_ONLY=true` では出ません（#708）。
+- server API: `GET /api/v1/documents` と `GET /api/v1/documents/{documentId}`（scope `work-items:read`）、
+  `POST /api/v1/documents` と `PATCH /api/v1/documents/{documentId}`（scope `work-items:write`、`Idempotency-Key` 必須）を
+  追加しました。作成・更新の応答は Document の要約です。権限は Web の Documents と同じで、閲覧できない Document は `404` です（ADR 0106、#708）。
+- MCP API revision を 6 に上げました。Document のツールは revision 6 以上の server が要ります（#708）。
 - Workspace profile に `list_relations`（親・子・WBS 番号と blocks / blockedBy / related / duplicate の link）、
   `save_relation`（同じ Team の Work Item を link、`remove: true` で解除）、`create_subtasks`（親の下に親の Project で最大 20 件の
   子を作る。途中で失敗したら同じ引数と `idempotencyKey` の再試行で残りだけを作る）を追加しました（#360）。
@@ -111,6 +116,15 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 - server API: `GET /api/v1/me`、`GET /api/v1/teams`、`GET /api/v1/projects/{projectId}/members`、
   `GET /api/v1/work-item-keys/{key}` を追加しました。scope は `work-items:read` で、request ごとに credential 所有者の
   現在の権限で評価します。読めない Work Item の key は、存在しない key と同じ 404 です。
+- Workspace profile に `list_milestones`・`list_cycles`・`list_planning_entities`（Planning の entity を type で一覧）・
+  `get_status_updates`（Project・Team・Initiative の健康度の更新を新しい順に）・`save_milestone`（作成と、渡した項目だけの変更）・
+  `save_status_update`（更新の cadence がある対象に健康度の更新を公開）を追加し、`save_issue` が `cycleId` と `milestoneId`
+  （`null` で外す）を受け取るようにしました（#706）。
+- server API: `GET /api/v1/planning/entities?type=`、`GET /api/v1/work-items/{workItemId}/planning?teamId=`、
+  `GET /api/v1/planning/status-updates`（scope `work-items:read`）と、`POST /api/v1/planning/milestones`、
+  `PATCH /api/v1/planning/milestones/{milestoneId}`、`PUT /api/v1/work-items/{workItemId}/planning?teamId=`、
+  `POST /api/v1/planning/status-updates`（scope `work-items:write`、`Idempotency-Key` 必須）を追加しました。権限は Web の
+  Planning と同じで、`expectedRevision` は省略すると最新の revision に書きます（#706、ADR 0107）。
 
 ### Changed
 
@@ -126,6 +140,11 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   server が古いと警告し、Workspace profile のツールは使えません。
 - MCP API revision を 5 に上げました。server は revision 1〜5 を受け付けます。revision 4 以前の server に接続した新しい MCP は
   server が古いと警告し、`list_relations`・`save_relation`・`create_subtasks` は使えません（#360）。
+- MCP API revision を 7 に上げました。server は revision 1〜7 を受け付けます。revision 6 以前の server に接続した新しい MCP は
+  server が古いと警告し、Planning のツールと `save_issue` の `cycleId`・`milestoneId` は使えません（#706）。
+- MCP API revision を 8 に上げました。server は revision 1〜8 を受け付けます。revision 7 以前の server に接続した新しい MCP は
+  server が古いと警告し、`list_issues` の `query`・`teamId` の省略、`get_project`、`save_issue` の `customFields`、
+  `list_attachments`・`save_attachment`・`delete_attachment` は使えません。`query` を知らない server は語を無視して全件を返すためです（#705）。
 - server API: Software factory が off の deploy でも、本人用 token の確認・発行・再発行
   （`/api/developer/me/agent-connection`、`POST /api/developer/me/api-keys`、`.../rotate`）と、管理者による本人用 token の
   rotate を `503` で断らないようにしました。Web の「agent を接続」は off では Workspace profile の設定例を出します。

@@ -1,5 +1,11 @@
 import type { TimeBudget } from './time-tracking'
 
+/**
+ * Audit event type recorded once when a Project budget's use reaches its alert percentage
+ * (ADR 0105). It notifies the Project owner and fires the `budget-threshold` Automation trigger.
+ */
+export const PROJECT_BUDGET_THRESHOLD_REACHED_EVENT_TYPE = 'project-budget.threshold-reached'
+
 /** Calendar bucket of the Project budget report series. */
 export type ProjectBudgetReportInterval = 'day' | 'week'
 
@@ -51,8 +57,8 @@ export type ProjectBudgetReportPoint = {
    */
   actualMinutes?: number
   /**
-   * Actual cost in the budget currency from the report start through the bucket; absent without
-   * a budget and for buckets that start after the as-of date.
+   * Actual cost in the budget currency from the report start through the bucket, time cost plus
+   * approved expenses; absent without a budget and for buckets that start after the as-of date.
    */
   actualCostMinor?: number
 }
@@ -67,7 +73,7 @@ export type ProjectEarnedValueMoney = {
   plannedValueMinor: number
   /** Earned value at the as-of date. */
   earnedValueMinor: number
-  /** Actual cost in the budget currency through the as-of date. */
+  /** Actual cost in the budget currency through the as-of date: time cost plus approved expenses. */
   actualCostMinor: number
   /** Schedule variance, earned minus planned value. */
   scheduleVarianceMinor: number
@@ -143,9 +149,19 @@ export type ProjectBudgetReport = {
   actualMinutes: number
   /** Of `actualMinutes`, the minutes of entries without a cost (no rate). */
   uncostedMinutes: number
-  /** Actual cost from `from` through `asOf`, keyed by ISO currency. */
+  /** Cost of the time recorded from `from` through `asOf`, keyed by ISO currency; expenses are apart. */
   actualCostByCurrency: Readonly<Record<string, number>>
-  /** Actual cost in the budget currency as a percentage of the budget; absent without a budget. */
+  /**
+   * Approved Project expenses dated from `from` through `asOf`, keyed by ISO currency (ADR 0104).
+   * The budget currency's amount is part of the actual cost; other currencies are not converted.
+   */
+  approvedExpenseByCurrency: Readonly<Record<string, number>>
+  /** Project expenses dated from `from` through `asOf` that wait for a decision, keyed by ISO currency. */
+  pendingExpenseByCurrency: Readonly<Record<string, number>>
+  /**
+   * Time cost plus approved expenses in the budget currency as a percentage of the budget; absent
+   * without a budget.
+   */
   budgetConsumedPercent?: number
   /** Actual minutes as a percentage of the baseline effort; absent without baseline effort. */
   effortConsumedPercent?: number

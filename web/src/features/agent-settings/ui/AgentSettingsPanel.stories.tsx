@@ -37,6 +37,7 @@ const defaultSettings: AgentSettings = {
   fileStalledRunsToTriage: false,
   notifyAssigneeOfRunEvents: false,
   acceptNewRuns: true,
+  artifactRepositories: [],
 }
 
 /** Storybook metadata for the Team Agent settings panel. */

@@ -112,6 +112,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get agentRunUsage() {
     return requireAppDependencies().workItems.agentRunUsage
   },
+  get agentRunArtifactStatuses() {
+    return requireAppDependencies().workItems.agentRunArtifactStatuses
+  },
   get focusState() {
     return requireAppDependencies().workItems.focusState
   },
@@ -138,6 +141,9 @@ export const workItemDependencies: WorkItemDependencies = {
   },
   get projectRaidLogs() {
     return requireAppDependencies().workItems.projectRaidLogs
+  },
+  get projectExpenses() {
+    return requireAppDependencies().workItems.projectExpenses
   },
   get calendarFeeds() {
     return requireAppDependencies().workItems.calendarFeeds

@@ -1,6 +1,6 @@
 # 0025. Work Item に link された Document を `work-items:read` で Work Item 経由だけ読ませる
 
-- 状態: 提案
+- 状態: 一部を置き換え済み（0106）
 - 日付: 2026-11-20
 - 関連: Issue #409, PR #606
 

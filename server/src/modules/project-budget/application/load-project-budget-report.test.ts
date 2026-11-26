@@ -69,6 +69,10 @@ function ports(pages: ProjectBudgetWorkItemPage[], calls: string[] = []): Projec
       entries: [{ workItemId: 'a', startDate: '2026-01-05', endDate: '2026-01-06', plannedEffortMinutes: 600 }],
     }),
     getProgressMode: async () => 'status-category',
+    listExpenses: async (workspaceId, teamId, projectId) => {
+      calls.push(`expenses ${workspaceId}/${teamId}/${projectId}`)
+      return []
+    },
     listEntries: async (input) => {
       calls.push(`entries ${input.projectId} ${input.from} ${input.to}`)
       // 2026-01-04T20:00Z is 2026-01-05 in Tokyo, so it counts on the first day.
@@ -95,6 +99,7 @@ describe('loadProjectBudgetReport', () => {
     expect(calls).toEqual([
       'budget w/t/p',
       'entries p 2026-01-04T10:00:00.000Z 2026-01-07T14:00:00.000Z',
+      'expenses w/t/p',
     ])
     expect(report.asOf).toBe('2026-01-06')
     expect(report.points[0]).toMatchObject({ date: '2026-01-05', actualMinutes: 60 })

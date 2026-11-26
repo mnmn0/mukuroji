@@ -221,6 +221,7 @@ import { createCanonicalPublicAttachmentService } from '../shared/public-attachm
 import { createCanonicalPublicDocumentService } from '../shared/public-document-access'
 import { createCanonicalPublicRelationService } from '../shared/public-relation-access'
 import { createCanonicalPublicWebLinkService } from '../shared/public-web-link-access'
+import { createCanonicalPublicPlanningService } from './public-planning-service'
 import { createCanonicalPublicAgentTelemetryService } from './public-agent-telemetry-service'
 import { createCanonicalPublicDirectoryService } from '../shared/public-directory-access'
 import { readTeamWorkItemHierarchy, readWorkItemHierarchyLinks } from '../shared/work-item-hierarchy'
@@ -4182,6 +4183,7 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       documents: createCanonicalPublicDocumentService(),
       workItemRelations: createCanonicalPublicRelationService(),
       workItemWebLinks: createCanonicalPublicWebLinkService(),
+      planning: createCanonicalPublicPlanningService(),
       attachments: createCanonicalPublicAttachmentService(),
       directory: createCanonicalPublicDirectoryService(),
       openApiDocument: PUBLIC_API_OPENAPI_DOCUMENT,

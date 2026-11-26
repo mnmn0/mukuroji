@@ -25,6 +25,7 @@ import { registerPortfolioRoutes } from './routes/portfolio-routes'
 import { registerProjectStatusReportRoutes } from './routes/project-status-report-routes'
 import { registerWeeklyReportRoutes } from './routes/weekly-report-routes'
 import { registerProjectBudgetRoutes } from './routes/project-budget-routes'
+import { registerProjectExpenseRoutes } from './routes/project-expense-routes'
 import { registerScheduleBaselineRoutes } from './routes/schedule-baseline-routes'
 import { registerWorkCalendarRoutes } from './routes/work-calendar-routes'
 import { registerDirectoryAdministrationRoutes } from './routes/directory-administration-routes'
@@ -196,6 +197,7 @@ registerProjectStatusReportRoutes(routeApp)
 registerWeeklyReportRoutes(routeApp)
 registerScheduleBaselineRoutes(routeApp)
 registerProjectBudgetRoutes(routeApp)
+registerProjectExpenseRoutes(routeApp)
 registerWorkCalendarRoutes(routeApp)
 registerDirectoryAdministrationRoutes(routeApp)
 registerOrgStructureRoutes(routeApp)

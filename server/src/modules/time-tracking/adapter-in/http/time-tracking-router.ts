@@ -720,6 +720,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(body.periodFrom === undefined ? {} : { periodFrom: readRequiredString(body.periodFrom, 'Budget period start') }),
         ...(body.periodTo === undefined ? {} : { periodTo: readRequiredString(body.periodTo, 'Budget period end') }),
         ...(body.periodBudget === undefined ? {} : { periodBudget: readRequiredBoolean(body.periodBudget, 'Period budget') }),
+        ...(body.alertPercent === undefined ? {} : { alertPercent: readRequiredNumber(body.alertPercent, 'Budget alert percent') }),
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
         ...(body.expectedUpdatedAt === undefined ? {} : { expectedUpdatedAt: readRequiredString(body.expectedUpdatedAt, 'Expected update time') }),
         updatedBy: principal.userKey,

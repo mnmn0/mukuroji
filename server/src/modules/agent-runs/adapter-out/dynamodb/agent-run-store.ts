@@ -12,6 +12,8 @@ import {
   AGENT_RUN_SCHEMA_VERSION,
   AGENT_SETTINGS_SCHEMA_VERSION,
   AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS,
+  AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX,
+  isArtifactRepositoryPath,
   type AgentRunOutcome,
   type AgentRunReportAnswer,
   type AgentSettings,
@@ -1126,6 +1128,8 @@ export function isSameSettingsSave(saved: AgentSettings, update: ValidatedAgentS
     saved.fileStalledRunsToTriage === update.fileStalledRunsToTriage &&
     saved.notifyAssigneeOfRunEvents === update.notifyAssigneeOfRunEvents &&
     saved.acceptNewRuns === update.acceptNewRuns &&
+    saved.artifactRepositories.length === update.artifactRepositories.length &&
+    saved.artifactRepositories.every((repository, index) => repository === update.artifactRepositories[index]) &&
     saved.acceptanceCriteriaFieldId === update.acceptanceCriteriaFieldId &&
     saved.brief === update.brief &&
     savedProjects.length === updateProjects.length &&
@@ -1195,7 +1199,13 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
   const readyStatusIds = item.readyStatusIds === undefined ? [] : item.readyStatusIds
   const resumableStatusIds = item.resumableStatusIds === undefined ? [] : item.resumableStatusIds
   const projectBriefs = item.projectBriefs === undefined ? {} : item.projectBriefs
+  // Rows saved before the allowlist existed list no repository.
+  const artifactRepositories = item.artifactRepositories === undefined ? [] : item.artifactRepositories
   if (
+    !Array.isArray(artifactRepositories) ||
+    artifactRepositories.length > AGENT_SETTINGS_ARTIFACT_REPOSITORIES_MAX ||
+    !artifactRepositories.every(isArtifactRepositoryPath) ||
+    new Set(artifactRepositories).size !== artifactRepositories.length ||
     !Array.isArray(readyStatusIds) ||
     !readyStatusIds.every((id): id is string => typeof id === 'string' && id !== '') ||
     !Array.isArray(resumableStatusIds) ||
@@ -1224,6 +1234,7 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
     leaseMinutes,
     // Rows saved before the switch existed accept new runs.
     acceptNewRuns: item.acceptNewRuns !== false,
+    artifactRepositories,
     allowTakeoverAfterLeaseExpiry: item.allowTakeoverAfterLeaseExpiry,
     readyStatusIds,
     resumableStatusIds,

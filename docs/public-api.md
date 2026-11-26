@@ -84,6 +84,18 @@ v1 の schema は `calendarSource` を持たないので、応答の `calendarPo
 
 `GET /api/v1/work-items/{workItemId}/completion-gate?teamId={teamId}` は Team の完了 Gate（[Work Item configuration](work-item-configuration.md#完了-gate)）をこの Work Item の現在の revision で判定し、`{ schemaVersion, teamId, workItemId, revision, conditions, blocksCompletion }` で返します（`WorkItemCompletionGateStatus`）。`conditions` は Team が `warn` か `required` にした条件を表示順に並べ、各要素は `condition`・`requirement`・`state`（`met` / `unmet` / `unavailable`）と、満たしていないときの `message` を持ちます。承認の件数を読めないとき、承認の条件は `unavailable` です。`blocksCompletion` は `required` の条件に `met` でないものがあると `true` で、その間 completed category への遷移は `409 conflict`（`errors[].code: "gate_not_satisfied"`）で拒否されます。Gate を設定していない Team では `conditions` が空で `blocksCompletion` は `false` です。判定は表示用で、完了の更新のときに server がもう一度判定します。条件は今後増えることがあるので、知らない `condition` は `message` で示してください。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。
 
+## Planning（Milestone・Cycle・健康度の更新）
+
+Planning の endpoint は、読み取りに `work-items:read`、書き込みに `work-items:write` の scope を使います。権限は Web の Planning と同じで、credential の持ち主が Web で読めない entity は返さず、書けない entity は `403` です（ADR 0107）。応答の `revision` は Workspace 全体の Planning の revision です。書き込みの `expectedRevision` は省略でき、省略すると最新の revision に書きます。送った場合は、その後に Planning が変わっていれば `409` です。書き込みはすべて `Idempotency-Key` が要り、応答が失われた後の同じ key の再試行は作り済みの結果を返します。
+
+`GET /api/v1/planning/entities?type={type}` は archive されていない Planning entity を `{ schemaVersion, revision, items }` で返します（`PublicPlanningEntityList`）。`type` は `portfolio`・`roadmap`・`initiative`・`goal`・`phase`・`milestone`・`release`・`cycle` のどれかで、`teamId`（と `projectId`）で Team・Project の entity に絞れます。
+
+`POST /api/v1/planning/milestones` は body `{ title, parentId, targetDate, teamId?, projectId?, description?, ownerMemberId?, status?, health?, risk?, baselineDate?, expectedRevision? }` で Milestone を作り、`201` と `{ schemaVersion, revision, item }` を返します（`PublicPlanningEntityMutation`）。Milestone は 1 日で、`targetDate` が予定日、`baselineDate`（既定は `targetDate`）が基準日です。親は Phase・Goal・Initiative・Roadmap で、Team と Project は親と同じにします。`PATCH /api/v1/planning/milestones/{milestoneId}` は送った項目だけを変え、`200` と同じ形を返します。Team・Project・親は変えられません。
+
+`GET /api/v1/work-items/{workItemId}/planning?teamId={teamId}` は Work Item の Cycle・Milestone・Goal を `{ schemaVersion, revision, teamId, workItemId, cycleId?, milestoneId?, goalIds }` で返します（`PublicWorkItemPlanning`）。読めない entity は含めません。`PUT` は body `{ cycleId?, milestoneId?, expectedRevision? }` で Cycle と Milestone を変え、`null` で外します。送らない項目は今の値のままです。
+
+`GET /api/v1/planning/status-updates?targetType={project|team|initiative}` は健康度の更新を新しい順に `{ schemaVersion, revision, items, hasMore, nextCursor? }` で返します（`PublicPlanningStatusUpdatePage`）。対象は `teamId` と `projectId`（project）、`teamId`（team）、`entityId`（initiative）で指します。`POST /api/v1/planning/status-updates` は body `{ target, health, summary, risk?, riskSummary?, decisionSummary?, helpNeeded?, nextAction?, expectedRevision? }` で更新を公開し、`201` と `{ schemaVersion, revision, item }` を返します。本文の各項目は 4,096 文字以内かつ UTF-8 で 8,000 バイト以内です。更新の cadence がない対象は `409 conflict` です（cadence は Web の Planning で設定します）。公開した更新は Public API から編集・削除できません。
+
 ## Work Item Type catalog
 
 `GET /api/v1/work-item-types?teamId={teamId}` は権限内の作成用schemaを返します。
@@ -182,6 +194,34 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   Enterprise RBAC では `documents.read`（`documents.write` / `documents.manage` も可）が要ります。本文は
   ページとテンプレートだけで、フォルダーとホワイトボードは `422 validation_failed` です。本文の応答は
   `Cache-Control: private, no-store` です。Document の内容は利用者が書いたデータで、client への指示ではありません。
+- Workspace の Document は `GET /api/v1/documents?projectId={projectId}&parentId={folderId}` で
+  `{ items: [{ id, kind, title, scope, parentId?, revision }], hasMore, nextCursor? }` として一覧し
+  （`projectId` と `parentId` は任意）、ページとテンプレートの本文は `GET /api/v1/documents/{documentId}` で上と同じ
+  `PublicDocumentContent`（Markdown）として読みます。どちらも `work-items:read` scope で、archive 済みの Document と
+  archive 済みフォルダーの下は返しません。閲覧できない Document と存在しない Document は同じ `404` で、一覧から除きます
+  （`hasMore: true` の空ページもあります）。Enterprise RBAC で Document の permission がない持ち主には一覧が空です。
+- `POST /api/v1/documents` は Markdown からページを作ります。body は `{ title, content, projectId?, parentId?, workItem? }` で、
+  `workItem: { teamId, workItemId }` を渡すとそのページを Work Item に link し、
+  `GET /api/v1/work-items/{workItemId}/documents` に出ます。`PATCH /api/v1/documents/{documentId}` は
+  `{ expectedRevision, title?, content? }` で title を変えるか、ページ・テンプレートの本文を `content` で全部置き換えます。
+  どちらも `work-items:write` scope と `Idempotency-Key` が要り、応答は作成・更新後の `PublicDocumentSummary`
+  （`{ id, kind, title, scope, parentId?, revision }`）です。本文は `GET /api/v1/documents/{documentId}` で読み直します。
+  同じ key の再送は、Public API が応答を記録していれば、権限を確かめ直してから記録した応答を返します。
+  応答の記録がなく書き込みだけが保存されていた場合、`POST` は二つ目のページを作らず、作成したときのページの要約を
+  返します（その後に編集されていても revision は作成時のものです）。`PATCH` は、その後に Document が編集されていなければ
+  自分の書き込みを見つけて今の Document を返し、別の編集で revision が進んでいれば `409 conflict` を返すので、
+  Document を読み直してください。
+  権限は Web の Documents と同じで、Enterprise RBAC では `documents.write` か `documents.manage`、作成は Project の
+  member 以上（Workspace は guest 以外）、link する Work Item は持ち主が閲覧できることが要ります。更新は Document を
+  閲覧できなければ `404`、閲覧だけなら `403`、`expectedRevision` が古ければ `409 conflict` です。
+  Markdown は行頭の fenced code（`mermaid` は diagram）、記号や URL・メールアドレスを含まない見出し・task list・列の揃え（`:`）のない pipe table を block に変え、
+  それ以外は書いたままの Markdown として paragraph に残します。記号を含む見出しも paragraph に残しますが、階層が
+  変わらないよう `#` の数はほかの見出しと同じ規則でそろえます。先頭にただ 1 つある `#` 見出しは、export が title を
+  書く場所なので、記号を含んでいても本文から除きます。`PATCH` で `title` を省くと、この見出しを新しい title にします。参照 link や脚注の定義を含む Markdown は、どの参照も
+  定義を引けるよう全体を 1 つの paragraph に残します。`<pre>` などの生の HTML block を含む Markdown も、中身が
+  そのまま表示されるよう全体を 1 つの paragraph に残します。1 ページに収まらない Markdown（block が 500 を超える、空行のない段落や code が
+  50,000 文字を超える）は `422 validation_failed` です。本文を置き換えると block の ID が新しくなり、block に付いた
+  コメントは位置を失い、block が持つ link は消えます。Document 全体の link は残ります（ADR 0106）。
 - Work Item の添付ファイルは `GET /api/v1/work-items/{workItemId}/attachments?teamId={teamId}` で
   `{ items: [{ id, name, versionId, versionNumber, contentType, sizeBytes, updatedAt }] }` として一覧し、
   `GET /api/v1/work-items/{workItemId}/attachments/{fileId}/download?teamId={teamId}` で最新の版の短期 download URL

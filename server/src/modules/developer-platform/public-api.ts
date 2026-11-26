@@ -32,6 +32,19 @@ import {
   parseWorkItemWebLinkUrl,
   type PublicWorkItemRelationType,
   type PublicWorkItemCompletionGate,
+  type CreatePublicMilestoneRequest,
+  type CreatePublicPlanningStatusUpdateRequest,
+  type PlanningUpdateTarget,
+  type PublicPlanningEntityList,
+  type PublicPlanningEntityMutation,
+  type PublicPlanningEntityType,
+  isPublicPlanningEntityType,
+  PUBLIC_PLANNING_ENTITY_TYPES,
+  type PublicPlanningStatusUpdateMutation,
+  type PublicPlanningStatusUpdatePage,
+  type PublicWorkItemPlanning,
+  type UpdatePublicMilestoneRequest,
+  type UpdatePublicWorkItemPlanningRequest,
   type PublicDocumentContent,
   type PublicWorkItemAttachmentDownload,
   type PublicWorkItemAttachmentList,
@@ -42,6 +55,12 @@ import {
   type PublicTeamList,
   type PublicWorkItemKeyLookup,
   type PublicWorkItemDocument,
+  type CreatePublicDocumentRequest,
+  type PublicDocumentSummary,
+  type UpdatePublicDocumentRequest,
+  PUBLIC_DOCUMENT_CONTENT_MAX_LENGTH,
+  PUBLIC_DOCUMENT_PAGE_MAX_LIMIT,
+  PUBLIC_DOCUMENT_TITLE_MAX_LENGTH,
   PUBLIC_WORK_ITEM_DOCUMENT_PAGE_MAX_LIMIT,
   type ApiProblem,
   type ApiProblemCode,
@@ -793,6 +812,154 @@ export interface PublicWorkItemWebLinkService {
   ): Promise<PublicWorkItemWebLinkMutation>
 }
 
+/**
+ * Planning adapter of the Public API: Milestones, Cycles, a Work Item's Cycle and Milestone, and
+ * health updates. Every call re-checks the credential owner's current permissions, as the
+ * signed-in Planning routes do (ADR 0107).
+ */
+export interface PublicPlanningService {
+  /**
+   * Lists the unarchived Planning entities of one type that the owner can read.
+   * @param credential - Authenticated developer credential.
+   * @param type - Entity type to list.
+   * @param scope - Optional Team, or Team and Project, the entities must be scoped to.
+   * @returns The entities and the Planning revision read.
+   */
+  listEntities(
+    credential: AuthenticatedDeveloperCredential,
+    type: PublicPlanningEntityType,
+    scope: { teamId?: string, projectId?: string },
+  ): Promise<PublicPlanningEntityList>
+  /**
+   * Checks that the owner may create a Milestone in the requested scope; replays call it, and
+   * also check that the owner can still see the Milestone the stored response names.
+   * @param credential - Authenticated developer credential.
+   * @param input - Creation request.
+   * @param storedBody - Stored response body of a replay.
+   */
+  authorizeMilestoneCreate(
+    credential: AuthenticatedDeveloperCredential,
+    input: CreatePublicMilestoneRequest,
+    storedBody?: unknown,
+  ): Promise<void>
+  /**
+   * Creates a Milestone whose ID derives from the idempotency key.
+   * @param credential - Authenticated developer credential.
+   * @param input - Creation request.
+   * @param context - Request, correlation, and idempotency identifiers.
+   * @returns The created Milestone.
+   */
+  createMilestone(
+    credential: AuthenticatedDeveloperCredential,
+    input: CreatePublicMilestoneRequest,
+    context: PublicMutationContext,
+  ): Promise<PublicPlanningEntityMutation>
+  /**
+   * Checks that the owner may change a Milestone; replays call it.
+   * @param credential - Authenticated developer credential.
+   * @param milestoneId - Milestone ID.
+   */
+  authorizeMilestoneUpdate(credential: AuthenticatedDeveloperCredential, milestoneId: string): Promise<void>
+  /**
+   * Changes the fields of a Milestone that the request names.
+   * @param credential - Authenticated developer credential.
+   * @param milestoneId - Milestone ID.
+   * @param input - Changed fields.
+   * @param context - Request, correlation, and idempotency identifiers.
+   * @param idempotency - Reservation whose receipt commits with the change, so a retry after a
+   *   lost response replays it instead of applying the patch again.
+   * @returns The updated Milestone.
+   */
+  updateMilestone(
+    credential: AuthenticatedDeveloperCredential,
+    milestoneId: string,
+    input: UpdatePublicMilestoneRequest,
+    context: PublicMutationContext,
+    idempotency: IdempotencyMutationToken,
+  ): Promise<PublicPlanningEntityMutation>
+  /**
+   * Reads the Cycle, Milestone, and Goals a Work Item is linked to.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team of the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The Planning link.
+   */
+  getWorkItemPlanning(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<PublicWorkItemPlanning>
+  /**
+   * Checks that the owner may change a Work Item's Planning link; replays call it, and also check
+   * that the owner can still see each Cycle, Milestone, and Goal the stored response names.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team of the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param storedBody - Stored response body of a replay.
+   */
+  authorizeWorkItemPlanningChange(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    storedBody?: unknown,
+  ): Promise<void>
+  /**
+   * Puts a Work Item in a Cycle or Milestone, or takes it out, keeping the rest of its link.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team of the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param input - Cycle and Milestone changes.
+   * @param idempotency - Reservation whose receipt commits with the link change, so a retry after a
+   *   lost response replays it instead of writing the link again.
+   * @returns The Planning link after the write.
+   */
+  updateWorkItemPlanning(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    input: UpdatePublicWorkItemPlanningRequest,
+    idempotency: IdempotencyMutationToken,
+  ): Promise<PublicWorkItemPlanning>
+  /**
+   * Lists one page of a target's health updates, newest first.
+   * @param credential - Authenticated developer credential.
+   * @param target - Project, Team, or Initiative.
+   * @param limit - Page size.
+   * @param cursor - Cursor of the previous page.
+   * @returns The page.
+   */
+  listStatusUpdates(
+    credential: AuthenticatedDeveloperCredential,
+    target: PlanningUpdateTarget,
+    limit: number | undefined,
+    cursor: string | undefined,
+  ): Promise<PublicPlanningStatusUpdatePage>
+  /**
+   * Checks, before a keyed publish replays, that the owner may still publish for the target and
+   * read the scope the stored update captured.
+   * @param credential - Authenticated developer credential.
+   * @param target - Project, Team, or Initiative.
+   * @param storedBody - Response body the earlier publish stored with its key.
+   */
+  authorizeStatusUpdateReplay(
+    credential: AuthenticatedDeveloperCredential,
+    target: PlanningUpdateTarget,
+    storedBody: unknown,
+  ): Promise<void>
+  /**
+   * Publishes an immutable health update whose ID derives from the idempotency key.
+   * @param credential - Authenticated developer credential.
+   * @param input - Health update.
+   * @param context - Request, correlation, and idempotency identifiers.
+   * @returns The published update.
+   */
+  publishStatusUpdate(
+    credential: AuthenticatedDeveloperCredential,
+    input: CreatePublicPlanningStatusUpdateRequest,
+    context: PublicMutationContext,
+  ): Promise<PublicPlanningStatusUpdateMutation>
+}
+
 export interface PublicDocumentService {
   /**
    * Lists one page of Documents linked to a Work Item that the credential owner can view.
@@ -832,6 +999,72 @@ export interface PublicDocumentService {
     workItemId: string,
     documentId: string,
   ): Promise<PublicDocumentContent>
+  /**
+   * Lists one page of the Workspace's Documents that the credential owner can view.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param filters - Optional Project and folder restrictions.
+   * @param continuation - Internal continuation from the previous page.
+   * @param limit - Maximum number of Documents evaluated in this page.
+   * @returns Visible Documents and any remaining internal continuation.
+   */
+  listDocuments(
+    credential: AuthenticatedDeveloperCredential,
+    filters: {
+      /** Only Documents of this Project; omitted lists every scope. */
+      projectId?: string
+      /** Only Documents directly in this folder. */
+      parentId?: string
+    },
+    continuation: string | undefined,
+    limit: number,
+  ): Promise<{
+    /** Visible Documents in this page. */
+    items: PublicDocumentSummary[]
+    /** Whether another page exists. */
+    hasMore: boolean
+    /** Internal continuation wrapped by the public API's signed cursor. */
+    nextContinuation?: string
+  }>
+  /**
+   * Reads a page or template the credential owner can view and renders it as Markdown.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param documentId - Document ID.
+   * @returns The Document content.
+   */
+  getDocument(credential: AuthenticatedDeveloperCredential, documentId: string): Promise<PublicDocumentContent>
+  /**
+   * Checks that the credential owner may still write Documents, so a replayed write is not
+   * returned to an owner who lost the permission.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @returns A promise that resolves when the owner may write Documents.
+   */
+  authorizeDocumentWrite(credential: AuthenticatedDeveloperCredential): Promise<void>
+  /**
+   * Creates a page from Markdown as the credential owner, optionally linked to a Work Item.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param input - Title, Markdown body, destination, and Work Item link.
+   * @param context - Request, correlation, and idempotency identifiers for the audit events.
+   * @returns Summary of the created page; its body is read with `getDocument`.
+   */
+  createDocument(
+    credential: AuthenticatedDeveloperCredential,
+    input: CreatePublicDocumentRequest,
+    context: PublicMutationContext,
+  ): Promise<PublicDocumentSummary>
+  /**
+   * Changes the title or replaces the Markdown body of a page or template as the credential owner.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param documentId - Document ID.
+   * @param input - Expected revision and the new title or body.
+   * @param context - Request, correlation, and idempotency identifiers for the audit events.
+   * @returns Summary of the changed Document; its body is read with `getDocument`.
+   */
+  updateDocument(
+    credential: AuthenticatedDeveloperCredential,
+    documentId: string,
+    input: UpdatePublicDocumentRequest,
+    context: PublicMutationContext,
+  ): Promise<PublicDocumentSummary>
 }
 
 /** Result of one accepted OTLP logs export. */
@@ -1242,6 +1475,8 @@ export type PublicApiDependencies = {
   workItemRelations?: PublicWorkItemRelationService
   /** Web link adapter; web link routes report unavailable when it is not configured. */
   workItemWebLinks?: PublicWorkItemWebLinkService
+  /** Planning adapter; Planning routes report unavailable when it is not configured. */
+  planning?: PublicPlanningService
   /** Read-only attachment adapter; attachment routes report unavailable when it is not configured. */
   attachments?: PublicAttachmentService
   /** Read-only directory adapter; directory routes report unavailable when it is not configured. */
@@ -1639,6 +1874,62 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     return c.json(document)
   })
 
+  router.get('/v1/documents', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const documents = requireDocumentService(dependencies)
+    const projectId = readOptionalQueryId(c.req.query('projectId'), 'projectId')
+    const parentId = readOptionalQueryId(c.req.query('parentId'), 'parentId')
+    c.header('Cache-Control', 'private, no-store')
+    return c.json(await createOrderedSignedContinuationPage(c, dependencies, {
+      workspaceId: credential.workspaceId,
+      actorId: `credential:${credential.credentialId}`,
+      resource: '/v1/documents',
+      filters: { projectId, parentId },
+    }, (continuation, limit) => documents.listDocuments(
+      credential,
+      { ...(projectId === undefined ? {} : { projectId }), ...(parentId === undefined ? {} : { parentId }) },
+      continuation,
+      Math.min(limit, PUBLIC_DOCUMENT_PAGE_MAX_LIMIT),
+    )))
+  })
+
+  router.post('/v1/documents', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const documents = requireDocumentService(dependencies)
+    const body = readCreatePublicDocumentRequest(await readJson(c))
+    c.header('Cache-Control', 'private, no-store')
+    return executeIdempotentJson(c, dependencies, credential, body, async (context) => ({
+      status: 201,
+      body: await documents.createDocument(credential, body, context),
+    }), {
+      authorizeReplay: () => documents.authorizeDocumentWrite(credential),
+    })
+  })
+
+  router.get('/v1/documents/:documentId', async (c) => {
+    c.header('Cache-Control', 'private, no-store')
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const documents = requireDocumentService(dependencies)
+    return c.json(await documents.getDocument(credential, readRouteId(c.req.param('documentId'), 'Document ID')))
+  })
+
+  router.patch('/v1/documents/:documentId', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const documents = requireDocumentService(dependencies)
+    const documentId = readRouteId(c.req.param('documentId'), 'Document ID')
+    const body = readUpdatePublicDocumentRequest(await readJson(c))
+    c.header('Cache-Control', 'private, no-store')
+    return executeIdempotentJson(c, dependencies, credential, { documentId, ...body }, async (context) => ({
+      status: 200,
+      body: await documents.updateDocument(credential, documentId, body, context),
+    }), {
+      authorizeReplay: async () => {
+        await documents.authorizeDocumentWrite(credential)
+        await documents.getDocument(credential, documentId)
+      },
+    })
+  })
+
   router.get('/v1/work-items/:workItemId/attachments', async (c) => {
     // Set before any check so error responses carry the same cache policy as the list.
     c.header('Cache-Control', 'private, no-store')
@@ -1785,6 +2076,93 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       body: await relations.deleteRelation(credential, teamId, workItemId, targetWorkItemId, type, context, idempotency),
     }), {
       authorizeReplay: () => relations.authorizeRelationChange(credential, teamId, workItemId, targetWorkItemId),
+    })
+  })
+
+  router.get('/v1/planning/entities', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    c.header('Cache-Control', 'private, no-store')
+    const type = c.req.query('type')
+    if (!isPublicPlanningEntityType(type)) {
+      throw new PublicApiServiceError(
+        400,
+        'validation_failed',
+        `type must be one of ${PUBLIC_PLANNING_ENTITY_TYPES.join(', ')}.`,
+      )
+    }
+    return c.json(await requirePlanningService(dependencies).listEntities(credential, type, readPlanningScopeQuery(c)))
+  })
+
+  router.post('/v1/planning/milestones', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const planning = requirePlanningService(dependencies)
+    const body = readCreatePublicMilestoneRequest(await readJson(c))
+    return executeIdempotentJson(c, dependencies, credential, body, async (context) => ({
+      status: 201,
+      body: await planning.createMilestone(credential, body, context),
+    }), {
+      authorizeReplay: (storedBody) => planning.authorizeMilestoneCreate(credential, body, storedBody),
+    })
+  })
+
+  router.patch('/v1/planning/milestones/:milestoneId', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const planning = requirePlanningService(dependencies)
+    const milestoneId = readRouteId(c.req.param('milestoneId'), 'Milestone ID')
+    const body = readUpdatePublicMilestoneRequest(await readJson(c))
+    return executeIdempotentJson(c, dependencies, credential, { milestoneId, ...body }, async (context, idempotency) => ({
+      status: 200,
+      body: await planning.updateMilestone(credential, milestoneId, body, context, idempotency),
+    }), {
+      authorizeReplay: () => planning.authorizeMilestoneUpdate(credential, milestoneId),
+    })
+  })
+
+  router.get('/v1/work-items/:workItemId/planning', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    c.header('Cache-Control', 'private, no-store')
+    return c.json(await requirePlanningService(dependencies).getWorkItemPlanning(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    ))
+  })
+
+  router.put('/v1/work-items/:workItemId/planning', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const planning = requirePlanningService(dependencies)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const body = readUpdatePublicWorkItemPlanningRequest(await readJson(c))
+    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, ...body }, async (_context, idempotency) => ({
+      status: 200,
+      body: await planning.updateWorkItemPlanning(credential, teamId, workItemId, body, idempotency),
+    }), {
+      authorizeReplay: (storedBody) => planning.authorizeWorkItemPlanningChange(credential, teamId, workItemId, storedBody),
+    })
+  })
+
+  router.get('/v1/planning/status-updates', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    c.header('Cache-Control', 'private, no-store')
+    const cursor = c.req.query('cursor')
+    return c.json(await requirePlanningService(dependencies).listStatusUpdates(
+      credential,
+      readPlanningUpdateTargetQuery(c),
+      readPageLimit(c.req.query('limit')),
+      cursor === undefined ? undefined : readOpaquePlanningCursor(cursor),
+    ))
+  })
+
+  router.post('/v1/planning/status-updates', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const planning = requirePlanningService(dependencies)
+    const body = readCreatePublicPlanningStatusUpdateRequest(await readJson(c))
+    return executeIdempotentJson(c, dependencies, credential, body, async (context) => ({
+      status: 201,
+      body: await planning.publishStatusUpdate(credential, body, context),
+    }), {
+      authorizeReplay: (storedBody) => planning.authorizeStatusUpdateReplay(credential, body.target, storedBody),
     })
   })
 
@@ -3785,8 +4163,11 @@ async function requireOwnPersonalApiKey(
 type IdempotentExecutionOptions = {
   /** Receipt 保存失敗後に安全に同じ domain operation を再実行できるかどうかです。 */
   releaseReservationAfterCompletionFailure?: boolean
-  /** Completed receipt を返す直前に current domain authorization を再評価します。 */
-  authorizeReplay?: () => Promise<void>
+  /**
+   * Completed receipt を返す直前に current domain authorization を再評価します。
+   * 引数は receipt に保存した response body です。
+   */
+  authorizeReplay?: (storedBody: unknown) => Promise<void>
 }
 
 async function executeIdempotentJson(
@@ -3857,7 +4238,9 @@ async function executeIdempotent(
     )
   }
   if (reservation.status === 'replay') {
-    await options.authorizeReplay?.()
+    // Authorize before validating the stored response, so a caller without access learns nothing
+    // about it; the callback validates whatever it reads from the body.
+    await options.authorizeReplay?.(readStoredResponseBody(reservation.response))
     const replay = requireStoredResponse(reservation.response)
     c.header('Idempotency-Replayed', 'true')
     return respondIdempotent(c, replay)
@@ -5491,7 +5874,7 @@ function assertAllowedFields(
 ) {
   const allowedFields = new Set(allowed)
   const unknownField = Object.keys(value).find((field) => !allowedFields.has(field))
-  if (unknownField) {
+  if (unknownField !== undefined) {
     throw new PublicApiServiceError(
       400,
       'validation_failed',
@@ -5953,6 +6336,16 @@ function invalidCursor() {
   return new PublicApiServiceError(400, 'invalid_request', 'Cursor is invalid or belongs to another scope.')
 }
 
+/**
+ * Reads the body of a stored idempotency response without validating the response.
+ *
+ * @param value - Stored response.
+ * @returns The body, or undefined when the response is not an object.
+ */
+function readStoredResponseBody(value: unknown): unknown {
+  return typeof value === 'object' && value !== null && 'body' in value ? value.body : undefined
+}
+
 function requireStoredResponse(value: unknown) {
   const response = requireRecord(value, 'Stored idempotency response is invalid.')
   if (
@@ -6001,6 +6394,292 @@ function requireAttachmentService(dependencies: PublicApiDependencies): PublicAt
 }
 
 /**
+ * Returns the configured Planning service or reports that Planning is unavailable.
+ *
+ * @param dependencies - Router dependencies.
+ * @returns Planning service.
+ */
+function requirePlanningService(dependencies: PublicApiDependencies): PublicPlanningService {
+  if (!dependencies.planning) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Planning is not configured.', true)
+  }
+  return dependencies.planning
+}
+
+/** Lifecycle statuses a Planning entity can have. */
+const PLANNING_ENTITY_STATUSES = ['proposed', 'planned', 'active', 'paused', 'completed', 'canceled'] as const
+
+/** Health values a Planning entity or update can state. */
+const PLANNING_HEALTH_VALUES = ['unknown', 'on-track', 'at-risk', 'off-track'] as const
+
+/** Risk levels a Planning entity or update can state. */
+const PLANNING_RISK_VALUES = ['none', 'low', 'medium', 'high', 'critical'] as const
+
+/** Longest description of a Planning entity, in UTF-8 bytes, as the Planning store accepts it. */
+const PLANNING_DESCRIPTION_MAX_BYTES = 20_000
+
+/** Longest text of one health update field the Public API accepts. */
+const PLANNING_UPDATE_TEXT_MAX_LENGTH = 4_096
+
+/** Longest text of one health update field, in UTF-8 bytes, as the Planning store accepts it. */
+const PLANNING_UPDATE_TEXT_MAX_BYTES = 8_000
+
+/**
+ * Reads one optional health update text, which the Planning store also limits in UTF-8 bytes.
+ *
+ * @param value - Untrusted value.
+ * @param label - Field name used in the error.
+ * @returns The text, or undefined when it is absent.
+ */
+function readPlanningUpdateText(value: unknown, label: string): string | undefined {
+  const text = readOptionalString(value, label, PLANNING_UPDATE_TEXT_MAX_LENGTH)
+  if (text !== undefined && new TextEncoder().encode(text).length > PLANNING_UPDATE_TEXT_MAX_BYTES) {
+    throw new PublicApiServiceError(400, 'validation_failed', `${label} must be at most ${PLANNING_UPDATE_TEXT_MAX_BYTES} bytes of UTF-8.`)
+  }
+  return text
+}
+
+/**
+ * Reads an optional value that must be one of a fixed list.
+ *
+ * @param value - Untrusted value.
+ * @param allowed - Accepted values.
+ * @param label - Field name used in the error.
+ * @returns The value, or undefined when it is absent.
+ */
+function readOptionalEnum<T extends string>(value: unknown, allowed: readonly T[], label: string): T | undefined {
+  if (value === undefined) return undefined
+  const found = allowed.find((candidate) => candidate === value)
+  if (found === undefined) {
+    throw new PublicApiServiceError(400, 'validation_failed', `${label} must be one of ${allowed.join(', ')}.`)
+  }
+  return found
+}
+
+/**
+ * Reads an optional Planning graph revision.
+ *
+ * @param value - Untrusted value.
+ * @returns The revision, or undefined when it is absent.
+ */
+function readOptionalPlanningRevision(value: unknown): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'expectedRevision must be a non-negative integer.')
+  }
+  return value
+}
+
+/**
+ * Reads a Planning entity description, which the Planning store limits in UTF-8 bytes.
+ *
+ * @param value - Untrusted value.
+ * @returns The description, or undefined when it is absent or blank.
+ */
+function readPlanningDescription(value: unknown): string | undefined {
+  const description = readOptionalString(value, 'description', PLANNING_DESCRIPTION_MAX_BYTES)
+  if (description !== undefined && new TextEncoder().encode(description).length > PLANNING_DESCRIPTION_MAX_BYTES) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'description must be at most 20 KB of UTF-8.')
+  }
+  return description
+}
+
+/**
+ * Reads the optional Team and Project query of a Planning list; a Project needs its Team.
+ *
+ * @param c - Request context.
+ * @returns The scope.
+ */
+function readPlanningScopeQuery(c: Context): { teamId?: string, projectId?: string } {
+  const teamId = c.req.query('teamId')
+  const projectId = c.req.query('projectId')
+  if (projectId !== undefined && teamId === undefined) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'projectId needs teamId.')
+  }
+  return {
+    ...(teamId === undefined ? {} : { teamId: readRouteId(teamId, 'teamId') }),
+    ...(projectId === undefined ? {} : { projectId: readRouteId(projectId, 'projectId') }),
+  }
+}
+
+/**
+ * Reads a health update target from a JSON value.
+ *
+ * @param value - Untrusted value.
+ * @returns The target.
+ */
+function readPlanningUpdateTargetValue(value: unknown): PlanningUpdateTarget {
+  const target = requireRecord(value, 'target must be an object.')
+  if (target.type === 'project') {
+    assertAllowedFields(target, ['type', 'teamId', 'projectId'], 'target')
+    return { type: 'project', teamId: readIdentifier(target.teamId, 'target.teamId'), projectId: readIdentifier(target.projectId, 'target.projectId') }
+  }
+  if (target.type === 'team') {
+    assertAllowedFields(target, ['type', 'teamId'], 'target')
+    return { type: 'team', teamId: readIdentifier(target.teamId, 'target.teamId') }
+  }
+  if (target.type === 'initiative') {
+    assertAllowedFields(target, ['type', 'entityId'], 'target')
+    return { type: 'initiative', entityId: readIdentifier(target.entityId, 'target.entityId') }
+  }
+  throw new PublicApiServiceError(400, 'validation_failed', 'target.type must be project, team, or initiative.')
+}
+
+/**
+ * Reads the health update target of `GET /api/v1/planning/status-updates` from its query.
+ *
+ * @param c - Request context.
+ * @returns The target.
+ */
+function readPlanningUpdateTargetQuery(c: Context): PlanningUpdateTarget {
+  const type = c.req.query('targetType')
+  return readPlanningUpdateTargetValue({
+    type,
+    ...(type === 'initiative'
+      ? { entityId: c.req.query('entityId') }
+      : {
+          teamId: c.req.query('teamId'),
+          ...(type === 'project' ? { projectId: c.req.query('projectId') } : {}),
+        }),
+  })
+}
+
+/**
+ * Reads the opaque cursor of a health update page; the Planning store checks that it belongs to
+ * the requested target.
+ *
+ * @param value - Untrusted query value.
+ * @returns The cursor.
+ */
+function readOpaquePlanningCursor(value: string): string {
+  if (!value || value.length > 2_048 || containsAsciiControl(value, false)) {
+    throw new PublicApiServiceError(400, 'invalid_request', 'cursor is invalid.')
+  }
+  return value
+}
+
+/**
+ * Reads the body of `POST /api/v1/planning/milestones`.
+ *
+ * @param value - Untrusted JSON body.
+ * @returns The creation request.
+ */
+function readCreatePublicMilestoneRequest(value: unknown): CreatePublicMilestoneRequest {
+  const body = requireRecord(value, 'Milestone body is required.')
+  assertAllowedFields(body, [
+    'title', 'description', 'parentId', 'teamId', 'projectId', 'ownerMemberId',
+    'status', 'health', 'risk', 'targetDate', 'baselineDate', 'expectedRevision',
+  ], 'Milestone body')
+  const teamId = body.teamId === undefined ? undefined : readIdentifier(body.teamId, 'teamId')
+  const projectId = body.projectId === undefined ? undefined : readIdentifier(body.projectId, 'projectId')
+  if (projectId !== undefined && teamId === undefined) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'projectId needs teamId.')
+  }
+  const description = readPlanningDescription(body.description)
+  const status = readOptionalEnum(body.status, PLANNING_ENTITY_STATUSES, 'status')
+  const health = readOptionalEnum(body.health, PLANNING_HEALTH_VALUES, 'health')
+  const risk = readOptionalEnum(body.risk, PLANNING_RISK_VALUES, 'risk')
+  const expectedRevision = readOptionalPlanningRevision(body.expectedRevision)
+  return {
+    title: readRequiredString(body.title, 'title'),
+    ...(description === undefined ? {} : { description }),
+    parentId: readIdentifier(body.parentId, 'parentId'),
+    ...(teamId === undefined ? {} : { teamId }),
+    ...(projectId === undefined ? {} : { projectId }),
+    ...(body.ownerMemberId === undefined ? {} : { ownerMemberId: readIdentifier(body.ownerMemberId, 'ownerMemberId') }),
+    ...(status === undefined ? {} : { status }),
+    ...(health === undefined ? {} : { health }),
+    ...(risk === undefined ? {} : { risk }),
+    targetDate: readIsoDate(body.targetDate, 'targetDate'),
+    ...(body.baselineDate === undefined ? {} : { baselineDate: readIsoDate(body.baselineDate, 'baselineDate') }),
+    ...(expectedRevision === undefined ? {} : { expectedRevision }),
+  }
+}
+
+/**
+ * Reads the body of `PATCH /api/v1/planning/milestones/{milestoneId}`.
+ *
+ * @param value - Untrusted JSON body.
+ * @returns The changed fields.
+ */
+function readUpdatePublicMilestoneRequest(value: unknown): UpdatePublicMilestoneRequest {
+  const body = requireRecord(value, 'Milestone patch is required.')
+  assertAllowedFields(body, [
+    'expectedRevision', 'title', 'description', 'ownerMemberId', 'status', 'health', 'risk', 'targetDate', 'baselineDate',
+  ], 'Milestone patch')
+  const description = body.description === null ? null : readPlanningDescription(body.description)
+  const status = readOptionalEnum(body.status, PLANNING_ENTITY_STATUSES, 'status')
+  const health = readOptionalEnum(body.health, PLANNING_HEALTH_VALUES, 'health')
+  const risk = readOptionalEnum(body.risk, PLANNING_RISK_VALUES, 'risk')
+  const expectedRevision = readOptionalPlanningRevision(body.expectedRevision)
+  const patch: UpdatePublicMilestoneRequest = {
+    ...(expectedRevision === undefined ? {} : { expectedRevision }),
+    ...(body.title === undefined ? {} : { title: readRequiredString(body.title, 'title') }),
+    ...(description === undefined ? {} : { description }),
+    ...(body.ownerMemberId === undefined ? {} : { ownerMemberId: readIdentifier(body.ownerMemberId, 'ownerMemberId') }),
+    ...(status === undefined ? {} : { status }),
+    ...(health === undefined ? {} : { health }),
+    ...(risk === undefined ? {} : { risk }),
+    ...(body.targetDate === undefined ? {} : { targetDate: readIsoDate(body.targetDate, 'targetDate') }),
+    ...(body.baselineDate === undefined ? {} : { baselineDate: readIsoDate(body.baselineDate, 'baselineDate') }),
+  }
+  if (Object.keys(patch).every((field) => field === 'expectedRevision')) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'Send at least one field to change.')
+  }
+  return patch
+}
+
+/**
+ * Reads the body of `PUT /api/v1/work-items/{workItemId}/planning`.
+ *
+ * @param value - Untrusted JSON body.
+ * @returns The Cycle and Milestone changes.
+ */
+function readUpdatePublicWorkItemPlanningRequest(value: unknown): UpdatePublicWorkItemPlanningRequest {
+  const body = requireRecord(value, 'Work Item Planning body is required.')
+  assertAllowedFields(body, ['expectedRevision', 'cycleId', 'milestoneId'], 'Work Item Planning body')
+  const expectedRevision = readOptionalPlanningRevision(body.expectedRevision)
+  const revision = expectedRevision === undefined ? {} : { expectedRevision }
+  const cycleId = body.cycleId === undefined || body.cycleId === null ? body.cycleId : readIdentifier(body.cycleId, 'cycleId')
+  const milestoneId = body.milestoneId === undefined || body.milestoneId === null
+    ? body.milestoneId
+    : readIdentifier(body.milestoneId, 'milestoneId')
+  if (cycleId !== undefined) return { ...revision, cycleId, ...(milestoneId === undefined ? {} : { milestoneId }) }
+  if (milestoneId !== undefined) return { ...revision, milestoneId }
+  throw new PublicApiServiceError(400, 'validation_failed', 'Send cycleId, milestoneId, or both.')
+}
+
+/**
+ * Reads the body of `POST /api/v1/planning/status-updates`.
+ *
+ * @param value - Untrusted JSON body.
+ * @returns The health update.
+ */
+function readCreatePublicPlanningStatusUpdateRequest(value: unknown): CreatePublicPlanningStatusUpdateRequest {
+  const body = requireRecord(value, 'Status update body is required.')
+  assertAllowedFields(body, [
+    'target', 'health', 'risk', 'summary', 'riskSummary', 'decisionSummary', 'helpNeeded', 'nextAction', 'expectedRevision',
+  ], 'Status update body')
+  const health = readOptionalEnum(body.health, PLANNING_HEALTH_VALUES, 'health')
+  if (health === undefined) throw new PublicApiServiceError(400, 'validation_failed', 'health is required.')
+  const risk = readOptionalEnum(body.risk, PLANNING_RISK_VALUES, 'risk')
+  const expectedRevision = readOptionalPlanningRevision(body.expectedRevision)
+  const summary = readPlanningUpdateText(body.summary, 'summary')
+  if (summary === undefined) throw new PublicApiServiceError(400, 'validation_failed', 'summary is required.')
+  const texts = Object.fromEntries((['riskSummary', 'decisionSummary', 'helpNeeded', 'nextAction'] as const)
+    .map((field) => [field, readPlanningUpdateText(body[field], field)])
+    .filter(([, text]) => text !== undefined))
+  return {
+    target: readPlanningUpdateTargetValue(body.target),
+    health,
+    ...(risk === undefined ? {} : { risk }),
+    summary,
+    ...texts,
+    ...(expectedRevision === undefined ? {} : { expectedRevision }),
+  }
+}
+
+/**
  * Returns the configured relation service or reports that relations are unavailable.
  *
  * @param dependencies - Router dependencies.
@@ -6040,6 +6719,112 @@ function readCreatePublicWorkItemRelationRequest(value: unknown): CreatePublicWo
   return {
     type: readPublicWorkItemRelationType(body.type),
     targetWorkItemId: readIdentifier(body.targetWorkItemId, 'targetWorkItemId'),
+  }
+}
+
+/**
+ * Reads an optional identifier query parameter.
+ *
+ * @param value - Raw query value.
+ * @param label - Parameter name used in the error.
+ * @returns The identifier, or undefined when the parameter is absent.
+ * @throws PublicApiServiceError 400 when the value is not a valid identifier.
+ */
+function readOptionalQueryId(value: string | undefined, label: string): string | undefined {
+  return value === undefined ? undefined : readRouteId(value, label)
+}
+
+/**
+ * Reads a Document title from a request body.
+ *
+ * @param value - Raw title.
+ * @returns The trimmed title.
+ * @throws PublicApiServiceError 400 when the title is empty, too long, or has control characters.
+ */
+function readPublicDocumentTitle(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    !value.trim() ||
+    value.length > PUBLIC_DOCUMENT_TITLE_MAX_LENGTH ||
+    /[\u2028\u2029]/u.test(value) ||
+    containsAsciiControl(value, false)
+  ) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      `title is required and must be at most ${PUBLIC_DOCUMENT_TITLE_MAX_LENGTH} characters on one line.`,
+    )
+  }
+  return value.trim()
+}
+
+/**
+ * Reads a Markdown Document body from a request body.
+ *
+ * @param value - Raw Markdown.
+ * @returns The Markdown.
+ * @throws PublicApiServiceError 400 when it is not text, is too long, or has control characters.
+ */
+function readPublicDocumentContent(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    value.length > PUBLIC_DOCUMENT_CONTENT_MAX_LENGTH ||
+    containsAsciiControl(value, true)
+  ) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      `content must be Markdown text of at most ${PUBLIC_DOCUMENT_CONTENT_MAX_LENGTH} characters.`,
+    )
+  }
+  return value
+}
+
+/**
+ * Reads the body of `POST /api/v1/documents`.
+ *
+ * @param value - Parsed JSON body.
+ * @returns The page to create.
+ * @throws PublicApiServiceError 400 when a field is missing, unknown, or invalid.
+ */
+function readCreatePublicDocumentRequest(value: unknown): CreatePublicDocumentRequest {
+  const body = requireRecord(value, 'Document body is required.')
+  assertAllowedFields(body, ['title', 'content', 'projectId', 'parentId', 'workItem'], 'Document body')
+  let workItem: CreatePublicDocumentRequest['workItem']
+  if (body.workItem !== undefined) {
+    const link = requireRecord(body.workItem, 'workItem must be an object.')
+    assertAllowedFields(link, ['teamId', 'workItemId'], 'workItem')
+    workItem = {
+      teamId: readIdentifier(link.teamId, 'workItem.teamId'),
+      workItemId: readIdentifier(link.workItemId, 'workItem.workItemId'),
+    }
+  }
+  return {
+    title: readPublicDocumentTitle(body.title),
+    content: readPublicDocumentContent(body.content),
+    ...(body.projectId === undefined ? {} : { projectId: readIdentifier(body.projectId, 'projectId') }),
+    ...(body.parentId === undefined ? {} : { parentId: readIdentifier(body.parentId, 'parentId') }),
+    ...(workItem === undefined ? {} : { workItem }),
+  }
+}
+
+/**
+ * Reads the body of `PATCH /api/v1/documents/{documentId}`.
+ *
+ * @param value - Parsed JSON body.
+ * @returns The expected revision and the changes.
+ * @throws PublicApiServiceError 400 when a field is unknown or invalid, or nothing changes.
+ */
+function readUpdatePublicDocumentRequest(value: unknown): UpdatePublicDocumentRequest {
+  const body = requireRecord(value, 'Document patch is required.')
+  assertAllowedFields(body, ['expectedRevision', 'title', 'content'], 'Document patch')
+  if (body.title === undefined && body.content === undefined) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'Pass title, content, or both.')
+  }
+  return {
+    expectedRevision: readPositiveInteger(body.expectedRevision, 'expectedRevision'),
+    ...(body.title === undefined ? {} : { title: readPublicDocumentTitle(body.title) }),
+    ...(body.content === undefined ? {} : { content: readPublicDocumentContent(body.content) }),
   }
 }
 
