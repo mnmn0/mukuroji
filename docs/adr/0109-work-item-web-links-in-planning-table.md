@@ -24,7 +24,7 @@ Work Item に付ける。既存の仕組みはどれも合わない。
   TransactWrite にまとめる。
   - 読んだときの Work Item revision（Project の移動や削除のあとに書かれない）
   - 呼び出した人の member row と、enterprise role の source（権限を失ったあとに書かれない）
-  - Public API の idempotency receipt（応答を失った retry が二重に足さない）
+  - idempotency receipt（応答を失った retry が二重に足さず、削除の retry も 404 にならない）
   競合したら読み直して 3 回まで試す。
 - row に Work Item の作成時刻を持つ。同じ ID で作り直された Work Item には、前の Work Item の
   リンクを見せない。削除された Work Item の row は残るが、読まれない。
@@ -36,7 +36,9 @@ Work Item に付ける。既存の仕組みはどれも合わない。
   既存の `work-items:read` と `work-items:write` で受ける。
   - `GET/POST /api/v1/work-items/{workItemId}/web-links`
   - `DELETE /api/v1/work-items/{workItemId}/web-links/{linkId}`
-  Web には同じ判定の `/api/teams/{teamId}/issues/{issueId}/web-links` を置く。
+  Web には同じ判定の `/api/teams/{teamId}/issues/{issueId}/web-links` を置く。Web の追加と削除も
+  `Idempotency-Key` を必須にし、Planning の依存関係の Web route と同じく利用者ごとの予約と receipt で
+  再送に最初の応答を返す。
 - MCP は `list_attachments`、`save_attachment`、`delete_attachment` を Workspace profile に足す。
 
 ## 検討した選択肢
@@ -53,5 +55,5 @@ Work Item に付ける。既存の仕組みはどれも合わない。
 - リンクの追加と削除は Work Item の revision を進めず、ほかの編集と衝突しない。
 - 1 件の Work Item のリンクの書き込みは、row の revision で順番に並ぶ。
 - 50 件を超える必要が出たら、1 件 1 row の形に移す。その場合は data migration を用意する。
-- Web から付けたリンクの重複送信は、URL の重複として 409 になる。Web route は idempotency receipt を
-  持たない。
+- 同じ `Idempotency-Key` の再送は、Public API でも Web でも最初の応答を返す。別の key で同じ URL を
+  付けると、URL の重複として 409 になる。
