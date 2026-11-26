@@ -121,3 +121,4 @@
 | [0098](0098-team-started-work-item-index-and-board-continuation.md) | Team の started な Work Item を sparse index で引き、Factory board の上限で止まった lane を続きから読む | 提案 |
 | [0100](0100-completion-gate-manager-override.md) | 完了 Gate の override は Work Item の manager だけが Web の更新で理由付きで行い、更新の監査と活動履歴に残す | 提案 |
 | [0102](0102-retire-mail-and-storage-connector-providers.md) | Gmail・Outlook・Google Drive・OneDrive・Dropbox を connector の選択肢から外す | 提案 |
+| [0104](0104-project-expense-entries.md) | Project の経費を Planning table に1件1行で保存し、申請者以外の Project manager の承認で予算の実績に入れる | 提案 |

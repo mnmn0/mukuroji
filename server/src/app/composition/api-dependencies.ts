@@ -13,6 +13,10 @@ import {
   InMemoryProjectRaidLogStore,
 } from '../../modules/project-raid-log'
 import {
+  DynamoDbProjectExpenseStore,
+  InMemoryProjectExpenseStore,
+} from '../../modules/project-budget'
+import {
   DynamoDbCalendarFeedStore,
   InMemoryCalendarFeedStore,
 } from '../../modules/calendar-feeds'
@@ -718,6 +722,11 @@ export function createProductionWorkItemDependencies(
       createDynamoDbDocumentClient(),
     ),
     projectRaidLogs: new DynamoDbProjectRaidLogStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      getConfiguredAuditTableName(),
+    ),
+    projectExpenses: new DynamoDbProjectExpenseStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
       getConfiguredAuditTableName(),
@@ -2033,6 +2042,7 @@ export function createTestAppDependencies(): AppDependencies {
       updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
       savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
       projectRaidLogs: new InMemoryProjectRaidLogStore(),
+      projectExpenses: new InMemoryProjectExpenseStore(),
       calendarFeeds: new InMemoryCalendarFeedStore(),
       projectStatusShares: new InMemoryProjectStatusShareStore(),
       weeklyReports: new InMemoryWeeklyReportStore(),
@@ -2177,6 +2187,7 @@ export function overrideAppDependencies(
       ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
       ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
       ...(overrides.projectRaidLogs ? { projectRaidLogs: overrides.projectRaidLogs } : {}),
+      ...(overrides.projectExpenses ? { projectExpenses: overrides.projectExpenses } : {}),
       ...(overrides.calendarFeeds ? { calendarFeeds: overrides.calendarFeeds } : {}),
       ...(overrides.projectStatusShares ? { projectStatusShares: overrides.projectStatusShares } : {}),
       ...(overrides.weeklyReports ? { weeklyReports: overrides.weeklyReports } : {}),

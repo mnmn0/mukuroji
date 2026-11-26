@@ -743,6 +743,13 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/projects/:projectId/budget-report*',
     permission: 'projects.manage',
   },
+  // Expenses count toward the confidential budget consumption, so reading them needs the same
+  // permission as the budget report (ADR 0104).
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/expenses*',
+    permission: 'projects.manage',
+  },
   {
     method: 'POST',
     pathPattern: '/api/teams/:teamId/projects',

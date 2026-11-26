@@ -1,5 +1,6 @@
 import type {
   ProjectBudgetReport,
+  ProjectExpense,
   ProjectBudgetReportInterval,
   ProjectBudgetReportPoint,
   ProjectEarnedValueMetrics,
@@ -52,6 +53,8 @@ export type ProjectBudgetReportInput = {
   workItems: ReadonlyMap<string, ProjectBudgetWorkItemProgress>
   /** Time entries recorded on the Project. Entries outside `from`..`asOf` are ignored. */
   entries: readonly ProjectBudgetTimeEntry[]
+  /** Expenses of the Project in every state. Expenses dated outside `from`..`asOf` are ignored. */
+  expenses: readonly ProjectExpense[]
 }
 
 /** One baseline Work Item that is planned on the calendar. */
@@ -75,7 +78,7 @@ const DAY_MS = 86_400_000
  * that date, and one without an end date plans none. Earned value is each baseline Work Item's
  * planned effort times its current progress. Canceled Work Items leave every value. Amounts are
  * the effort figures times the budget amount per baseline minute, and actual cost counts only the
- * entries in the budget currency.
+ * entries and the approved expenses in the budget currency.
  *
  * @param input - Report inputs.
  * @returns The report.
@@ -125,9 +128,29 @@ export function createProjectBudgetReport(input: ProjectBudgetReportInput): Proj
     actualByDate.set(entry.localDate, day)
   }
 
+  // Approved expenses are actual cost like time; an expense waiting for approval is reported apart
+  // and counts once a second Project manager approves it (ADR 0104).
+  const approvedExpenseByCurrency: Record<string, number> = {}
+  const pendingExpenseByCurrency: Record<string, number> = {}
+  for (const expense of input.expenses) {
+    if (!measured || expense.date < input.from || expense.date > asOf) continue
+    if (expense.status === 'submitted') {
+      pendingExpenseByCurrency[expense.currency] = (pendingExpenseByCurrency[expense.currency] ?? 0) + expense.amountMinor
+      continue
+    }
+    if (expense.status !== 'approved') continue
+    approvedExpenseByCurrency[expense.currency] = (approvedExpenseByCurrency[expense.currency] ?? 0) + expense.amountMinor
+    if (expense.currency !== currency) continue
+    const day = actualByDate.get(expense.date) ?? { minutes: 0, costMinor: 0 }
+    day.costMinor += expense.amountMinor
+    actualByDate.set(expense.date, day)
+  }
+
   const points = createSeries(input, asOf, measured, planned, actualByDate, minorPerMinute)
   const plannedValueMinutes = plannedValueAt(planned, asOf)
-  const actualCostMinor = currency === undefined ? 0 : actualCostByCurrency[currency] ?? 0
+  const actualCostMinor = currency === undefined
+    ? 0
+    : (actualCostByCurrency[currency] ?? 0) + (approvedExpenseByCurrency[currency] ?? 0)
   return {
     teamId: input.teamId,
     projectId: input.projectId,
@@ -150,6 +173,8 @@ export function createProjectBudgetReport(input: ProjectBudgetReportInput): Proj
     actualMinutes,
     uncostedMinutes,
     actualCostByCurrency,
+    approvedExpenseByCurrency,
+    pendingExpenseByCurrency,
     ...(input.budget && input.budget.amountMinor > 0
       ? { budgetConsumedPercent: roundRatio((actualCostMinor * 100) / input.budget.amountMinor) }
       : {}),

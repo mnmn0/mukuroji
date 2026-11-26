@@ -130,10 +130,13 @@ function ReportContent({ locale, report, t }: { locale: Locale; report: ProjectB
   const ev = report.earnedValue
   const money = ev?.money
   const budget = report.budget
+  // Approved expenses are actual cost like time; both are shown together per currency.
+  const actualByCurrency = sumByCurrency(report.actualCostByCurrency, report.approvedExpenseByCurrency)
   const otherCurrencies = Object.fromEntries(
-    Object.entries(report.actualCostByCurrency).filter(([currency]) => currency !== budget?.currency),
+    Object.entries(actualByCurrency).filter(([currency]) => currency !== budget?.currency),
   )
-  const budgetCost = budget ? report.actualCostByCurrency[budget.currency] ?? 0 : undefined
+  const budgetCost = budget ? actualByCurrency[budget.currency] ?? 0 : undefined
+  const budgetExpense = budget ? report.approvedExpenseByCurrency[budget.currency] ?? 0 : 0
   const formatMoney = (amount: number | undefined) =>
     amount === undefined || !budget ? '—' : formatMinorAmount(amount, budget.currency, locale)
   return (
@@ -147,12 +150,17 @@ function ReportContent({ locale, report, t }: { locale: Locale; report: ProjectB
         </Figure>
         <Figure
           label={t('timeTracking.projectBudget.actualCost')}
-          note={report.budgetConsumedPercent === undefined
-            ? undefined
-            : interpolate(t('timeTracking.projectBudget.consumed'), { percent: report.budgetConsumedPercent })}
+          note={[
+            report.budgetConsumedPercent === undefined
+              ? undefined
+              : interpolate(t('timeTracking.projectBudget.consumed'), { percent: report.budgetConsumedPercent }),
+            budgetExpense > 0
+              ? interpolate(t('timeTracking.projectBudget.includesExpenses'), { amount: formatMoney(budgetExpense) })
+              : undefined,
+          ].filter((part) => part !== undefined).join(' / ') || undefined}
         >
           {budgetCost === undefined
-            ? formatCostsByCurrency(report.actualCostByCurrency, locale) || '—'
+            ? formatCostsByCurrency(actualByCurrency, locale) || '—'
             : formatMinorAmount(budgetCost, budget?.currency ?? '', locale)}
         </Figure>
         <Figure
@@ -214,6 +222,9 @@ function ReportContent({ locale, report, t }: { locale: Locale; report: ProjectB
         {report.uncostedMinutes > 0 ? (
           <li>{interpolate(t('timeTracking.projectBudget.uncosted'), { minutes: formatMinutes(report.uncostedMinutes) })}</li>
         ) : null}
+        {Object.keys(report.pendingExpenseByCurrency).length > 0 ? (
+          <li>{interpolate(t('timeTracking.projectBudget.pendingExpenses'), { amounts: formatCostsByCurrency(report.pendingExpenseByCurrency, locale) })}</li>
+        ) : null}
         {budget && Object.keys(otherCurrencies).length > 0 ? (
           <li>{interpolate(t('timeTracking.projectBudget.otherCurrencies'), { amounts: formatCostsByCurrency(otherCurrencies, locale) })}</li>
         ) : null}
@@ -221,6 +232,19 @@ function ReportContent({ locale, report, t }: { locale: Locale; report: ProjectB
       <CumulativeChart locale={locale} report={report} t={t} />
     </div>
   )
+}
+
+/**
+ * Adds two per-currency amounts.
+ *
+ * @param left - First amounts by ISO currency.
+ * @param right - Second amounts by ISO currency.
+ * @returns The sums by currency.
+ */
+function sumByCurrency(left: Readonly<Record<string, number>>, right: Readonly<Record<string, number>>): Record<string, number> {
+  const sums: Record<string, number> = { ...left }
+  for (const [currency, amount] of Object.entries(right)) sums[currency] = (sums[currency] ?? 0) + amount
+  return sums
 }
 
 /**

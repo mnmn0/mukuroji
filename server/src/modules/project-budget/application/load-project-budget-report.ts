@@ -2,6 +2,7 @@ import {
   deriveWorkItemProgressPercent,
   type ProjectBudgetReport,
   type ProjectBudgetReportInterval,
+  type ProjectExpense,
   type ProjectScheduleBaseline,
   type TimeBudget,
   type TimeEntry,
@@ -81,6 +82,8 @@ export type ProjectBudgetReportPorts = {
     /** Upper instant, ISO 8601. */
     to: string
   }): Promise<readonly TimeEntry[]>
+  /** Reads every expense of the Project. */
+  listExpenses(workspaceId: string, teamId: string, projectId: string): Promise<readonly ProjectExpense[]>
   /** Reads one page of the Team's Work Items, archived ones included. */
   listWorkItems(workspaceId: string, teamId: string, startAfterIssueId: string | undefined): Promise<ProjectBudgetWorkItemPage>
   /** Returns the current time. */
@@ -129,7 +132,7 @@ export async function loadProjectBudgetReport(
   workItemLimit: number,
 ): Promise<ProjectBudgetReport> {
   const { workspaceId, teamId, projectId, timeZone } = request
-  const [budget, baseline, progressMode, entries] = await Promise.all([
+  const [budget, baseline, progressMode, entries, expenses] = await Promise.all([
     ports.getBudget(workspaceId, teamId, projectId),
     ports.getBaseline(workspaceId, teamId, projectId),
     ports.getProgressMode(workspaceId, teamId),
@@ -140,6 +143,7 @@ export async function loadProjectBudgetReport(
       from: new Date(Date.parse(`${request.from}T00:00:00Z`) - MAX_TIMEZONE_OFFSET_MS).toISOString(),
       to: new Date(Date.parse(`${request.to}T00:00:00Z`) + DAY_MS + MAX_TIMEZONE_OFFSET_MS).toISOString(),
     }),
+    ports.listExpenses(workspaceId, teamId, projectId),
   ])
   const baselineIds = new Set((baseline?.entries ?? []).map((entry) => entry.workItemId))
   const workItems = baselineIds.size === 0
@@ -157,6 +161,7 @@ export async function loadProjectBudgetReport(
     baseline,
     workItems,
     entries: entries.flatMap((entry) => toBudgetEntries(entry, timeZone)),
+    expenses,
   })
 }
 
