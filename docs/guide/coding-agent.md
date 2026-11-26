@@ -205,6 +205,7 @@ Team の **Factory board**（`/teams/:teamId/factory`）で、agent の作業状
 管理者だけに表示）。Run や使用量が読み込み上限に達したときは、合計に含まれていない分があることを表示します。
 
 「停滞」は、リース時間内に `heartbeat` が届かなかった Run です。自動では止まらず、担当も変わりません。
+Claude Code などで hooks を設定すると、agent が MCP tool を呼ばずに長く作業している間も heartbeat が届き、停滞と表示されにくくなります（設定は [MCP の説明](../coding-agent-mcp.md) の「hooks からの heartbeat」）。
 Run を開いて状況を確認し、続けられない場合は **解放** してタスクを人や別の agent に戻します。
 解放できるのは Team の管理者、その Run を始めた人、現在の担当者です。失敗・停滞した Run を
 Triage に自動で起票する設定もあります。

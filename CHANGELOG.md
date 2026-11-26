@@ -24,6 +24,8 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Added
 
+- MCP: `mcp.mjs --heartbeat` を追加しました。agent の hooks から呼ぶと、MCP server と同じ設定と instance ID で
+  その instance の `active` Run の lease を延長します。instance ごとに 1 分に 1 回までで、失敗しても終了コード 0 で終わります（#356）。
 - server API: `GET /api/v1/agent-context` が `acceptNewRuns` を返します。Team の管理者が新しい Agent Run の受付を
   止めている間は `false` で、start・resume・take over は `409 not_ready`（pointer `/acceptNewRuns`）になります（#412）。
 - MCP: `get_configuration` の `agentSettings.acceptNewRuns` で受付停止を示し、`get_next_task` は受付停止中に

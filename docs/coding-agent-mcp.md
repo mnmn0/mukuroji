@@ -227,6 +227,49 @@ Kiro IDEは、承認していない環境変数を `${VAR}` から展開しま�
 設定の書式は各クライアントの更新で変わることがあります。登録後は `claude mcp get mukuroji-tasks`、
 `codex mcp list`、KiroのMCP一覧などで接続を確認し、`get_configuration` で `runtime` と担当者を確かめます。
 
+### hooks からの heartbeat
+
+agent が MCP tool を呼ばずに長く作業すると、lease が切れて Run が「停滞」と表示されます。
+agent の hooks から `node /absolute/path/to/mcp.mjs --heartbeat` を実行すると、tool 呼び出しの合間にも lease を延長できます。
+
+- MCP server と同じ `MUKUROJI_MCP_*`（URL、token、Team、担当者、`MUKUROJI_MCP_RUNTIME`、指定している場合は `MUKUROJI_MCP_INSTANCE_ID`）を読みます。
+  instance ID も MCP server と同じ方法で求めるので、延長するのは同じマシン・アカウント・runtime・担当者で始めた `active` Run だけです。
+  `MUKUROJI_MCP_PROJECT_ID` を指定している場合は、その Project のタスクの Run だけを延長します。
+- 同じ instance・Team・Project の heartbeat は 1 分に 1 回までです。それより早く呼ばれたときは API を呼ばずに終わります。最後に成功した時刻は `~/.cache/mukuroji-mcp`（`XDG_CACHE_HOME` を設定していればその下）に空の file として残します。
+  server 側の rate limit（Run ごとに 10 秒に 1 回）と lease の契約は変わりません。
+- 直前の heartbeat から 10 秒以内で server に断られた Run は、Run の最後の heartbeat が 30 秒以内なら `recent` と数えます。それ以外の rate limit、読み切れないほど多い Run、読み取りの失敗は `failed` と数え、時刻を残さないので次の hook で再試行します。
+- 結果は stderr に 1 行出し、失敗しても常に終了コード 0 で終わるので、hook が agent を止めることはありません。
+- hooks は MCP の `env` を引き継ぎません。値はクライアントを起動するシェルで export するか、
+  次のような小さな script に書きます（token は書かず、シェルの `MUKUROJI_MCP_TOKEN` を使います）。
+
+```sh
+#!/bin/sh
+# ~/.local/bin/mukuroji-heartbeat
+MUKUROJI_MCP_URL=https://your-mukuroji.example.com \
+MUKUROJI_MCP_TEAM_ID=your-team-id \
+MUKUROJI_MCP_ASSIGNEE_ID=your-workspace-member-id \
+MUKUROJI_MCP_RUNTIME=claude-code \
+exec node /absolute/path/to/mcp.mjs --heartbeat
+```
+
+Claude Code（`~/.claude/settings.json` またはプロジェクトの `.claude/settings.json`）では、
+tool 呼び出しのたびに実行される `PostToolUse` hook に登録します。
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "~/.local/bin/mukuroji-heartbeat", "timeout": 30 }] }
+    ]
+  }
+}
+```
+
+Kiro では、agent hook の action に同じ command を指定します（`MUKUROJI_MCP_RUNTIME=kiro`）。
+hook の作り方と書式は Kiro のバージョンで変わるため、Kiro の hook 画面の案内に従ってください。
+Codex は tool 呼び出しごとの hook の有無を実機で確かめていないため、ここでは例を示しません。
+Codex では従来どおり、長い作業の途中で `heartbeat` tool を呼びます。
+
 ### トークン使用量の送信（Claude Code、OpenTelemetry）
 
 Claude Code が OpenTelemetry で出す request ごとのトークン数と推定費用を Mukuroji に送ると、MCP で着手した
