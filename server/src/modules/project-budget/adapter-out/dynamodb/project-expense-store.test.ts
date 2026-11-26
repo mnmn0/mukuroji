@@ -175,6 +175,7 @@ test('deletes the expense and lowers the counter, refusing an approved expense a
     now: expense.updatedAt,
     callerAuthorization,
     auditContext,
+    deleteReceipt: 'r1',
     previous: expense,
   })
   expect(sent[0]?.input).toMatchObject({
@@ -186,10 +187,27 @@ test('deletes the expense and lowers the counter, refusing an approved expense a
         },
       },
       { Update: { Key: { recordKey: 'PROJECT_EXPENSE#t#p' }, UpdateExpression: 'SET #count = #count - :one' } },
+      // The removal leaves its receipt outside the list prefix, so a retry can find it.
+      { Put: { Item: { recordKey: 'PROJECT_EXPENSE#t#p#DELETED#x1', entryType: 'project-expense-deletion', deleteReceipt: 'r1' } } },
       callerAuthorization[0],
       { Put: { TableName: 'audit' } },
     ],
   })
+})
+
+test('recognizes only the request that removed the expense', async () => {
+  const deletion = { workspaceId: 'w', recordKey: 'PROJECT_EXPENSE#t#p#DELETED#x1', entryType: 'project-expense-deletion', deleteReceipt: 'r1' }
+  const client = {
+    async send(command: SentCommand) {
+      const key = command.input.Key
+      const recordKey = typeof key === 'object' && key !== null && 'recordKey' in key ? key.recordKey : undefined
+      return { Item: recordKey === deletion.recordKey ? deletion : undefined }
+    },
+  }
+  const store = new DynamoDbProjectExpenseStore('planning', Object.assign(Object.create(null), client))
+  expect(await store.wasDeletedBy(scope, 'x1', 'r1')).toBe(true)
+  expect(await store.wasDeletedBy(scope, 'x1', 'other')).toBe(false)
+  expect(await store.wasDeletedBy(scope, 'x2', 'r1')).toBe(false)
 })
 
 test('lists the expenses of every query page', async () => {

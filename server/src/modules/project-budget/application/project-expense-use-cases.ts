@@ -73,10 +73,16 @@ export type UpdateProjectExpenseStoreInput<TCallerCheck, TAudit> = ProjectExpens
 
 /** Input of one expense removal, as the persistence port receives it. */
 export type DeleteProjectExpenseStoreInput<TCallerCheck, TAudit> = ProjectExpenseScope &
-  ProjectExpenseMutation<TCallerCheck, TAudit> & {
+  ProjectExpenseDeleteMutation<TCallerCheck, TAudit> & {
     /** Expense read before the removal; its revision guards the delete. */
     previous: ProjectExpense
   }
+
+/** Mutation context of a removal, with the receipt that lets a retry find the removal it made. */
+export type ProjectExpenseDeleteMutation<TCallerCheck, TAudit> = ProjectExpenseMutation<TCallerCheck, TAudit> & {
+  /** Receipt of this request, kept after the expense is gone. */
+  deleteReceipt: string
+}
 
 /** One stored expense with the receipt of the change that produced its current revision. */
 export type ProjectExpenseRecord = {
@@ -125,6 +131,15 @@ export type ProjectExpenseStore<TCallerCheck, TAudit> = {
    * @param input - Removal input.
    */
   delete(input: DeleteProjectExpenseStoreInput<TCallerCheck, TAudit>): Promise<void>
+  /**
+   * Tells whether a request with this receipt already removed the expense.
+   *
+   * @param scope - Team and Project.
+   * @param expenseId - Expense ID.
+   * @param deleteReceipt - Receipt of the removal request.
+   * @returns True when the expense was removed by that request.
+   */
+  wasDeletedBy(scope: ProjectExpenseScope, expenseId: string, deleteReceipt: string): Promise<boolean>
 }
 
 /** Mutation context of a change that records who made it and how its request is recognized. */
@@ -343,7 +358,7 @@ export async function decideProjectExpenseUseCase<TCallerCheck, TAudit>(
  * @param scope - Authorized Team and Project.
  * @param expenseId - Expense to remove.
  * @param body - Untrusted request body with the expected revision.
- * @param mutation - Mutation time, caller fences, and audit context.
+ * @param mutation - Mutation time, caller fences, audit context, and removal receipt.
  * @throws ProjectDataError 400 for an invalid body, 404 for an unknown expense, and 409 for a
  * stale revision or an approved expense.
  */
@@ -352,11 +367,16 @@ export async function deleteProjectExpenseUseCase<TCallerCheck, TAudit>(
   scope: ProjectExpenseScope,
   expenseId: string,
   body: unknown,
-  mutation: ProjectExpenseMutation<TCallerCheck, TAudit>,
+  mutation: ProjectExpenseDeleteMutation<TCallerCheck, TAudit>,
 ): Promise<void> {
   const expectedRevision = readExpectedRevision(body)
-  const record = await requireExpense(store, scope, expenseId)
-  const previous = record.expense
+  const found = await store.get(scope, expenseId)
+  // A retry whose first attempt removed the expense but lost the response succeeds again.
+  if (!found) {
+    if (await store.wasDeletedBy(scope, expenseId, mutation.deleteReceipt)) return
+    throw expenseNotFound()
+  }
+  const previous = found.expense
   if (previous.revision !== expectedRevision) throw staleExpense()
   if (previous.status === 'approved') {
     throw new ProjectDataError(409, 'ProjectExpenseApproved', 'An approved expense cannot be deleted.')
@@ -379,8 +399,17 @@ async function requireExpense<TCallerCheck, TAudit>(
   expenseId: string,
 ): Promise<ProjectExpenseRecord> {
   const record = await store.get(scope, expenseId)
-  if (!record) throw new ProjectDataError(404, 'ProjectExpenseNotFound', 'The expense was not found.')
+  if (!record) throw expenseNotFound()
   return record
+}
+
+/**
+ * Builds the error of an unknown expense.
+ *
+ * @returns The 404 error.
+ */
+function expenseNotFound() {
+  return new ProjectDataError(404, 'ProjectExpenseNotFound', 'The expense was not found.')
 }
 
 /**

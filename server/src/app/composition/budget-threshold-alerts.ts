@@ -14,6 +14,7 @@ import type {
   ScheduledProjectBudgetStatus,
 } from '../../modules/notifications'
 import { loadProjectBudgetConsumption } from '../../modules/project-budget'
+import { isWorkspaceMemberRowActive } from '../../modules/workspace-access'
 
 /** Reads the budget threshold reader needs (ADR 0105). */
 export type BudgetThresholdReaderSources = {
@@ -40,6 +41,18 @@ export type BudgetThresholdReaderSources = {
   listExpenses(workspaceId: string, teamId: string, projectId: string): Promise<readonly ProjectExpense[]>
   /** Reads the Workspace's Enterprise roles, when the deployment has them. */
   readEnterpriseSnapshot?(workspaceId: string): Promise<EnterpriseIdentitySnapshot>
+  /** Lists every member row of the Workspace, deactivated and expired members included. */
+  listWorkspaceMembers(workspaceId: string): Promise<readonly BudgetAlertWorkspaceMember[]>
+}
+
+/** The parts of a Workspace member row that tell whether the member can still be notified. */
+export type BudgetAlertWorkspaceMember = {
+  /** Member key. */
+  memberKey: string
+  /** Membership status; only `active` members are notified. */
+  status: string
+  /** Instant the member's access ends, when it is limited. */
+  accessExpiresAt?: string
 }
 
 /**
@@ -90,6 +103,7 @@ export function createBudgetThresholdReader(sources: BudgetThresholdReaderSource
       const timeZone = (profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS).timeZone
       const statuses: ScheduledProjectBudgetStatus[] = []
       let enterprise: EnterpriseIdentitySnapshot | undefined
+      let activeMembers: ReadonlySet<string> | undefined
       for (const project of await sources.readProjects(workspaceId)) {
         const consumption = await loadProjectBudgetConsumption(
           { workspaceId, teamId: project.teamId, projectId: project.projectId },
@@ -100,9 +114,14 @@ export function createBudgetThresholdReader(sources: BudgetThresholdReaderSource
         if (!consumption) continue
         const { budget } = consumption
         enterprise ??= await sources.readEnterpriseSnapshot?.(workspaceId)
-        const { managerMemberKeys, ownerMemberKey } = enterprise
-          ? selectEffectiveManagers(enterprise, project)
-          : project
+        const active = activeMembers ??= await readActiveMemberKeys(sources, workspaceId, now)
+        const effective = enterprise ? selectEffectiveManagers(enterprise, project) : project
+        // Delivery skips a member whose Workspace access ended, so such a manager is left out before
+        // the owner is preferred; otherwise an expired owner would leave the alert with no reader.
+        const managerMemberKeys = effective.managerMemberKeys.filter((key) => active.has(key))
+        const ownerMemberKey = effective.ownerMemberKey !== undefined && active.has(effective.ownerMemberKey)
+          ? effective.ownerMemberKey
+          : undefined
         statuses.push({
           teamId: project.teamId,
           projectId: project.projectId,
@@ -120,4 +139,22 @@ export function createBudgetThresholdReader(sources: BudgetThresholdReaderSource
       return statuses
     },
   }
+}
+
+/**
+ * Reads the members of a Workspace who can still be notified.
+ *
+ * @param sources - Reader of the Workspace's member rows.
+ * @param workspaceId - Workspace to read.
+ * @param now - Schedule execution instant.
+ * @returns Lower-case member keys of the active members whose access has not ended.
+ */
+async function readActiveMemberKeys(
+  sources: Pick<BudgetThresholdReaderSources, 'listWorkspaceMembers'>,
+  workspaceId: string,
+  now: Date,
+): Promise<ReadonlySet<string>> {
+  return new Set((await sources.listWorkspaceMembers(workspaceId))
+    .filter((member) => isWorkspaceMemberRowActive(member, now))
+    .map((member) => member.memberKey.trim().toLowerCase()))
 }

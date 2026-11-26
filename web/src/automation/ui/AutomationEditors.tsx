@@ -413,7 +413,11 @@ export function AutomationRuleEditor({
     initialSchedule?.monthlyDay === 'last-day' ? 'last-day' : 'day-of-month',
   )
   const [scheduleDueDaysBefore, setScheduleDueDaysBefore] = useState('')
-  const [actionType, setActionType] = useState<AutomationActionType>('move')
+  const [actionType, setActionType] = useState<AutomationActionType>(() => {
+    // A trigger without a Work Item, such as a budget threshold, starts on an action it can run.
+    const allowed = readAutomationActionTypesForTrigger(scopedActionTypes, initialSchedule ? 'schedule' : initialTriggerType)
+    return allowed.includes('move') ? 'move' : allowed.includes('notify') ? 'notify' : allowed[0] ?? 'notify'
+  })
   const [actionConfiguration, setActionConfiguration] = useState('')
   const [notifyAssignee, setNotifyAssignee] = useState(false)
   const [conditionField, setConditionField] = useState('')

@@ -133,6 +133,7 @@ export function registerProjectExpenseRoutes(routeApp: Hono): void {
     try {
       const { principal, teamId, projectId, expenseId } = await authorizeExpense(c)
       const body = await readJson<unknown>(c.req)
+      const auditContext = createApiMutationContext(c, principal, body)
       await deleteProjectExpenseUseCase(
         workItemDependencies.projectExpenses,
         { workspaceId: principal.directoryId, teamId, projectId },
@@ -141,7 +142,8 @@ export function registerProjectExpenseRoutes(routeApp: Hono): void {
         {
           now: new Date().toISOString(),
           callerAuthorization: await createCallerAuthorization(principal, teamId, projectId),
-          auditContext: createApiMutationContext(c, principal, body),
+          auditContext,
+          deleteReceipt: createChangeReceipts('delete', expenseId, auditContext).updateReceipt,
         },
       )
       return c.body(null, 204)
@@ -339,7 +341,7 @@ function createExpenseId(teamId: string, projectId: string, actorId: string, ide
  * @returns The receipt and the key, hexadecimal.
  */
 function createChangeReceipts(
-  operation: 'update' | 'decision',
+  operation: 'update' | 'decision' | 'delete',
   expenseId: string,
   auditContext: { actor: { id: string }; idempotencyKeyHash: string; requestFingerprint: string },
 ) {

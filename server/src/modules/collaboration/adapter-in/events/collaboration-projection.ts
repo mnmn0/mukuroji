@@ -2263,21 +2263,19 @@ export function isCurrentBudgetThresholdRecipient(
   if (event.eventType !== BUDGET_THRESHOLD_REACHED_EVENT_TYPE) return true
   const recipient = normalizeMemberKey(memberKey)
   if (!event.projectId || !event.teamId || recipient === undefined) return false
-  // Member rows carry no Team, so the Project row must show the Project is still active in the event's Team.
-  const projectActiveInTeam = directoryItems.some((item) =>
-    item.entryType === 'project' &&
-    item.projectId === event.projectId &&
-    item.teamId === event.teamId &&
-    !item.archivedAt
-  )
-  if (!projectActiveInTeam) return false
-  return directoryItems.some((item) =>
+  const projectRows = directoryItems.filter((item) => item.entryType === 'project' && item.projectId === event.projectId)
+  // The Project must still be active in the event's Team.
+  if (!projectRows.some((item) => item.teamId === event.teamId && !item.archivedAt)) return false
+  if (enterpriseManagerKeys.some((key) => normalizeMemberKey(key) === recipient)) return true
+  // Member rows carry no Team and a Project ID is unique only within a Team (ADR 0028), so a
+  // manager row counts only when no other Team has a Project with the same ID.
+  return projectRows.every((item) => item.teamId === event.teamId) && directoryItems.some((item) =>
     item.entryType === 'project-member' &&
     item.projectId === event.projectId &&
     item.role === 'manager' &&
     item.archivedAt === undefined &&
     normalizeMemberKey(item.memberKey) === recipient
-  ) || enterpriseManagerKeys.some((key) => normalizeMemberKey(key) === recipient)
+  )
 }
 
 /**

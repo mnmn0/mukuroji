@@ -167,6 +167,9 @@ test('submits, lists, resubmits, and deletes a Project expense for its manager',
   expect(stale.status).toBe(409)
   const deleted = await request(`${path}/${expense.id}`, 'DELETE', { expectedRevision: 2 }, 'expense-1-delete')
   expect(deleted.status).toBe(204)
+  // A retry of the removal after a lost response succeeds again; another request finds nothing.
+  expect((await request(`${path}/${expense.id}`, 'DELETE', { expectedRevision: 2 }, 'expense-1-delete')).status).toBe(204)
+  expect((await request(`${path}/${expense.id}`, 'DELETE', { expectedRevision: 2 }, 'expense-1-delete-again')).status).toBe(404)
   expect((await (await request(path)).json() as ProjectExpenseListResponse).expenses).toEqual([])
 })
 

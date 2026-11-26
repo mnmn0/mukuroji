@@ -114,6 +114,14 @@ describe('Automation editors', () => {
     expect(html).toContain('value="both"')
   })
 
+  test('starts a budget-threshold rule on an action it can run', () => {
+    const html = renderToStaticMarkup(
+      <AutomationRuleEditor initialTriggerType="budget-threshold" locale="en" onCreate={async () => undefined} />,
+    )
+    expect(html).toMatch(/<option value="notify" selected="">/u)
+    expect(html).not.toContain('<option value="move"')
+  })
+
   test('hides the form and webhook options from a Team rule', () => {
     const render = (teamScoped: boolean) => renderToStaticMarkup(
       <AutomationRuleEditor locale="en" teamScoped={teamScoped} onCreate={async () => undefined} />,

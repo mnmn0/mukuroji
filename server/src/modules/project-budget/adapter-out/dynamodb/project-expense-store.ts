@@ -36,6 +36,8 @@ type DeleteInput = DeleteProjectExpenseStoreInput<ProjectExpenseCallerAuthorizat
 
 /** Planning-table record type of one expense. */
 const ENTRY_TYPE = 'project-expense'
+/** Planning-table record type of the receipt a removal leaves behind. */
+const DELETION_TYPE = 'project-expense-deletion'
 /** Planning-table record type of the per-Project expense counter. */
 const COUNTER_TYPE = 'project-expense-ledger'
 /** Schema version of the counter and expense rows. */
@@ -75,6 +77,17 @@ function counterKey(scope: Pick<ProjectExpenseScope, 'teamId' | 'projectId'>) {
  */
 function entryKey(scope: Pick<ProjectExpenseScope, 'teamId' | 'projectId'>, expenseId: string) {
   return `${counterKey(scope)}#ENTRY#${encodeURIComponent(expenseId)}`
+}
+
+/**
+ * Builds the sort key of the receipt a removed expense leaves, outside the expense list prefix.
+ *
+ * @param scope - Team and Project.
+ * @param expenseId - Expense ID.
+ * @returns The sort key.
+ */
+function deletionKey(scope: Pick<ProjectExpenseScope, 'teamId' | 'projectId'>, expenseId: string) {
+  return `${counterKey(scope)}#DELETED#${encodeURIComponent(expenseId)}`
 }
 
 /** Stores each Project expense as one Planning-table row, next to a per-Project counter. */
@@ -324,6 +337,25 @@ export class DynamoDbProjectExpenseStore implements ProjectExpenseStore {
               ExpressionAttributeValues: { ...counterValues(input), ':one': 1 },
             },
           },
+          {
+            // Expense IDs come from Idempotency-Keys, so a removed expense is never stored again
+            // and its receipt lets a retry that lost the response succeed.
+            Put: {
+              TableName: this.tableName,
+              Item: {
+                workspaceId: input.workspaceId,
+                recordKey: deletionKey(input, input.previous.id),
+                entryType: DELETION_TYPE,
+                schemaVersion: SCHEMA_VERSION,
+                teamId: input.teamId,
+                projectId: input.projectId,
+                expenseId: input.previous.id,
+                deleteReceipt: input.deleteReceipt,
+                deletedAt: input.now,
+              },
+              ConditionExpression: 'attribute_not_exists(recordKey)',
+            },
+          },
           ...input.callerAuthorization,
           ...(audit ? [audit] : []),
         ],
@@ -331,8 +363,27 @@ export class DynamoDbProjectExpenseStore implements ProjectExpenseStore {
     } catch (error) {
       const reasons = readCancellationCodes(error)
       if (reasons?.[1] === 'ConditionalCheckFailed' && reasons[0] !== 'ConditionalCheckFailed') throw corruptLedger()
-      return storageFailure(error, 2 + input.callerAuthorization.length + (audit ? 1 : 0))
+      return storageFailure(error, 3 + input.callerAuthorization.length + (audit ? 1 : 0))
     }
+  }
+
+  /**
+   * Tells whether a request with this receipt removed the expense, with a strongly consistent read.
+   *
+   * @param scope - Team and Project.
+   * @param expenseId - Expense ID.
+   * @param deleteReceipt - Receipt of the removal request.
+   * @returns True when the stored removal receipt matches.
+   */
+  async wasDeletedBy(scope: ProjectExpenseScope, expenseId: string, deleteReceipt: string): Promise<boolean> {
+    const { Item: row } = await this.client
+      .send(new GetCommand({
+        TableName: this.tableName,
+        Key: { workspaceId: scope.workspaceId, recordKey: deletionKey(scope, expenseId) },
+        ConsistentRead: true,
+      }))
+      .catch((error: unknown) => storageFailure(error))
+    return row?.entryType === DELETION_TYPE && row.deleteReceipt === deleteReceipt
   }
 
   /**
@@ -375,6 +426,8 @@ export class DynamoDbProjectExpenseStore implements ProjectExpenseStore {
 export class InMemoryProjectExpenseStore implements ProjectExpenseStore {
   /** Expenses with their creation and change receipts keyed by Workspace, Team, Project, and expense. */
   private readonly rows = new Map<string, { expense: ProjectExpense; creationFingerprint: string; lastUpdateReceipt?: string; lastUpdateKey?: string }>()
+  /** Removal receipts of removed expenses, keyed like `rows`. */
+  private readonly deletions = new Map<string, string>()
 
   /**
    * Reads copies of every expense of a Project.
@@ -468,6 +521,19 @@ export class InMemoryProjectExpenseStore implements ProjectExpenseStore {
     const existing = this.rows.get(key)
     if (!existing || existing.expense.revision !== input.previous.revision || existing.expense.status === 'approved') throw conflict()
     this.rows.delete(key)
+    this.deletions.set(key, input.deleteReceipt)
+  }
+
+  /**
+   * Tells whether a request with this receipt removed the expense.
+   *
+   * @param scope - Team and Project.
+   * @param expenseId - Expense ID.
+   * @param deleteReceipt - Receipt of the removal request.
+   * @returns True when the stored removal receipt matches.
+   */
+  async wasDeletedBy(scope: ProjectExpenseScope, expenseId: string, deleteReceipt: string): Promise<boolean> {
+    return this.deletions.get(memoryKey(scope, expenseId)) === deleteReceipt
   }
 }
 

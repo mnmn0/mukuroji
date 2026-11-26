@@ -33,10 +33,14 @@ Issue #345 は「予算 90%（設定値）到達時に責任者へ通知」と�
    毎朝の判定でも同じ規則で manager を絞る。Enterprise role が効く人はその role が Project を管理するときだけ、効かない人は
    manager member 行で数える。owner が manager でなくなっていればほかの manager 全員に送る。sign-in 時にしか分からない
    group への割り当てがあって owner を判定しきれないときは、owner だけに絞らず manager 全員に送る。
+   Workspace のアクセス期限が切れた・無効になった member は配信で落ちるので、毎朝の判定でも owner を選ぶ前に外す
+   （期限切れの owner だけに送って誰にも届かない、を避ける）。member 行は Team を持たず、Project ID は Team の中でしか
+   一意でないので、同じ Project ID が別の Team にもあるときは manager member 行を根拠にしない。
+   閾値の判定は丸めた消化率ではなく実コストの整数比較（`actualCostMinor × 100 ≥ 閾値 × 予算額`）で行う。
    消化率と閾値は通知の message にだけ入れ、audit event の summary には入れない（audit を読めても Project を管理できない人がいる）。
 5. Automation に `budget-threshold` trigger を足す。この event で動き、Team の rule は自分の Team の Project の event でだけ
-   動く。event に Work Item はないので、Work Item を変える action はこの trigger では対象がなく失敗する（form・webhook
-   trigger と同じ）。通知・作成・webhook の action は使える。
+   動く。event に Work Item はないので、Work Item を変える action と担当者への通知は保存時に拒否する（form・webhook
+   trigger と同じく対象がない）。通知（相手を指定）・作成・webhook の action は使える。
 6. PMO dashboard（Team portfolio）の予算消化にも、予算期間の承認済み経費を足す。
 
 ## 検討した選択肢

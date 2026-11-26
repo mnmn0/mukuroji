@@ -71,6 +71,7 @@ function sources(overrides: Partial<BudgetThresholdReaderSources> = {}): BudgetT
       createdAt: '2026-01-05T00:00:00.000Z',
       updatedAt: '2026-01-05T00:00:00.000Z',
     }],
+    listWorkspaceMembers: async () => ['owner', 'lead', 'boss'].map((name) => ({ memberKey: `${name}@example.com`, status: 'active' })),
     ...overrides,
   }
 }
@@ -105,4 +106,17 @@ test('adds Enterprise managers and drops managers whose Enterprise role no longe
 test('skips a Workspace that is not active', async () => {
   const reader = createBudgetThresholdReader(sources({ readProfile: async () => ({ status: 'closing' }) }))
   expect(await reader.listProjectBudgetStatuses('w', new Date('2026-01-10T00:00:00.000Z'))).toEqual([])
+})
+
+test('leaves out managers whose Workspace access ended, so an expired owner does not take the alert', async () => {
+  const now = new Date('2026-01-10T00:00:00.000Z')
+  const [status] = await createBudgetThresholdReader(sources({
+    listWorkspaceMembers: async () => [
+      { memberKey: 'Owner@example.com', status: 'active', accessExpiresAt: '2026-01-09T00:00:00.000Z' },
+      { memberKey: 'lead@example.com', status: 'active' },
+    ],
+    readProjects: async () => [{ teamId: 't', projectId: 'p', ownerMemberKey: 'owner@example.com', managerMemberKeys: ['lead@example.com', 'owner@example.com'] }],
+  })).listProjectBudgetStatuses('w', now)
+  expect(status?.ownerMemberKey).toBeUndefined()
+  expect(status?.managerMemberKeys).toEqual(['lead@example.com'])
 })

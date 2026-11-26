@@ -71,8 +71,7 @@ export function evaluateBudgetThresholdAlerts(
   statuses: readonly ScheduledProjectBudgetStatus[],
 ): BudgetThresholdAlertCandidate[] {
   return statuses.flatMap((status) => {
-    // The exact cost decides, so a use just under the threshold that rounds up to it is not alerted.
-    if (!(status.actualCostMinor * 100 >= status.alertPercent * status.amountMinor)) return []
+    if (!reachesAlertPercent(status)) return []
     const managers = [...new Set(status.managerMemberKeys.map((key) => key.toLowerCase()))].sort()
     const owner = status.ownerMemberKey?.toLowerCase()
     const recipientMemberKeys = owner !== undefined && managers.includes(owner) ? [owner] : managers
@@ -92,4 +91,20 @@ export function evaluateBudgetThresholdAlerts(
       recipientMemberKeys,
     }]
   })
+}
+
+/**
+ * Tells whether a Project's cost reached its alert percentage, from the exact cost rather than the
+ * rounded percentage, so a use just under the threshold that rounds up to it is not alerted.
+ *
+ * @param status - Cost, budget amount, and alert percentage.
+ * @returns True when the cost is at or past the alert percentage of the budget.
+ */
+function reachesAlertPercent(status: Pick<ScheduledProjectBudgetStatus, 'actualCostMinor' | 'amountMinor' | 'alertPercent'>) {
+  const { actualCostMinor, amountMinor, alertPercent } = status
+  if ([actualCostMinor, amountMinor, alertPercent].every(Number.isSafeInteger)) {
+    // Integer products stay exact even past the range a double holds exactly.
+    return BigInt(actualCostMinor) * 100n >= BigInt(alertPercent) * BigInt(amountMinor)
+  }
+  return actualCostMinor * 100 >= alertPercent * amountMinor
 }

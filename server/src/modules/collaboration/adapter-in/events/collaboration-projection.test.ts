@@ -211,6 +211,10 @@ describe('collaboration projection pure helpers', () => {
     expect(isCurrentBudgetThresholdRecipient(event, 'elsewhere@example.com', directory)).toBe(false)
     // A manager row of the Project does not count when the event names another Team.
     expect(isCurrentBudgetThresholdRecipient({ ...event, teamId: 'other' }, 'lead@example.com', directory)).toBe(false)
+    // When another Team has a Project with the same ID, the manager row could be of either one.
+    const shared: ProjectDirectoryItem[] = [...directory, { entryType: 'project', teamId: 'other', projectId: 'platform' }]
+    expect(isCurrentBudgetThresholdRecipient(event, 'lead@example.com', shared)).toBe(false)
+    expect(isCurrentBudgetThresholdRecipient(event, 'lead@example.com', shared, ['lead@example.com'])).toBe(true)
     expect(isCurrentBudgetThresholdRecipient({ eventType: 'project-budget.threshold-reached' }, 'lead@example.com', directory)).toBe(false)
     expect(isCurrentBudgetThresholdRecipient({ eventType: 'comment.created' }, 'dev@example.com', directory)).toBe(true)
   })

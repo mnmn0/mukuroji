@@ -170,6 +170,7 @@ export function createProductionNotificationScheduleHandler() {
       }),
       listExpenses: async (workspaceId, teamId, projectId) =>
         await projectExpenses.list({ workspaceId, teamId, projectId }),
+      listWorkspaceMembers: async (workspaceId) => await workspaceAccess.listMembers(workspaceId),
       ...(enterpriseIdentity
         ? { readEnterpriseSnapshot: async (workspaceId: string) => await enterpriseIdentity.getSnapshot(workspaceId) }
         : {}),
