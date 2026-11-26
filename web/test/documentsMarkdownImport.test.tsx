@@ -654,6 +654,54 @@ describe('Markdown import of a file whose blocks reference each other', () => {
     }
   })
 
+  test('rewrites only the links the parser reads, leaving code in lists and quotes as written', () => {
+    const resolved: string[] = []
+    /**
+     * Converts Markdown with a resolver that maps `*.md` targets to page paths.
+     *
+     * @param source - Markdown text.
+     * @returns The type or paragraph text of each block.
+     */
+    const convertLinked = (source: string) => {
+      const result = convertMarkdownToDocument(source, {
+        createId: createSequentialId(),
+        fallbackTitle: 'fallback',
+        resolveLink: (href) => {
+          if (!href.endsWith('.md')) return undefined
+          resolved.push(href)
+          return `/documents/${href.slice(0, -3)}`
+        },
+      })
+      if (!result.ok) throw new Error(`conversion failed: ${result.code}`)
+      return result.blocks.map((block) => block.type === 'paragraph' ? block.text : block.type)
+    }
+    const nested = [
+      '- item [a](a.md)\n\n  ~~~\n  [b](b.md)\n  ~~~',
+      '* item\n\n  ```md\n  [c](c.md)\n  ```',
+      '1. item\n\n       [d](d.md) indented code',
+      '> quote [e](e.md)\n>\n>     [f](f.md) indented code\n>\n> ```\n> [g](g.md)\n> ```',
+      'Text `[h](h.md)` and <span title="[i](i.md)">x</span> [j](j.md)',
+    ]
+    expect(convertLinked(nested.join('\n\n'))).toEqual([
+      '- item [a](/documents/a)\n\n  ~~~\n  [b](b.md)\n  ~~~',
+      '* item\n\n  ```md\n  [c](c.md)\n  ```',
+      '1. item\n\n       [d](d.md) indented code',
+      '> quote [e](/documents/e)\n>\n>     [f](f.md) indented code\n>\n> ```\n> [g](g.md)\n> ```',
+      'Text `[h](h.md)` and <span title="[i](i.md)">x</span> [j](/documents/j)',
+    ])
+    // A link in code is never resolved, so it is not counted as a link to another page either.
+    expect(resolved.sort()).toEqual(['a.md', 'e.md', 'j.md'])
+    // A top-level fence is a code block, written as it is.
+    expect(blocksOf('```\n[k](k.md)\n```')).toMatchObject([{ type: 'code', code: '[k](k.md)' }])
+    // References are made inline only where the parser reads them, so code keeps them as written.
+    expect(blocksOf('- item [x][r]\n\n  ~~~\n  [x][r] [^n]\n  ~~~\n\n> ```\n> [x][r]\n> ```\n\n[r]: https://example.com/r')
+      .map((block) => block.type === 'paragraph' ? block.text : block.type))
+      .toEqual([
+        '- item [x](<https://example.com/r>)\n\n  ~~~\n  [x][r] [^n]\n  ~~~',
+        '> ```\n> [x][r]\n> ```',
+      ])
+  })
+
   test('reads an exported page back into blocks that render as the page did', () => {
     const result = convert(BLOCK_SCOPED_EXPORT)
     if (!result.ok) throw new Error(`conversion failed: ${result.code}`)

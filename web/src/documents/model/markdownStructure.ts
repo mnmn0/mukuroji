@@ -148,6 +148,26 @@ export function readMarkdownImportStructure(
 }
 
 /**
+ * Lists where each inline link and image of a Markdown file is, as the parser reads it. Text that
+ * only looks like a link, such as one in a code block, a code span, or HTML, is not listed, so a
+ * rewrite of link targets limited to these ranges leaves code examples as written.
+ *
+ * @param source - Markdown file with `\n` line endings.
+ * @returns The source range of each `[label](target)` link and `![alt](target)` image.
+ */
+export function readInlineLinkRanges(source: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = []
+  for (const node of listMarkdownNodes(parseMarkdown(source))) {
+    if (node.type !== 'link' && node.type !== 'image') continue
+    const range = readNodeRange(node)
+    // An autolink, `<url>`, or a bare URL is a link too, but has no target to rewrite.
+    if (range === undefined || !/^!?\[/u.test(source.slice(range.start, range.start + 2))) continue
+    ranges.push(range)
+  }
+  return ranges.sort((left, right) => left.start - right.start)
+}
+
+/**
  * Tells whether the Markdown parser reads an import file in bounded time; a file past the limits
  * is imported without being parsed as a whole.
  *

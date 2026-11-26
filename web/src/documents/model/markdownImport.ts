@@ -7,6 +7,7 @@ import type {
 import { createNativeBlockChecker } from './markdownNativeBlocks'
 import {
   isMarkdownImportWithinParseLimits,
+  readInlineLinkRanges,
   readMarkdownImportStructure,
   type MarkdownImportStructure,
   type MarkdownLineRange,
@@ -185,19 +186,26 @@ export function convertMarkdownToDocument(
   // parse limits, and a line scan with throwaway IDs has not rejected an oversized table.
   // A file the parser could take too long on is split by lines only, as before references were
   // made inline.
-  const spans = MAY_SPAN_BLOCKS.test(text) && isMarkdownImportWithinParseLimits(text)
+  // A file whose link targets are rewritten is parsed too, so only links the parser reads are
+  // rewritten, and code examples keep their text.
+  const rewritesLinks = options.resolveLink !== undefined && text.includes('](')
+  const spans = (MAY_SPAN_BLOCKS.test(text) || rewritesLinks) && isMarkdownImportWithinParseLimits(text)
   if (spans) {
-    const checked = scanBlocks(sourceLines, () => 'unused', options.resolveLink, undefined, undefined, false)
+    const checked = scanBlocks(sourceLines, () => 'unused', undefined, undefined, undefined, false)
     if (!checked.ok) return checked
   }
+  const linked = spans && rewritesLinks && options.resolveLink
+    ? rewriteParsedLinkTargets(text, options.resolveLink, readInlineLinkRanges(text))
+    : text
   // Every destination a reference is written with stays in the page's text, so references that
   // add more than the page can hold are refused before the long text is built.
-  const structure = spans ? readMarkdownImportStructure(text, options.resolveLink, MAX_CONTENT_BYTES) : undefined
+  const structure = spans ? readMarkdownImportStructure(linked, options.resolveLink, MAX_CONTENT_BYTES) : undefined
   if (structure === 'too-large') return { ok: false, code: 'too-large' }
   const scanned = scanBlocks(
     structure?.text.split('\n') ?? sourceLines,
     options.createId,
-    options.resolveLink,
+    // A parsed file has its link targets rewritten already.
+    structure === undefined ? options.resolveLink : undefined,
     structure?.topLevelBlocks,
     structure?.footnoteReferences.map(({ line }) => line).sort((a, b) => a - b),
   )
@@ -300,7 +308,8 @@ function scanBlocks(
   const paragraphLines = new Map<string, MarkdownLineRange>()
   /** Rewrites link targets with the resolver, or keeps the text as written. */
   const rewrite: LinkRewriter = resolveLink
-    ? (raw) => rewriteLinkTargets(raw, resolveLink)
+    // Without a parse, text that may hold a code block keeps its link-like text as written.
+    ? (raw) => MAY_HOLD_CODE_BLOCK.test(raw) ? raw : rewriteLinkTargets(raw, resolveLink)
     : (raw) => raw
   /** Whether each top-level block is a list of task items alone, once worked out. */
   const checklistBlocks = new Map<MarkdownLineRange, boolean>()
@@ -1176,10 +1185,7 @@ function rewriteLinkTargets(
       const destination = readLinkDestination(raw, position + 2)
       const target = destination ? resolveLink(destination.href) : undefined
       if (destination && target !== undefined) {
-        // A page link is written without `<>`, as the text of table cells and checklist items only
-        // recognizes `[label](/documents/<id>)`.
-        result += raw.slice(position, destination.start) +
-          (PLAIN_DESTINATION.test(target) ? target : `<${target.replace(/[\\<>&]/gu, '\\$&')}>`) +
+        result += raw.slice(position, destination.start) + writeLinkTarget(target) +
           raw.slice(destination.end, destination.close + 1)
         position = destination.close + 1
         continue
@@ -1190,6 +1196,57 @@ function rewriteLinkTargets(
   }
   return result
 }
+
+/**
+ * Rewrites the targets of the inline links and images the parser read in a file, leaving any
+ * text that only looks like a link, such as one in a code block, a code span, or HTML, as written.
+ *
+ * @param text - Markdown file.
+ * @param resolveLink - Returns the new target, or undefined to keep it.
+ * @param links - Source ranges of the parsed inline links and images, in order.
+ * @returns The file with resolved link targets replaced; the line count stays the same.
+ */
+function rewriteParsedLinkTargets(
+  text: string,
+  resolveLink: (href: string) => string | undefined,
+  links: ReadonlyArray<{ start: number; end: number }>,
+): string {
+  let result = ''
+  let copied = 0
+  for (const link of links) {
+    // An image may sit in a link's text; it is rewritten with the link, from left to right.
+    if (link.start < copied) continue
+    // The label ends at the `](` whose destination closes the link where the parser ended it.
+    for (let index = text.indexOf('](', link.start); index !== -1 && index < link.end; index = text.indexOf('](', index + 1)) {
+      const destination = readLinkDestination(text, index + 2)
+      if (destination?.close !== link.end - 1) continue
+      const target = resolveLink(destination.href)
+      if (target !== undefined) {
+        result += text.slice(copied, destination.start) + writeLinkTarget(target)
+        copied = destination.end
+      }
+      break
+    }
+  }
+  return result + text.slice(copied)
+}
+
+/**
+ * Writes a rewritten link target. A page link is written without `<>`, as the text of table cells
+ * and checklist items only recognizes `[label](/documents/<id>)`.
+ *
+ * @param target - New target.
+ * @returns The destination as Markdown.
+ */
+function writeLinkTarget(target: string): string {
+  return PLAIN_DESTINATION.test(target) ? target : `<${target.replace(/[\\<>&]/gu, '\\$&')}>`
+}
+
+/**
+ * A line that may open a fenced or indented code block, after any quote or list markers, which a
+ * file read by lines only cannot tell apart from text.
+ */
+const MAY_HOLD_CODE_BLOCK = /^(?:[ \t]*(?:>|[-+*]|\d{1,9}[.)])(?=[ \t]|$))*[ \t]*(?:`{3,}|~{3,})|^(?: {4}|\t)/mu
 
 /**
  * Removes Markdown backslash escapes so stored text reads as written.

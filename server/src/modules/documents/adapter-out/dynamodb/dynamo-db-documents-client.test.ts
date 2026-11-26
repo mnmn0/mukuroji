@@ -6536,6 +6536,53 @@ const NESTED_BLOCK_EXPORT = [
   'Note[^5-1]\n\n[^5-1]: first\n\n    ```js\n    code()\n    ```',
 ].join('\n\n') + '\n'
 
+test('leaves code in a paragraph list or quote as written when references and footnotes are rewritten', () => {
+  const text = [
+    '- item [x][r] and a note[^n]',
+    '',
+    '  ~~~',
+    '  [x][r] [^n] <b>',
+    '  ~~~',
+    '',
+    '      [x][r] [^n] indented',
+    '',
+    '> ```',
+    '> [x][r] [^n] [^z]',
+    '> ```',
+    '>',
+    '>     [x][r] `[^n]`',
+    '',
+    '[r]: https://example.com/r',
+    '',
+    '[^n]: note',
+  ].join('\n')
+  const page = createPage({ blocks: [{ id: 'block-1', type: 'paragraph', text }] })
+  const exported = renderDocumentExport(page, 'markdown', markdownInspector).content
+  expect(exported).toBe([
+    '# Document',
+    '',
+    '- item [x](<https://example.com/r>) and a note[^1-1]',
+    '',
+    '  ~~~',
+    '  [x][r] [^n] <b>',
+    '  ~~~',
+    '',
+    '      [x][r] [^n] indented',
+    '',
+    '> ```',
+    '> [x][r] [^n] [^z]',
+    '> ```',
+    '>',
+    '>     [x][r] `[^n]`',
+    // The removed definition leaves its blank lines.
+    '',
+    '',
+    '',
+    '[^1-1]: note',
+    '',
+  ].join('\n'))
+})
+
 test('writes native blocks so that their Markdown renders the text the page shows', () => {
   const page = createPage({
     title: 'Plan #',
