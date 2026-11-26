@@ -332,7 +332,8 @@ function closesFence(line: string, marker: string): boolean {
 }
 
 /**
- * Splits paragraph Markdown longer than one block holds at blank lines outside code fences.
+ * Splits paragraph Markdown longer than one block holds at blank lines outside code fences. A part
+ * that still does not fit is left whole, so the caller refuses it.
  *
  * @param text - Paragraph Markdown.
  * @returns Parts of at most one block's length where blank lines allow it.
@@ -341,7 +342,7 @@ function splitLongParagraph(text: string): string[] {
   if (text.length <= DOCUMENT_MAX_TEXT_LENGTH) return [text]
   const parts: string[] = []
   let current = ''
-  for (const section of text.split(/\n[ \t]*\n/u)) {
+  for (const section of splitAtBlankLinesOutsideFences(text)) {
     const joined = current === '' ? section : `${current}\n\n${section}`
     if (joined.length <= DOCUMENT_MAX_TEXT_LENGTH) {
       current = joined
@@ -352,6 +353,35 @@ function splitLongParagraph(text: string): string[] {
   }
   if (current !== '') parts.push(current)
   return parts
+}
+
+/**
+ * Splits paragraph Markdown into sections at blank lines that are outside fenced code, including
+ * fences nested in lists or quotes, so no section starts or ends inside a code block.
+ *
+ * @param text - Paragraph Markdown.
+ * @returns Sections in order, without the blank lines between them.
+ */
+function splitAtBlankLinesOutsideFences(text: string): string[] {
+  const sections: string[] = []
+  let lines: string[] = []
+  let fence: string | undefined
+  for (const line of text.split('\n')) {
+    const content = line.replace(/^[ \t>]*(?:(?:[*+-]|\d+[.)])[ \t]+)?/u, '')
+    if (fence !== undefined) {
+      if (closesFence(content, fence)) fence = undefined
+    } else if (line.trim() === '') {
+      if (lines.length > 0) sections.push(lines.join('\n'))
+      lines = []
+      continue
+    } else {
+      const open = /^(`{3,}|~{3,})/u.exec(content)
+      if (open?.[1] !== undefined) fence = open[1]
+    }
+    lines.push(line)
+  }
+  if (lines.length > 0) sections.push(lines.join('\n'))
+  return sections
 }
 
 /**
