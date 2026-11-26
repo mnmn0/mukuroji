@@ -140,7 +140,7 @@ export function convertMarkdownToPageBlocks(
   }
   if (keepsWhole) return whole()
   const scanned = scanBlocks(bodyLines, createId)
-  if (!scanned.ok) return scanned.code === 'keep-whole' ? whole() : scanned
+  if (!scanned.ok) return scanned.code === 'keep-whole' ? whole() : { ok: false, code: scanned.code }
   const body = scanned.blocks
   const leadingTitle = title?.text
   const shallowest = leadingTitle !== undefined
