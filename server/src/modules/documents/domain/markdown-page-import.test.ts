@@ -178,6 +178,14 @@ describe('convertMarkdownToPageBlocks', () => {
     ])
   })
 
+  test('trims many blank lines in linear time', () => {
+    const started = performance.now()
+    expect(convert(`${'\n'.repeat(100_000)}Text${'\n'.repeat(100_000)}`).blocks).toEqual([
+      { id: expect.any(String), type: 'paragraph', text: 'Text' },
+    ])
+    expect(performance.now() - started).toBeLessThan(2_000)
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])

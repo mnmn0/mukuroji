@@ -113,7 +113,7 @@ export function convertMarkdownToPageBlocks(
   const title = findLeadingTitle(lines)
   const bodyLines = title === undefined ? lines : lines.slice(title.next)
   // Only blank lines are trimmed, so the first line keeps indentation that makes it code.
-  const bodyText = bodyLines.join('\n').replace(/^(?:[ \t]*\n)+/u, '').replace(/(?:\n[ \t]*)+$/u, '')
+  const bodyText = trimBlankLines(bodyLines).join('\n')
   // A reference or footnote definition resolves anywhere in the document, but each paragraph
   // block is shown on its own; such Markdown stays whole in one paragraph so every reference
   // keeps its definition. A raw HTML block is shown literally up to its end, so Markdown with one
@@ -236,8 +236,7 @@ function scanBlocks(
 
   /** Ends the open paragraph Markdown, splitting it at blank lines when it is too long. */
   const flushParagraph = () => {
-    while (paragraph.length > 0 && paragraph[0]?.trim() === '') paragraph.shift()
-    while (paragraph.length > 0 && paragraph.at(-1)?.trim() === '') paragraph.pop()
+    paragraph = trimBlankLines(paragraph)
     if (paragraph.length > 0) {
       for (const text of splitLongParagraph(paragraph.join('\n'))) {
         if (text.length > DOCUMENT_MAX_TEXT_LENGTH) tooLong = true
@@ -346,6 +345,22 @@ function scanBlocks(
   }
   flushParagraph()
   return tooLong ? { ok: false, code: 'block-too-long' } : { ok: true, blocks }
+}
+
+/**
+ * Drops the blank lines at the start and end of a run of lines in one pass, so many blank lines
+ * cost linear time.
+ *
+ * @param lines - Source lines.
+ * @returns The lines from the first to the last line that is not blank.
+ */
+function trimBlankLines(lines: readonly string[]): string[] {
+  const blank = (line: string | undefined) => line === undefined || /^[ \t]*$/u.test(line)
+  let start = 0
+  while (start < lines.length && blank(lines[start])) start += 1
+  let end = lines.length
+  while (end > start && blank(lines[end - 1])) end -= 1
+  return lines.slice(start, end)
 }
 
 /**
