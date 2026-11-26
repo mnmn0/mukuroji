@@ -69,6 +69,7 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
   if (!isRecord(value) || value.schemaVersion !== AGENT_SETTINGS_SCHEMA_VERSION) return undefined
   const {
     acceptanceCriteriaFieldId,
+    acceptNewRuns,
     allowTakeoverAfterLeaseExpiry,
     brief,
     fileFailedRunsToTriage,
@@ -96,6 +97,8 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     // Servers older than Triage filing omit the flags, which then read as off.
     (fileFailedRunsToTriage !== undefined && typeof fileFailedRunsToTriage !== 'boolean') ||
     (fileStalledRunsToTriage !== undefined && typeof fileStalledRunsToTriage !== 'boolean') ||
+    // Servers older than the switch omit it and always accept new runs.
+    (acceptNewRuns !== undefined && typeof acceptNewRuns !== 'boolean') ||
     (acceptanceCriteriaFieldId !== undefined && !isNonEmptyString(acceptanceCriteriaFieldId)) ||
     (brief !== undefined && typeof brief !== 'string') ||
     !projectBriefs ||
@@ -109,6 +112,7 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     teamId,
     revision,
     leaseMinutes,
+    acceptNewRuns: acceptNewRuns !== false,
     allowTakeoverAfterLeaseExpiry,
     readyStatusIds: [...readyStatusIds],
     resumableStatusIds: Array.isArray(resumableStatusIds) ? resumableStatusIds.filter(isNonEmptyString) : [],

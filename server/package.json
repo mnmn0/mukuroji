@@ -42,6 +42,9 @@
     "@smithy/node-http-handler": "4.9.5",
     "@smithy/signature-v4": "5.6.4",
     "hono": "^4.13.16",
+    "mdast-util-from-markdown": "2.0.3",
+    "mdast-util-gfm": "3.1.0",
+    "micromark-extension-gfm": "3.0.0",
     "openai": "7.52.0",
     "zod": "4.6.6"
   },
