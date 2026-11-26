@@ -66,6 +66,9 @@ const FENCE_OPEN = /^(`{3,}|~{3,})(.*)$/u
 /** ATX heading line at the start of a line. */
 const ATX_HEADING = /^(#{1,6})(?:[ \t]+(.*?))?[ \t]*$/u
 
+/** Setext heading underline, which makes the paragraph line above it a heading. */
+const SETEXT_UNDERLINE = /^ {0,3}(=+|-+)[ \t]*$/u
+
 /** Closing sequence of an ATX heading. */
 const ATX_CLOSING = /[ \t]+#+[ \t]*$/u
 
@@ -126,7 +129,8 @@ export function convertMarkdownToPageBlocks(
     const content = stripContainerMarkers(line)
     return REFERENCE_DEFINITION.test(content) || HTML_BLOCK_START.test(content)
   })
-  if (keepsWhole) {
+  /** Keeps the whole body in one paragraph, which shows it as the Markdown it is. */
+  const whole = (): MarkdownPageImportResult => {
     if (bodyText.length > DOCUMENT_MAX_TEXT_LENGTH) return { ok: false, code: 'block-too-long' }
     return {
       ok: true,
@@ -134,8 +138,9 @@ export function convertMarkdownToPageBlocks(
       ...(title === undefined ? {} : { leadingTitle: title.text }),
     }
   }
+  if (keepsWhole) return whole()
   const scanned = scanBlocks(bodyLines, createId)
-  if (!scanned.ok) return scanned
+  if (!scanned.ok) return scanned.code === 'keep-whole' ? whole() : scanned
   const body = scanned.blocks
   const leadingTitle = title?.text
   const shallowest = leadingTitle !== undefined
@@ -228,7 +233,7 @@ function toHeadingLevel(level: number): 1 | 2 | 3 {
 function scanBlocks(
   lines: readonly string[],
   createId: (prefix: string) => string,
-): { ok: true, blocks: ScannedBlock[] } | { ok: false, code: 'block-too-long' } {
+): { ok: true, blocks: ScannedBlock[] } | { ok: false, code: 'block-too-long' | 'keep-whole' } {
   const blocks: ScannedBlock[] = []
   /** Lines of the paragraph Markdown that is still open. */
   let paragraph: string[] = []
@@ -262,6 +267,8 @@ function scanBlocks(
 
   /** Whether an HTML comment in the open paragraph is still open. */
   let paragraphComment = false
+  /** Whether a Setext heading the scan cannot take apart needs the whole body kept together. */
+  let keepWhole = false
 
   let index = 0
   while (index < lines.length) {
@@ -315,6 +322,27 @@ function scanBlocks(
         continue
       }
     }
+    // A Setext underline makes the paragraph text above it a heading. A single plain line becomes a
+    // heading block so its level is normalized with the others; any other text is kept whole with
+    // the body, so the hierarchy does not change.
+    const underline = SETEXT_UNDERLINE.exec(line)
+    if (underline && paragraph.length > 0 && index > 0 && (lines[index - 1] ?? '').trim() !== '') {
+      const above = paragraph.at(-1) ?? ''
+      const before = paragraph.at(-2)
+      const plain = !/^(?: {4}|\t)/u.test(above) && stripContainerMarkers(above) === above.trimStart()
+      if ((before === undefined || before.trim() === '') && plain) {
+        paragraph.pop()
+        flushParagraph()
+        const text = above.trim()
+        const rawLevel = underline[1]?.startsWith('=') ? 1 : 2
+        blocks.push(MARKDOWN_SYNTAX.test(text)
+          ? { type: 'raw-markdown-heading', rawLevel, text }
+          : { type: 'raw-heading', rawLevel, text })
+        index += 1
+        continue
+      }
+      keepWhole = true
+    }
     const heading = ATX_HEADING.exec(line)
     if (heading) {
       const text = (heading[2] ?? '').replace(ATX_CLOSING, '').trim()
@@ -353,6 +381,7 @@ function scanBlocks(
     index += 1
   }
   flushParagraph()
+  if (keepWhole) return { ok: false, code: 'keep-whole' }
   return tooLong ? { ok: false, code: 'block-too-long' } : { ok: true, blocks }
 }
 

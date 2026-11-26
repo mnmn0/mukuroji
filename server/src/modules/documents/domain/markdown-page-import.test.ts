@@ -198,6 +198,21 @@ describe('convertMarkdownToPageBlocks', () => {
     ])
   })
 
+  test('normalizes Setext headings with the other headings', () => {
+    expect(convert('Overview\n---\n\n### Details').blocks).toEqual([
+      { id: expect.any(String), type: 'heading', level: 1, text: 'Overview' },
+      { id: expect.any(String), type: 'heading', level: 2, text: 'Details' },
+    ])
+    expect(convert('Intro\n\n**Top**\n===\n\n## Sub').blocks).toEqual([
+      { id: expect.any(String), type: 'paragraph', text: 'Intro' },
+      { id: expect.any(String), type: 'paragraph', text: '## **Top**' },
+      { id: expect.any(String), type: 'heading', level: 2, text: 'Sub' },
+    ])
+    const multiLine = 'Two\nlines\n---\n\n### Details'
+    expect(convert(multiLine).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: multiLine }])
+    expect(convert('Text\n\n---\n\n## Heading').blocks.map(({ type }) => type)).toEqual(['paragraph', 'heading'])
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])
