@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { createApiTestHarness } from './test-support/api-test-harness'
 import { createCanonicalPublicPlanningService } from './routes/public-planning-service'
 import { InMemoryPlanningClient } from '../modules/planning/planning'
-import type { AuthenticatedDeveloperCredential } from '../modules/developer-platform/application/ports'
+import type { AuthenticatedDeveloperCredential, CompleteIdempotencyRequest } from '../modules/developer-platform/application/ports'
+import { createInMemoryDeveloperPlatformAdapters } from '../modules/developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { PublicMutationContext } from '../modules/developer-platform/public-api'
 
 const {
@@ -38,13 +39,37 @@ function context(idempotencyKey: string): PublicMutationContext {
 }
 
 /**
- * Installs an in-memory Planning store for the test Workspace.
+ * Installs an in-memory Planning store for the test Workspace, whose health update publish commits
+ * its idempotency receipt with the update, as the DynamoDB transaction does.
  *
  * @returns The store.
  */
 function usePlanning(): InMemoryPlanningClient {
   const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
-  setTestAppDependencies({ planning })
+  const platform = createInMemoryDeveloperPlatformAdapters()
+  const prepared: CompleteIdempotencyRequest[] = []
+  const publishUpdate = planning.publishUpdate.bind(planning)
+  planning.publishUpdate = async (...input) => {
+    const first = prepared.length
+    try {
+      const result = await publishUpdate(...input)
+      for (const completion of prepared.splice(first)) await platform.idempotency.completeIdempotency(completion)
+      return result
+    } catch (error) {
+      prepared.splice(first)
+      throw error
+    }
+  }
+  setTestAppDependencies({
+    planning,
+    idempotency: platform.idempotency,
+    transactions: {
+      async prepareIdempotencyCompletionTransactWrite(request) {
+        prepared.push(request)
+        return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { entryType: 'idempotency' } } } }
+      },
+    },
+  })
   return planning
 }
 
@@ -183,15 +208,24 @@ describe('Public API Planning', () => {
     expect(published.item).toMatchObject({
       target: projectTarget, version: 1, health: 'on-track', risk: 'none', summary: 'On plan.', authorMemberId: 'demo@example.com',
     })
-    const retried = await runWithTestAppDependencies(() => service.publishStatusUpdate(
+    // Another update follows before the first request is retried; the retry still finds its own.
+    const next = await runWithTestAppDependencies(() => service.publishStatusUpdate(
       credential,
-      { ...input, expectedRevision: 1 },
-      context('key-5'),
+      { ...input, summary: 'Still on plan.' },
+      context('key-7'),
     ))
-    expect(retried.item.id).toBe(published.item.id)
+    expect(next.item.version).toBe(2)
+    const retried = await runWithTestAppDependencies(() => service.publishStatusUpdate(credential, input, context('key-5')))
+    expect(retried.item).toMatchObject({ id: published.item.id, version: 1 })
+    await runWithTestAppDependencies(() => service.authorizeStatusUpdateReplay(credential, projectTarget, published))
+    await expect(runWithTestAppDependencies(() => service.authorizeStatusUpdateReplay(
+      credential,
+      projectTarget,
+      { item: { id: 'another', version: 1 } },
+    ))).rejects.toMatchObject({ status: 503 })
 
     const page = await runWithTestAppDependencies(() => service.listStatusUpdates(credential, projectTarget, 10, undefined))
-    expect(page).toMatchObject({ schemaVersion: 1, hasMore: false, items: [{ id: published.item.id, version: 1 }] })
+    expect(page).toMatchObject({ schemaVersion: 1, hasMore: false, items: [{ version: 2 }, { id: published.item.id, version: 1 }] })
   })
 
   test('refuses a health update for a target without an update cadence', async () => {

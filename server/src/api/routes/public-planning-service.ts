@@ -17,6 +17,7 @@ import type {
 } from '@mukuroji/contracts'
 import { createMutationAuditContext, type MutationAuditContext } from '../../modules/audit/audit'
 import type { AuthenticatedDeveloperCredential } from '../../modules/developer-platform/application/ports'
+import { readCredentialPrincipalKey } from '../../modules/developer-platform/credential-principal'
 import {
   PublicApiServiceError,
   type PublicMutationContext,
@@ -28,13 +29,14 @@ import { resolveDeveloperCredentialPrincipal } from '../shared/developer-platfor
 import {
   filterPlanningSnapshotForPrincipal,
   readPlanningWorkItemState,
-  requirePlanningUpdateTargetPermission,
   withPlanningLegacyReadScope,
 } from '../shared/planning-access'
 import { requirePlanningEntityPermission, requirePlanningScopePermission } from '../shared/planning-scope-access'
 import { requireWorkspaceBusinessWrite, type WorkspacePrincipal } from '../shared/project-access'
+import { isRecord } from '../shared/value-guards'
 import { loadAuthorizedTeamIssue } from '../shared/work-item-access'
 import {
+  authorizePlanningUpdateReplayAsPrincipal,
   createPlanningEntityAsPrincipal,
   deletePlanningWorkItemLinkAsPrincipal,
   listPlanningUpdatesAsPrincipal,
@@ -50,24 +52,90 @@ const MILESTONES_ROUTE = '/api/v1/planning/milestones'
 /** Route the health update publish records in its audit events. */
 const STATUS_UPDATES_ROUTE = '/api/v1/planning/status-updates'
 
+/** Team, or Team and Project, a Planning request acts on. */
+type PlanningResource = {
+  /** Team of the resource. */
+  teamId?: string
+  /** Project of the resource, inside `teamId`. */
+  projectId?: string
+}
+
 /**
  * Resolves the credential owner with the Enterprise permission the Web Planning routes require,
- * evaluated the same way: at the Workspace, counting Team and Project grants, with the legacy
- * Project scopes loaded.
+ * evaluated the same way: at the Team or Project the request acts on when it has one, otherwise at
+ * the Workspace counting Team and Project grants, with the legacy Project scopes loaded.
  *
  * @param credential - Authenticated developer credential.
  * @param permission - `planning.read` for reads, `planning.write` for writes.
+ * @param resource - Team or Project the request acts on, as the Web route resolves it.
  * @returns The owner as a Workspace principal.
  */
 async function resolvePlanningPrincipal(
   credential: AuthenticatedDeveloperCredential,
   permission: 'planning.read' | 'planning.write',
+  resource: PlanningResource = {},
 ): Promise<WorkspacePrincipal> {
+  const scope = resource.teamId === undefined
+    ? {}
+    : { teamId: resource.teamId, ...(resource.projectId === undefined ? {} : { projectId: resource.projectId }) }
   // The Web Planning routes load the legacy Project scopes with the principal; do the same, so
   // an owner without Enterprise grants sees the Planning entities of their Projects.
   return withPlanningLegacyReadScope(
-    await resolveDeveloperCredentialPrincipal(credential, { permission, evaluateProjectScopes: true }),
+    await resolveDeveloperCredentialPrincipal(credential, { permission, evaluateProjectScopes: true, ...scope }),
   )
+}
+
+/**
+ * Reads the Team and Project of a live Planning entity, which the Web routes authorize an entity
+ * write at.
+ *
+ * @param workspaceId - Workspace ID.
+ * @param entityId - Planning entity ID.
+ * @returns The entity's scope; empty for a Workspace-wide or missing entity.
+ */
+async function readEntityResource(workspaceId: string, entityId: string): Promise<PlanningResource> {
+  const state = await workItemDependencies.planning.getAuthorizationState(workspaceId)
+  const entity = state.entities.find((candidate) => candidate.id === entityId)
+  return entity?.teamId === undefined
+    ? {}
+    : { teamId: entity.teamId, ...(entity.projectId === undefined ? {} : { projectId: entity.projectId }) }
+}
+
+/**
+ * Reads the Team and Project of a Work Item, which the Web link routes authorize a link write at.
+ *
+ * @param workspaceId - Workspace ID.
+ * @param teamId - Team of the Work Item.
+ * @param workItemId - Work Item ID.
+ * @returns The Work Item's Project inside the Team, or the Team alone.
+ */
+async function readWorkItemResource(workspaceId: string, teamId: string, workItemId: string): Promise<PlanningResource> {
+  const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(workspaceId, teamId, workItemId, {
+    consistentIssueRead: true,
+    includeEvents: false,
+  })
+  const projectId = detail.issue.assignedProjectId
+  return projectId ? { teamId, projectId } : { teamId }
+}
+
+/**
+ * Reads the ID and version of the update a keyed publish stored with its response.
+ *
+ * @param storedBody - Stored response body.
+ * @returns The update's ID and version.
+ */
+function readStoredStatusUpdate(storedBody: unknown): { id: string, version: number } {
+  const item = isRecord(storedBody) && isRecord(storedBody.item) ? storedBody.item : undefined
+  if (
+    !item ||
+    typeof item.id !== 'string' ||
+    typeof item.version !== 'number' ||
+    !Number.isSafeInteger(item.version) ||
+    item.version < 1
+  ) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Stored idempotency response is invalid.', true)
+  }
+  return { id: item.id, version: item.version }
 }
 
 /**
@@ -99,7 +167,8 @@ function createAuditContext(
 
 /**
  * Derives the ID of an entity or update a keyed write creates, so that a retry with the same key
- * names the same one instead of creating another.
+ * names the same one instead of creating another. It uses the same stable caller identity as the
+ * Public API idempotency receipt, which outlives one OAuth access token.
  *
  * @param prefix - ID prefix.
  * @param principal - Credential owner.
@@ -114,7 +183,7 @@ function deriveWriteId(
   context: PublicMutationContext,
 ): string {
   const digest = createHash('sha256')
-    .update(`public-planning-v1\n${prefix}\n${principal.directoryId}\n${credential.credentialId}\n${context.idempotencyKey}`)
+    .update(`public-planning-v1\n${prefix}\n${principal.directoryId}\n${readCredentialPrincipalKey(credential)}\n${context.idempotencyKey}`)
     .digest('hex')
   return `${prefix}-${digest.slice(0, 32)}`
 }
@@ -306,18 +375,6 @@ async function readStatusUpdatePage(
 }
 
 /**
- * Requires the principal to hold member access to a health update target, as publishing does.
- *
- * @param principal - Credential owner.
- * @param target - Project, Team, or Initiative.
- */
-async function authorizeStatusUpdateAs(principal: WorkspacePrincipal, target: PlanningUpdateTarget): Promise<void> {
-  requireWorkspaceBusinessWrite(principal)
-  const snapshot = filterPlanningSnapshotForPrincipal(principal, await readUnfilteredSnapshot(principal))
-  await requirePlanningUpdateTargetPermission(principal, snapshot, target, 'member')
-}
-
-/**
  * Creates the Planning adapter of the Public API. Every call resolves the credential owner's
  * current permissions and runs the same authorization as the Web Planning routes (ADR 0107).
  *
@@ -345,13 +402,13 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
     },
 
     async authorizeMilestoneCreate(credential, input) {
-      const principal = await resolvePlanningPrincipal(credential, 'planning.write')
+      const principal = await resolvePlanningPrincipal(credential, 'planning.write', input)
       requireWorkspaceBusinessWrite(principal)
       await requirePlanningScopePermission(principal, input, 'member')
     },
 
     async createMilestone(credential, input, context) {
-      const principal = await resolvePlanningPrincipal(credential, 'planning.write')
+      const principal = await resolvePlanningPrincipal(credential, 'planning.write', input)
       const entityId = deriveWriteId('pe', principal, credential, context)
       /** Answers with the Milestone an earlier attempt with the same key created. */
       const replay = async (): Promise<PublicPlanningEntityMutation> => {
@@ -399,13 +456,21 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
     },
 
     async authorizeMilestoneUpdate(credential, milestoneId) {
-      const principal = await resolvePlanningPrincipal(credential, 'planning.write')
+      const principal = await resolvePlanningPrincipal(
+        credential,
+        'planning.write',
+        await readEntityResource(credential.workspaceId, milestoneId),
+      )
       requireWorkspaceBusinessWrite(principal)
       await requireChangeableMilestone(principal, milestoneId)
     },
 
     async updateMilestone(credential, milestoneId, input, context) {
-      const principal = await resolvePlanningPrincipal(credential, 'planning.write')
+      const principal = await resolvePlanningPrincipal(
+        credential,
+        'planning.write',
+        await readEntityResource(credential.workspaceId, milestoneId),
+      )
       await requireChangeableMilestone(principal, milestoneId)
       const patch: PlanningEntityPatch = {
         ...(input.title === undefined ? {} : { title: input.title }),
@@ -435,13 +500,21 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
     },
 
     async authorizeWorkItemPlanningChange(credential, teamId, workItemId) {
-      const principal = await resolvePlanningPrincipal(credential, 'planning.write')
+      const principal = await resolvePlanningPrincipal(
+        credential,
+        'planning.write',
+        await readWorkItemResource(credential.workspaceId, teamId, workItemId),
+      )
       requireWorkspaceBusinessWrite(principal)
       await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
     },
 
     async updateWorkItemPlanning(credential, teamId, workItemId, input) {
-      const principal = await resolvePlanningPrincipal(credential, 'planning.write')
+      const principal = await resolvePlanningPrincipal(
+        credential,
+        'planning.write',
+        await readWorkItemResource(credential.workspaceId, teamId, workItemId),
+      )
       const state = await workItemDependencies.planning.getAuthorizationState(principal.directoryId)
       const current = state.workItemLinks.find((link) => link.teamId === teamId && link.workItemId === workItemId)
       const cycleId = input.cycleId === undefined ? current?.cycleId : input.cycleId ?? undefined
@@ -477,53 +550,40 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
       return readStatusUpdatePage(principal, target, limit, cursor)
     },
 
-    async authorizeStatusUpdate(credential, target) {
-      await authorizeStatusUpdateAs(await resolvePlanningPrincipal(credential, 'planning.write'), target)
+    async authorizeStatusUpdateReplay(credential, target, storedBody) {
+      const { id, version } = readStoredStatusUpdate(storedBody)
+      await authorizePlanningUpdateReplayAsPrincipal(
+        await resolvePlanningPrincipal(credential, 'planning.write'),
+        target,
+        id,
+        version,
+      )
     },
 
     async publishStatusUpdate(credential, input, context): Promise<PublicPlanningStatusUpdateMutation> {
       const principal = await resolvePlanningPrincipal(credential, 'planning.write')
-      const updateId = deriveWriteId('pu', principal, credential, context)
-      /** Answers with the update an earlier attempt with the same key published, if it is the latest. */
-      const replay = async (): Promise<PublicPlanningStatusUpdateMutation | undefined> => {
-        const page = await readStatusUpdatePage(principal, input.target, 1, undefined)
-        const latest = page.items[0]
-        return latest?.id === updateId ? { schemaVersion: 1, revision: page.revision, item: latest } : undefined
-      }
-      // The ID comes from the key, so after a lost response the retry finds the update it made,
-      // even though that publish moved the revision the retry still sends.
-      const earlier = await replay()
-      if (earlier) {
-        await authorizeStatusUpdateAs(principal, input.target)
-        return earlier
-      }
-      const publish = {
-        target: input.target,
-        id: updateId,
-        health: input.health,
+      const { expectedRevision, ...request } = input
+      // The ID comes from the key, and the key's receipt commits with the update, bound to the
+      // client body. A retry after a lost response therefore replays the update it made, after the
+      // same captured-scope check as the Web replay, even though the latest revision has moved.
+      const outcome = await publishPlanningUpdateAsPrincipal(principal, {
+        ...request,
+        id: deriveWriteId('pu', principal, credential, context),
         risk: input.risk ?? 'none',
-        summary: input.summary,
         riskSummary: input.riskSummary ?? '',
         decisionSummary: input.decisionSummary ?? '',
         helpNeeded: input.helpNeeded ?? '',
         nextAction: input.nextAction ?? '',
         evidence: [],
-        expectedRevision: await resolveRevision(principal, input.expectedRevision),
-      }
-      try {
-        const outcome = await publishPlanningUpdateAsPrincipal(principal, publish, {
-          method: 'POST',
-          path: STATUS_UPDATES_ROUTE,
-          createAuditContext: (recorded) => createAuditContext(principal, context, 'POST', STATUS_UPDATES_ROUTE, recorded),
-        })
-        return { schemaVersion: 1, revision: outcome.planning.revision, item: toPublicStatusUpdate(outcome.update) }
-      } catch (error) {
-        // A concurrent attempt with the same key committed first.
-        if (!(error instanceof PlanningError && error.code === 'PlanningUpdateExists')) throw error
-        const concurrent = await replay()
-        if (!concurrent) throw error
-        return concurrent
-      }
+        expectedRevision: await resolveRevision(principal, expectedRevision),
+      }, {
+        idempotencyKey: context.idempotencyKey,
+        method: 'POST',
+        path: STATUS_UPDATES_ROUTE,
+        fingerprint: input,
+        createAuditContext: (recorded) => createAuditContext(principal, context, 'POST', STATUS_UPDATES_ROUTE, recorded),
+      })
+      return { schemaVersion: 1, revision: outcome.planning.revision, item: toPublicStatusUpdate(outcome.update) }
     },
   }
 }

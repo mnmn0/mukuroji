@@ -1736,7 +1736,7 @@ type PlanningUpdatePublishReceiptExpectation = {
   /** Authenticated member key that published the update. */
   authorMemberKey: string
   /** Exact request body bound to the idempotency fingerprint. */
-  request: PublishPlanningUpdateInput
+  request: unknown
 }
 
 /** Canonical request identity retained by a durable Planning cadence receipt. */
@@ -3599,6 +3599,11 @@ export type PlanningUpdatePublishRequest = {
   method: string
   /** Canonical API path the key is bound to. */
   path: string
+  /**
+   * Request the key is bound to, when it differs from the publish input; the Public API binds the
+   * client body, so a retry that resolves another latest revision still replays.
+   */
+  fingerprint?: unknown
   /** Builds the audit context of the publish from the validated input. */
   createAuditContext: (input: PublishPlanningUpdateInput) => MutationAuditContext
 }
@@ -3645,7 +3650,7 @@ export async function publishPlanningUpdateAsPrincipal(
           target: input.target,
           id: input.id,
           authorMemberKey: principal.userKey.toLowerCase(),
-          request: input,
+          request: request.fingerprint ?? input,
         }
         const reservationRequest = createPlanningUpdatePublishReservationRequest(
           principal,
@@ -3758,6 +3763,30 @@ export async function publishPlanningUpdateAsPrincipal(
     }
     throw error
   }
+}
+
+/**
+ * Authorizes the replay of an update published earlier, as the Web publish replay does: the caller
+ * needs member access to the target and read access to the scope the update captured, which stays
+ * the same when the target later moves.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param target - Project, Team, or Initiative of the update.
+ * @param id - Update ID.
+ * @param version - Update version within the target.
+ */
+export async function authorizePlanningUpdateReplayAsPrincipal(
+  principal: WorkspacePrincipal,
+  target: PlanningUpdateTarget,
+  id: string,
+  version: number,
+): Promise<void> {
+  requireWorkspaceBusinessWrite(principal)
+  const { snapshot } = await readPlanningPublishState(principal, readPlanningUpdateTarget(target))
+  await requirePlanningUpdateTargetPermission(principal, filterPlanningSnapshotForPrincipal(principal, snapshot), target, 'member')
+  const update = await readPlanningUpdateByVersion(principal.directoryId, target, version)
+  if (!update || update.id !== id) throw planningUpdatePublishIdempotencyUnavailable()
+  await requirePlanningUpdateCapturedScopePermission(principal, update.contextSnapshot.scope)
 }
 
 /**

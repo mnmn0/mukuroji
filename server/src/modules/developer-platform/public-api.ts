@@ -844,11 +844,17 @@ export interface PublicPlanningService {
     cursor: string | undefined,
   ): Promise<PublicPlanningStatusUpdatePage>
   /**
-   * Checks that the owner may publish a health update for a target; replays call it.
+   * Checks, before a keyed publish replays, that the owner may still publish for the target and
+   * read the scope the stored update captured.
    * @param credential - Authenticated developer credential.
    * @param target - Project, Team, or Initiative.
+   * @param storedBody - Response body the earlier publish stored with its key.
    */
-  authorizeStatusUpdate(credential: AuthenticatedDeveloperCredential, target: PlanningUpdateTarget): Promise<void>
+  authorizeStatusUpdateReplay(
+    credential: AuthenticatedDeveloperCredential,
+    target: PlanningUpdateTarget,
+    storedBody: unknown,
+  ): Promise<void>
   /**
    * Publishes an immutable health update whose ID derives from the idempotency key.
    * @param credential - Authenticated developer credential.
@@ -1903,7 +1909,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       status: 201,
       body: await planning.publishStatusUpdate(credential, body, context),
     }), {
-      authorizeReplay: () => planning.authorizeStatusUpdate(credential, body.target),
+      authorizeReplay: (storedBody) => planning.authorizeStatusUpdateReplay(credential, body.target, storedBody),
     })
   })
 
@@ -3904,8 +3910,11 @@ async function requireOwnPersonalApiKey(
 type IdempotentExecutionOptions = {
   /** Receipt 保存失敗後に安全に同じ domain operation を再実行できるかどうかです。 */
   releaseReservationAfterCompletionFailure?: boolean
-  /** Completed receipt を返す直前に current domain authorization を再評価します。 */
-  authorizeReplay?: () => Promise<void>
+  /**
+   * Completed receipt を返す直前に current domain authorization を再評価します。
+   * 引数は receipt に保存した response body です。
+   */
+  authorizeReplay?: (storedBody: unknown) => Promise<void>
 }
 
 async function executeIdempotentJson(
@@ -3976,7 +3985,9 @@ async function executeIdempotent(
     )
   }
   if (reservation.status === 'replay') {
-    await options.authorizeReplay?.()
+    // Authorize before validating the stored response, so a caller without access learns nothing
+    // about it; the callback validates whatever it reads from the body.
+    await options.authorizeReplay?.(readStoredResponseBody(reservation.response))
     const replay = requireStoredResponse(reservation.response)
     c.header('Idempotency-Replayed', 'true')
     return respondIdempotent(c, replay)
@@ -6044,6 +6055,16 @@ function readCursor(
 
 function invalidCursor() {
   return new PublicApiServiceError(400, 'invalid_request', 'Cursor is invalid or belongs to another scope.')
+}
+
+/**
+ * Reads the body of a stored idempotency response without validating the response.
+ *
+ * @param value - Stored response.
+ * @returns The body, or undefined when the response is not an object.
+ */
+function readStoredResponseBody(value: unknown): unknown {
+  return typeof value === 'object' && value !== null && 'body' in value ? value.body : undefined
 }
 
 function requireStoredResponse(value: unknown) {

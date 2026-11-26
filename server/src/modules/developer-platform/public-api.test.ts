@@ -897,7 +897,7 @@ describe('public API router', () => {
           calls.push(`updates ${JSON.stringify(target)} ${limit}`)
           return { schemaVersion: 1, revision: 7, items: [update], hasMore: false }
         },
-        async authorizeStatusUpdate() { throw new Error('not used') },
+        async authorizeStatusUpdateReplay() { throw new Error('not used') },
         async publishStatusUpdate(_credential, input) {
           calls.push(`publish ${JSON.stringify(input)}`)
           return { schemaVersion: 1, revision: 8, item: update }
