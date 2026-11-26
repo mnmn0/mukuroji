@@ -128,7 +128,33 @@ polling に戻ります。ADR 0041 を参照してください。一覧は評価
 Comment は root / reply、block・text・whiteboard object anchor を保持します。解決済み root
 への reply は、reply 保存 transaction 内でも root の未解決状態を condition check して拒否します。
 Mention は active Workspace member を検証し、comment と同じ transaction で audit event を保存
-します。通知一覧を返す直前にも current Document ACL を再評価するため、通知作成後に private
+します。Reply の通知は mention された member に加え、thread の root の作成者とそれまでの返信者
+（reply 作成者自身を除く）にも届きます。参加者は thread ごとの index row
+（`COMMENT_PARTICIPANT#<documentId>#<rootCommentId>#<memberKey>`）に comment と同じ transaction で
+書き、返信時はその thread の row だけを全 page 読みます。新しい root comment は index の完了 marker
+（`COMMENT_PARTICIPANT_INDEX#<documentId>#<rootCommentId>`）も書きます。marker のない、index が
+できる前の thread は Document の comment row を全 page 読んで参加者を集め、25 人以下なら同じ返信の
+transaction で参加者 row と marker を書き足します。どちらも page を途中で打ち切りません（ADR 0092）。
+同じ Document の別の comment が先に保存されて comment window の条件に負けた返信は、参加者を読み直して
+参加者 row と通知先を作り直してから再試行するので、同時に初めて返信した member にも通知が届きます。
+既存の thread は data migration `0002-document-comment-participant-index` で参加者 row と marker を
+一括で作れます。migration の間は comment の作成を止めます（[data-migration.md](data-migration.md)）。comment row の編集・削除・resolve は、row の単調増加の `revision` を 1 つ上げ、読んだ `revision` と
+`updatedAt` を条件に書くので、同じミリ秒に commit された別の書き込みも上書きせず 409 で断ります
+（`revision` のない古い row は revision 0 として扱います。ADR 0092）。Comment の作成者は自分の
+comment の本文と mention を編集（`editedAt` を記録し、新しく mention された member にだけ通知）
+し、削除できます。編集の画面は保存済みの mention を候補から選んだ扱いにせず、編集で変わらなかった
+部分にある mention はその位置の member のまま保ちます。そのため保存後に member の名前が入れ替わっても、
+関係のない編集で古い `@名前` が別の member の mention に変わりません。削除は row を消さず、本文と mention を空にして `deletedAt` を記録するので、
+thread の返信はそのまま残り、画面は「このコメントは削除されました」と表示します。編集と削除の
+`Idempotency-Key` は Workspace・member・key の hash を sort key にした
+`COMMENT_MUTATION#<documentId>#<hash>` の receipt（operation・comment・入力の fingerprint と
+結果の comment を持ち、30 日の TTL）に、変更と同じ transaction で記録します。同じ key の
+再送は comment を書き換えずに最初の結果を返し（その後の新しい編集を巻き戻さない）、同じ key で
+別の操作・comment・入力を送ると `409 DocumentCommentIdempotencyConflict` を返します。削除済みの comment を新しい key で削除した場合も key を
+receipt に記録します。audit event は Document・comment・置き換える版ごとに別の ID を持つので、同じ key で
+別の Document の comment を変えても、receipt の期限後に同じ comment を変えても衝突しません。記録済みの
+編集の再送は mention の member 検証より前に結果を返すので、その後 mention した member が Workspace を
+離れても失敗しません。通知一覧を返す直前にも current Document ACL を再評価するため、通知作成後に private
 化・archive された Document は表示されません。
 
 Favorite と最終 open 時刻は、preference revision の条件付き transaction を競合時に再試行して
@@ -181,6 +207,7 @@ Document 最大 payload の末尾まで検索対象になります。
 - `POST /api/documents/{documentId}/versions/{versionId}/approvals`
 - `GET /api/documents/{documentId}/approvals`
 - `GET|POST /api/documents/{documentId}/comments`
+- `PATCH|DELETE /api/documents/{documentId}/comments/{commentId}`（作成者だけ）
 - `POST /api/documents/{documentId}/comments/{commentId}/resolve`
 - `GET|PUT /api/documents/{documentId}/presence`
 - `DELETE /api/documents/{documentId}/presence/{clientId}`
@@ -214,6 +241,24 @@ Team ID と Issue ID から `team/<teamId>/issue/<issueId>` を生成するた�
 にし、public share 画面では編集 control を表示しません。Mention 通知の deep link は対象 thread
 を cursor 越しに取得し、対象 comment を drawer 内で強調・focus します。
 
+Paragraph block は Markdown として表示します（GFM の箇条書き・番号付きリスト・link・強調・
+引用・表・inline code。単独の改行もそのまま改行として表示）。描画は Work Item のコメントと共通の
+sanitize 済み renderer（`web/src/shared/ui/SafeMarkdown.tsx`）で、raw HTML は実行せず文字として
+表示し、外部 URL の画像は読み込みません。Work Item key の link と `attachment:` 添付はコメント
+だけの機能で、paragraph では文字のまま表示します。
+Editor 右上の「プレビュー」で編集中のページを表示どおりに確認できます。Block は各 block の
+「+」から直下に、最初の block の上の「先頭にブロックを挿入」から先頭に挿入でき、table は行と列を個別に削除できます（列は 1 つ以上残します）。
+Diagram block の `text` 形式は `A → B` の流れとして描画します。Mermaid の描画 library は同梱して
+いないため、新しい diagram では Mermaid を選べず、取り込み済みの Mermaid は source として表示します。
+
+まだないもの: 画像・file の block と Document への file 添付（file の保存・malware scan・認可は
+Team の Work Item / Project 単位の scope で作られており、Workspace 直下の Document を添付先に
+するには scope・保存 key・整合性検査の設計が別に要るため）、Work Item 一覧を埋め込む block、
+Document の watch。
+
+「共有とアクセス」のメンバー追加は、Workspace の active member を名前で選べます（member key や
+メールの直接入力もできます）。共有済みの一覧とコメントの作成者は表示名で表示します。
+
 右 panel の version 一覧では各 version の「確認・比較・承認」から dialog を開き、read-only の
 preview、別の version または現在の内容との block 単位の差分（追加・削除・変更・移動）、
 名前を付けた固定、Work Item への承認依頼と結果の確認ができます。Work Item の承認一覧の
@@ -234,9 +279,100 @@ Documents home の「Markdown を取り込む」で、貼り付けた Markdown �
 - ページの Markdown export は表の各行の間に空行を入れるので、その形の表も table block に戻します。
 - フェンス付きコードは code block（安全な言語名だけ保持）、`mermaid` のフェンスは diagram block、
   `- [ ]` / `- [x]` の連続行は checklist block、GFM のパイプ表は table block にします。
-- 段落・リスト・引用・リンク・画像・HTML は、Markdown の backslash escape だけを外して paragraph
-  block の text として残します。paragraph は text として表示するので、HTML やリンクは描画しません。
-- folder 単位の一括取り込みと、相対リンクを取り込んだページ同士のリンクに変換する処理はまだありません。
+- 見出し・チェック項目・表の cell・埋め込みのタイトルは本文を Markdown として描画せず、書いたとおりの
+  文字を表示します（チェック項目と表の cell は `[label](/documents/<id>)` のページへの link だけを link に
+  します）。そのため取り込みは、描画すると同じ文字になる Markdown だけをこれらの block にし、強調・code
+  span・ほかの場所への link・画像・HTML・脚注・文字参照（`&amp;` など）・取り消し線を含む見出し・list・
+  表・link は、全体を paragraph block の Markdown として残します（チェック項目の list は 1 つの項目でも
+  当てはまれば list 全体を残します）。判定は `web/src/documents/model/markdownNativeBlocks.ts` が block の
+  種類ごとに、描画と同じ parser の結果と block が表示する文字を比べて行います。URL や mail address を
+  そのまま書いた部分は、block でも同じ文字が表示される（link にはならない）ので、そのまま block にします。
+  記号を含む行は描画と同じ parser で解析しますが（数百行ずつまとめて解析します）、1 ファイルで解析する
+  合計が 3 万文字を超えた後の行は解析せず paragraph block の Markdown として残します（表示は変わりません）。
+  どの block も表示しない区切り線（`---`）は、捨てずに paragraph block の Markdown として残します。
+  Markdown 書き出しは、これらの block の文字を `\`、`*`、`&`、`~` などの記号を escape して書き、見出しの
+  末尾の `#` も escape し、ページへの link は Markdown の link として書くので、書き出したファイルを
+  取り込み直すと同じ種類の block に戻ります。
+- 段落・リスト・引用・リンク・画像・HTML は、backslash escape も含めて Markdown のまま paragraph
+  block の text として残します。paragraph は Markdown として表示するので、リスト・引用・リンクは
+  描画され、`\*literal\*` のような escape は文字のまま、HTML は文字のまま表示されます。画像は
+  描画しません。強調や括弧の記号が密な段落や深く入れ子の list のように、parser が長さに比べて大きく
+  時間のかかる段落は、画面を固まらせないよう Markdown として解析せず、改行と空白を保った文字のまま
+  表示し、書式を付けていないことを下に添えます（上限は `web/src/shared/lib/markdownParseLimits.ts`。
+  comment 本文にはまだ適用していません）。Markdown 書き出しは paragraph の text を Markdown のまま書き、raw HTML の部分だけを
+  escape します（引用の `>`、autolink、code span と fenced code の中身はそのまま）。画面は HTML の部分を
+  文字のまま表示するので、書き出しでもその部分の記号をすべて backslash で escape し、
+  `<div>\n**literal**\n</div>` の `**` が太字にならないようにします。HTML block の 2 行目以降の
+  行頭の空白は文字参照（`&#32;`）にし、escape 後に indent の code block にならないようにします。
+  raw HTML は、画面の描画と同じ CommonMark + GFM の parser（`mdast-util-from-markdown` と
+  `micromark-extension-gfm`）で段落を解析して見つけ、HTML block と inline HTML の範囲だけを escape します。
+  引用やリストの中の HTML block は、行頭の `>` や indent を除いた HTML の部分だけを escape します。
+  そのため複数行にまたがる code span や fence の判定も描画と一致します。HTML block を escape すると
+  中の行が新たに HTML になることがあるので、HTML が無くなるまで解析し直し、数回で収まらない場合は
+  段落全体の HTML の開始を escape します。
+  画面は block ごとに別々に Markdown を描画するので、参照の定義と脚注も block の中だけで効きます。
+  脚注の id と link は描画ごとに別の prefix を付けるので、同じ label を使う block や comment が
+  1 つの画面に並んでも、それぞれ自分の脚注へ移動します。
+  書き出しでは 1 つのファイルにつなぐと最初の定義がすべての block に効いてしまうため、定義を使う
+  link と画像は inline の link（`[text](<url> "title")`）に書き換えて定義を消し、脚注の label は
+  `<書き出しの中の block の番号>-<番号>` に付け替えます（中身のない段落は書き出しません）。
+  定義のない `[^2-1]` のような文字は、付け替えた別の block の脚注を指さないよう `[\^2-1]` と書きます
+  （表示は同じ文字のままです）。label は文字参照（`&amp;` など）を含んでいても書いたとおりに読み、
+  行き先と title の `|` は escape するので、表の cell の中の link も cell を分けません。書き換えで
+  ページに足す行き先と title の長さは 1 回の書き出しで合わせて 1,000,000 文字までにし、それを超える
+  段落は参照を書き換えずに平文として書きます。中身のない
+  段落・空白だけの段落・項目のないチェック項目は書き出さず、その前後の block を直接比べます。
+  解析の上限は CR・LF・CRLF をどれも改行として数えます。脚注の id は描画ごとに label を番号に
+  付け替えてから作るので、`[^a]` の 2 回目と `[^a-2]` の参照が同じ id になりません。link の title は
+  表示します。
+  隣り合う 2 つの block は、別々に解析した結果とつないで解析した結果を比べ、top-level の block の
+  種類・開始位置・list の番号・見出しの level が変わる場合（`1. Alpha` と `1. Beta` が 1 つの list に
+  なる、行頭に空白がある段落が前の list の続きになる、など）は、間に何も表示しない参照の定義
+  `[mukuroji-block-boundary]: #` を入れます。raw HTML の comment は使いません。それでも変わる段落は
+  平文として書きます。比べるのは隣り合う 2 つだけなので、解析は block の数に比例します。
+  段落は書き出しで空行をはさんでつなぐので、段落の最後で閉じていない fenced code には閉じる fence を
+  足し、次の block を取り込まないようにします。それでも次の block を取り込む段落は、Markdown を
+  escape した平文として書きます。最後に、隣とつながりうる block（段落・チェック項目・embed）が続く
+  範囲をそれぞれもう一度解析し、HTML が残っていれば escape します。見出し・表・code・図は自分で
+  escape して書き、隣とつながらないので解析しません。
+  parser は強調や括弧の記号が密な段落、深く入れ子の list、行の多い list で長さに比べて大きく時間が
+  かかるため、書き出しで解析する段落には 1 段落ごとと 1 ページ全体の上限（強調・取り消し線・`]`・`|`
+  の数と ASCII 記号の数のそれぞれ 2 乗の和、行数、行頭の list と引用の記号の数、1 行の入れ子 8 段まで）
+  を設けます。上限を超える段落は解析せず、ASCII 記号をすべて escape した文字として書き、上限を超える
+  チェック項目は解析せずに前後へ `[mukuroji-block-boundary]: #` を入れます。
+  上限を超えずに Markdown のまま書いた段落は、書き出したページを取り込み直しても表示が変わりません。
+  上限（ページ全体の残りを含む）を超えて文字として書いた段落は、取り込み直すと書式のない文字として
+  表示されます（強調の記号なども文字のまま出ます）。この変更より前に取り込んだ段落は escape を外して保存
+  しているため、`*` などを含むと強調として表示されることがあります。
+- 取り込みでは、ファイル全体を同じ parser で解析し、定義を使う link と画像を inline の link に
+  書き換えてから定義を消します（書き出しの `[mukuroji-block-boundary]: #` もここで消えます）。空行で
+  分かれていても 1 つの top-level の block（空行を含む list など）は 1 つの段落 block にまとめ、
+  チェック項目の block にするのは、行頭をそろえたチェック項目だけの top-level の list に限ります
+  （別の list の中に入れ子になったチェック項目は、その list の段落 block に残します）。list・引用・
+  脚注の定義は中身ごと 1 つの段落 block にするので、その中の fenced code・見出し・表・区切り線も
+  code や見出しの block に切り出さず、入れ子のまま残します。チェック項目・表・見出し・埋め込みの
+  block は本文を Markdown として描画せず脚注を表示できないので、脚注を使う top-level の block は
+  どの種類でも 1 つの段落 block にし、脚注の定義を一緒に残します（`- [ ] task[^n]` と定義を持つ段落を
+  書き出して取り込み直しても、同じ段落に戻ります）。定義を使う link は先に inline の link に書き換えて
+  行き先を残すので、チェック項目などの block のままにします。脚注の定義を使う block へ写した合計が
+  ページに入りきらない長さになる場合も、写す前にページが大きすぎるとして断ります。
+  脚注の定義はそれを使う段落 block の末尾へ移します（引用などの中にある定義は、定義の部分だけを写し、
+  周りの本文は元の位置に残します）。参照の定義が引用や list の中にあっても同じように使います。
+  展開した link の行き先と title の `|` は escape するので、表の cell の中の link が cell を分けません。
+  展開した行き先と title が合わせてページに入りきらない長さになる場合は、展開する前にページが大きすぎる
+  として断ります。脚注の定義が別の脚注を使う場合は、その定義も
+  たどって一緒に移します（同じ脚注は 1 度だけ移すので、互いに使う脚注でも止まります）。
+  フォルダごとの取り込みでは、参照の定義が別のファイルを指す場合も、定義の行き先を `<>` で書き直す
+  前に取り込むページへの link に変えます。inline の link の `<other.md>` のように `<>` で書いた行き先や
+  title つきの link も同じように変えます。書き換えるのはファイル全体を描画と同じ parser で解析して link と読めた部分だけなので、
+  list や引用の中の fenced code（`` ``` `` / `~~~`）・indent の code block・code span・HTML の中にある
+  `[x](other.md)` は書いたまま残し、取り込むページへの link にも数えません（参照の定義の展開と、書き出しの
+  参照・脚注の付け替えも parser の結果だけを書き換えるので、code の中は変えません）。解析の上限を超える
+  ファイルでは、code block を含み得る段落の link は書き換えません。ページへの link は `<>` を付けずに書くので、表の cell と
+  チェック項目でもページへの link として表示されます。この解析は定義・脚注・list の項目を含む
+  ファイルだけで行い、大きすぎる表は解析の前に断ります。書き出しと同じ理由で、記号が密な部分や深い
+  入れ子があって上限（書き出しより緩く、1 回の解析が約 1 秒に収まる値）を超えるファイルは全体を
+  解析せず、行ごとの読み取りだけで取り込みます（参照の定義は inline にしません）。
 
 ### 同梱テンプレートと宿題の Work Item 化
 

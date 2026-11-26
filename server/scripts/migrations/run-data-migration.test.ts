@@ -54,7 +54,14 @@ describe('data migration CLI', () => {
     expect(await runDataMigrationCli(['list'], dependencies)).toBe(0)
     expect(JSON.parse(output[0] ?? '{}')).toEqual({
       operation: 'list',
-      migrations: [expect.objectContaining({ id: '0001-work-item-member-index', writerPolicy: 'revision-fenced' })],
+      migrations: [
+        expect.objectContaining({ id: '0001-work-item-member-index', writerPolicy: 'revision-fenced' }),
+        expect.objectContaining({
+          id: '0002-document-comment-participant-index',
+          table: 'documents',
+          writerPolicy: 'pause-writers',
+        }),
+      ],
     })
   })
 

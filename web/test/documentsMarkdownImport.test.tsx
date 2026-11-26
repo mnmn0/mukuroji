@@ -7,6 +7,7 @@ import {
   titleFromMarkdownFileName,
 } from '../src/documents/model/markdownImport'
 import { DocumentHome } from '../src/documents/ui/DocumentHome'
+import { SafeMarkdown } from '../src/shared/ui/SafeMarkdown'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
 /**
@@ -93,7 +94,8 @@ describe('Markdown import', () => {
       'diagram',
     ])
     expect(result.blocks[0]).toMatchObject({ level: 1, text: '背景' })
-    expect(result.blocks[1]).toMatchObject({ text: '本文の 1 行目\n2 行目は *強調ではない*' })
+    // Paragraphs are shown as Markdown, so the escapes stay and the text renders literally.
+    expect(result.blocks[1]).toMatchObject({ text: '本文の 1 行目\n2 行目は \\*強調ではない\\*' })
     expect(result.blocks[2]).toMatchObject({ level: 2, text: '詳細' })
     expect(result.blocks[3]).toMatchObject({
       columns: ['項目', '値'],
@@ -139,12 +141,14 @@ describe('Markdown import', () => {
     ])
   })
 
-  test('keeps lists, quotes, links, and HTML as plain paragraph text', () => {
+  test('keeps lists, quotes, links, HTML, and dividers as plain paragraph text', () => {
     const blocks = blocksOf('- one\n- two\n\n> quote\n\n[link](javascript:alert(1)) <b>x</b>\n\n---\n')
     expect(blocks).toEqual([
       { id: 'block-1', text: '- one\n- two', type: 'paragraph' },
       { id: 'block-2', text: '> quote', type: 'paragraph' },
       { id: 'block-3', text: '[link](javascript:alert(1)) <b>x</b>', type: 'paragraph' },
+      // No block shows a divider, so it stays in paragraph Markdown instead of being dropped.
+      { id: 'block-4', text: '---', type: 'paragraph' },
     ])
   })
 
@@ -340,5 +344,370 @@ describe('Markdown import', () => {
     )
     expect(withFolder).toContain('フォルダごと取り込む')
     expect(withFolder).toContain('フォルダを取り込む')
+  })
+})
+
+/**
+ * Markdown export of a page whose paragraph blocks use references, footnotes, and lists; pinned by
+ * the server's block-scoped export test, which also exports {@link BLOCK_SCOPED_IMPORT} back to it.
+ */
+const BLOCK_SCOPED_EXPORT = [
+  '# Document',
+  'See [guide](<https://example.com/a>).',
+  'See [guide](<https://example.com/b> "B \\& \\"t\\"").',
+  '[ref](</c d>) and [ref](</c d>) and [![pic](</i.png>)](</c d>)',
+  'text [nodef] here',
+  'note[^5-1]\n\n[^5-1]: first',
+  'other[^6-1]\n\n[^6-1]: second',
+  '1. Alpha',
+  '[mukuroji-block-boundary]: #',
+  '1. Beta',
+  '- a\n\n- b',
+  '[mukuroji-block-boundary]: #',
+  '- item',
+  '[mukuroji-block-boundary]: #',
+  '  continued',
+].join('\n\n') + '\n'
+
+/** Paragraph blocks of the exported page, as the app stores them before the export. */
+const BLOCK_SCOPED_ORIGINAL = [
+  'See [guide][ref].\n\n[ref]: https://example.com/a',
+  'See [guide][ref].\n\n[ref]: https://example.com/b "B & \\"t\\""',
+  '[ref][] and [ref] and [![pic][img]][ref]\n\n[ref]: </c d>\n[img]: /i.png',
+  'text [nodef] here',
+  'note[^n]\n\n[^n]: first',
+  'other[^n]\n\n[^n]: second',
+  '1. Alpha',
+  '1. Beta',
+  '- a\n\n- b',
+  '- item',
+  '  continued',
+]
+
+/** Paragraph blocks the import makes from {@link BLOCK_SCOPED_EXPORT}. */
+const BLOCK_SCOPED_IMPORT = [
+  'See [guide](<https://example.com/a>).',
+  'See [guide](<https://example.com/b> "B \\& \\"t\\"").',
+  '[ref](</c d>) and [ref](</c d>) and [![pic](</i.png>)](</c d>)',
+  'text [nodef] here',
+  'note[^5-1]\n\n[^5-1]: first',
+  'other[^6-1]\n\n[^6-1]: second',
+  '1. Alpha',
+  '1. Beta',
+  '- a\n\n- b',
+  '- item',
+  '  continued',
+]
+
+/**
+ * Renders paragraph Markdown as a Document page does, with footnote labels left out, since a
+ * label is not shown and only names the link between a footnote and its reference.
+ *
+ * @param markdown - Paragraph Markdown.
+ * @returns The rendered HTML.
+ */
+function renderParagraph(markdown: string) {
+  return renderToStaticMarkup(<SafeMarkdown bodyMarkdown={markdown} rawHtml="escape" />)
+    .replace(/(fn(?:ref)?-)[^"#]+/gu, '$1label')
+}
+
+describe('Markdown import of a file whose blocks reference each other', () => {
+  test('uses a reference definition from another part of the file as an inline link', () => {
+    expect(blocksOf('[guide][ref]\n\n[ref]: https://example.com')).toEqual([
+      { id: 'block-1', text: '[guide](<https://example.com>)', type: 'paragraph' },
+    ])
+    expect(blocksOf('![pic][img] and [x]\n\n[img]: /i.png "Pic"\n[x]: <a b>')).toEqual([
+      { id: 'block-1', text: '![pic](</i.png> "Pic") and [x](<a b>)', type: 'paragraph' },
+    ])
+  })
+
+  test('keeps a footnote definition with the block that uses it', () => {
+    expect(blocksOf('One[^a] and two[^b].\n\nMiddle\n\n[^a]: First\n\n[^b]: Second')).toEqual([
+      { id: 'block-1', text: 'One[^a] and two[^b].\n\n[^a]: First\n\n[^b]: Second', type: 'paragraph' },
+      { id: 'block-2', text: 'Middle', type: 'paragraph' },
+    ])
+  })
+
+  test('moves the footnotes a footnote uses along with it, once each and through cycles', () => {
+    expect(blocksOf('Text[^a]\n\n[^a]: First[^b]\n\n[^b]: Second')).toEqual([
+      { id: 'block-1', text: 'Text[^a]\n\n[^a]: First[^b]\n\n[^b]: Second', type: 'paragraph' },
+    ])
+    expect(blocksOf('One[^a]\n\nTwo[^b]\n\n[^a]: A[^b]\n\n[^b]: B[^a]')).toEqual([
+      { id: 'block-1', text: 'One[^a]\n\n[^a]: A[^b]\n\n[^b]: B[^a]', type: 'paragraph' },
+      { id: 'block-2', text: 'Two[^b]\n\n[^b]: B[^a]\n\n[^a]: A[^b]', type: 'paragraph' },
+    ])
+    const [chained] = blocksOf('Text[^a]\n\n[^a]: First[^b]\n\n[^b]: Second')
+    const html = chained?.type === 'paragraph' ? renderParagraph(chained.text) : ''
+    // Both notes are listed, so the reference inside the first note is a link, not literal text.
+    expect(html).toContain('First<sup><a')
+    expect(html).toContain('Second')
+    expect(html).not.toContain('[^b]')
+  })
+
+  test('reads a file the parser could take too long on by lines only', () => {
+    const dense = '*a'.repeat(3_001)
+    expect(blocksOf(`[guide][ref]\n\n${dense}\n\n[ref]: https://example.com`)).toEqual([
+      { id: 'block-1', text: '[guide][ref]', type: 'paragraph' },
+      { id: 'block-2', text: dense, type: 'paragraph' },
+      { id: 'block-3', text: '[ref]: https://example.com', type: 'paragraph' },
+    ])
+    expect(blocksOf(`[guide][ref]\n\n${'- '.repeat(9)}deep\n\n[ref]: /r`)[0]).toEqual(
+      { id: 'block-1', text: '[guide][ref]', type: 'paragraph' },
+    )
+  })
+
+  test('keeps a loose list in one block and drops the block boundary of an export', () => {
+    expect(blocksOf('- a\n\n- b\n\n[mukuroji-block-boundary]: #\n\n- c')).toEqual([
+      { id: 'block-1', text: '- a\n\n- b', type: 'paragraph' },
+      { id: 'block-2', text: '- c', type: 'paragraph' },
+    ])
+  })
+
+  test('copies only a footnote definition inside a quote, keeping the quote where it is', () => {
+    expect(blocksOf('A[^n]\n\nB[^n]\n\n> Quoted\n>\n> [^n]: Note\n').map((block) => block.type === 'paragraph' ? block.text : block.type))
+      .toEqual(['A[^n]\n\n[^n]: Note', 'B[^n]\n\n[^n]: Note', '> Quoted\n>\n> [^n]: Note'])
+  })
+
+  test('reads a reference definition inside a quote, and a label with a character reference', () => {
+    expect(blocksOf('> [guide]: https://example.com/g\n\nRead [guide].').map((block) => block.type === 'paragraph' ? block.text : block.type))
+      // The definition is removed; the quote that held it is left empty.
+      .toEqual(['> ', 'Read [guide](<https://example.com/g>).'])
+    expect(blocksOf('See [here][a&amp;b] and [ok][c].\n\n[a&amp;b]: https://example.com/a\n[c]: https://example.com/c')
+      .map((block) => block.type === 'paragraph' ? block.text : block.type))
+      .toEqual(['See [here](<https://example.com/a>) and [ok](<https://example.com/c>).'])
+  })
+
+  test('keeps a reference link in a table cell from splitting the cell', () => {
+    const blocks = blocksOf('| A | B |\n| - | - |\n| [guide][r] | x |\n\n[r]: <https://example.com/a|b> "T | U"')
+    // A table cell shows a link to another place as written, so the table stays paragraph
+    // Markdown, which renders the link in a cell of its own.
+    const table = blocks[0]
+    if (table?.type !== 'paragraph') throw new Error('The table should stay a paragraph.')
+    const markup = renderParagraph(table.text)
+    expect(markup.match(/<td>/gu)).toHaveLength(2)
+    expect(markup).toContain('href="https://example.com/a%7Cb"')
+  })
+
+  test('refuses references that would make the page too large before writing them out', () => {
+    const destination = `https://example.com/${'a'.repeat(2_000)}`
+    const source = `${Array.from({ length: 200 }, () => '[x][d]').join(' ')}\n\n[d]: ${destination}`
+    expect(convert(source)).toEqual({ ok: false, code: 'too-large' })
+  })
+
+  test('refuses footnote copies that would make the page too large before writing them out', () => {
+    const source = `${Array.from({ length: 300 }, (_, index) => `Use ${index}[^n]`).join('\n\n')}\n\n[^n]: ${'note '.repeat(400)}`
+    expect(convert(source)).toEqual({ ok: false, code: 'too-large' })
+  })
+
+  test('keeps a fence, heading, divider, or table nested in a list, quote, or footnote where it is', () => {
+    // The server export of these paragraphs (see the nested block export test in
+    // server/src/modules/documents/adapter-out/dynamodb/dynamo-db-documents-client.test.ts).
+    const paragraphs = [
+      '- parent\n\n  ```js\n  child()\n  ```',
+      '1. step\n\n   # Heading in item\n\n   ---',
+      '- item\n\n  | A | B |\n  | - | - |\n  | 1 | 2 |',
+      '> quote\n>\n> | A | B |\n> | - | - |\n> | 1 | 2 |',
+      'Note[^5-1]\n\n[^5-1]: first\n\n    ```js\n    code()\n    ```',
+    ]
+    const result = convert(`# Document\n\n${paragraphs.join('\n\n')}\n`)
+    if (!result.ok) throw new Error(`conversion failed: ${result.code}`)
+    expect(result.blocks.map((block) => block.type === 'paragraph' ? block.text : block.type)).toEqual(paragraphs)
+    // A fence and a heading outside any container still become blocks of their own.
+    expect(blocksOf('- item\n\n```js\ncode()\n```\n\n# Title\n\nafter').map((block) => block.type))
+      .toEqual(['paragraph', 'code', 'heading', 'paragraph'])
+  })
+
+  test('keeps a task item nested in another list in that list, and reads a task list as a checklist', () => {
+    // The server export writes this paragraph as it is (see the nested task list export test in
+    // server/src/modules/documents/adapter-out/dynamodb/dynamo-db-documents-client.test.ts), so the
+    // round trip gives the same paragraph back instead of a checklist that lost its parent.
+    const nested = '- parent\n\n  - [ ] child\n  - [x] done'
+    // The export puts a block boundary between two lists Markdown would join.
+    const exported = `# Document\n\n${nested}\n\n[mukuroji-block-boundary]: #\n\n- [ ] top\n- [x] finished\n`
+    const result = convert(exported)
+    if (!result.ok) throw new Error(`conversion failed: ${result.code}`)
+    expect(result.blocks.map((block) => block.type === 'paragraph' ? block.text : block.type))
+      .toEqual([nested, 'checklist'])
+    expect(result.blocks[1]).toMatchObject({
+      type: 'checklist',
+      items: [{ text: 'top', checked: false }, { text: 'finished', checked: true }],
+    })
+    expect(blocksOf('- [ ] a\n- b').map((block) => block.type === 'paragraph' ? block.text : block.type))
+      .toEqual(['- [ ] a\n- b'])
+  })
+
+  test('keeps a checklist, table, heading, or embed with a footnote as paragraph Markdown', () => {
+    // The server export of these paragraphs (see the referencing native paragraph export test in
+    // server/src/modules/documents/adapter-out/dynamodb/dynamo-db-documents-client.test.ts). A
+    // native block shows its text as written, so each stays a paragraph with its footnote.
+    const paragraphs = [
+      '- [ ] task[^1-1]\n\n[^1-1]: explanation',
+      '| A | B |\n| - | - |\n| 1[^2-1] | 2 |\n\n[^2-1]: cell note',
+      '# Heading[^3-1]\n\n[^3-1]: heading note',
+      '[Guide[^4-1]](https://example.com/g)\n\n[^4-1]: link note',
+    ]
+    // The reference link is written inline by the export, and a checklist item shows a link to
+    // another place as written, so this paragraph stays a paragraph too.
+    const inlined = '- [ ] see [guide](<https://example.com/g>)'
+    const result = convert(`# Document\n\n${[...paragraphs, inlined].join('\n\n')}\n`)
+    if (!result.ok) throw new Error(`conversion failed: ${result.code}`)
+    expect(result.title).toBe('Document')
+    expect(result.blocks.map((block) => block.type === 'paragraph' ? block.text : block.type))
+      .toEqual([...paragraphs, inlined])
+    for (const text of paragraphs.map((paragraph) => renderParagraph(paragraph))) {
+      expect(text).toContain('data-footnote-ref')
+    }
+  })
+
+  test('reads exported native blocks back into the same native blocks', () => {
+    // The server export of these blocks (see the native block export test in
+    // server/src/modules/documents/adapter-out/dynamodb/dynamo-db-documents-client.test.ts).
+    const exported = [
+      '# Plan \\#',
+      '## Price \\&amp; \\~\\~sale\\~\\~ for C# a\\\\b \\#',
+      [
+        '- [ ] Read [Setup](/documents/doc-1) first',
+        '- [x] See https://example.com/x',
+        '- [ ] \\*\\*not bold\\*\\* \\& \\`not code\\` \\<b\\> C:\\\\dir\\\\',
+      ].join('\n'),
+      [
+        '| A | B \\| C |',
+        '| --- | --- |',
+        '| [Setup](/documents/doc-1) | line<br>break |',
+        '| \\~x\\~ | a\\\\b\\|c |',
+      ].join('\n'),
+      '[Guide \\&amp; \\~more\\~](https://example.com/g)',
+    ].join('\n\n') + '\n'
+    const result = convert(exported)
+    if (!result.ok) throw new Error(`conversion failed: ${result.code}`)
+    expect(result.title).toBe('Plan #')
+    expect(result.blocks).toMatchObject([
+      { type: 'heading', level: 1, text: 'Price &amp; ~~sale~~ for C# a\\b #' },
+      {
+        type: 'checklist',
+        items: [
+          { text: 'Read [Setup](/documents/doc-1) first', checked: false },
+          { text: 'See https://example.com/x', checked: true },
+          { text: '**not bold** & `not code` <b> C:\\dir\\', checked: false },
+        ],
+      },
+      {
+        type: 'table',
+        columns: ['A', 'B | C'],
+        rows: [
+          { cells: [{ text: '[Setup](/documents/doc-1)' }, { text: 'line\nbreak' }] },
+          { cells: [{ text: '~x~' }, { text: 'a\\b|c' }] },
+        ],
+      },
+      { type: 'embed', url: 'https://example.com/g', title: 'Guide &amp; ~more~' },
+    ])
+  })
+
+  test('makes a native block only of Markdown the native block shows as it renders', () => {
+    /**
+     * Converts Markdown and names each block by its type, or by its text when it is a paragraph.
+     *
+     * @param source - Markdown text.
+     * @returns The type or paragraph text of each block.
+     */
+    const kinds = (source: string) =>
+      blocksOf(source).map((block) => block.type === 'paragraph' ? block.text : block.type)
+    // A heading shows plain text; a bare URL shows the same characters. (A lone `#` heading
+    // would become the title.)
+    expect(kinds('## Plain \\*text\\*\n\n## See https://example.com')).toEqual(['heading', 'heading'])
+    for (const heading of ['# **Bold**', '# Use `code`', '# [Guide](https://example.com)', '# a &amp; b', '# <b>x</b>', '# ~~gone~~']) {
+      expect(kinds(heading)).toEqual([heading])
+    }
+    // A checklist item shows plain text and links to other pages.
+    expect(kinds('- [ ] plain \\_x\\_\n- [x] [Setup](/documents/doc-1) and www.example.com')).toEqual(['checklist'])
+    for (const item of [
+      '- [ ] read [guide](https://example.com)',
+      '- [ ] **important**',
+      '- [ ] run `make`',
+      '- [ ] <b>x</b>',
+      '- [ ] ~~done~~',
+      '- [ ] a &amp; b',
+      '- [ ] ![pic](/i.png)',
+      '- [ ] [Setup](/documents/doc-1 "Title")',
+    ]) {
+      expect(kinds(`- [ ] plain\n${item}`)).toEqual([`- [ ] plain\n${item}`])
+    }
+    // Five spaces after the marker make the item's text indented code.
+    expect(kinds('-     [ ] code')).toEqual(['-     [ ] code'])
+    // A list of task items stays whole, blank lines included, when one item renders otherwise.
+    expect(kinds('- [ ] plain\n\n- [ ] **bold**')).toEqual(['- [ ] plain\n\n- [ ] **bold**'])
+    // A table cell shows plain text, links to other pages, and line breaks.
+    expect(kinds('| A | B |\n| - | - |\n| [Setup](/documents/doc-1) | a<br>b |')).toEqual(['table'])
+    for (const cell of ['**x**', '[x](https://example.com)', '`x`', '<i>x</i>']) {
+      const table = `| A | B |\n| - | - |\n| ${cell} | y |`
+      expect(kinds(table)).toEqual([table])
+    }
+    // Past the parse budget of one file, what still needs a parse stays paragraph Markdown,
+    // which renders as written.
+    const items = (count: number) => Array.from({ length: count }, () => '- [ ] a\\_b').join('\n')
+    expect(kinds(items(100))).toEqual(['checklist'])
+    expect(kinds(items(4000))).toEqual([items(4000)])
+    // An embed shows its title as plain text.
+    expect(kinds('[Guide](https://example.com/g)')).toEqual(['embed'])
+    for (const link of ['[**Guide**](https://example.com/g)', '[a &amp; b](https://example.com/g)', '[](https://example.com/g)']) {
+      expect(kinds(link)).toEqual([link])
+    }
+  })
+
+  test('rewrites only the links the parser reads, leaving code in lists and quotes as written', () => {
+    const resolved: string[] = []
+    /**
+     * Converts Markdown with a resolver that maps `*.md` targets to page paths.
+     *
+     * @param source - Markdown text.
+     * @returns The type or paragraph text of each block.
+     */
+    const convertLinked = (source: string) => {
+      const result = convertMarkdownToDocument(source, {
+        createId: createSequentialId(),
+        fallbackTitle: 'fallback',
+        resolveLink: (href) => {
+          if (!href.endsWith('.md')) return undefined
+          resolved.push(href)
+          return `/documents/${href.slice(0, -3)}`
+        },
+      })
+      if (!result.ok) throw new Error(`conversion failed: ${result.code}`)
+      return result.blocks.map((block) => block.type === 'paragraph' ? block.text : block.type)
+    }
+    const nested = [
+      '- item [a](a.md)\n\n  ~~~\n  [b](b.md)\n  ~~~',
+      '* item\n\n  ```md\n  [c](c.md)\n  ```',
+      '1. item\n\n       [d](d.md) indented code',
+      '> quote [e](e.md)\n>\n>     [f](f.md) indented code\n>\n> ```\n> [g](g.md)\n> ```',
+      'Text `[h](h.md)` and <span title="[i](i.md)">x</span> [j](j.md)',
+    ]
+    expect(convertLinked(nested.join('\n\n'))).toEqual([
+      '- item [a](/documents/a)\n\n  ~~~\n  [b](b.md)\n  ~~~',
+      '* item\n\n  ```md\n  [c](c.md)\n  ```',
+      '1. item\n\n       [d](d.md) indented code',
+      '> quote [e](/documents/e)\n>\n>     [f](f.md) indented code\n>\n> ```\n> [g](g.md)\n> ```',
+      'Text `[h](h.md)` and <span title="[i](i.md)">x</span> [j](/documents/j)',
+    ])
+    // A link in code is never resolved, so it is not counted as a link to another page either.
+    expect(resolved.sort()).toEqual(['a.md', 'e.md', 'j.md'])
+    // A top-level fence is a code block, written as it is.
+    expect(blocksOf('```\n[k](k.md)\n```')).toMatchObject([{ type: 'code', code: '[k](k.md)' }])
+    // References are made inline only where the parser reads them, so code keeps them as written.
+    expect(blocksOf('- item [x][r]\n\n  ~~~\n  [x][r] [^n]\n  ~~~\n\n> ```\n> [x][r]\n> ```\n\n[r]: https://example.com/r')
+      .map((block) => block.type === 'paragraph' ? block.text : block.type))
+      .toEqual([
+        '- item [x](<https://example.com/r>)\n\n  ~~~\n  [x][r] [^n]\n  ~~~',
+        '> ```\n> [x][r]\n> ```',
+      ])
+  })
+
+  test('reads an exported page back into blocks that render as the page did', () => {
+    const result = convert(BLOCK_SCOPED_EXPORT)
+    if (!result.ok) throw new Error(`conversion failed: ${result.code}`)
+    expect(result.title).toBe('Document')
+    expect(result.blocks.map((block) => block.type === 'paragraph' ? block.text : block.type))
+      .toEqual(BLOCK_SCOPED_IMPORT)
+    expect(BLOCK_SCOPED_IMPORT.map(renderParagraph)).toEqual(BLOCK_SCOPED_ORIGINAL.map(renderParagraph))
   })
 })
