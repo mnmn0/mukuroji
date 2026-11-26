@@ -74,8 +74,11 @@ const THEMATIC_BREAK = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/u
 /** Task-list item line at the start of a line. */
 const TASK_ITEM = /^[-*+][ \t]+\[([ xX])\][ \t]+(.*)$/u
 
-/** One cell of a table delimiter row, such as `---` or `:-:`. */
-const DELIMITER_CELL = /^:?-+:?$/u
+/**
+ * One cell of a table delimiter row without alignment, such as `---`. A native table has no column
+ * alignment, so a table with `:` alignment markers stays Markdown.
+ */
+const DELIMITER_CELL = /^-+$/u
 
 /** Code-fence language identifiers the Documents store accepts. */
 const SAFE_LANGUAGE = /^[A-Za-z0-9][A-Za-z0-9_+.-]{0,99}$/u
@@ -268,6 +271,8 @@ function scanBlocks(
   let paragraph: string[] = []
   /** Whether a nested fence inside the open paragraph is still open, with its marker. */
   let paragraphFence: string | undefined
+  /** Most spaces, after quote markers, that a line closing the open paragraph fence may start with. */
+  let paragraphFenceIndent = 0
   let tooLong = false
 
   /** Ends the open paragraph Markdown, splitting it at blank lines when it is too long. */
@@ -312,7 +317,9 @@ function scanBlocks(
     // An indented fence belongs to the list or quote around it, in the paragraph Markdown.
     if (paragraphFence !== undefined) {
       paragraph.push(line)
-      if (closesFence(line.replace(/^[ \t>]*/u, ''), paragraphFence)) paragraphFence = undefined
+      const unquoted = line.replace(/^(?:[ \t]*>[ \t]?)*/u, '')
+      const indent = /^ */u.exec(unquoted)?.[0].length ?? 0
+      if (indent <= paragraphFenceIndent && closesFence(unquoted.slice(indent), paragraphFence)) paragraphFence = undefined
       index += 1
       continue
     }
@@ -410,7 +417,10 @@ function scanBlocks(
       }
     }
     const nestedFence = /^[ \t>*+\-\d.)]+?(`{3,}|~{3,})/u.exec(line)
-    if (nestedFence?.[1] !== undefined) paragraphFence = nestedFence[1]
+    if (nestedFence?.[1] !== undefined) {
+      paragraphFence = nestedFence[1]
+      paragraphFenceIndent = readNestedFenceCloseIndent(line)
+    }
     paragraphComment = opensHtmlComment(line, false)
     paragraph.push(line)
     index += 1
@@ -470,6 +480,21 @@ function readFenceOpening(content: string): string | undefined {
   const marker = open?.[1]
   if (marker === undefined || (marker.startsWith('`') && (open?.[2] ?? '').includes('`'))) return undefined
   return marker
+}
+
+/**
+ * Reads how far a line closing a fence nested in a list or quote may be indented, after quote
+ * markers: the list content column plus the three spaces any fence may be indented by. Deeper
+ * lines are code inside the fence.
+ *
+ * @param line - Line that opens the nested fence.
+ * @returns Most leading spaces a closing line may have.
+ */
+function readNestedFenceCloseIndent(line: string): number {
+  const prefix = /^((?:[ \t]*(?:>[ \t]?|[*+-][ \t]+|\d+[.)][ \t]+))*)( {0,3})(?:`{3,}|~{3,})/u.exec(line)?.[1]
+  // An opening line this parser does not take apart closes on any indentation, as before.
+  if (prefix === undefined) return Number.POSITIVE_INFINITY
+  return prefix.replace(/>[ \t]?/gu, '').length + 3
 }
 
 /**

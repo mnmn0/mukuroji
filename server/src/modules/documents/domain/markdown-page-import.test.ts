@@ -35,7 +35,7 @@ describe('convertMarkdownToPageBlocks', () => {
       '~~~',
       '',
       '| Name | Owner |',
-      '| --- | :-: |',
+      '| --- | --- |',
       '| API | Kai |',
       '',
       '### Notes',
@@ -262,6 +262,19 @@ describe('convertMarkdownToPageBlocks', () => {
     const blocks = convert('---\n---').blocks
     expect(blocks.some((block) => block.type === 'heading')).toBe(false)
     expect(blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: '---\n---' }])
+  })
+
+  test('keeps a table with column alignment as Markdown', () => {
+    const source = '| Amount |\n| ---: |\n| 123 |'
+    expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
+  })
+
+  test('keeps deeper indented backticks inside a nested fence as code', () => {
+    const source = '- item\n  ```text\n        ```\n  ## literal\n  ```'
+    const blocks = convert(source).blocks
+    expect(blocks.some((block) => block.type === 'heading')).toBe(false)
+    const indented = convert(' ```text\n    ```\n## literal\n ```').blocks
+    expect(indented.some((block) => block.type === 'heading')).toBe(false)
   })
 
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
