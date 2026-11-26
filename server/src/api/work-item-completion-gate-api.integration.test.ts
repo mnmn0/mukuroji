@@ -457,6 +457,32 @@ test('lets a manager complete past the Gate with a reason and records the overri
   expect(fencedMembers).toEqual([[expect.stringMatching(/^MEMBER#/)]])
 })
 
+test('fences the approval counts of a required condition that passed when an override completes', async () => {
+  const approvalSummaryCheck = {
+    ConditionCheck: expect.objectContaining({ Key: expect.objectContaining({ recordKey: 'APPROVAL_SUMMARY' }) }),
+  }
+  configureFakeProjectClients(true, { role: 'manager', detailAcceptanceCriteria: [openCriterion] })
+  configureGate({ acceptanceCriteria: 'required', humanApproval: 'required' }, async () => approvals({ approvedCount: 1 }))
+  const passedChecks = captureConfigurationConditionChecks()
+
+  const passed = await patchWorkItem({ workflowStatusId: 'done', completionGateOverride: { reason: 'Accepted in review' } })
+
+  expect(passed.status).toBe(200)
+  // Only the criteria are overridden, so the approval that passed must still hold at commit.
+  expect(passedChecks).toContainEqual(approvalSummaryCheck)
+
+  resetTestApp()
+  configureFakeProjectClients(true, { role: 'manager', detailAcceptanceCriteria: [openCriterion] })
+  configureGate({ acceptanceCriteria: 'required', humanApproval: 'required' })
+  const overriddenChecks = captureConfigurationConditionChecks()
+
+  const overridden = await patchWorkItem({ workflowStatusId: 'done', completionGateOverride: { reason: 'Accepted in review' } })
+
+  expect(overridden.status).toBe(200)
+  // The approval condition itself is overridden and recorded, so its counts are not fenced.
+  expect(overriddenChecks).not.toContainEqual(approvalSummaryCheck)
+})
+
 test('records no override when the Gate does not block the update', async () => {
   configureFakeProjectClients(true, { role: 'manager', detailAcceptanceCriteria: [metCriterion] })
   configureGate({ acceptanceCriteria: 'required' })
