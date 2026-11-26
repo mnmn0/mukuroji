@@ -1418,6 +1418,10 @@ test('returns the saved Document when a keyed content replacement is retried', a
     .rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyReused' })
   await expect(client.replaceContent({ ...write, idempotencyKey: 'key-2', idempotencyFingerprint: 'fingerprint-2' }))
     .rejects.toMatchObject({ status: 409, code: 'DocumentRevisionConflict' })
+
+  // After another write, a retry never answers with a revision this writer did not save.
+  await client.replaceContent({ ...write, expectedRevision: 2, title: 'Other', idempotencyKey: 'key-3', idempotencyFingerprint: 'fingerprint-3' })
+  await expect(client.replaceContent(write)).rejects.toMatchObject({ status: 409, code: 'DocumentRevisionConflict' })
 })
 
 test('stores operation deltas with retention and periodically compacts them into restorable snapshots', async () => {

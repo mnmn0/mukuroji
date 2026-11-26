@@ -2437,9 +2437,10 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     const receiptKey = input.idempotencyKey === undefined
       ? undefined
       : contentReplaceReceiptKey(input.documentId, input.access.memberKey, input.idempotencyKey)
-    if (receiptKey !== undefined && await this.readContentReplaceReceipt(input, receiptKey)) {
-      return this.projectDocument(input.workspaceId, row.document, input.access)
-    }
+    const savedRevision = receiptKey === undefined
+      ? undefined
+      : await this.readContentReplaceReceipt(input, receiptKey)
+    if (savedRevision !== undefined) return this.replayContentReplacement(input, row, savedRevision)
     requireExpectedRevision(row, input.expectedRevision)
     const next = structuredClone(row.document)
     if (next.kind !== 'page' && next.kind !== 'template') {
@@ -2525,9 +2526,12 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       )
     } catch (error) {
       // A concurrent retry of the same write may have saved it first.
-      if (receiptKey !== undefined && await this.readContentReplaceReceipt(input, receiptKey)) {
+      const raced = receiptKey === undefined
+        ? undefined
+        : await this.readContentReplaceReceipt(input, receiptKey)
+      if (raced !== undefined) {
         const current = await this.requireMutableDocument(input.workspaceId, input.documentId, input.access, 'edit')
-        return this.projectDocument(input.workspaceId, current.documentRow.document, input.access)
+        return this.replayContentReplacement(input, current.documentRow, raced)
       }
       throw error
     }
@@ -2535,17 +2539,43 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
   }
 
   /**
-   * Tells whether a live receipt records this content replacement as already saved.
+   * Answers a retried content replacement that was already saved. The result is the Document
+   * as the replacement saved it, so the writer never receives a revision it did not write; when
+   * someone changed the Document since, the retry is a conflict and the writer reads it again.
+   *
+   * @param input - Replacement being retried.
+   * @param row - Current Document row.
+   * @param savedRevision - Revision the earlier replacement saved.
+   * @returns The Document at the saved revision.
+   * @throws DocumentError 409 when the Document changed after the saved replacement.
+   */
+  private async replayContentReplacement(
+    input: ReplaceDocumentContentRequest,
+    row: StoredDocumentItem,
+    savedRevision: number,
+  ): Promise<DocumentDetail> {
+    if (row.document.revision !== savedRevision) {
+      throw new DocumentError(
+        409,
+        'DocumentRevisionConflict',
+        'This change was saved, but the Document changed after it. Read the Document again.',
+      )
+    }
+    return this.projectDocument(input.workspaceId, row.document, input.access)
+  }
+
+  /**
+   * Reads the live receipt of this content replacement, when one was saved.
    *
    * @param input - Replacement being retried.
    * @param receiptKey - Receipt sort key derived from the writer and Idempotency-Key.
-   * @returns Whether the same request was saved before.
+   * @returns The revision the same request saved, or undefined when it was not saved.
    * @throws DocumentError 409 when the key was used for a different request.
    */
   private async readContentReplaceReceipt(
     input: ReplaceDocumentContentRequest,
     receiptKey: string,
-  ): Promise<boolean> {
+  ): Promise<number | undefined> {
     const result = await this.client.send(new GetCommand({
       TableName: this.tableName,
       Key: { workspaceId: input.workspaceId, recordKey: receiptKey },
@@ -2558,16 +2588,16 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       typeof receipt.expiresAtEpoch !== 'number' ||
       receipt.expiresAtEpoch <= Math.floor(this.now().getTime() / 1_000)
     ) {
-      return false
+      return undefined
     }
-    if (receipt.actorKey !== input.access.memberKey || receipt.fingerprint !== input.idempotencyFingerprint) {
+    if (typeof receipt.revision !== 'number' || receipt.actorKey !== input.access.memberKey || receipt.fingerprint !== input.idempotencyFingerprint) {
       throw new DocumentError(
         409,
         'IdempotencyKeyReused',
         'The idempotency key has already been used with different input.',
       )
     }
-    return true
+    return receipt.revision
   }
 
   /**
