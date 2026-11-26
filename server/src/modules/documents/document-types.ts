@@ -493,6 +493,52 @@ export type CreateDocumentCommentRequest = {
 }
 
 /**
+ * Input that edits the body of the actor's own Document comment.
+ */
+export type UpdateDocumentCommentRequest = {
+  /** Canonical Workspace ID. */
+  workspaceId: string
+  /** Document that owns the comment. */
+  documentId: string
+  /** Comment to edit. */
+  commentId: string
+  /** Authorization snapshot of the comment author. */
+  access: DocumentAccessContext
+  /** New plain text body. */
+  body: string
+  /** User mention ranges in the new body. */
+  mentions: DocumentMention[]
+  /**
+   * Client `Idempotency-Key`. A retry with the same key returns the first result without
+   * rewriting the comment; the same key with another input is a conflict.
+   */
+  idempotencyKey?: string
+  /** Audit context that records the edit and notifies newly mentioned members. */
+  auditContext?: MutationAuditContext
+}
+
+/**
+ * Input that deletes the actor's own Document comment.
+ */
+export type DeleteDocumentCommentRequest = {
+  /** Canonical Workspace ID. */
+  workspaceId: string
+  /** Document that owns the comment. */
+  documentId: string
+  /** Comment to delete. */
+  commentId: string
+  /** Authorization snapshot of the comment author. */
+  access: DocumentAccessContext
+  /**
+   * Client `Idempotency-Key`. A retry with the same key returns the first result without
+   * rewriting the comment; the same key for another comment is a conflict.
+   */
+  idempotencyKey?: string
+  /** Audit context that records the deletion. */
+  auditContext?: MutationAuditContext
+}
+
+/**
  * Document comment 一覧 input です。
  */
 export type ListDocumentCommentsRequest = {

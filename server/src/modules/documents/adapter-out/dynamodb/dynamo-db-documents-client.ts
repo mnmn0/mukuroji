@@ -85,6 +85,8 @@ import type {
   ResolvedDocumentPublicShare,
   ResolvedDocumentSearchAccess,
   ResolveDocumentCommentRequest,
+  UpdateDocumentCommentRequest,
+  DeleteDocumentCommentRequest,
   ResolveDocumentSearchAccessRequest,
   RestoreDocumentVersionRequest,
   StoredDocumentComment,
@@ -112,6 +114,7 @@ import {
   DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
   DOCUMENT_COMMENT_MAX_LENGTH,
   DOCUMENT_COMMENT_MAX_PAGE_LIMIT,
+  DOCUMENT_THREAD_PARTICIPANT_BACKFILL_LIMIT,
   DOCUMENT_MAX_ITEM_BYTES,
   DOCUMENT_MAX_OPERATION_COUNT,
   DOCUMENT_MAX_TREE_DEPTH,
@@ -124,6 +127,20 @@ import {
   DOCUMENT_VERSION_SNAPSHOT_MAX_AGE_MS,
 } from '../../domain/document-limits'
 import { DocumentError } from '../../errors'
+import { markdownInspector } from '../../application/markdown-inspector'
+import {
+  DOCUMENT_COMMENT_PARTICIPANT_INDEX_SCHEMA_VERSION,
+  commentKey,
+  commentParticipantIndexKey,
+  commentParticipantKey,
+  commentParticipantPrefix,
+  createCommentParticipantIndexItem,
+  createCommentParticipantItem,
+  encodeKeyPart,
+  normalizeCommentMemberKey,
+  type StoredDocumentCommentParticipantIndexItem,
+  type StoredDocumentCommentParticipantItem,
+} from './document-comment-records'
 import {
   isWorkItemCompletionRelationId,
   planWorkItemCompletionOperations,
@@ -607,6 +624,12 @@ type StoredDocumentCommentItem = StoredDocumentComment & {
   recordKey: string
   /** Row discriminator です。 */
   entryType: 'document-comment'
+  /**
+   * Monotonic revision of the row, raised by every edit, delete, and resolve and checked by
+   * each of them, so two writes in the same millisecond still conflict. Rows written before it
+   * existed have none and count as revision 0 until their next write.
+   */
+  revision?: number
 }
 
 /**
@@ -649,6 +672,43 @@ type StoredDocumentCommentReceiptItem = {
   /** Idempotency conflict を判定する author key です。 */
   authorUserId: string
   /** Timestamp を除いた comment input fingerprint です。 */
+  fingerprint: string
+}
+
+/**
+ * Receipt of one idempotent comment edit or delete, written in the same transaction as the
+ * change so a retry with the same `Idempotency-Key` returns the first result without rewriting.
+ */
+type StoredDocumentCommentMutationReceiptItem = {
+  /** Canonical Workspace partition key. */
+  workspaceId: string
+  /** Sort key derived from the Document and the hashed actor-scoped idempotency key. */
+  recordKey: string
+  /** Row discriminator. */
+  entryType: 'document-comment-mutation'
+  /** Document that owns the comment. */
+  documentId: string
+  /** Comment that was changed. */
+  commentId: string
+  /** Change that was applied. */
+  action: 'updated' | 'deleted'
+  /** Fingerprint of the operation, the comment, and the request input. */
+  fingerprint: string
+  /** Comment as returned by the first request. */
+  comment: Record<string, unknown>
+  /** Receipt creation time. */
+  createdAt: string
+  /** DynamoDB TTL epoch seconds. */
+  expiresAtEpoch: number
+}
+
+/**
+ * Identity of one idempotent comment edit or delete.
+ */
+type CommentMutationIdempotency = {
+  /** Sort key of the receipt row. */
+  recordKey: string
+  /** Fingerprint of the operation, the comment, and the request input. */
   fingerprint: string
 }
 
@@ -3271,6 +3331,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       workspaceId: input.workspaceId,
       recordKey: commentKey(input.documentId, now, id),
       entryType: 'document-comment',
+      revision: 1,
     }
     const receipt: StoredDocumentCommentReceiptItem = {
       workspaceId: input.workspaceId,
@@ -3313,60 +3374,15 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         },
       },
     })
-    const notificationCandidates = [
-      ...new Set(
-        mentions
-          .map(({ userId }) => userId.trim().toLowerCase())
-          .filter((memberKey) =>
-            memberKey !== input.access.memberKey.trim().toLowerCase()
-          ),
-      ),
-    ].map((memberKey) => ({
-      memberKey,
-      reason: 'mention',
-    }))
-    const auditPut = createMutationAuditEventPut(
-      this.auditTableName,
-      input.auditContext,
-      {
-        directoryId: input.workspaceId,
-        eventType: parentCommentId === undefined
-          ? 'document.comment.created'
-          : 'document.comment.replied',
-        entityType: 'document',
-        entityId: input.documentId,
-        target: {
-          type: 'comment',
-          id: `document/${input.documentId}/comment/${id}`,
-        },
-        action: parentCommentId === undefined ? 'commented' : 'replied',
-        occurredAt: now,
-        changes: createAuditFieldChanges(
-          undefined,
-          { body: input.body },
-          ['body'],
-          ['body'],
-        ),
-        summary: parentCommentId === undefined
-          ? 'A document comment mentioned you.'
-          : 'A document reply mentioned you.',
-        metadata: {
-          actorMemberKey: input.access.memberKey,
-          commentId: id,
-          ...(parentCommentId === undefined
-            ? {}
-            : { rootCommentId: parentCommentId }),
-          deepLink:
-            `/documents/${encodeURIComponent(input.documentId)}` +
-            `?context=comments&commentId=${encodeURIComponent(id)}` +
-            (parentCommentId === undefined
-              ? ''
-              : `&rootCommentId=${encodeURIComponent(parentCommentId)}`),
-          notificationTitle: document.title,
-          notificationCandidates,
-        },
-      },
+    const actorMemberKey = normalizeCommentMemberKey(input.access.memberKey)
+    const mentionedMemberKeys = new Set(
+      mentions
+        .map(({ userId }) => normalizeCommentMemberKey(userId))
+        .filter((memberKey) => memberKey !== actorMemberKey),
     )
+    let threadRead = storedParent === undefined
+      ? undefined
+      : await this.readThreadParticipants(input.workspaceId, input.documentId, storedParent)
     const mutationAuthorizationGuards =
       mergeAuthorizationGuards(
         input.workspaceId,
@@ -3377,46 +3393,128 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
           [authorization],
         ),
       )
-    const actions: NonNullable<
-      TransactWriteCommandInput['TransactItems']
-    > = [
-      ...(storedParent === undefined
-        ? []
-        : [{
-            ConditionCheck: {
-              TableName: this.tableName,
-              Key: {
-                workspaceId: input.workspaceId,
-                recordKey: storedParent.recordKey,
+    /**
+     * Builds the comment transaction from the thread participants last read, so a retry after
+     * a concurrent comment notifies and indexes the participants that comment added.
+     *
+     * @returns The transaction actions.
+     */
+    const buildActions = (): NonNullable<TransactWriteCommandInput['TransactItems']> => {
+      const threadParticipants = (threadRead?.participants ?? [])
+        .filter((memberKey) => memberKey !== actorMemberKey && !mentionedMemberKeys.has(memberKey))
+      // The participant index of the thread: every comment adds its author, a new root marks its
+      // index complete, and a reply to an older thread backfills it and marks it complete only
+      // when every participant was written.
+      const rootCommentId = storedParent?.id ?? id
+      const participantPuts = [
+        ...[...new Set([...(threadRead?.backfill ?? []), actorMemberKey])].map((memberKey) => ({
+          Put: {
+            TableName: this.tableName,
+            Item: createCommentParticipantItem(input.workspaceId, input.documentId, rootCommentId, memberKey),
+          },
+        })),
+        ...(storedParent === undefined || threadRead?.completesIndex === true
+          ? [{
+              Put: {
+                TableName: this.tableName,
+                Item: createCommentParticipantIndexItem(input.workspaceId, input.documentId, rootCommentId),
               },
-              ConditionExpression:
-                'resolved = :unresolved AND updatedAt = :parentUpdatedAt',
-              ExpressionAttributeValues: {
-                ':unresolved': false,
-                ':parentUpdatedAt': storedParent.updatedAt,
+            }]
+          : []),
+      ]
+      const notificationCandidates = [
+        ...[...mentionedMemberKeys].map((memberKey) => ({
+          memberKey,
+          reason: 'mention',
+        })),
+        ...threadParticipants.map((memberKey) => ({
+          memberKey,
+          reason: 'reply',
+        })),
+      ]
+      const auditPut = createMutationAuditEventPut(
+        this.auditTableName,
+        input.auditContext,
+        {
+          directoryId: input.workspaceId,
+          eventType: parentCommentId === undefined
+            ? 'document.comment.created'
+            : 'document.comment.replied',
+          entityType: 'document',
+          entityId: input.documentId,
+          target: {
+            type: 'comment',
+            id: `document/${input.documentId}/comment/${id}`,
+          },
+          action: parentCommentId === undefined ? 'commented' : 'replied',
+          occurredAt: now,
+          changes: createAuditFieldChanges(
+            undefined,
+            { body: input.body },
+            ['body'],
+            ['body'],
+          ),
+          summary: parentCommentId === undefined
+            ? 'A document comment mentioned you.'
+            : 'A document thread you joined received a reply.',
+          metadata: {
+            actorMemberKey: input.access.memberKey,
+            commentId: id,
+            ...(parentCommentId === undefined
+              ? {}
+              : { rootCommentId: parentCommentId }),
+            deepLink:
+              `/documents/${encodeURIComponent(input.documentId)}` +
+              `?context=comments&commentId=${encodeURIComponent(id)}` +
+              (parentCommentId === undefined
+                ? ''
+                : `&rootCommentId=${encodeURIComponent(parentCommentId)}`),
+            notificationTitle: document.title,
+            notificationCandidates,
+          },
+        },
+      )
+      return [
+        ...(storedParent === undefined
+          ? []
+          : [{
+              ConditionCheck: {
+                TableName: this.tableName,
+                Key: {
+                  workspaceId: input.workspaceId,
+                  recordKey: storedParent.recordKey,
+                },
+                ConditionExpression:
+                  'resolved = :unresolved AND updatedAt = :parentUpdatedAt',
+                ExpressionAttributeValues: {
+                  ':unresolved': false,
+                  ':parentUpdatedAt': storedParent.updatedAt,
+                },
               },
-            },
-          }]),
-      {
-        Put: {
-          TableName: this.tableName,
-          Item: item,
-          ConditionExpression: 'attribute_not_exists(workspaceId)',
+            }]),
+        {
+          Put: {
+            TableName: this.tableName,
+            Item: item,
+            ConditionExpression: 'attribute_not_exists(workspaceId)',
+          },
         },
-      },
-      {
-        Put: {
-          TableName: this.tableName,
-          Item: receipt,
-          ConditionExpression: 'attribute_not_exists(workspaceId)',
+        {
+          Put: {
+            TableName: this.tableName,
+            Item: receipt,
+            ConditionExpression: 'attribute_not_exists(workspaceId)',
+          },
         },
-      },
-      createCommentWindowAction(),
-      ...(auditPut === undefined ? [] : [auditPut]),
-      ...authorizationGuardConditionChecks(
-        mutationAuthorizationGuards,
-      ),
-    ]
+        createCommentWindowAction(),
+        ...participantPuts,
+        ...(auditPut === undefined ? [] : [auditPut]),
+        ...authorizationGuardConditionChecks(
+          mutationAuthorizationGuards,
+        ),
+      ]
+    }
+    let actions = buildActions()
     assertTransactionSize(actions)
     const commentWindowActionIndex = (storedParent === undefined ? 0 : 1) + 2
     for (
@@ -3443,7 +3541,13 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
             revision: commentWindowRevision + 1,
             updatedAt: this.now().toISOString(),
           }
-          actions[commentWindowActionIndex] = createCommentWindowAction()
+          // Another comment of this Document committed first; it may have joined this thread,
+          // so the participants, their index rows, and the notification candidates are re-read.
+          if (storedParent !== undefined) {
+            threadRead = await this.readThreadParticipants(input.workspaceId, input.documentId, storedParent)
+          }
+          actions = buildActions()
+          assertTransactionSize(actions)
           continue
         }
         if (
@@ -3672,6 +3776,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     const now = this.now().toISOString()
     const next: StoredDocumentCommentItem = {
       ...stored,
+      revision: nextCommentRevision(stored),
       resolved: input.resolved,
       updatedAt: now,
       ...(input.resolved
@@ -3695,10 +3800,10 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         Put: {
           TableName: this.tableName,
           Item: next,
-          ConditionExpression: 'updatedAt = :updatedAt',
-          ExpressionAttributeValues: {
-            ':updatedAt': stored.updatedAt,
-          },
+          // The row is written whole, so any write that committed since it was read, even in
+          // the same millisecond, must fail the condition instead of being undone. A deleted
+          // root can still be resolved.
+          ...commentRevisionCondition(stored, true),
         },
       },
       ...authorizationGuardConditionChecks(
@@ -3728,6 +3833,382 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       throw normalizeDynamoError(error)
     }
     return stripCommentStorageFields(next)
+  }
+
+  /**
+   * Edits the body and mentions of the actor's own comment and notifies members newly mentioned.
+   *
+   * @param input - Comment identity, new body, and mentions.
+   * @returns Updated comment.
+   */
+  async updateComment(
+    input: UpdateDocumentCommentRequest,
+  ): Promise<StoredDocumentComment> {
+    assertText(input.body, 'body', DOCUMENT_COMMENT_MAX_LENGTH, false)
+    const mentions = structuredClone(input.mentions)
+    validateMentions(input.body, mentions)
+    return this.writeOwnComment(input, 'updated', { body: input.body, mentions }, (stored, now) => ({
+      ...stored,
+      body: input.body,
+      mentions,
+      updatedAt: now,
+      editedAt: now,
+    }), (stored) => {
+      const actorKey = normalizeCommentMemberKey(input.access.memberKey)
+      const previous = new Set(stored.mentions.map(({ userId }) => normalizeCommentMemberKey(userId)))
+      return [...new Set(mentions.map(({ userId }) => normalizeCommentMemberKey(userId)))]
+        .filter((memberKey) => memberKey !== actorKey && !previous.has(memberKey))
+        .map((memberKey) => ({ memberKey, reason: 'mention' }))
+    })
+  }
+
+  /**
+   * Returns the recorded result of an idempotent comment edit, so a retry is answered before
+   * the request's mentions are validated again: a member mentioned in the first edit may have
+   * left the Workspace since. The caller must still be allowed to comment on the Document.
+   *
+   * @param input - Edit request with its idempotency key.
+   * @returns The first result, or `undefined` when the request carries no key or the key has
+   *   no live receipt.
+   * @throws DocumentError 409 when the key was used for another operation, comment, or input.
+   */
+  async getCommentUpdateReplay(
+    input: UpdateDocumentCommentRequest,
+  ): Promise<StoredDocumentComment | undefined> {
+    const idempotency = commentMutationIdempotency(input, 'updated', {
+      body: input.body,
+      mentions: input.mentions,
+    })
+    if (idempotency === undefined) return undefined
+    await this.ensureTable()
+    assertIdentifier(input.commentId, 'commentId')
+    await this.requireDocumentCapabilityAuthorization(
+      input.workspaceId,
+      input.documentId,
+      input.access,
+      'canComment',
+      'DocumentCommentDenied',
+      true,
+    )
+    return this.readCommentMutationReplay(input.workspaceId, input.documentId, idempotency)
+  }
+
+  /**
+   * Deletes the actor's own comment. The row stays as an empty placeholder so replies keep
+   * their thread and the deletion is visible to the other participants.
+   *
+   * @param input - Comment identity.
+   * @returns Deleted comment placeholder.
+   */
+  async deleteComment(
+    input: DeleteDocumentCommentRequest,
+  ): Promise<StoredDocumentComment> {
+    return this.writeOwnComment(input, 'deleted', {}, (stored, now) => ({
+      ...stored,
+      body: '',
+      mentions: [],
+      updatedAt: now,
+      deletedAt: now,
+    }), () => [])
+  }
+
+  /**
+   * Rewrites one comment of the actor under the Document authorization fence.
+   *
+   * With an idempotency key, the result is recorded in a receipt in the same transaction, and a
+   * retry with the same key returns that result without rewriting the comment, even after a
+   * newer change; the same key with another operation, comment, or input is a conflict.
+   *
+   * @param input - Comment identity, actor access, idempotency key, and audit context.
+   * @param action - Audited action name.
+   * @param payload - Request input bound to the idempotency key.
+   * @param change - Builds the next stored comment from the current one.
+   * @param notify - Builds notification candidates from the current comment.
+   * @returns Updated comment without storage fields.
+   */
+  private async writeOwnComment(
+    input: DeleteDocumentCommentRequest,
+    action: 'updated' | 'deleted',
+    payload: Record<string, unknown>,
+    change: (stored: StoredDocumentCommentItem, now: string) => StoredDocumentCommentItem,
+    notify: (stored: StoredDocumentCommentItem) => Array<{ memberKey: string; reason: string }>,
+  ): Promise<StoredDocumentComment> {
+    await this.ensureTable()
+    assertIdentifier(input.commentId, 'commentId')
+    const authorization =
+      await this.requireDocumentCapabilityAuthorization(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'canComment',
+        'DocumentCommentDenied',
+        true,
+      )
+    const idempotency = commentMutationIdempotency(input, action, payload)
+    if (idempotency !== undefined) {
+      const replay = await this.readCommentMutationReplay(input.workspaceId, input.documentId, idempotency)
+      if (replay !== undefined) return replay
+    }
+    const stored = await this.findStoredComment(
+      input.workspaceId,
+      input.documentId,
+      input.commentId,
+    )
+    if (normalizeCommentMemberKey(stored.authorUserId) !== normalizeCommentMemberKey(input.access.memberKey)) {
+      throw new DocumentError(403, 'DocumentCommentAuthorRequired', 'Only the author can change this comment.')
+    }
+    if (stored.deletedAt !== undefined) {
+      // A retried delete whose first response was lost finds the comment already deleted.
+      if (action === 'deleted') {
+        // A keyed request still records its key, so the key cannot later delete another comment.
+        // The comment and its audit event are not written again.
+        if (idempotency !== undefined) {
+          try {
+            await this.client.send(new TransactWriteCommand({
+              TransactItems: [commentMutationReceiptPut(this.tableName, input, action, idempotency, stored, this.now())],
+            }))
+          } catch (error) {
+            if (!isConditionalFailure(error)) throw normalizeDynamoError(error)
+            const replay = await this.readCommentMutationReplay(input.workspaceId, input.documentId, idempotency)
+            if (replay !== undefined) return replay
+            throw new DocumentError(409, 'DocumentCommentConflict', 'The comment changed concurrently.')
+          }
+        }
+        return stripCommentStorageFields(stored)
+      }
+      throw new DocumentError(409, 'DocumentCommentDeleted', 'The comment was deleted.')
+    }
+    const now = this.now().toISOString()
+    const next: StoredDocumentCommentItem = { ...change(stored, now), revision: nextCommentRevision(stored) }
+    const notificationCandidates = notify(stored)
+    const deepLink =
+      `/documents/${encodeURIComponent(input.documentId)}` +
+      `?context=comments&commentId=${encodeURIComponent(stored.id)}` +
+      (stored.parentCommentId === undefined
+        ? ''
+        : `&rootCommentId=${encodeURIComponent(stored.parentCommentId)}`)
+    // The receipt decides whether a keyed request is a retry. The audit event is named by the
+    // change it records: the Document, the comment, and the version it replaces. The same key can
+    // then change a comment of another Document, or the same comment after its receipt expired,
+    // without meeting the audit event of the earlier change, which outlives the receipt.
+    const auditContext = input.auditContext === undefined
+      ? undefined
+      : deriveMutationAuditPartContext(
+          input.auditContext,
+          `document-comment-${action}:${input.documentId}:${stored.id}:${stored.updatedAt}:${stored.revision ?? 0}`,
+        )
+    const auditPut = createMutationAuditEventPut(
+      this.auditTableName,
+      auditContext,
+      {
+        directoryId: input.workspaceId,
+        eventType: `document.comment.${action}`,
+        entityType: 'document',
+        entityId: input.documentId,
+        target: {
+          type: 'comment',
+          id: `document/${input.documentId}/comment/${stored.id}`,
+        },
+        action,
+        occurredAt: now,
+        changes: createAuditFieldChanges(
+          { body: stored.body },
+          { body: next.body },
+          ['body'],
+          ['body'],
+        ),
+        summary: action === 'updated'
+          ? 'A document comment was edited.'
+          : 'A document comment was deleted.',
+        metadata: {
+          actorMemberKey: input.access.memberKey,
+          commentId: stored.id,
+          ...(stored.parentCommentId === undefined
+            ? {}
+            : { rootCommentId: stored.parentCommentId }),
+          deepLink,
+          notificationTitle: authorization.documentRow.document.title,
+          notificationCandidates,
+        },
+      },
+    )
+    const mutationAuthorizationGuards =
+      mergeAuthorizationGuards(
+        input.workspaceId,
+        input.access.authorizationSnapshots,
+        documentAuthorizationSnapshotGuards(
+          this.tableName,
+          input.workspaceId,
+          [authorization],
+        ),
+      )
+    const actions: NonNullable<
+      TransactWriteCommandInput['TransactItems']
+    > = [
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: next,
+          // Any write that committed since the read, even in the same millisecond, fails it.
+          ...commentRevisionCondition(stored, false),
+        },
+      },
+      ...(idempotency === undefined
+        ? []
+        : [commentMutationReceiptPut(this.tableName, input, action, idempotency, next, this.now())]),
+      ...(auditPut === undefined ? [] : [auditPut]),
+      ...authorizationGuardConditionChecks(
+        mutationAuthorizationGuards,
+      ),
+    ]
+    assertTransactionSize(actions)
+    try {
+      await this.client.send(new TransactWriteCommand({
+        TransactItems: actions,
+      }))
+    } catch (error) {
+      if (isConditionalFailure(error)) {
+        if (
+          !await this.authorizationGuardsMatch(
+            mutationAuthorizationGuards,
+          )
+        ) {
+          throw new DocumentError(
+            409,
+            'DocumentAuthorizationChanged',
+            'Document authorization changed while changing the comment.',
+          )
+        }
+        // A concurrent retry with the same key may have committed first.
+        if (idempotency !== undefined) {
+          const replay = await this.readCommentMutationReplay(input.workspaceId, input.documentId, idempotency)
+          if (replay !== undefined) return replay
+        }
+        throw new DocumentError(409, 'DocumentCommentConflict', 'The comment changed concurrently.')
+      }
+      throw normalizeDynamoError(error)
+    }
+    return stripCommentStorageFields(next)
+  }
+
+  /**
+   * Reads the recorded result of an idempotent comment edit or delete.
+   *
+   * @param workspaceId - Workspace that owns the Document.
+   * @param documentId - Document that owns the comment.
+   * @param idempotency - Receipt key and request fingerprint.
+   * @returns The first result, or undefined when no live receipt exists.
+   * @throws DocumentError 409 when the key was used for another operation, comment, or input.
+   */
+  private async readCommentMutationReplay(
+    workspaceId: string,
+    documentId: string,
+    idempotency: CommentMutationIdempotency,
+  ): Promise<StoredDocumentComment | undefined> {
+    const result = await this.client.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: idempotency.recordKey },
+      ConsistentRead: true,
+    }))
+    if (result.Item === undefined) return undefined
+    const receipt = readStoredCommentMutationReceipt(result.Item, workspaceId, documentId, idempotency.recordKey)
+    if (receipt.expiresAtEpoch <= Math.floor(this.now().getTime() / 1_000)) return undefined
+    if (receipt.fingerprint !== idempotency.fingerprint) {
+      throw new DocumentError(
+        409,
+        'DocumentCommentIdempotencyConflict',
+        'The idempotency key has already been used with different input.',
+      )
+    }
+    return stripCommentStorageFields(receipt.comment)
+  }
+
+  /**
+   * Reads the members who wrote in one comment thread: the root author and every replier.
+   *
+   * A thread whose index is marked complete reads only its participant rows. An older thread
+   * has no completion marker, so every page of the Document's comments is read; its participants
+   * are then returned for backfill, and the index is marked complete when all of them fit in the
+   * reply transaction. No page is skipped either way.
+   *
+   * @param workspaceId - Workspace that owns the Document.
+   * @param documentId - Document that owns the thread.
+   * @param root - Root comment of the thread.
+   * @returns Normalized participant member keys, those to write to the index, and whether
+   *   writing them completes the index.
+   */
+  private async readThreadParticipants(
+    workspaceId: string,
+    documentId: string,
+    root: StoredDocumentCommentItem,
+  ): Promise<{ participants: string[]; backfill: string[]; completesIndex: boolean }> {
+    const participants = new Set([normalizeCommentMemberKey(root.authorUserId)])
+    const marker = await this.client.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: commentParticipantIndexKey(documentId, root.id) },
+      ConsistentRead: true,
+    }))
+    const indexed = marker.Item !== undefined
+    if (marker.Item !== undefined) {
+      readStoredCommentParticipantIndex(marker.Item, workspaceId, documentId, root.id)
+    }
+    for (const item of await this.queryAllPages(
+      workspaceId,
+      commentParticipantPrefix(documentId, root.id),
+    )) {
+      participants.add(readStoredCommentParticipant(item, workspaceId, documentId, root.id).memberKey)
+    }
+    if (indexed) return { participants: [...participants], backfill: [], completesIndex: false }
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const result = await this.client.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        FilterExpression: 'parentCommentId = :rootCommentId AND entryType = :entryType',
+        ProjectionExpression: 'authorUserId',
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':prefix': `COMMENT#${encodeKeyPart(documentId)}#`,
+          ':rootCommentId': root.id,
+          ':entryType': 'document-comment',
+        },
+        ConsistentRead: true,
+        ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
+      }))
+      for (const item of result.Items ?? []) {
+        if (typeof item.authorUserId !== 'string' || !item.authorUserId) throw invalidStoredDocumentData()
+        participants.add(normalizeCommentMemberKey(item.authorUserId))
+      }
+      exclusiveStartKey = result.LastEvaluatedKey
+    } while (exclusiveStartKey !== undefined)
+    const all = [...participants]
+    // A thread with more participants than one transaction can index keeps the full read.
+    const completesIndex = all.length <= DOCUMENT_THREAD_PARTICIPANT_BACKFILL_LIMIT
+    return { participants: all, backfill: completesIndex ? all : [], completesIndex }
+  }
+
+  /**
+   * Reads every page of one key prefix in a Workspace partition.
+   *
+   * @param workspaceId - Workspace partition.
+   * @param prefix - Sort key prefix.
+   * @returns All items under the prefix.
+   */
+  private async queryAllPages(workspaceId: string, prefix: string): Promise<Record<string, unknown>[]> {
+    const items: Record<string, unknown>[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const result = await this.client.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: { ':workspaceId': workspaceId, ':prefix': prefix },
+        ConsistentRead: true,
+        ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
+      }))
+      items.push(...(result.Items ?? []))
+      exclusiveStartKey = result.LastEvaluatedKey
+    } while (exclusiveStartKey !== undefined)
+    return items
   }
 
   /** Presence lease を更新します。 */
@@ -4914,7 +5395,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       'DocumentExportDenied',
     )
     validateDocumentPayload(row.document)
-    const rendered = renderDocumentProjectionExport(projected, input.format)
+    const rendered = renderDocumentProjectionExport(projected, input.format, markdownInspector)
     // The export returns the current content, so a retry after the Document changed is a new
     // export of another revision and gets its own event instead of reusing the first one.
     const auditContext = input.auditContext === undefined
@@ -5991,6 +6472,10 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         'Document comment was not found.',
       )
     }
+    const revision: unknown = result.Item.revision
+    if (revision !== undefined && (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1)) {
+      throw invalidStoredDocumentData()
+    }
     return result.Item as StoredDocumentCommentItem
   }
 
@@ -6773,10 +7258,6 @@ function stableStringify(value: unknown): string {
   return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`).join(',')}}`
 }
 
-function encodeKeyPart(value: string): string {
-  return Buffer.from(value, 'utf8').toString('base64url')
-}
-
 function documentKey(documentId: string): string {
   return `DOCUMENT#${documentId}`
 }
@@ -6836,13 +7317,213 @@ function recentKey(
 }
 
 
-function commentKey(documentId: string, createdAt: string, commentId: string): string {
-  return `COMMENT#${encodeKeyPart(documentId)}#${createdAt}#${encodeKeyPart(commentId)}`
-}
-
 /** Builds the deterministic sort key for one Document comment-window fence row. */
 function commentWindowKey(documentId: string): string {
   return `COMMENT_WINDOW#${encodeKeyPart(documentId)}`
+}
+
+/**
+ * Validates one stored thread participant row.
+ *
+ * @param value - Raw DynamoDB item.
+ * @param workspaceId - Expected Workspace partition.
+ * @param documentId - Expected Document.
+ * @param rootCommentId - Expected root comment.
+ * @returns The validated row.
+ * @throws DocumentError when the row is malformed or crosses a boundary.
+ */
+function readStoredCommentParticipant(
+  value: unknown,
+  workspaceId: string,
+  documentId: string,
+  rootCommentId: string,
+): StoredDocumentCommentParticipantItem {
+  if (
+    !isRecord(value) ||
+    value.workspaceId !== workspaceId ||
+    value.entryType !== 'document-comment-participant' ||
+    value.documentId !== documentId ||
+    value.rootCommentId !== rootCommentId ||
+    typeof value.memberKey !== 'string' ||
+    !value.memberKey ||
+    value.recordKey !== commentParticipantKey(documentId, rootCommentId, value.memberKey) ||
+    value.schemaVersion !== DOCUMENT_COMMENT_PARTICIPANT_INDEX_SCHEMA_VERSION
+  ) {
+    throw invalidStoredDocumentData()
+  }
+  return {
+    workspaceId,
+    recordKey: value.recordKey,
+    entryType: 'document-comment-participant',
+    documentId,
+    rootCommentId,
+    memberKey: value.memberKey,
+    schemaVersion: DOCUMENT_COMMENT_PARTICIPANT_INDEX_SCHEMA_VERSION,
+  }
+}
+
+/**
+ * Validates the completion marker of one thread's participant index.
+ *
+ * @param value - Raw DynamoDB item.
+ * @param workspaceId - Expected Workspace partition.
+ * @param documentId - Expected Document.
+ * @param rootCommentId - Expected root comment.
+ * @returns The validated marker.
+ * @throws DocumentError when the row is malformed or crosses a boundary.
+ */
+function readStoredCommentParticipantIndex(
+  value: unknown,
+  workspaceId: string,
+  documentId: string,
+  rootCommentId: string,
+): StoredDocumentCommentParticipantIndexItem {
+  if (
+    !isRecord(value) ||
+    value.workspaceId !== workspaceId ||
+    value.recordKey !== commentParticipantIndexKey(documentId, rootCommentId) ||
+    value.entryType !== 'document-comment-participant-index' ||
+    value.documentId !== documentId ||
+    value.rootCommentId !== rootCommentId ||
+    value.schemaVersion !== DOCUMENT_COMMENT_PARTICIPANT_INDEX_SCHEMA_VERSION
+  ) {
+    throw invalidStoredDocumentData()
+  }
+  return {
+    workspaceId,
+    recordKey: value.recordKey,
+    entryType: 'document-comment-participant-index',
+    documentId,
+    rootCommentId,
+    schemaVersion: DOCUMENT_COMMENT_PARTICIPANT_INDEX_SCHEMA_VERSION,
+  }
+}
+
+/**
+ * Builds the receipt identity of an idempotent comment edit or delete.
+ *
+ * @param input - Comment identity, actor access, and optional idempotency key.
+ * @param action - Operation the key is bound to.
+ * @param payload - Request input bound to the key.
+ * @returns The receipt key and request fingerprint, or `undefined` without an idempotency key.
+ */
+function commentMutationIdempotency(
+  input: DeleteDocumentCommentRequest,
+  action: 'updated' | 'deleted',
+  payload: Record<string, unknown>,
+): CommentMutationIdempotency | undefined {
+  if (input.idempotencyKey === undefined) return undefined
+  return {
+    recordKey: commentMutationReceiptKey(
+      input.documentId,
+      sha256(
+        `document-comment-mutation-v1\0${input.workspaceId}\0` +
+        `${normalizeCommentMemberKey(input.access.memberKey)}\0${input.idempotencyKey}`,
+      ),
+    ),
+    fingerprint: fingerprint({ action, commentId: input.commentId, payload }),
+  }
+}
+
+/**
+ * Builds the sort key of an idempotent comment edit or delete receipt.
+ *
+ * @param documentId - Document that owns the comment.
+ * @param keyHash - Hash of the Workspace, actor, and idempotency key.
+ * @returns The receipt sort key.
+ */
+function commentMutationReceiptKey(documentId: string, keyHash: string): string {
+  return `COMMENT_MUTATION#${encodeKeyPart(documentId)}#${keyHash}`
+}
+
+/**
+ * Builds the conditional Put of an idempotent comment edit or delete receipt. An expired
+ * receipt with the same key may be replaced.
+ *
+ * @param tableName - Documents table.
+ * @param input - Comment identity.
+ * @param action - Change that was applied.
+ * @param idempotency - Receipt key and request fingerprint.
+ * @param comment - Stored comment after the change.
+ * @param now - Current time.
+ * @returns The transaction item.
+ */
+function commentMutationReceiptPut(
+  tableName: string,
+  input: DeleteDocumentCommentRequest,
+  action: 'updated' | 'deleted',
+  idempotency: CommentMutationIdempotency,
+  comment: StoredDocumentCommentItem,
+  now: Date,
+) {
+  const nowEpoch = Math.floor(now.getTime() / 1_000)
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        workspaceId: input.workspaceId,
+        recordKey: idempotency.recordKey,
+        entryType: 'document-comment-mutation',
+        documentId: input.documentId,
+        commentId: input.commentId,
+        action,
+        fingerprint: idempotency.fingerprint,
+        comment: stripCommentStorageFields(comment),
+        createdAt: now.toISOString(),
+        expiresAtEpoch: nowEpoch + DOCUMENT_OPERATION_RECEIPT_RETENTION_DAYS * SECONDS_PER_DAY,
+      } satisfies StoredDocumentCommentMutationReceiptItem,
+      ConditionExpression: 'attribute_not_exists(workspaceId) OR expiresAtEpoch <= :operationReceiptNowEpoch',
+      ExpressionAttributeValues: { ':operationReceiptNowEpoch': nowEpoch },
+    },
+  }
+}
+
+/**
+ * Validates one stored comment edit or delete receipt.
+ *
+ * @param value - Raw DynamoDB item.
+ * @param workspaceId - Expected Workspace partition.
+ * @param documentId - Expected Document owner.
+ * @param recordKey - Expected receipt sort key.
+ * @returns The validated receipt.
+ * @throws DocumentError when the stored row is malformed or crosses a boundary.
+ */
+function readStoredCommentMutationReceipt(
+  value: unknown,
+  workspaceId: string,
+  documentId: string,
+  recordKey: string,
+): StoredDocumentCommentMutationReceiptItem {
+  if (
+    !isRecord(value) ||
+    value.workspaceId !== workspaceId ||
+    value.recordKey !== recordKey ||
+    value.entryType !== 'document-comment-mutation' ||
+    value.documentId !== documentId ||
+    typeof value.commentId !== 'string' ||
+    (value.action !== 'updated' && value.action !== 'deleted') ||
+    typeof value.fingerprint !== 'string' ||
+    !isRecord(value.comment) ||
+    value.comment.id !== value.commentId ||
+    value.comment.documentId !== documentId ||
+    !isCanonicalIsoTimestamp(value.createdAt) ||
+    typeof value.expiresAtEpoch !== 'number' ||
+    !Number.isSafeInteger(value.expiresAtEpoch)
+  ) {
+    throw invalidStoredDocumentData()
+  }
+  return {
+    workspaceId,
+    recordKey,
+    entryType: 'document-comment-mutation',
+    documentId,
+    commentId: value.commentId,
+    action: value.action,
+    fingerprint: value.fingerprint,
+    comment: value.comment,
+    createdAt: value.createdAt,
+    expiresAtEpoch: value.expiresAtEpoch,
+  }
 }
 
 function commentReceiptKey(documentId: string, commentId: string): string {
@@ -8761,11 +9442,47 @@ function isObjectLike(value: unknown): boolean {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * Gives the revision a comment row gets on its next write.
+ *
+ * @param stored - Comment row as read.
+ * @returns One more than its revision; a row without one counts as revision 0.
+ */
+function nextCommentRevision(stored: StoredDocumentCommentItem): number {
+  return (stored.revision ?? 0) + 1
+}
+
+/**
+ * Builds the condition that a comment row is still the one read, checked by every write of it.
+ *
+ * The revision tells writes apart even within one millisecond; a row without one must still have
+ * none. The update time is checked as well, for a write by a server version that does not raise
+ * the revision yet.
+ *
+ * @param stored - Comment row as read.
+ * @param allowDeleted - Whether the row may already be deleted, as when a deleted root is resolved.
+ * @returns The condition expression and its values.
+ */
+function commentRevisionCondition(
+  stored: StoredDocumentCommentItem,
+  allowDeleted: boolean,
+): { ConditionExpression: string; ExpressionAttributeValues: Record<string, unknown> } {
+  const revision = stored.revision === undefined ? 'attribute_not_exists(revision)' : 'revision = :expectedRevision'
+  return {
+    ConditionExpression: `${revision} AND updatedAt = :updatedAt${allowDeleted ? '' : ' AND attribute_not_exists(deletedAt)'}`,
+    ExpressionAttributeValues: {
+      ':updatedAt': stored.updatedAt,
+      ...(stored.revision === undefined ? {} : { ':expectedRevision': stored.revision }),
+    },
+  }
+}
+
 function stripCommentStorageFields(item: Record<string, unknown>): StoredDocumentComment {
   const {
     workspaceId: _workspaceId,
     recordKey: _recordKey,
     entryType: _entryType,
+    revision: _revision,
     ...comment
   } = item
   return comment as StoredDocumentComment

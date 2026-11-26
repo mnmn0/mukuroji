@@ -6,7 +6,19 @@ import {
   reduceDocumentOperations,
   renderDocumentExport,
   validateDocumentPayload,
+  type MarkdownInspector,
 } from './document-content'
+
+/**
+ * Stands in for the Markdown parser in pages without raw HTML, open blocks, or references; the
+ * export escaping itself is tested with the real parser next to the DynamoDB client.
+ */
+const plainMarkdownInspector: MarkdownInspector = {
+  findHtml: () => [],
+  findOpenBlock: () => undefined,
+  localizeReferences: (text) => text,
+  keepsBlocksApart: () => true,
+}
 
 test('reduces independent stale-base operations without mutating the input snapshot', () => {
   const original = createPage({ revision: 2 })
@@ -82,7 +94,7 @@ test('validates, renders, and collects relations without AWS or Hono dependencie
   })
 
   expect(() => validateDocumentPayload(page)).not.toThrow()
-  expect(renderDocumentExport(page, 'markdown').content).toContain('# Document')
+  expect(renderDocumentExport(page, 'markdown', plainMarkdownInspector).content).toContain('# Document')
   expect(collectDocumentRelationTargets(page)).toEqual([{
     kind: 'work-item',
     workItemId: 'team/team-1/issue/issue-1',
@@ -102,9 +114,61 @@ test('renders a table as one GitHub Flavored Markdown table without blank lines 
     }],
   })
 
-  expect(renderDocumentExport(page, 'markdown').content).toBe(
+  expect(renderDocumentExport(page, 'markdown', plainMarkdownInspector).content).toBe(
     '# Document\n\n| Name | Note |\n| --- | --- |\n| A | x |\n| B | y |\n',
   )
+})
+
+test('parses only the parts that can join a neighbour, within a budget for the page', () => {
+  /** Texts the export asked the parser to read. */
+  const parsed: string[] = []
+  /**
+   * Records a text and returns no finding.
+   *
+   * @param text - Markdown the export reads.
+   * @returns `true`, so neighbours are kept apart.
+   */
+  const record = (text: string) => {
+    parsed.push(text)
+    return true
+  }
+  const inspector: MarkdownInspector = {
+    findHtml: (text) => (record(text) ? [] : []),
+    findOpenBlock: (text) => (record(text) ? undefined : undefined),
+    localizeReferences: (text) => (record(text) ? text : text),
+    keepsBlocksApart: (previous, next) => record(previous) && record(next),
+  }
+  const dense = '*a'.repeat(501)
+  const deep = `${'- '.repeat(9)}deep`
+  const page = createPage({
+    blocks: [
+      { id: 'block-1', type: 'paragraph', text: 'kept *x*' },
+      { id: 'block-2', type: 'paragraph', text: dense },
+      { id: 'block-3', type: 'paragraph', text: deep },
+      { id: 'block-4', type: 'table', columns: ['*a*'], rows: [] },
+      { id: 'block-5', type: 'heading', level: 1, text: 'Heading' },
+      { id: 'block-6', type: 'checklist', items: Array.from({ length: 1_001 }, (_, index) => ({
+        id: `item-${index}`,
+        text: 'x',
+        checked: false,
+      })) },
+      { id: 'block-7', type: 'paragraph', text: 'after' },
+    ],
+  })
+
+  const content = renderDocumentExport(page, 'markdown', inspector).content
+
+  // A paragraph past the limits is written as literal text without being read: dense emphasis,
+  // or a line nested deeper than the limit.
+  expect(content).toContain(`\n\n${'\\*a'.repeat(501)}\n\n`)
+  expect(content).toContain('\n\n\\- \\- \\- \\- \\- \\- \\- \\- \\- deep\n\n')
+  // A list past the limits is not read either; boundaries keep it apart from its neighbours.
+  expect(content).toContain('| \\*a\\* |\n| --- |\n\n## Heading\n\n[mukuroji-block-boundary]: #\n\n- [ ] x\n')
+  expect(content).toEndWith('- [ ] x\n\n[mukuroji-block-boundary]: #\n\nafter\n')
+  expect(parsed.some((text) => text.includes('*a*a') || text.includes('deep') || text.includes('Heading'))).toBe(false)
+  expect(parsed.some((text) => text.includes('- [ ] x'))).toBe(false)
+  expect(parsed).toContain('kept *x*')
+  expect(parsed).toContain('after')
 })
 
 test('rejects malformed document payloads with domain errors', () => {

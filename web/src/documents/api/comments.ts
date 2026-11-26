@@ -1,4 +1,9 @@
-import type { CreateDocumentCommentInput, DocumentComment, DocumentCommentsResponse } from '@mukuroji/contracts'
+import type {
+  CreateDocumentCommentInput,
+  DocumentComment,
+  DocumentCommentsResponse,
+  DocumentMention,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
@@ -89,7 +94,7 @@ export async function createDocumentComment(
     accessToken,
     createJsonMutationInit('POST', input, context),
   )
-  return readObjectValue(value, 'comment') as DocumentComment
+  return readCommentResponse(value)
 }
 
 /**
@@ -106,7 +111,55 @@ export async function resolveDocumentComment(
     accessToken,
     createJsonMutationInit('POST', { resolved: true }, context),
   )
-  return readObjectValue(value, 'comment') as DocumentComment
+  return readCommentResponse(value)
+}
+
+/**
+ * Edits the body and mentions of the viewer's own Document comment.
+ *
+ * @param accessToken - Workspace access token.
+ * @param documentId - Document that owns the comment.
+ * @param commentId - Comment to edit.
+ * @param input - New body and mentions.
+ * @param context - Idempotency and audit context of the mutation.
+ * @returns The edited comment.
+ */
+export async function updateDocumentComment(
+  accessToken: string,
+  documentId: string,
+  commentId: string,
+  input: { body: string; mentions: DocumentMention[] },
+  context: MutationRequestContext,
+) {
+  const value = await requestJson(
+    `${documentsApiBaseUrl}/documents/${encodeURIComponent(documentId)}/comments/${encodeURIComponent(commentId)}`,
+    accessToken,
+    createJsonMutationInit('PATCH', input, context),
+  )
+  return readCommentResponse(value)
+}
+
+/**
+ * Deletes the viewer's own Document comment, leaving a placeholder in its thread.
+ *
+ * @param accessToken - Workspace access token.
+ * @param documentId - Document that owns the comment.
+ * @param commentId - Comment to delete.
+ * @param context - Idempotency and audit context of the mutation.
+ * @returns The deleted comment placeholder.
+ */
+export async function deleteDocumentComment(
+  accessToken: string,
+  documentId: string,
+  commentId: string,
+  context: MutationRequestContext,
+) {
+  const value = await requestJson(
+    `${documentsApiBaseUrl}/documents/${encodeURIComponent(documentId)}/comments/${encodeURIComponent(commentId)}`,
+    accessToken,
+    { headers: createMutationHeaders(context), method: 'DELETE' },
+  )
+  return readCommentResponse(value)
 }
 
 function createJsonMutationInit(
@@ -176,9 +229,50 @@ function createApiErrorFromBody(status: number, value: unknown) {
   )
 }
 
-function readObjectValue(value: unknown, key: string) {
-  const record = readRecord(value)
-  const nested = record[key]
-  return nested && typeof nested === 'object' ? nested : value
+/**
+ * Reads the comment of a comment mutation response, checking its fields first.
+ *
+ * @param value - Parsed response body.
+ * @returns The comment.
+ * @throws DocumentsApiError when the response holds no valid comment.
+ */
+function readCommentResponse(value: unknown): DocumentComment {
+  const comment = readRecord(value).comment
+  if (!isDocumentComment(comment)) {
+    throw new DocumentsApiError(200, 'Documents API returned an invalid comment.', 'InvalidDocumentsResponse')
+  }
+  return comment
 }
 
+/**
+ * Tells whether a value has the fields of a Document comment.
+ *
+ * @param value - Value to check.
+ * @returns Whether the value is a comment.
+ */
+function isDocumentComment(value: unknown): value is DocumentComment {
+  if (typeof value !== 'object' || value === null) return false
+  const record = readRecord(value)
+  const optionalString = (field: unknown) => field === undefined || typeof field === 'string'
+  const anchor = readRecord(record.anchor)
+  return typeof record.id === 'string' &&
+    typeof record.documentId === 'string' &&
+    typeof record.body === 'string' &&
+    typeof record.authorUserId === 'string' &&
+    typeof record.resolved === 'boolean' &&
+    typeof record.createdAt === 'string' &&
+    typeof record.updatedAt === 'string' &&
+    typeof anchor.type === 'string' &&
+    optionalString(record.parentCommentId) &&
+    optionalString(record.resolvedByUserId) &&
+    optionalString(record.resolvedAt) &&
+    optionalString(record.editedAt) &&
+    optionalString(record.deletedAt) &&
+    Array.isArray(record.mentions) &&
+    record.mentions.every((mention: unknown) => {
+      const entry = readRecord(mention)
+      return typeof entry.userId === 'string' &&
+        typeof entry.offset === 'number' &&
+        typeof entry.length === 'number'
+    })
+}

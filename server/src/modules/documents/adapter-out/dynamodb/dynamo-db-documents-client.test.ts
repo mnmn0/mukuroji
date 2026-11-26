@@ -10,8 +10,24 @@ import {
   TransactWriteCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
+import { fromMarkdown } from 'mdast-util-from-markdown'
+import { gfmFromMarkdown } from 'mdast-util-gfm'
+import { gfm } from 'micromark-extension-gfm'
 import { createMutationAuditContext } from '../../../audit/audit'
 import { createOrgStructureKey } from '../../../directory/adapter-out/dynamodb/org-structure-item'
+import {
+  assertValidDataMigrationRegistry,
+  runDataMigration,
+  verifyDataMigration,
+  type DataMigrationRowStore,
+} from '../../../data-migration'
+import {
+  createManualClock,
+  createMemoryCheckpointStore,
+} from '../../../data-migration/test-support/data-migration-fakes'
+import { documentCommentParticipantIndexMigration } from '../../document-comment-participant-index-migration'
+import { markdownInspector } from '../../application/markdown-inspector'
+import { createCommentParticipantItem } from './document-comment-records'
 import {
   DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
   DOCUMENT_MAX_BACKLINK_COUNT,
@@ -4539,6 +4555,826 @@ test('stores document mention notification source events atomically with comment
   })
 })
 
+test('notifies thread participants of replies and lets authors edit and delete only their own comments', async () => {
+  const memory = createMemoryDocumentClient()
+  let clock = Date.parse('2026-07-18T00:00:00.000Z')
+  const client = createClient(
+    memory,
+    () => new Date(clock += 1_000),
+    'audit-events-table',
+  )
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Thread source',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  const replierAccess = { ...ownerAccess, memberKey: 'mina@example.com' }
+  const thirdAccess = { ...ownerAccess, memberKey: 'kai@example.com' }
+  /**
+   * Builds an audit context for one comment mutation.
+   *
+   * @param key - Idempotency key of the mutation.
+   * @param actorId - Member who acts.
+   * @returns Mutation audit context.
+   */
+  const audit = (key: string, actorId: string) => createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: actorId, kind: 'user', displayName: actorId },
+    idempotencyKey: key,
+    request: { method: 'POST', path: `/api/documents/${document.id}/comments`, body: { key } },
+    source: { kind: 'api' },
+    occurredAt: '2026-07-18T00:00:00.000Z',
+  })
+  const root = await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Root',
+    mentions: [],
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: replierAccess,
+    body: 'First reply',
+    mentions: [],
+    parentCommentId: root.id,
+    auditContext: audit('reply-1', replierAccess.memberKey),
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: thirdAccess,
+    body: 'Second reply',
+    mentions: [],
+    parentCommentId: root.id,
+    commentId: 'reply-2',
+    auditContext: audit('reply-2', thirdAccess.memberKey),
+  })
+
+  const secondReplyEvent = memory.items().find(({ eventType, metadata }) =>
+    eventType === 'document.comment.replied' &&
+    typeof metadata === 'object' && metadata !== null &&
+    'commentId' in metadata && metadata.commentId === 'reply-2')
+  expect(secondReplyEvent).toMatchObject({
+    metadata: {
+      notificationCandidates: [
+        { memberKey: ownerAccess.memberKey.toLowerCase(), reason: 'reply' },
+        { memberKey: 'mina@example.com', reason: 'reply' },
+      ],
+    },
+  })
+
+  await expect(client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'reply-2',
+    access: replierAccess,
+    body: 'Not mine',
+    mentions: [],
+  })).rejects.toMatchObject({ status: 403, code: 'DocumentCommentAuthorRequired' })
+
+  const edited = await client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'reply-2',
+    access: thirdAccess,
+    body: 'Edited for @Mina',
+    mentions: [{ userId: 'mina@example.com', offset: 11, length: 5 }],
+    auditContext: audit('edit-1', thirdAccess.memberKey),
+  })
+  expect(edited).toMatchObject({ body: 'Edited for @Mina', editedAt: expect.any(String) })
+  expect(memory.items().find(({ eventType }) => eventType === 'document.comment.updated')).toMatchObject({
+    metadata: { notificationCandidates: [{ memberKey: 'mina@example.com', reason: 'mention' }] },
+  })
+
+  const deleted = await client.deleteComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'reply-2',
+    access: thirdAccess,
+  })
+  expect(deleted).toMatchObject({ body: '', mentions: [], deletedAt: expect.any(String) })
+  expect(await client.deleteComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'reply-2',
+    access: thirdAccess,
+  })).toEqual(deleted)
+  await expect(client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'reply-2',
+    access: thirdAccess,
+    body: 'Again',
+    mentions: [],
+  })).rejects.toMatchObject({ status: 409, code: 'DocumentCommentDeleted' })
+  const listed = await client.listComments({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+  })
+  expect(listed.comments.find(({ id }) => id === 'reply-2')).toMatchObject({ body: '', deletedAt: expect.any(String) })
+})
+
+test('notifies every thread participant through the participant index, backfilling older threads', async () => {
+  const memory = createMemoryDocumentClient()
+  let clock = Date.parse('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => new Date(clock += 1_000), 'audit-events-table')
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Long thread',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  /**
+   * Adds a reply to the fixed root comment of the test Document, with an audit context of its own.
+   *
+   * @param memberKey - Member who replies.
+   * @param commentId - ID of the reply, also its idempotency key.
+   * @returns The created reply.
+   */
+  const reply = async (memberKey: string, commentId: string) => client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: { ...ownerAccess, memberKey },
+    body: `Reply from ${memberKey}`,
+    mentions: [],
+    parentCommentId: 'root',
+    commentId,
+    auditContext: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: memberKey, kind: 'user', displayName: memberKey },
+      idempotencyKey: commentId,
+      request: { method: 'POST', path: `/api/documents/${document.id}/comments`, body: { commentId } },
+      source: { kind: 'api' },
+    }),
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Root',
+    mentions: [],
+    commentId: 'root',
+  })
+  // Many unrelated comments push the early repliers past the old ten-page bound.
+  for (let index = 0; index < 30; index += 1) {
+    await client.createComment({
+      workspaceId: 'workspace-1',
+      documentId: document.id,
+      access: ownerAccess,
+      body: `Other ${index}`,
+      mentions: [],
+      commentId: `other-${index}`,
+    })
+  }
+  await reply('mina@example.com', 'reply-1')
+  // Simulates a thread written before the participant index existed.
+  for (const item of memory.items()) {
+    if (
+      item.entryType === 'document-comment-participant' ||
+      item.entryType === 'document-comment-participant-index'
+    ) {
+      memory.remove(String(item.workspaceId), String(item.recordKey))
+    }
+  }
+  memory.setQueryPageSize(2)
+  /**
+   * Reads the reply notification candidates of one reply.
+   *
+   * @param commentId - Reply comment ID.
+   * @returns Member keys notified because of the reply.
+   */
+  const replyCandidates = (commentId: string) => {
+    const event = memory.items().find(({ eventType, metadata }) =>
+      eventType === 'document.comment.replied' &&
+      typeof metadata === 'object' && metadata !== null &&
+      'commentId' in metadata && metadata.commentId === commentId)
+    if (!event || typeof event.metadata !== 'object' || event.metadata === null) return undefined
+    return 'notificationCandidates' in event.metadata ? event.metadata.notificationCandidates : undefined
+  }
+
+  await reply('kai@example.com', 'reply-2')
+  expect(replyCandidates('reply-2')).toEqual([
+    { memberKey: ownerAccess.memberKey.toLowerCase(), reason: 'reply' },
+    { memberKey: 'mina@example.com', reason: 'reply' },
+  ])
+  // The older thread was backfilled and marked complete, so the next reply reads only its index.
+  expect(memory.items()
+    .filter((item) => item.entryType === 'document-comment-participant')
+    .map(({ memberKey }) => memberKey)
+    .sort()).toEqual(['kai@example.com', 'mina@example.com', ownerAccess.memberKey.toLowerCase()])
+  expect(memory.items().filter((item) => item.entryType === 'document-comment-participant-index'))
+    .toHaveLength(1)
+  memory.remove('workspace-1', String(memory.items().find(({ id }) => id === 'reply-1')?.recordKey))
+  await reply('ren@example.com', 'reply-3')
+  expect(replyCandidates('reply-3')).toEqual([
+    { memberKey: ownerAccess.memberKey.toLowerCase(), reason: 'reply' },
+    { memberKey: 'kai@example.com', reason: 'reply' },
+    { memberKey: 'mina@example.com', reason: 'reply' },
+  ])
+})
+
+test('keeps reading an older thread too large to backfill, even after the root author replies', async () => {
+  const memory = createMemoryDocumentClient()
+  let clock = Date.parse('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => new Date(clock += 1_000), 'audit-events-table')
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Large thread',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  /**
+   * Adds a reply to the fixed root comment of the test Document, with an audit context of its own.
+   *
+   * @param memberKey - Member who replies.
+   * @param commentId - ID of the reply, also its idempotency key.
+   * @returns The created reply.
+   */
+  const reply = async (memberKey: string, commentId: string) => client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: { ...ownerAccess, memberKey },
+    body: `Reply from ${memberKey}`,
+    mentions: [],
+    parentCommentId: 'root',
+    commentId,
+    auditContext: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: memberKey, kind: 'user', displayName: memberKey },
+      idempotencyKey: commentId,
+      request: { method: 'POST', path: `/api/documents/${document.id}/comments`, body: { commentId } },
+      source: { kind: 'api' },
+    }),
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Root',
+    mentions: [],
+    commentId: 'root',
+  })
+  // More repliers than one reply transaction backfills, written before the index existed.
+  for (let index = 0; index < 26; index += 1) {
+    await reply(`member-${index}@example.com`, `legacy-${index}`)
+  }
+  for (const item of memory.items()) {
+    if (
+      item.entryType === 'document-comment-participant' ||
+      item.entryType === 'document-comment-participant-index'
+    ) {
+      memory.remove(String(item.workspaceId), String(item.recordKey))
+    }
+  }
+
+  // The root author's reply adds its own row but must not mark the older index complete.
+  await reply(ownerAccess.memberKey, 'owner-reply')
+  expect(memory.items().filter((item) => item.entryType === 'document-comment-participant-index'))
+    .toEqual([])
+  await reply('late@example.com', 'late-reply')
+  const lateEvent = memory.items().find(({ eventType, metadata }) =>
+    eventType === 'document.comment.replied' &&
+    typeof metadata === 'object' && metadata !== null &&
+    'commentId' in metadata && metadata.commentId === 'late-reply')
+  const candidates = lateEvent && typeof lateEvent.metadata === 'object' && lateEvent.metadata !== null &&
+    'notificationCandidates' in lateEvent.metadata && Array.isArray(lateEvent.metadata.notificationCandidates)
+    ? lateEvent.metadata.notificationCandidates
+    : []
+  // Every historical replier is still found by reading all comment pages.
+  expect(candidates).toHaveLength(27)
+})
+
+/**
+ * Builds a data migration row store over the in-memory Documents table, reading one partition
+ * in key order from the rows present when it is created.
+ *
+ * @param memory - In-memory Documents table.
+ * @returns The row store.
+ */
+function createMemoryDocumentsRowStore(
+  memory: ReturnType<typeof createMemoryDocumentClient>,
+): DataMigrationRowStore {
+  /**
+   * Builds the map key of a stored row from its partition and sort keys.
+   *
+   * @param row - Stored row or key.
+   * @returns The `workspaceId|recordKey` key.
+   */
+  const keyOf = (row: Readonly<Record<string, unknown>>) => `${String(row.workspaceId)}|${String(row.recordKey)}`
+  /**
+   * Reads the current stored row with a map key.
+   *
+   * @param key - `workspaceId|recordKey` key.
+   * @returns The row, or undefined when none is stored.
+   */
+  const find = (key: string) => memory.items().find((row) => keyOf(row) === key)
+  const keys = memory.items().map(keyOf).sort()
+  return {
+    targetTable: 'documents-table',
+    listPartitions: () => ['segment-0-of-1'],
+    readPage: async ({ cursor, limit }) => {
+      const start = cursor === undefined ? 0 : Number(cursor)
+      const rows = keys.slice(start, start + limit).flatMap((key) => {
+        const row = find(key)
+        return row === undefined ? [] : [row]
+      })
+      return start + limit < keys.length ? { rows, nextCursor: String(start + limit) } : { rows }
+    },
+    getRow: async (key) => find(keyOf(key)),
+    replaceRow: async () => 'condition-failed',
+    writeDerivedRows: async ({ sourceKey, rows }) => {
+      if (find(keyOf(sourceKey)) === undefined) return 'condition-failed'
+      for (const row of rows) memory.put({ ...row })
+      return 'replaced'
+    },
+  }
+}
+
+test('the participant index migration backfills older threads so replies read only the index', async () => {
+  const memory = createMemoryDocumentClient()
+  let clock = Date.parse('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => new Date(clock += 1_000), 'audit-events-table')
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Migrated thread',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  /**
+   * Adds a reply to the fixed root comment of the test Document, with an audit context of its own.
+   *
+   * @param memberKey - Member who replies.
+   * @param commentId - ID of the reply, also its idempotency key.
+   * @returns The created reply.
+   */
+  const reply = async (memberKey: string, commentId: string) => client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: { ...ownerAccess, memberKey },
+    body: `Reply from ${memberKey}`,
+    mentions: [],
+    parentCommentId: 'root',
+    commentId,
+    auditContext: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: memberKey, kind: 'user', displayName: memberKey },
+      idempotencyKey: commentId,
+      request: { method: 'POST', path: `/api/documents/${document.id}/comments`, body: { commentId } },
+      source: { kind: 'api' },
+    }),
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Root',
+    mentions: [],
+    commentId: 'root',
+  })
+  // More repliers than one reply transaction backfills, written before the index existed.
+  for (let index = 0; index < 26; index += 1) {
+    await reply(`Member-${index}@example.com`, `legacy-${index}`)
+  }
+  for (const item of memory.items()) {
+    if (
+      item.entryType === 'document-comment-participant' ||
+      item.entryType === 'document-comment-participant-index'
+    ) {
+      memory.remove(String(item.workspaceId), String(item.recordKey))
+    }
+  }
+  const commentCount = memory.items().filter(({ entryType }) => entryType === 'document-comment').length
+  expect(commentCount).toBe(27)
+  expect(() => assertValidDataMigrationRegistry([documentCommentParticipantIndexMigration])).not.toThrow()
+  const runInput = {
+    definition: documentCommentParticipantIndexMigration,
+    rowStore: createMemoryDocumentsRowStore(memory),
+    checkpointStore: createMemoryCheckpointStore(),
+    clock: createManualClock(),
+    runId: 'run-1',
+    operator: 'arn:aws:sts::123456789012:assumed-role/migration-operator/session',
+    pageSize: 10,
+    maxPages: 100,
+    maxWritesPerSecond: 1000,
+  }
+  /**
+   * Verifies the participant index migration against the rows stored now.
+   *
+   * @returns The verification result.
+   */
+  const verify = () => verifyDataMigration({
+    definition: documentCommentParticipantIndexMigration,
+    rowStore: runInput.rowStore,
+    checkpointStore: runInput.checkpointStore,
+    pageSize: 10,
+    maxPages: 100,
+  })
+
+  const dryRun = await runDataMigration({ ...runInput, mode: 'dry-run' })
+  expect(dryRun.counters.migrated).toBe(commentCount)
+  expect(memory.items().filter(({ entryType }) => entryType === 'document-comment-participant')).toEqual([])
+  expect(await verify()).toMatchObject({ status: 'fail', pendingRows: commentCount })
+
+  const applied = await runDataMigration({ ...runInput, mode: 'apply' })
+  expect(applied).toMatchObject({ status: 'completed' })
+  expect(applied.counters.migrated).toBe(commentCount)
+  expect(await verify()).toMatchObject({ status: 'pass', pendingRows: 0, migratedRows: commentCount })
+  expect(memory.items()
+    .filter((item) => item.entryType === 'document-comment-participant')
+    .map(({ memberKey }) => memberKey)
+    .sort()).toEqual([
+    ...Array.from({ length: 26 }, (_, index) => `member-${index}@example.com`),
+    ownerAccess.memberKey.toLowerCase(),
+  ].sort())
+  expect(memory.items().filter((item) => item.entryType === 'document-comment-participant-index'))
+    .toHaveLength(1)
+
+  // A replier whose comment row is gone is still notified, so the reply read the index alone.
+  memory.remove('workspace-1', String(memory.items().find(({ id }) => id === 'legacy-0')?.recordKey))
+  await reply('late@example.com', 'late-reply')
+  const lateEvent = memory.items().find(({ eventType, metadata }) =>
+    eventType === 'document.comment.replied' &&
+    typeof metadata === 'object' && metadata !== null &&
+    'commentId' in metadata && metadata.commentId === 'late-reply')
+  const candidates = lateEvent && typeof lateEvent.metadata === 'object' && lateEvent.metadata !== null &&
+    'notificationCandidates' in lateEvent.metadata && Array.isArray(lateEvent.metadata.notificationCandidates)
+    ? lateEvent.metadata.notificationCandidates
+    : []
+  expect(candidates).toHaveLength(27)
+  expect(candidates).toContainEqual({ memberKey: 'member-0@example.com', reason: 'reply' })
+
+  // A live reply writes the same participant row the migration derives from it.
+  const lateComment = memory.items().find(({ id, entryType }) => id === 'late-reply' && entryType === 'document-comment')
+  expect(lateComment).toBeDefined()
+  const [derivedLate] = documentCommentParticipantIndexMigration.derive(lateComment ?? {})
+  expect(memory.items().find(({ recordKey }) => recordKey === derivedLate?.recordKey)).toEqual(derivedLate)
+})
+
+test('the participant index migration stops on a malformed comment row', async () => {
+  const memory = createMemoryDocumentClient()
+  memory.put({
+    workspaceId: 'workspace-1',
+    recordKey: 'COMMENT#broken',
+    entryType: 'document-comment',
+    id: 'broken',
+  })
+  memory.put({ workspaceId: 'workspace-1', recordKey: 'DOCUMENT#doc-1', entryType: 'document' })
+  expect(documentCommentParticipantIndexMigration.classify(memory.items()[0] ?? {})).toBe('unknown')
+  expect(documentCommentParticipantIndexMigration.classify(memory.items()[1] ?? {})).toBe('unrelated')
+
+  const report = await runDataMigration({
+    definition: documentCommentParticipantIndexMigration,
+    rowStore: createMemoryDocumentsRowStore(memory),
+    checkpointStore: createMemoryCheckpointStore(),
+    clock: createManualClock(),
+    runId: 'run-1',
+    operator: 'arn:aws:sts::123456789012:assumed-role/migration-operator/session',
+    mode: 'apply',
+    pageSize: 10,
+    maxPages: 100,
+    maxWritesPerSecond: 1000,
+  })
+
+  expect(report).toMatchObject({ status: 'failed', failureCode: 'UNKNOWN_ROW' })
+  expect(memory.items()).toHaveLength(2)
+})
+
+test('replays an idempotent comment edit or delete without rewriting a newer change', async () => {
+  const memory = createMemoryDocumentClient()
+  let clock = Date.parse('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => new Date(clock += 1_000))
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Idempotent edits',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Original',
+    mentions: [],
+    commentId: 'comment-1',
+  })
+  /**
+   * Edits the fixed comment of the test Document with the given body and idempotency key.
+   *
+   * @param body - New body.
+   * @param idempotencyKey - Idempotency key of the edit.
+   * @returns The edited comment.
+   */
+  const edit = (body: string, idempotencyKey: string) => client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'comment-1',
+    access: ownerAccess,
+    body,
+    mentions: [],
+    idempotencyKey,
+  })
+
+  const first = await edit('First edit', 'edit-key-1')
+  const second = await edit('Second edit', 'edit-key-2')
+  // The lost-response retry of the first edit returns its own result and keeps the newer edit.
+  expect(await edit('First edit', 'edit-key-1')).toEqual(first)
+  const replayRequest = {
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'comment-1',
+    access: ownerAccess,
+    body: 'First edit',
+    mentions: [],
+    idempotencyKey: 'edit-key-1',
+  }
+  // The API answers a recorded edit before it validates the mentions again.
+  expect(await client.getCommentUpdateReplay(replayRequest)).toEqual(first)
+  expect(await client.getCommentUpdateReplay({ ...replayRequest, idempotencyKey: 'edit-key-unused' }))
+    .toBeUndefined()
+  await expect(client.getCommentUpdateReplay({ ...replayRequest, body: 'Other body' }))
+    .rejects.toMatchObject({ status: 409, code: 'DocumentCommentIdempotencyConflict' })
+  // The replay is read only for a caller who may still comment on the Document.
+  await expect(client.getCommentUpdateReplay({
+    ...replayRequest,
+    access: { memberKey: ownerAccess.memberKey, workspaceRole: 'guest' },
+  })).rejects.toMatchObject({ status: 403 })
+  const listed = await client.listComments({ workspaceId: 'workspace-1', documentId: document.id, access: ownerAccess })
+  expect(listed.comments.find(({ id }) => id === 'comment-1')).toEqual(second)
+
+  await expect(edit('Different body', 'edit-key-1'))
+    .rejects.toMatchObject({ status: 409, code: 'DocumentCommentIdempotencyConflict' })
+  /**
+   * Deletes the fixed comment of the test Document with the given idempotency key.
+   *
+   * @param idempotencyKey - Idempotency key of the delete.
+   * @returns The deleted comment placeholder.
+   */
+  const deleteWithKey = (idempotencyKey: string) => client.deleteComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'comment-1',
+    access: ownerAccess,
+    idempotencyKey,
+  })
+  await expect(deleteWithKey('edit-key-2'))
+    .rejects.toMatchObject({ status: 409, code: 'DocumentCommentIdempotencyConflict' })
+  const deleted = await deleteWithKey('delete-key-1')
+  expect(deleted).toMatchObject({ body: '', deletedAt: expect.any(String) })
+  expect(await deleteWithKey('delete-key-1')).toEqual(deleted)
+  // A new key that deletes the comment again is recorded too, so it cannot then delete another one.
+  expect(await deleteWithKey('delete-key-2')).toEqual(deleted)
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Another',
+    mentions: [],
+    commentId: 'comment-2',
+  })
+  await expect(client.deleteComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'comment-2',
+    access: ownerAccess,
+    idempotencyKey: 'delete-key-2',
+  })).rejects.toMatchObject({ status: 409, code: 'DocumentCommentIdempotencyConflict' })
+  // A key is bound to its actor: another member's identical key is not a replay of this one.
+  await expect(client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'comment-1',
+    access: { ...ownerAccess, memberKey: 'mina@example.com' },
+    body: 'First edit',
+    mentions: [],
+    idempotencyKey: 'edit-key-1',
+  })).rejects.toMatchObject({ status: 403, code: 'DocumentCommentAuthorRequired' })
+})
+
+test('does not let a resolve and an edit or delete with the same timestamp undo each other', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory, () => new Date('2026-07-18T00:00:00.000Z'))
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Same millisecond',
+    blocks: [],
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Original',
+    mentions: [],
+    commentId: 'root',
+  })
+  /**
+   * Reads the stored row of the root comment.
+   *
+   * @returns The row.
+   */
+  const commentRow = () => {
+    const row = memory.items().find((item) => item.entryType === 'document-comment' && item.id === 'root')
+    if (row === undefined) throw new Error('The comment row should exist.')
+    return row
+  }
+  /**
+   * Commits a change to the comment row with the timestamp it already has, as a concurrent
+   * writer whose clock reads the same millisecond does, right before the next transaction. Like
+   * every comment write, it raises the revision.
+   *
+   * @param change - Fields the concurrent writer sets.
+   */
+  const concurrently = (change: Record<string, unknown>) => {
+    memory.beforeTransaction(() => {
+      const row = commentRow()
+      memory.put({ ...row, ...change, revision: Number(row.revision ?? 0) + 1 })
+    })
+  }
+  const resolve = () => client.resolveComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'root',
+    access: ownerAccess,
+    resolved: true,
+  })
+
+  concurrently({ body: 'Edited' })
+  await expect(resolve()).rejects.toMatchObject({ status: 409, code: 'DocumentCommentConflict' })
+  expect(commentRow()).toMatchObject({ body: 'Edited', resolved: false })
+
+  concurrently({ body: '', mentions: [], deletedAt: '2026-07-18T00:00:00.000Z' })
+  await expect(resolve()).rejects.toMatchObject({ status: 409, code: 'DocumentCommentConflict' })
+  expect(commentRow()).toMatchObject({ body: '', deletedAt: expect.any(String) })
+
+  memory.put({ ...commentRow(), body: 'Edited', mentions: [], deletedAt: undefined })
+  concurrently({ resolved: true })
+  await expect(client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'root',
+    access: ownerAccess,
+    body: 'Edited again',
+    mentions: [],
+  })).rejects.toMatchObject({ status: 409, code: 'DocumentCommentConflict' })
+  expect(commentRow()).toMatchObject({ body: 'Edited', resolved: true })
+})
+
+test('does not let two edits of a comment in the same millisecond overwrite each other', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory, () => new Date('2026-07-18T00:00:00.000Z'))
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Same millisecond edits',
+    blocks: [],
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Original',
+    mentions: [],
+    commentId: 'root',
+  })
+  /**
+   * Reads the stored row of the root comment.
+   *
+   * @returns The row.
+   */
+  const commentRow = () => {
+    const row = memory.items().find((item) => item.entryType === 'document-comment' && item.id === 'root')
+    if (row === undefined) throw new Error('The comment row should exist.')
+    return row
+  }
+  /**
+   * Edits the root comment.
+   *
+   * @param body - New body.
+   * @returns The edited comment.
+   */
+  const edit = (body: string) => client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'root',
+    access: ownerAccess,
+    body,
+    mentions: [],
+  })
+  expect(commentRow()).toMatchObject({ revision: 1 })
+
+  // Edits one after another in the same millisecond each raise the revision, and the response
+  // keeps the revision to the server.
+  const first = await edit('First')
+  expect(first).not.toHaveProperty('revision')
+  await edit('Second')
+  expect(commentRow()).toMatchObject({ body: 'Second', revision: 3 })
+
+  // Another edit commits between this edit's read and write, with the same timestamp.
+  memory.beforeTransaction(() => {
+    memory.put({ ...commentRow(), body: 'Concurrent', revision: Number(commentRow().revision) + 1 })
+  })
+  await expect(edit('Late')).rejects.toMatchObject({ status: 409, code: 'DocumentCommentConflict' })
+  expect(commentRow()).toMatchObject({ body: 'Concurrent', revision: 4 })
+
+  // A row stored before revisions existed is edited as revision 0, and an edit that gave it a
+  // revision in the meantime is a conflict.
+  const { revision: _revision, ...legacy } = commentRow()
+  memory.put(legacy)
+  memory.beforeTransaction(() => {
+    memory.put({ ...commentRow(), body: 'Concurrent on legacy', revision: 1 })
+  })
+  await expect(edit('Late on legacy')).rejects.toMatchObject({ status: 409, code: 'DocumentCommentConflict' })
+  memory.put(legacy)
+  await edit('Legacy edited')
+  expect(commentRow()).toMatchObject({ body: 'Legacy edited', revision: 1 })
+
+  // A malformed revision is refused instead of being written over.
+  memory.put({ ...commentRow(), revision: 'x' })
+  await expect(edit('Broken')).rejects.toMatchObject({ code: 'InvalidStoredDocumentData' })
+})
+
+test('names a keyed comment edit audit event by the change, so the key can change another Document or a later version', async () => {
+  const memory = createMemoryDocumentClient()
+  let clock = Date.parse('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => new Date(clock += 1_000), 'audit-events-table')
+  /**
+   * Creates a page with one comment of the owner.
+   *
+   * @param title - Page title.
+   * @returns The page ID.
+   */
+  const pageWithComment = async (title: string) => {
+    const document = await client.create({
+      workspaceId: 'workspace-1',
+      access: ownerAccess,
+      kind: 'page',
+      scope: { type: 'workspace' },
+      title,
+      blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+    })
+    await client.createComment({
+      workspaceId: 'workspace-1',
+      documentId: document.id,
+      access: ownerAccess,
+      body: 'Original',
+      mentions: [],
+      commentId: 'comment-1',
+    })
+    return document.id
+  }
+  /**
+   * Edits the owner's comment with one fixed key and the audit context the API builds from it.
+   *
+   * @param documentId - Page that owns the comment.
+   * @param body - New body.
+   * @returns The edited comment.
+   */
+  const edit = (documentId: string, body: string) => client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId,
+    commentId: 'comment-1',
+    access: ownerAccess,
+    body,
+    mentions: [],
+    idempotencyKey: 'shared-key',
+    auditContext: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: ownerAccess.memberKey, kind: 'user', displayName: 'Owner' },
+      idempotencyKey: 'shared-key',
+      request: { method: 'PATCH', path: `/api/documents/${documentId}/comments/comment-1`, body: { body } },
+      source: { kind: 'api' },
+    }),
+  })
+  const first = await pageWithComment('First')
+  const second = await pageWithComment('Second')
+  expect(await edit(first, 'Edited first')).toMatchObject({ body: 'Edited first' })
+  // The receipt is per Document, so the same key edits the other Document's comment too.
+  expect(await edit(second, 'Edited second')).toMatchObject({ body: 'Edited second' })
+  // After the receipt expires, the key edits the comment again instead of meeting the first audit event.
+  clock += 31 * 24 * 60 * 60 * 1_000
+  expect(await edit(first, 'Edited again')).toMatchObject({ body: 'Edited again' })
+  const audited = memory.items().filter((item) => item.eventType === 'document.comment.updated')
+  expect(audited).toHaveLength(3)
+})
+
 test('records Document lifecycle, permission, public link, and export audit events with the change', async () => {
   const memory = createMemoryDocumentClient()
   seedOwnerAuthorization(memory)
@@ -4818,6 +5654,79 @@ test('retries a comment when only the comment-window fence changed concurrently'
     documentId: document.id,
     access: ownerAccess,
   })).toBe(2)
+})
+
+test('re-reads thread participants when a concurrent reply wins the comment-window fence', async () => {
+  const memory = createMemoryDocumentClient()
+  let clock = Date.parse('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => new Date(clock += 1_000), 'audit-events-table')
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Concurrent replies',
+    blocks: [],
+  })
+  /**
+   * Adds a reply to the fixed root comment of the test Document, with an audit context of its own.
+   *
+   * @param memberKey - Member who replies.
+   * @param commentId - ID of the reply, also its idempotency key.
+   * @returns The created reply.
+   */
+  const reply = (memberKey: string, commentId: string) => client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: { ...ownerAccess, memberKey },
+    body: `Reply from ${memberKey}`,
+    mentions: [],
+    parentCommentId: 'root',
+    commentId,
+    auditContext: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: memberKey, kind: 'user', displayName: memberKey },
+      idempotencyKey: commentId,
+      request: { method: 'POST', path: `/api/documents/${document.id}/comments`, body: { commentId } },
+      source: { kind: 'api' },
+    }),
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Root',
+    mentions: [],
+    commentId: 'root',
+  })
+  await reply('mina@example.com', 'reply-1')
+  // Ren's first reply commits after Kai read the participants and before Kai's transaction.
+  memory.beforeTransaction(() => {
+    memory.put({
+      workspaceId: 'workspace-1',
+      recordKey: `COMMENT_WINDOW#${Buffer.from(document.id, 'utf8').toString('base64url')}`,
+      entryType: 'document-comment-window',
+      documentId: document.id,
+      revision: 3,
+      updatedAt: '2026-07-18T00:00:00.000Z',
+    })
+    memory.put(createCommentParticipantItem('workspace-1', document.id, 'root', 'ren@example.com'))
+    // Kai's transaction then fails on its own comment window condition.
+  })
+
+  await reply('kai@example.com', 'reply-2')
+
+  const event = memory.items().find(({ eventType, metadata }) =>
+    eventType === 'document.comment.replied' &&
+    typeof metadata === 'object' && metadata !== null &&
+    'commentId' in metadata && metadata.commentId === 'reply-2')
+  const candidates = event && typeof event.metadata === 'object' && event.metadata !== null &&
+    'notificationCandidates' in event.metadata ? event.metadata.notificationCandidates : undefined
+  expect(candidates).toEqual([
+    { memberKey: ownerAccess.memberKey.toLowerCase(), reason: 'reply' },
+    { memberKey: 'mina@example.com', reason: 'reply' },
+    { memberKey: 'ren@example.com', reason: 'reply' },
+  ])
 })
 
 test('stores at most one replaceable presence lease per Workspace member', async () => {
@@ -5450,11 +6359,496 @@ test('exports a private canonical document through a redacted viewer projection'
   })
 })
 
+test('exports the text of an HTML node as literal Markdown that imports back unchanged', () => {
+  const page = createPage({
+    blocks: [
+      { id: 'block-1', type: 'paragraph', text: '<div>\n**literal**\n</div>' },
+      { id: 'block-2', type: 'paragraph', text: '> <div>\n>     _x_ [y](z)\n> </div>\n\n**bold** stays' },
+    ],
+  })
+  const exported = renderDocumentExport(page, 'markdown', markdownInspector).content
+  const literalBlock = '\\<div\\>\n\\*\\*literal\\*\\*\n\\<\\/div\\>'
+  // The blockquote marker stays; the node's indentation becomes character references, so the
+  // line cannot turn into indented code. Markdown outside the node is exported as written.
+  const quotedBlock = '> \\<div\\>\n> &#32;&#32;&#32;&#32;\\_x\\_ \\[y\\]\\(z\\)\n> \\<\\/div\\>'
+  expect(exported).toContain(`\n${literalBlock}\n\n${quotedBlock}\n\n**bold** stays\n`)
+  expect(findMarkdownHtml(exported)).toEqual([])
+  // A Markdown viewer shows the node's text as the app does, with no emphasis or link.
+  expect(readMarkdownNodeTypes(literalBlock)).toEqual(['root', 'paragraph', 'text'])
+  expect(readMarkdownText(literalBlock)).toBe('<div>\n**literal**\n</div>')
+  expect(readMarkdownNodeTypes(quotedBlock)).toEqual(['root', 'blockquote', 'paragraph', 'text'])
+  expect(readMarkdownNodeTypes('**bold** stays')).toContain('strong')
+
+  // Import keeps each paragraph's Markdown as written, so exporting the imported page again
+  // gives the same file.
+  const imported = createPage({
+    blocks: [literalBlock, quotedBlock, '**bold** stays']
+      .map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
+  })
+  expect(renderDocumentExport(imported, 'markdown', markdownInspector).content).toBe(exported)
+})
+
+test('keeps each paragraph block\'s references, footnotes, and structure to itself in the export', () => {
+  const page = createPage({
+    blocks: [
+      'See [guide][ref].\n\n[ref]: https://example.com/a',
+      'See [guide][ref].\n\n[ref]: https://example.com/b "B & \\"t\\""',
+      '[ref][] and [ref] and [![pic][img]][ref]\n\n[ref]: </c d>\n[img]: /i.png',
+      'text [nodef] here',
+      '[nodef]: https://example.com/leak',
+      'note[^n]\n\n[^n]: first',
+      'other[^n]\n\n[^n]: second',
+      '1. Alpha',
+      '1. Beta',
+      '- a\n\n- b',
+      '- item',
+      '[unused]: /u',
+      '  continued',
+    ].map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
+  })
+  const exported = renderDocumentExport(page, 'markdown', markdownInspector).content
+  // Links and images that used a definition of their block become inline and the definitions go,
+  // so the first definition of a label in the file no longer wins for every block. A block that
+  // held only a definition shows nothing and is left out. Footnotes get labels of their block.
+  // Neighbours that Markdown would read as one block, such as two lists, get a definition between
+  // them that shows nothing.
+  expect(exported).toBe(BLOCK_SCOPED_EXPORT)
+  const links = readMarkdownNodes(exported)
+    .filter((node) => node.type === 'link' || node.type === 'image')
+    .map((node) => [node.type, node.url, node.title ?? null])
+  expect(links).toEqual([
+    ['link', 'https://example.com/a', null],
+    ['link', 'https://example.com/b', 'B & "t"'],
+    ['link', '/c d', null],
+    ['link', '/c d', null],
+    ['link', '/c d', null],
+    ['image', '/i.png', null],
+  ])
+  // A label with no definition in its block stays text, as the app shows it.
+  expect(readMarkdownNodes(exported).some((node) => node.type === 'linkReference')).toBe(false)
+  // Each block's footnote points at its own definition.
+  expect(readMarkdownNodes(exported)
+    .filter((node) => node.type === 'footnoteDefinition')
+    .map((node) => node.identifier)).toEqual(['5-1', '6-1'])
+  // Each block keeps its own lists: two lists numbered from 1, a loose list, and a list the
+  // indented paragraph does not continue.
+  const lists = readMarkdownNodes(exported).filter((node) => node.type === 'list')
+  expect(lists.map((node) => [node.ordered, node.start, Array.isArray(node.children) ? node.children.length : 0]))
+    .toEqual([[true, 1, 1], [true, 1, 1], [false, null, 2], [false, null, 1]])
+  expect(readMarkdownNodes(exported).at(-1)).toMatchObject({ type: 'text', value: 'continued' })
+  expect(findMarkdownHtml(exported)).toEqual([])
+
+  // Import drops the definitions and keeps a footnote with the block that uses it
+  // (web/test/documentsMarkdownImport.test.tsx imports this file into these blocks). Exporting the
+  // imported page gives the same file.
+  const imported = createPage({
+    blocks: BLOCK_SCOPED_IMPORT
+      .map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
+  })
+  expect(renderDocumentExport(imported, 'markdown', markdownInspector).content).toBe(exported)
+})
+
+test('keeps table cells, CR-separated quotes, and lists around blank blocks as the app shows them in the export', () => {
+  const page = createPage({
+    blocks: [
+      { id: 'block-1', type: 'paragraph', text: '| A | B |\n| - | - |\n| [guide][ref] | x |\n\n[ref]: </a|b> "T | U"' },
+      { id: 'block-2', type: 'paragraph', text: '> <div>\r> note\r> </div>' },
+      { id: 'block-3', type: 'paragraph', text: '1. Alpha' },
+      { id: 'block-4', type: 'checklist', items: [] },
+      { id: 'block-5', type: 'paragraph', text: '  ' },
+      { id: 'block-6', type: 'paragraph', text: '1. Beta' },
+    ],
+  })
+  const exported = renderDocumentExport(page, 'markdown', markdownInspector).content
+  const nodes = readMarkdownNodes(exported)
+  // The expanded link keeps its cell: the table still has two cells per row, and the link its target.
+  const rows = nodes.filter((node) => node.type === 'tableRow')
+  expect(rows.map((row) => Array.isArray(row.children) ? row.children.length : 0)).toEqual([2, 2])
+  expect(nodes.filter((node) => node.type === 'link').map((node) => [node.url, node.title]))
+    .toEqual([['/a|b', 'T | U']])
+  // Only the HTML of the quote is escaped; each line stays in the quote.
+  const quote = nodes.find((node) => node.type === 'blockquote')
+  expect(quote).toBeDefined()
+  expect(findMarkdownHtml(exported)).toEqual([])
+  expect(exported).toContain('\r> ')
+  // The blank checklist and paragraph are left out, so the two lists still start at 1 apart.
+  const lists = nodes.filter((node) => node.type === 'list')
+  expect(lists.map((node) => [node.start, Array.isArray(node.children) ? node.children.length : 0]))
+    .toEqual([[1, 1], [1, 1]])
+})
+
+test('rewrites references and footnotes whose labels hold character references in the export', () => {
+  const page = createPage({
+    blocks: [{
+      id: 'block-1',
+      type: 'paragraph',
+      text: 'See [x][a&amp;b] and [y][] B[^c&amp;d]\n\n[a&amp;b]: /u\n[y]: /v\n\n[^c&amp;d]: note',
+    }],
+  })
+  const exported = renderDocumentExport(page, 'markdown', markdownInspector).content
+  expect(exported).toStartWith('# Document\n\nSee [x](</u>) and [y](</v>) B[^1-1]\n')
+  expect(exported).toEndWith('\n[^1-1]: note\n')
+  const nodes = readMarkdownNodes(exported)
+  expect(nodes.filter((node) => node.type === 'link').map((node) => node.url)).toEqual(['/u', '/v'])
+  expect(nodes.filter((node) => node.type === 'definition')).toEqual([])
+})
+
+test('writes references as plain text when rewriting them would grow the export past the limit', () => {
+  const destination = `https://example.com/${'a'.repeat(45_000)}`
+  const text = `${Array.from({ length: 490 }, () => '[r]').join(' ')}\n\n[r]: ${destination}`
+  const page = createPage({
+    blocks: [
+      { id: 'block-1', type: 'paragraph', text },
+      { id: 'block-2', type: 'paragraph', text: 'See [guide][g].\n\n[g]: https://example.com/g' },
+    ],
+  })
+  const exported = renderDocumentExport(page, 'markdown', markdownInspector).content
+  // 490 inline copies of the destination would be over 22 MB; the paragraph stays as written text.
+  expect(exported.length).toBeLessThan(200_000)
+  expect(exported).toContain('\\[r\\] \\[r\\]')
+  // The other paragraph's reference is still rewritten.
+  expect(exported).toContain('See [guide](<https://example.com/g>).')
+})
+
+test('writes blocks nested in a paragraph list, quote, or footnote as they are', () => {
+  const page = createPage({
+    blocks: NESTED_BLOCK_PARAGRAPHS
+      .map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
+  })
+  // web/test/documentsMarkdownImport.test.tsx imports this file back into the same paragraphs.
+  expect(renderDocumentExport(page, 'markdown', markdownInspector).content).toBe(NESTED_BLOCK_EXPORT)
+})
+
+/** Paragraphs that nest a fence, a heading, a divider, or a table in a list, quote, or footnote. */
+const NESTED_BLOCK_PARAGRAPHS = [
+  '- parent\n\n  ```js\n  child()\n  ```',
+  '1. step\n\n   # Heading in item\n\n   ---',
+  '- item\n\n  | A | B |\n  | - | - |\n  | 1 | 2 |',
+  '> quote\n>\n> | A | B |\n> | - | - |\n> | 1 | 2 |',
+  'Note[^n]\n\n[^n]: first\n\n    ```js\n    code()\n    ```',
+]
+
+/** Markdown export of {@link NESTED_BLOCK_PARAGRAPHS}; the web import test reads it too. */
+const NESTED_BLOCK_EXPORT = [
+  '# Document',
+  ...NESTED_BLOCK_PARAGRAPHS.slice(0, -1),
+  // The footnote gets the label of its block.
+  'Note[^5-1]\n\n[^5-1]: first\n\n    ```js\n    code()\n    ```',
+].join('\n\n') + '\n'
+
+test('leaves code in a paragraph list or quote as written when references and footnotes are rewritten', () => {
+  const text = [
+    '- item [x][r] and a note[^n]',
+    '',
+    '  ~~~',
+    '  [x][r] [^n] <b>',
+    '  ~~~',
+    '',
+    '      [x][r] [^n] indented',
+    '',
+    '> ```',
+    '> [x][r] [^n] [^z]',
+    '> ```',
+    '>',
+    '>     [x][r] `[^n]`',
+    '',
+    '[r]: https://example.com/r',
+    '',
+    '[^n]: note',
+  ].join('\n')
+  const page = createPage({ blocks: [{ id: 'block-1', type: 'paragraph', text }] })
+  const exported = renderDocumentExport(page, 'markdown', markdownInspector).content
+  expect(exported).toBe([
+    '# Document',
+    '',
+    '- item [x](<https://example.com/r>) and a note[^1-1]',
+    '',
+    '  ~~~',
+    '  [x][r] [^n] <b>',
+    '  ~~~',
+    '',
+    '      [x][r] [^n] indented',
+    '',
+    '> ```',
+    '> [x][r] [^n] [^z]',
+    '> ```',
+    '>',
+    '>     [x][r] `[^n]`',
+    // The removed definition leaves its blank lines.
+    '',
+    '',
+    '',
+    '[^1-1]: note',
+    '',
+  ].join('\n'))
+})
+
+test('writes native blocks so that their Markdown renders the text the page shows', () => {
+  const page = createPage({
+    title: 'Plan #',
+    blocks: [
+      { id: 'block-1', type: 'heading', level: 1, text: 'Price &amp; ~~sale~~ for C# a\\b #' },
+      {
+        id: 'block-2',
+        type: 'checklist',
+        items: [
+          { id: 'item-1', text: 'Read [Setup](/documents/doc-1) first', checked: false },
+          { id: 'item-2', text: 'See https://example.com/x', checked: true },
+          { id: 'item-3', text: '**not bold** & `not code` <b> C:\\dir\\', checked: false },
+        ],
+      },
+      {
+        id: 'block-3',
+        type: 'table',
+        columns: ['A', 'B | C'],
+        rows: [
+          {
+            id: 'row-1',
+            cells: [
+              { id: 'cell-1', text: '[Setup](/documents/doc-1)' },
+              { id: 'cell-2', text: 'line\nbreak' },
+            ],
+          },
+          { id: 'row-2', cells: [{ id: 'cell-3', text: '~x~' }, { id: 'cell-4', text: 'a\\b|c' }] },
+        ],
+      },
+      { id: 'block-4', type: 'embed', url: 'https://example.com/g', title: 'Guide &amp; ~more~' },
+    ],
+  })
+  // web/test/documentsMarkdownImport.test.tsx imports this file back into the same blocks.
+  expect(renderDocumentExport(page, 'markdown', markdownInspector).content).toBe(NATIVE_BLOCK_EXPORT)
+})
+
+/** Markdown export of the native blocks above; the web import test reads it too. */
+const NATIVE_BLOCK_EXPORT = [
+  '# Plan \\#',
+  '## Price \\&amp; \\~\\~sale\\~\\~ for C# a\\\\b \\#',
+  [
+    '- [ ] Read [Setup](/documents/doc-1) first',
+    '- [x] See https://example.com/x',
+    '- [ ] \\*\\*not bold\\*\\* \\& \\`not code\\` \\<b\\> C:\\\\dir\\\\',
+  ].join('\n'),
+  [
+    '| A | B \\| C |',
+    '| --- | --- |',
+    '| [Setup](/documents/doc-1) | line<br>break |',
+    '| \\~x\\~ | a\\\\b\\|c |',
+  ].join('\n'),
+  '[Guide \\&amp; \\~more\\~](https://example.com/g)',
+].join('\n\n') + '\n'
+
+test('writes a paragraph shaped like a native block with a footnote or reference as it is', () => {
+  const page = createPage({
+    blocks: REFERENCING_NATIVE_PARAGRAPHS
+      .map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
+  })
+  // web/test/documentsMarkdownImport.test.tsx imports this file back into the same paragraphs.
+  expect(renderDocumentExport(page, 'markdown', markdownInspector).content).toBe(REFERENCING_NATIVE_EXPORT)
+})
+
+/**
+ * Paragraphs that read as a checklist, a table, a heading, or an embed, with a footnote reference
+ * or a reference link whose definition is a block of its own.
+ */
+const REFERENCING_NATIVE_PARAGRAPHS = [
+  '- [ ] task[^n]\n\n[^n]: explanation',
+  '| A | B |\n| - | - |\n| 1[^n] | 2 |\n\n[^n]: cell note',
+  '# Heading[^n]\n\n[^n]: heading note',
+  '[Guide[^n]](https://example.com/g)\n\n[^n]: link note',
+  '- [ ] see [guide][g]\n\n[g]: https://example.com/g',
+]
+
+/** Markdown export of {@link REFERENCING_NATIVE_PARAGRAPHS}; the web import test reads it too. */
+const REFERENCING_NATIVE_EXPORT = [
+  '# Document',
+  '- [ ] task[^1-1]\n\n[^1-1]: explanation',
+  '| A | B |\n| - | - |\n| 1[^2-1] | 2 |\n\n[^2-1]: cell note',
+  '# Heading[^3-1]\n\n[^3-1]: heading note',
+  '[Guide[^4-1]](https://example.com/g)\n\n[^4-1]: link note',
+  '- [ ] see [guide](<https://example.com/g>)',
+].join('\n\n') + '\n'
+
+test('writes a task list nested in a paragraph list as it is, apart from a checklist block', () => {
+  const page = createPage({
+    blocks: [
+      { id: 'block-1', type: 'paragraph', text: '- parent\n\n  - [ ] child\n  - [x] done' },
+      {
+        id: 'block-2',
+        type: 'checklist',
+        items: [
+          { id: 'item-1', text: 'top', checked: false },
+          { id: 'item-2', text: 'finished', checked: true },
+        ],
+      },
+    ],
+  })
+  // web/test/documentsMarkdownImport.test.tsx imports this file back into the same two blocks.
+  expect(renderDocumentExport(page, 'markdown', markdownInspector).content).toBe(
+    '# Document\n\n- parent\n\n  - [ ] child\n  - [x] done\n\n[mukuroji-block-boundary]: #\n\n- [ ] top\n- [x] finished\n',
+  )
+})
+
+test('keeps a literal footnote token from naming the footnote another block gets in the export', () => {
+  const page = createPage({
+    blocks: [
+      'See[^2-1]',
+      'Note[^n]\n\n[^n]: detail',
+      'Link [^2-1](https://example.com/x) and \\[^2-1] and `[^2-1]`',
+    ].map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
+  })
+  const exported = renderDocumentExport(page, 'markdown', markdownInspector).content
+  // The second block's footnote is renamed to `2-1`; the literal `[^2-1]` of the other blocks has
+  // its `^` escaped, so it stays text and does not point at that footnote.
+  expect(exported).toBe([
+    '# Document',
+    'See[\\^2-1]',
+    'Note[^2-1]',
+    '[^2-1]: detail',
+    'Link [\\^2-1](https://example.com/x) and \\[^2-1] and `[^2-1]`',
+  ].join('\n\n') + '\n')
+  const nodes = readMarkdownNodes(exported)
+  expect(nodes.filter((node) => node.type === 'footnoteReference').map((node) => node.identifier))
+    .toEqual(['2-1'])
+  expect(nodes.filter((node) => node.type === 'link').map((node) => node.url)).toEqual(['https://example.com/x'])
+  expect(nodes.find((node) => node.type === 'text' && node.value === 'See[^2-1]')).toBeDefined()
+  // Exporting the exported text again gives the same file.
+  const reexported = createPage({
+    blocks: ['See[\\^2-1]', 'Note[^2-1]\n\n[^2-1]: detail', 'Link [\\^2-1](https://example.com/x) and \\[^2-1] and `[^2-1]`']
+      .map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
+  })
+  expect(renderDocumentExport(reexported, 'markdown', markdownInspector).content).toBe(exported)
+})
+
+/** Markdown export of the page in the block-scoped export test; the web import test reads it too. */
+const BLOCK_SCOPED_EXPORT = [
+  '# Document',
+  'See [guide](<https://example.com/a>).',
+  'See [guide](<https://example.com/b> "B \\& \\"t\\"").',
+  '[ref](</c d>) and [ref](</c d>) and [![pic](</i.png>)](</c d>)',
+  'text [nodef] here',
+  'note[^5-1]\n\n[^5-1]: first',
+  'other[^6-1]\n\n[^6-1]: second',
+  '1. Alpha',
+  '[mukuroji-block-boundary]: #',
+  '1. Beta',
+  '- a\n\n- b',
+  '[mukuroji-block-boundary]: #',
+  '- item',
+  '[mukuroji-block-boundary]: #',
+  '  continued',
+].join('\n\n') + '\n'
+
+/** Paragraph blocks the web import makes from {@link BLOCK_SCOPED_EXPORT}. */
+const BLOCK_SCOPED_IMPORT = [
+  'See [guide](<https://example.com/a>).',
+  'See [guide](<https://example.com/b> "B \\& \\"t\\"").',
+  '[ref](</c d>) and [ref](</c d>) and [![pic](</i.png>)](</c d>)',
+  'text [nodef] here',
+  'note[^5-1]\n\n[^5-1]: first',
+  'other[^6-1]\n\n[^6-1]: second',
+  '1. Alpha',
+  '1. Beta',
+  '- a\n\n- b',
+  '- item',
+  '  continued',
+]
+
+/**
+ * Lists every node of parsed Markdown, outermost first.
+ *
+ * @param markdown - Markdown text.
+ * @returns The nodes with their fields, depth first.
+ */
+function readMarkdownNodes(markdown: string): Array<Record<string, unknown>> {
+  const nodes: Array<Record<string, unknown>> = []
+  const pending: unknown[] = [fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })]
+  while (pending.length > 0) {
+    const node = pending.shift()
+    if (typeof node !== 'object' || node === null) continue
+    nodes.push(Object.fromEntries(Object.entries(node)))
+    if ('children' in node && Array.isArray(node.children)) pending.unshift(...node.children)
+  }
+  return nodes
+}
+
+/**
+ * Lists the distinct node types of parsed Markdown, outermost first.
+ *
+ * @param markdown - Markdown text.
+ * @returns Node types in the order they are first met, depth first.
+ */
+function readMarkdownNodeTypes(markdown: string): string[] {
+  const types = new Set<string>()
+  const pending: unknown[] = [fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })]
+  while (pending.length > 0) {
+    const node = pending.shift()
+    if (typeof node !== 'object' || node === null || !('type' in node)) continue
+    types.add(String(node.type))
+    if ('children' in node && Array.isArray(node.children)) pending.push(...node.children)
+  }
+  return [...types]
+}
+
+/**
+ * Joins the text a Markdown viewer shows for parsed Markdown.
+ *
+ * @param markdown - Markdown text.
+ * @returns The concatenated values of the text nodes.
+ */
+function readMarkdownText(markdown: string): string {
+  let text = ''
+  const pending: unknown[] = [fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })]
+  while (pending.length > 0) {
+    const node = pending.shift()
+    if (typeof node !== 'object' || node === null) continue
+    if ('type' in node && node.type === 'text' && 'value' in node) text += String(node.value)
+    if ('children' in node && Array.isArray(node.children)) pending.unshift(...node.children)
+  }
+  return text
+}
+
+/**
+ * Lists the raw HTML a CommonMark and GFM renderer finds in Markdown.
+ *
+ * @param markdown - Markdown text.
+ * @returns The source of every HTML block and inline HTML node.
+ */
+function findMarkdownHtml(markdown: string): string[] {
+  const found: string[] = []
+  const pending: unknown[] = [fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })]
+  while (pending.length > 0) {
+    const node = pending.pop()
+    if (typeof node !== 'object' || node === null) continue
+    if ('type' in node && node.type === 'html' && 'value' in node) found.push(String(node.value))
+    if ('children' in node && Array.isArray(node.children)) pending.push(...node.children)
+  }
+  return found
+}
+
 test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloads', () => {
   const page = createPage({
     title: 'Export / document',
     blocks: [
       { id: 'block-a', type: 'paragraph', text: '<script>alert(1)</script>' },
+      { id: 'block-m', type: 'paragraph', text: '**bold** and \\*literal\\*' },
+      { id: 'block-q', type: 'paragraph', text: '> quoted <b>tag</b> and `a<b>c` and <https://example.com>' },
+      { id: 'block-f', type: 'paragraph', text: '```html\n<div>kept</div>\n```' },
+      { id: 'block-e', type: 'paragraph', text: 'already \\<div> and \\\\<span>' },
+      { id: 'block-t', type: 'paragraph', text: '\\`<img src=x onerror=alert(1)>`' },
+      { id: 'block-u', type: 'paragraph', text: 'run \\``<b>`' },
+      { id: 'block-v', type: 'paragraph', text: '```a`b\n<img src=x onerror=alert(1)>' },
+      { id: 'block-w', type: 'paragraph', text: '```\n``` <b>\n<i>still code</i>\n```' },
+      { id: 'block-x', type: 'paragraph', text: 'span `first\n<b>bold</b>\nlast` end' },
+      { id: 'block-d', type: 'paragraph', text: 'span `first\n<div>\nlast` end' },
+      { id: 'block-y', type: 'paragraph', text: '<div>\n<span>inner</span>\n</div>' },
+      { id: 'block-z', type: 'paragraph', text: '<div>\n\\<i>raw</i>' },
+      { id: 'block-l', type: 'paragraph', text: '> - item <img src=x onerror=alert(1)> <!-- note -->' },
+      { id: 'block-g', type: 'paragraph', text: '| a |\n| - |\n| <b>x</b> `<c>` |' },
+      { id: 'block-o1', type: 'paragraph', text: '```' },
+      { id: 'block-o2', type: 'paragraph', text: '```\n<img src=x onerror=alert(1)>' },
+      { id: 'block-n1', type: 'paragraph', text: '- ```' },
+      { id: 'block-n2', type: 'paragraph', text: '  ```\n  <img src=x onerror=alert(2)>' },
+      { id: 'block-h', type: 'heading', level: 1, text: 'After' },
       {
         id: 'block-b',
         type: 'table',
@@ -5463,10 +6857,50 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
       },
     ],
   })
-  const markdown = renderDocumentExport(page, 'markdown')
-  const json = renderDocumentExport(page, 'json')
+  const markdown = renderDocumentExport(page, 'markdown', markdownInspector)
+  const json = renderDocumentExport(page, 'json', markdownInspector)
   expect(markdown.fileName).toBe('Export - document.md')
-  expect(markdown.content).toContain('\\<script\\>alert(1)\\</script\\>')
+  expect(markdown.content).toContain('\\<script\\>alert\\(1\\)\\<\\/script\\>')
+  // Only the text of raw HTML is escaped, every Markdown character of it, so it stays literal as
+  // in the app: the blockquote marker, an autolink, and code keep their text.
+  expect(markdown.content).toContain('\n> quoted \\<b\\>tag\\<\\/b\\> and `a<b>c` and <https://example.com>\n')
+  expect(markdown.content).toContain('\n```html\n<div>kept</div>\n```\n')
+  // An escaped `<` stays as written; after an escaped backslash, `<` still starts HTML.
+  expect(markdown.content).toContain('\nalready \\<div> and \\\\\\<span\\>\n')
+  // A backslash-escaped backtick opens no code span, so the HTML after it is still escaped; the
+  // rest of an escaped run can open one.
+  expect(markdown.content).toContain('\n\\`\\<img src\\=x onerror\\=alert\\(1\\)\\>`\n')
+  expect(markdown.content).toContain('\nrun \\``<b>`\n')
+  // A backtick in a backtick fence's info string makes the line text, not a fence, so the HTML
+  // after it is escaped; only a bare marker line closes a fence.
+  expect(markdown.content).toContain('\n```a`b\n\\<img src\\=x onerror\\=alert\\(1\\)\\>\n')
+  expect(markdown.content).toContain('\n```\n``` <b>\n<i>still code</i>\n```\n')
+  // A code span may cross lines; its content stays as written. A `<div>` line is different: it
+  // starts an HTML block that interrupts the paragraph and takes the next line, so there is no
+  // code span to keep.
+  expect(markdown.content).toContain('\nspan `first\n<b>bold</b>\nlast` end\n')
+  expect(markdown.content).toContain('\nspan `first\n\\<div\\>\nlast\\` end\n')
+  // Every tag of an HTML block is escaped. A backslash inside the block is the block's literal
+  // text, as the app shows it, so it is escaped as well.
+  expect(markdown.content).toContain('\n\\<div\\>\n\\<span\\>inner\\<\\/span\\>\n\\<\\/div\\>\n')
+  expect(markdown.content).toContain('\n\\<div\\>\n\\\\\\<i\\>raw\\<\\/i\\>\n')
+  expect(markdown.content).toContain(
+    '\n> - item \\<img src\\=x onerror\\=alert\\(1\\)\\> \\<\\!\\-\\- note \\-\\-\\>\n',
+  )
+  expect(markdown.content).toContain('\n| \\<b\\>x\\<\\/b\\> `<c>` |\n')
+  // A fence left open is closed inside its own paragraph, so it cannot pair with the next one.
+  expect(markdown.content).toContain('\n```\n```\n\n```\n<img src=x onerror=alert(1)>\n```\n')
+  // An indented paragraph after a list would continue the list item and close its open fence once
+  // joined, so a definition that shows nothing is written between them. The paragraph then stays
+  // the fenced code it is in the app, and its `<img>` stays code.
+  expect(markdown.content).toContain(
+    '\n- ```\n\n[mukuroji-block-boundary]: #\n\n  ```\n  <img src=x onerror=alert(2)>\n```\n',
+  )
+  expect(markdown.content).toContain('\n## After\n')
+  // The exported file has no raw HTML for any Markdown renderer.
+  expect(findMarkdownHtml(markdown.content)).toEqual([])
+  // Paragraph text is Markdown, so it is exported as written and imports back unchanged.
+  expect(markdown.content).toContain('\n**bold** and \\*literal\\*\n')
   expect(markdown.content).toContain('A\\|B')
   expect(JSON.parse(json.content)).toMatchObject({ id: page.id, revision: 1 })
 
@@ -5481,6 +6915,7 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
       }],
     }),
     'markdown',
+    markdownInspector,
   )
   expect(fencedCode.content).toContain(
     '````typescript\n',
@@ -5518,6 +6953,7 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
     renderPublicDocumentExport(
       legacyPublicPage,
       'markdown',
+      markdownInspector,
     )
   expect(legacyPublicMarkdown.content).toContain(
     '````\nlegacy ``` source\n````',
@@ -5527,7 +6963,7 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
   )
 
   const whiteboard = createWhiteboard()
-  const svg = renderDocumentExport(whiteboard, 'svg')
+  const svg = renderDocumentExport(whiteboard, 'svg', markdownInspector)
   expect(svg.content).toContain('&lt;unsafe&gt;')
   expect(svg.content).not.toContain('<unsafe>')
   whiteboard.whiteboard.objects.push({
@@ -5537,7 +6973,7 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
     bounds: { x: 140, y: 20, width: 100, height: 80 },
     zIndex: 2,
   })
-  expect(renderDocumentExport(whiteboard, 'svg').content).toContain(
+  expect(renderDocumentExport(whiteboard, 'svg', markdownInspector).content).toContain(
     'Work item: team/team-a/issue/authenticated-work-item-id',
   )
 
@@ -7303,7 +8739,17 @@ function createMemoryDocumentClient() {
         const pending = new Map(
           [...stored].map(([key, item]) => [key, structuredClone(item)]),
         )
-        for (const action of transaction) applyTransactionAction(pending, action)
+        // As in DynamoDB, a cancelled transaction names the action whose condition failed.
+        transaction.forEach((action, index) => {
+          try {
+            applyTransactionAction(pending, action)
+          } catch (error) {
+            if (!(error instanceof Error) || error.name !== 'TransactionCanceledException') throw error
+            throw transactionCancellationError(
+              transaction.map((_, position) => position === index ? 'ConditionalCheckFailed' : 'None'),
+            )
+          }
+        })
         stored.clear()
         for (const [key, item] of pending) stored.set(key, item)
         return {}
@@ -7378,8 +8824,15 @@ function createMemoryDocumentClient() {
         )
         const page = matches.slice(0, limit)
         const hasNext = matches.length > page.length
+        // As in DynamoDB, the filter applies to the page read, so a page of unrelated rows comes
+        // back with no items and a key to read on from.
+        const items = input.FilterExpression === 'parentCommentId = :rootCommentId AND entryType = :entryType'
+          ? page.filter((candidate) =>
+              candidate.parentCommentId === values[':rootCommentId'] &&
+              candidate.entryType === values[':entryType'])
+          : page
         return {
-          Items: structuredClone(page),
+          Items: structuredClone(items),
           ...(hasNext && page.at(-1) !== undefined
             ? {
                 LastEvaluatedKey: {
@@ -7514,8 +8967,14 @@ function matchesCondition(
     return current?.revision ===
       values[':expectedDocumentAuthorizationRevision']
   }
-  if (condition === 'updatedAt = :updatedAt') {
-    return current?.updatedAt === values[':updatedAt']
+  const commentRevision = /^(attribute_not_exists\(revision\)|revision = :expectedRevision) AND updatedAt = :updatedAt( AND attribute_not_exists\(deletedAt\))?$/u.exec(condition)
+  if (commentRevision) {
+    const revisionMatches = commentRevision[1] === 'attribute_not_exists(revision)'
+      ? current?.revision === undefined
+      : current?.revision === values[':expectedRevision']
+    return revisionMatches &&
+      current?.updatedAt === values[':updatedAt'] &&
+      (commentRevision[2] === undefined || current?.deletedAt === undefined)
   }
   if (condition === 'preferenceRevision = :expectedPreferenceRevision') {
     return (

@@ -238,3 +238,90 @@ export const ReadOnly: Story = {
     },
   },
 }
+
+/** Members whose names stand in for member keys in comments and the share dialog. */
+const storyMembers = [
+  { memberKey: 'demo-user', name: 'デモ ユーザー', email: 'demo@example.com', status: 'active' },
+  { memberKey: 'sato-user', name: '佐藤 一郎', email: 'sato@example.com', status: 'active' },
+  { memberKey: 'guest@example.com', name: 'ゲスト 花子', email: 'guest@example.com', status: 'active' },
+]
+
+/**
+ * Design spec page that uses Markdown lists, links, emphasis, and quotes, a table, and a flow diagram.
+ */
+export const MarkdownDesignSpec: Story = {
+  args: {
+    data: {
+      ...screenData,
+      selectedDocument: documentRecordFixture.kind === 'page'
+        ? {
+            ...documentRecordFixture,
+            title: '申請フロー設計書',
+            blocks: [
+              { id: 'spec-heading', type: 'heading', level: 1, text: '概要' },
+              {
+                id: 'spec-markdown',
+                type: 'paragraph',
+                text: '社内向けの申請フローを **3 段階** で承認する。\n\n- 申請者が [申請フォーム](https://example.com/form) から送る\n- 上長が承認する\n- 経理が支払いを確定する\n\n> 承認の期限は **5 営業日** とする',
+              },
+              {
+                id: 'spec-table',
+                type: 'table',
+                columns: ['役割', '担当'],
+                rows: [
+                  { id: 'row-1', cells: [{ id: 'c-1', text: '上長' }, { id: 'c-2', text: '佐藤' }] },
+                  { id: 'row-2', cells: [{ id: 'c-3', text: '経理' }, { id: 'c-4', text: '山田' }] },
+                ],
+              },
+              { id: 'spec-diagram', type: 'diagram', format: 'text', source: '申請 → 上長承認 → 経理確定' },
+            ],
+          }
+        : documentRecordFixture,
+    },
+  },
+}
+
+/**
+ * Comment thread where the viewer edits and deletes their own comments and sees author names.
+ */
+export const CommentOwnActions: Story = {
+  args: {
+    actions: {
+      ...screenActions,
+      deleteComment: async () => undefined,
+      editComment: async () => undefined,
+    },
+    data: {
+      ...screenData,
+      comments: [
+        ...documentCommentFixtures,
+        {
+          anchor: { type: 'document' },
+          authorUserId: 'sato-user',
+          body: '',
+          createdAt: '2026-07-18T08:50:00.000Z',
+          deletedAt: '2026-07-18T09:10:00.000Z',
+          documentId: 'product-principles',
+          id: 'comment-deleted',
+          mentions: [],
+          parentCommentId: 'comment-context',
+          resolved: false,
+          updatedAt: '2026-07-18T09:10:00.000Z',
+        },
+      ],
+      currentUserKey: 'demo-user',
+    },
+    initialContextTab: 'comments',
+    mentionMembers: storyMembers,
+  },
+}
+
+/**
+ * Share dialog that offers Workspace members by name.
+ */
+export const ShareMemberPicker: Story = {
+  args: {
+    initialShareDialogOpen: true,
+    mentionMembers: storyMembers,
+  },
+}

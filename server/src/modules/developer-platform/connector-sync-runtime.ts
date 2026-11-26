@@ -1257,7 +1257,7 @@ export class ConnectorSyncEngine {
         if (applied.reason === 'workflow-rule-rejected') {
           throw new ConnectorRuntimeError(
             'ConnectorSyncConflictWorkflowRejected',
-            'A workflow rule or completion gate of the Work Item refuses this change.',
+            'A workflow rule, completion gate, or required field of the Work Item refuses this change.',
           )
         }
         throw applied.reason === 'state-status-unavailable'

@@ -118,10 +118,12 @@ finished(paused|completed など) + Work Item が started --resume(同じ assign
   `lastHeartbeatAt` を更新する。読み取りは lease を延長しない。lease は `lastHeartbeatAt < now`
   を条件に更新し、遅れて届いた更新で期限を戻さない。
 - heartbeat は Run ごとに 10 秒に 1 回まで受け付け、超過分は `429` と `retryAfterSeconds` を返す。
-- Phase 1 の heartbeat は MCP tool 呼び出しだけで送る。Claude Code の hooks や Kiro の agent
-  hooks から定期送信する方式は後続 Phase の option とし、Codex は hook 相当の有無を確認して
-  から決める。tool を呼ばない長い作業中に停滞表示になることは、停滞が「要確認」であって
-  「失敗」ではないことで許容する。
+- heartbeat は MCP tool 呼び出しで送るほか、agent の hooks から `mcp.mjs --heartbeat` で送れる
+  （[coding-agent-mcp](coding-agent-mcp.md)「hooks からの heartbeat」）。この mode は MCP server と同じ設定と
+  instance ID を使い、その instance の `active` Run だけを延長する。account の cache directory に置く stamp で instance ごとに 1 分に 1 回までとし、
+  失敗しても終了コード 0 で終える。Claude Code の `PostToolUse` hook の例を示し、Kiro は agent hook に同じ command を指定する。
+  Codex は hook 相当の有無を実機で確かめるまで `heartbeat` tool だけとする。hook を使わない長い作業中に
+  停滞表示になることは、停滞が「要確認」であって「失敗」ではないことで許容する。
 
 ### Work Item mutation との fence
 
@@ -927,8 +929,10 @@ report row と Agent settings の row は件数だけを数え、内容は検査
   組み込む。既存の approval action を再利用する。
 - token 費用を analytics に追加し、stage 別 lead time と Run の成功 / 手戻り率（「期間サマリー」）を
   Analytics engine の metric と snapshot に統合する。
-- hooks による heartbeat、planner / implementer / reviewer の多段 Run を Work Item relation と
-  Run の親子で表現する。
+- planner / implementer / reviewer の役割（`role`）を Run に持たせる。Run の連鎖は、`paused` の Run を
+  `resume_task` で続けた Run が `resumedFromRunId` で前の Run を指し、Run 履歴に連鎖として表示される形で表す。
+  役割、handoff report の構造化された引き継ぎ、reviewer の判定を Gate（bot review 条件、#353 の GitHub 連携に依存）に
+  つなぐこと、役割ごとの lease 既定値は、利用者の運用が固まってから決める。
 
 ## 決定事項と保留
 

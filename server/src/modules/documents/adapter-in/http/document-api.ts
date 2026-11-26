@@ -7,6 +7,7 @@ import type {
   ApplyDocumentOperationsInput,
   ArchiveDocumentInput,
   CreateDocumentCommentInput,
+  DocumentMention,
   CreateDocumentInput,
   CreateDocumentShareInput,
   DocumentBlock,
@@ -46,7 +47,9 @@ import type {
   DocumentAuthorizationFenceSnapshot,
   DocumentBacklink,
   DocumentProjectRole,
+  UpdateDocumentCommentRequest,
 } from '../../document-types'
+import { DOCUMENT_MENTION_MAX_COUNT } from '../../domain/document-limits'
 import {
   DOCUMENT_BACKLINK_MAX_PAGE_LIMIT,
   DOCUMENT_COMMENT_MAX_PAGE_LIMIT,
@@ -905,6 +908,61 @@ export function registerDocumentApiRoutes(
     })
   })
 
+  app.patch('/api/documents/:documentId/comments/:commentId', async (c) => {
+    return withDocumentPrincipal(c, dependencies, async (principal, access) => {
+      const input = parseEditDocumentCommentInput(await readJson<unknown>(c))
+      const commentId = readRequiredCommentId(c)
+      const documentId = readRequiredDocumentId(c)
+      const idempotencyKey = readOptionalIdempotencyKey(c)
+      const request: UpdateDocumentCommentRequest = {
+        workspaceId: principal.workspaceId,
+        documentId,
+        commentId,
+        access,
+        body: input.body,
+        mentions: input.mentions,
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+      }
+      // A recorded edit is answered before its mentions are checked again: a mentioned member
+      // may have left since the first attempt, and the retry must still get the first result.
+      if (idempotencyKey !== undefined) {
+        const replay = await dependencies.getClient().getCommentUpdateReplay(request)
+        if (replay !== undefined) return c.json({ comment: replay })
+      }
+      await validateMentionMembers(dependencies, principal.workspaceId, input)
+      const comment = await dependencies.getClient().updateComment({
+        ...request,
+        auditContext: createDocumentCommentAuditContext(c, principal, input, idempotencyKey),
+      })
+      await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+        documentId,
+        part: 'comments',
+      })
+      return c.json({ comment })
+    })
+  })
+
+  app.delete('/api/documents/:documentId/comments/:commentId', async (c) => {
+    return withDocumentPrincipal(c, dependencies, async (principal, access) => {
+      const commentId = readRequiredCommentId(c)
+      const documentId = readRequiredDocumentId(c)
+      const idempotencyKey = readOptionalIdempotencyKey(c)
+      const comment = await dependencies.getClient().deleteComment({
+        workspaceId: principal.workspaceId,
+        documentId,
+        commentId,
+        access,
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+        auditContext: createDocumentCommentAuditContext(c, principal, { commentId }, idempotencyKey),
+      })
+      await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+        documentId,
+        part: 'comments',
+      })
+      return c.json({ comment })
+    })
+  })
+
   app.get('/api/documents/:documentId/presence', async (c) => {
     return withDocumentPrincipal(c, dependencies, async (principal, access) => {
       const documentId = readRequiredDocumentId(c)
@@ -1395,10 +1453,20 @@ function createDocumentAuditContext(
   }
 }
 
+/**
+ * Reads the optional `Idempotency-Key` header of a comment edit or delete.
+ *
+ * @param c - Request context.
+ * @returns The trimmed key, or undefined when the header is absent or blank.
+ */
+function readOptionalIdempotencyKey(c: Context): string | undefined {
+  return c.req.header('Idempotency-Key')?.trim() || undefined
+}
+
 function createDocumentCommentAuditContext(
   c: Context,
   principal: DocumentApiPrincipal,
-  input: CreateDocumentCommentInput,
+  input: object,
   idempotencyKey?: string,
 ): MutationAuditContext {
   const path = new URL(c.req.url).pathname
@@ -1899,6 +1967,66 @@ function validateDocumentOperationShape(operation: Record<string, unknown>): voi
   }
 }
 
+/**
+ * Reads the comment ID path parameter.
+ *
+ * @param c - Hono request context.
+ * @returns The trimmed comment ID.
+ * @throws DocumentError when the ID is missing.
+ */
+function readRequiredCommentId(c: Context): string {
+  const commentId = c.req.param('commentId')?.trim()
+  if (!commentId) {
+    throw new DocumentError(400, 'InvalidDocumentComment', 'Comment ID is required.')
+  }
+  return commentId
+}
+
+/**
+ * Parses the body and mentions of a comment edit.
+ *
+ * @param value - Untrusted request body.
+ * @returns The new body and mentions.
+ * @throws DocumentError when the body or a mention is invalid.
+ */
+function parseEditDocumentCommentInput(value: unknown): { body: string; mentions: DocumentMention[] } {
+  const input = requireDocumentRecord(
+    value,
+    'InvalidDocumentComment',
+    'Comment input is required.',
+  )
+  requireNonEmptyString(input.body, 'InvalidDocumentComment', 'Comment body is required.')
+  return { body: input.body, mentions: parseDocumentCommentMentions(input.mentions) }
+}
+
+/**
+ * Validates the shape of comment mentions.
+ *
+ * @param value - Untrusted mentions.
+ * @returns The mentions.
+ * @throws DocumentError when the list or a mention is invalid.
+ */
+function parseDocumentCommentMentions(value: unknown): DocumentMention[] {
+  if (!Array.isArray(value) || value.length > DOCUMENT_MENTION_MAX_COUNT) {
+    throw new DocumentError(400, 'InvalidDocumentMention', 'Comment mentions are invalid.')
+  }
+  return value.map((mention: unknown) => {
+    if (
+      !isRecord(mention) ||
+      typeof mention.userId !== 'string' ||
+      typeof mention.offset !== 'number' ||
+      typeof mention.length !== 'number' ||
+      !Number.isSafeInteger(mention.offset) ||
+      !Number.isSafeInteger(mention.length) ||
+      mention.offset < 0 ||
+      mention.length < 1
+    ) {
+      throw new DocumentError(400, 'InvalidDocumentMention', 'A comment mention is invalid.')
+    }
+    return { userId: mention.userId, offset: mention.offset, length: mention.length }
+  })
+}
+
 function parseCreateDocumentCommentInput(value: unknown): CreateDocumentCommentInput {
   const input = requireDocumentRecord(
     value,
@@ -1911,21 +2039,8 @@ function parseCreateDocumentCommentInput(value: unknown): CreateDocumentCommentI
     'InvalidDocumentComment',
     'Parent comment ID is invalid.',
   )
-  if (!Array.isArray(input.mentions) || input.mentions.length > 20) {
-    throw new DocumentError(400, 'InvalidDocumentMention', 'Comment mentions are invalid.')
-  }
-  for (const mention of input.mentions) {
-    if (
-      !isRecord(mention) ||
-      typeof mention.userId !== 'string' ||
-      !Number.isSafeInteger(mention.offset) ||
-      !Number.isSafeInteger(mention.length) ||
-      (mention.offset as number) < 0 ||
-      (mention.length as number) < 1
-    ) {
-      throw new DocumentError(400, 'InvalidDocumentMention', 'A comment mention is invalid.')
-    }
-  }
+  // Validated as an edit's mentions are; the input itself is kept, as its fingerprint is.
+  parseDocumentCommentMentions(input.mentions)
   validateDocumentCommentAnchor(input.anchor)
   return input as unknown as CreateDocumentCommentInput
 }
@@ -2712,7 +2827,7 @@ function toPublicWhiteboardStyle(
 async function validateMentionMembers(
   dependencies: DocumentApiDependencies,
   workspaceId: string,
-  input: CreateDocumentCommentInput,
+  input: Pick<CreateDocumentCommentInput, 'mentions'>,
 ) {
   const memberKeys = [...new Set(input.mentions.map((mention) => mention.userId))]
   if (!await everyActiveDocumentMember(dependencies, workspaceId, memberKeys)) {
