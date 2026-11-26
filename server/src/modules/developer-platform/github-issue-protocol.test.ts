@@ -276,18 +276,48 @@ describe('bundled GitHub connector settings', () => {
     await expect(adapter.disconnect(credential)).rejects.toBeDefined()
   })
 
-  test('keeps operator REST mappings for GitHub instead of the bundled issue sync', () => {
-    expect(() => createOAuthConnectorRegistryFromEnvironment({
+  test('keeps operator REST mappings for GitHub instead of the bundled issue sync', async () => {
+    const binding = {
+      collectionPath: 'operator/issues',
+      itemPath: 'operator/issues/{externalId}',
+      itemsPath: 'items',
+      record: {
+        externalId: 'id',
+        externalUrl: 'url',
+        externalVersion: 'version',
+        title: 'title',
+        description: 'body',
+        status: 'state',
+        originMarker: 'origin',
+      },
+      mutation: { title: 'title', description: 'body', status: 'state', originMarker: 'origin' },
+    }
+    const urls: string[] = []
+    const registry = createOAuthConnectorRegistryFromEnvironment({
       environment: {
         MUKUROJI_CONNECTOR_PROVIDERS_JSON: JSON.stringify([{
           provider: 'github',
           clientId: 'github-client',
           clientSecretEnvironmentVariable: 'MUKUROJI_CONNECTOR_GITHUB_SECRET',
           redirectUri: 'https://app.example.test/api/developer/connector-oauth/callback',
-          resources: { issue: { collectionPath: 'x', itemPath: 'x/{externalId}', itemsPath: 'items', record: {}, mutation: {} } },
+          authorizationEndpoint: 'https://git.example.test/oauth/authorize',
+          tokenEndpoint: 'https://git.example.test/oauth/token',
+          apiBaseUrl: 'https://git.example.test/api/',
+          defaultScopes: ['repo'],
+          token: { accessToken: 'access_token', externalAccountId: 'account_id' },
+          resources: { issue: binding, 'merge-request': binding, commit: binding, deploy: binding },
+          allowedHosts: ['app.example.test', 'git.example.test'],
         }]),
         MUKUROJI_CONNECTOR_GITHUB_SECRET: 'secret',
       },
-    })).toThrow()
+      fetch: Object.assign(async (input: string | URL | Request) => {
+        urls.push(String(input))
+        return Response.json({ items: [] })
+      }, { preconnect: () => undefined }),
+    })
+    const adapter = registry.get('github')
+    const page = await adapter.pull({ accessToken: 'token', externalAccountId: '1', scopes: ['repo'] }, 'issue')
+    expect(page).toEqual({ items: [] })
+    expect(urls).toEqual(['https://git.example.test/api/operator/issues'])
   })
 })

@@ -133,6 +133,8 @@ export type TeamIssueOutlineSource = {
 export type TeamIssueScreenProps = {
   /** Whether the saved Workspace AI policy permits the Summary workflow. */
   aiAssistanceEnabled?: boolean
+  /** Whether the saved Workspace AI policy permits the Planning workflow. */
+  aiPlanningAssistanceEnabled?: boolean
   /** Whether the deployment serves Software factory: agent handoff, Agent Run history, and report chips. */
   softwareFactoryEnabled?: boolean
   /** Saved task view active when canonical Team actions are invoked. */

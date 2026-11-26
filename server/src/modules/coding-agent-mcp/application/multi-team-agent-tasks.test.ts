@@ -106,6 +106,7 @@ function teamApi(teamId: string, tasks: AgentTask[], runs: AgentRunRecord[] = []
     async actualDates() { return undefined },
     async taskKey() { return undefined },
     async hierarchy() { return undefined },
+    async completionGate() { return undefined },
     async relatedDocuments() { return undefined },
     async projectCharter(projectId) {
       if (!projects.includes(projectId)) return undefined

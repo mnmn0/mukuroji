@@ -76,6 +76,7 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     fileFailedRunsToTriage,
     fileStalledRunsToTriage,
     leaseMinutes,
+    notifyAssigneeOfRunEvents,
     readyStatusIds,
     requireAcceptanceCriteria,
     resumableStatusIds,
@@ -98,6 +99,8 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     // Servers older than Triage filing omit the flags, which then read as off.
     (fileFailedRunsToTriage !== undefined && typeof fileFailedRunsToTriage !== 'boolean') ||
     (fileStalledRunsToTriage !== undefined && typeof fileStalledRunsToTriage !== 'boolean') ||
+    // Servers older than Agent Run notifications omit the flag, which then reads as off.
+    (notifyAssigneeOfRunEvents !== undefined && typeof notifyAssigneeOfRunEvents !== 'boolean') ||
     // Servers older than the switch omit it and always accept new runs.
     (acceptNewRuns !== undefined && typeof acceptNewRuns !== 'boolean') ||
     // Servers older than pull request verification omit the list, which then reads as any repository.
@@ -126,6 +129,7 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     projectBriefs,
     fileFailedRunsToTriage: fileFailedRunsToTriage === true,
     fileStalledRunsToTriage: fileStalledRunsToTriage === true,
+    notifyAssigneeOfRunEvents: notifyAssigneeOfRunEvents === true,
     ...(updatedAt === undefined ? {} : { updatedAt }),
     ...(updatedBy === undefined ? {} : { updatedBy }),
   }

@@ -94,6 +94,10 @@ Team のワークフローで実行できる役割を限った遷移（例: 「�
 足りない項目（`/schedule`、`/acceptanceCriteria`、`/customFieldValues/<ID>`）がエラーに示されるので、
 `update_task` で埋めてから新しい `idempotencyKey` でやり直します。
 
+Team に完了 Gate を設定していると、`get_task` の `completionGate` に条件ごとの達成状況が出ます。
+`blocksCompletion` が `true` の間は `complete_task` が拒否されるので、agent は足りない条件
+（例: 承認がまだない）を人に伝えます。受け入れ条件は agent が満たしたと記録できますが、承認は人が行います。
+
 仕様書や設計書は、タスク詳細の **関連 Document** でタスクに link しておくと agent が読めます。
 `get_task` が link された Document の一覧の最初のページを返し、続きは `list_task_documents` で取得します。
 agent は `read_document` で本文を Markdown として読みます。
@@ -222,7 +226,8 @@ Team の **Factory board**（`/teams/:teamId/factory`）で、agent の作業状
 Claude Code などで hooks を設定すると、agent が MCP tool を呼ばずに長く作業している間も heartbeat が届き、停滞と表示されにくくなります（設定は [MCP の説明](../coding-agent-mcp.md) の「hooks からの heartbeat」）。
 Run を開いて状況を確認し、続けられない場合は **解放** してタスクを人や別の agent に戻します。
 解放できるのは Team の管理者、その Run を始めた人、現在の担当者です。失敗・停滞した Run を
-Triage に自動で起票する設定もあります。
+Triage に自動で起票する設定もあります。Team のエージェント設定で「通知」を有効にすると、blocker や引き継ぎの
+report、失敗、停滞があったときに担当者の Inbox と有効な通知先に届きます。
 
 ### Run 履歴
 

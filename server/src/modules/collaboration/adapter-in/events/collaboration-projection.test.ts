@@ -1876,6 +1876,30 @@ describe('collaboration projection pure helpers', () => {
     })).toMatchObject({ contextItemId: 'context-1', sourceRevision: 4 })
   })
 
+  test('keeps an Agent Run notification for the assignee whose credential the agent used', () => {
+    const event = parseAuditProjectionEvent({
+      eventId: 'evt-agent-blocker',
+      eventType: 'agent-run.reported',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-11-25T12:00:00.000Z',
+      actorUserId: 'member@example.com',
+      entityType: 'agent-run',
+      entityId: 'team/core/agent-run/run-1',
+      metadata: {
+        actorMemberKey: 'member@example.com',
+        teamId: 'core',
+        issueId: 'example',
+        notificationCandidates: [
+          { memberKey: 'member@example.com', reason: 'agent-run-blocker' },
+          { memberKey: 'member@example.com', reason: 'watcher' },
+        ],
+      },
+    })
+    if (!event) throw new Error('The event must parse.')
+    // Only the Agent Run reason survives the actor exclusion.
+    expect(groupNotificationCandidates(event)).toEqual([{ memberKey: 'member@example.com', reasons: ['agent-run-blocker'] }])
+  })
+
   test('parses actor member metadata and preserves suppressed outbox events', () => {
     const event = parseAuditProjectionEvent({
       eventId: 'evt-suppressed',

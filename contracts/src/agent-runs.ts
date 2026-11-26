@@ -541,6 +541,11 @@ export type AgentSettings = {
   fileFailedRunsToTriage: boolean
   /** Whether each run that stalls (active past its lease) is filed to the Team's Triage as an `agent-run` entry. */
   fileStalledRunsToTriage: boolean
+  /**
+   * Whether the Work Item assignee is notified when the run saves a `blocker` or `handoff` report,
+   * finishes as `failed`, or stalls. Off by default.
+   */
+  notifyAssigneeOfRunEvents: boolean
   /** UTC ISO 8601 time of the last saved change. */
   updatedAt?: string
   /** Member key of the last editor. */
@@ -604,6 +609,8 @@ export type UpdateAgentSettingsRequest = {
   fileFailedRunsToTriage?: boolean
   /** Whether stalled runs are filed to Triage; omitted means false. */
   fileStalledRunsToTriage?: boolean
+  /** Whether the assignee is notified of blocker and handoff reports, failed finishes, and stalls; omitted means off. */
+  notifyAssigneeOfRunEvents?: boolean
   /** Whether agents may start, resume, or take over runs; omitted means true. */
   acceptNewRuns?: boolean
   /** Repositories whose pull requests are verified; omitted means none listed, so any readable repository. */

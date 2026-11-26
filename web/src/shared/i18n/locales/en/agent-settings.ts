@@ -45,6 +45,10 @@ export const agentSettingsMessages = {
   'agentSettings.triage.description': 'File runs that need a person to the Team triage queue as Agent run entries, one entry per run.',
   'agentSettings.triage.failed': 'File runs that finish as failed',
   'agentSettings.triage.stalled': 'File runs that stall past their lease',
+  'agentSettings.notifications.title': 'Notifications',
+  'agentSettings.notifications.assignee': 'Notify the assignee when a run needs a person',
+  'agentSettings.notifications.help':
+    'The assignee is notified in Inbox and on the channels they turned on when a run reports a blocker or a handoff, fails, or stalls past its lease. A stalled run is notified once.',
   'agentSettings.criteria.field': 'Custom field that also counts as acceptance criteria',
   'agentSettings.criteria.fieldNone': 'None',
   'agentSettings.criteria.fieldMissing': '{field} (no longer available)',

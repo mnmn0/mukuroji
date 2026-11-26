@@ -926,6 +926,7 @@ export async function updateWebAgentSettings(
       { field: 'acceptanceCriteriaFieldId', before: before.acceptanceCriteriaFieldId ?? '', after: update.acceptanceCriteriaFieldId ?? '' },
       { field: 'fileFailedRunsToTriage', before: before.fileFailedRunsToTriage, after: update.fileFailedRunsToTriage },
       { field: 'fileStalledRunsToTriage', before: before.fileStalledRunsToTriage, after: update.fileStalledRunsToTriage },
+      { field: 'notifyAssigneeOfRunEvents', before: before.notifyAssigneeOfRunEvents, after: update.notifyAssigneeOfRunEvents },
       // Briefs are long user text, so the audit records only their size.
       { field: 'brief.bytes', before: briefBytes(before.brief), after: briefBytes(update.brief) },
       ...[...new Set([...Object.keys(before.projectBriefs), ...Object.keys(update.projectBriefs)])].map((projectId) => ({

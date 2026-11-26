@@ -45,6 +45,8 @@ export type AgentSettingsDraft = {
   fileFailedRunsToTriage: boolean
   /** Whether stalled runs are filed to Triage. */
   fileStalledRunsToTriage: boolean
+  /** Whether the assignee is notified of blocker and handoff reports, failed finishes, and stalls. */
+  notifyAssigneeOfRunEvents: boolean
   /** Whether agents may start, resume, or take over runs. */
   acceptNewRuns: boolean
   /** Repositories whose reported pull requests are verified, one `owner/repo` per line; blank means any. */
@@ -137,6 +139,7 @@ export function createAgentSettingsDraft(settings: AgentSettings): AgentSettings
     projectBriefs: { ...settings.projectBriefs },
     fileFailedRunsToTriage: settings.fileFailedRunsToTriage,
     fileStalledRunsToTriage: settings.fileStalledRunsToTriage,
+    notifyAssigneeOfRunEvents: settings.notifyAssigneeOfRunEvents,
     acceptNewRuns: settings.acceptNewRuns,
     artifactRepositories: settings.artifactRepositories.join('\n'),
   }
@@ -239,6 +242,7 @@ export function createUpdateAgentSettingsRequest(
     projectBriefs,
     fileFailedRunsToTriage: draft.fileFailedRunsToTriage,
     fileStalledRunsToTriage: draft.fileStalledRunsToTriage,
+    notifyAssigneeOfRunEvents: draft.notifyAssigneeOfRunEvents,
     acceptNewRuns: draft.acceptNewRuns,
     artifactRepositories: readArtifactRepositoryLines(draft.artifactRepositories),
   }
@@ -438,6 +442,7 @@ function createDraftComparisonKey(draft: AgentSettingsDraft): string {
     draft.requireAcceptanceCriteria,
     draft.fileFailedRunsToTriage,
     draft.fileStalledRunsToTriage,
+    draft.notifyAssigneeOfRunEvents,
     draft.acceptNewRuns,
     readArtifactRepositoryLines(draft.artifactRepositories),
     draft.acceptanceCriteriaFieldId,
