@@ -726,7 +726,8 @@ function lastTopLevelLine(paragraph: string[]): string | undefined {
 }
 
 /**
- * Removes the parts of a line inside HTML comments.
+ * Removes the parts of a line inside HTML comments. A `<!--` inside an inline code span or after a
+ * backslash is text, so it opens no comment.
  *
  * @param line - Source line.
  * @param open - Whether a comment was open before the line.
@@ -736,17 +737,63 @@ function removeHtmlComments(line: string, open: boolean): { text: string, open: 
   let inside = open
   let text = ''
   let position = 0
+  /** Backtick run lengths with no closing run later in the line. */
+  const unclosedRuns = new Set<number>()
   while (position < line.length) {
-    const next = inside ? line.indexOf('-->', position) : line.indexOf('<!--', position)
-    if (next < 0) {
-      if (!inside) text += line.slice(position)
-      break
+    if (inside) {
+      const close = line.indexOf('-->', position)
+      if (close < 0) break
+      position = close + 3
+      inside = false
+      continue
     }
-    if (!inside) text += line.slice(position, next)
-    position = next + (inside ? 3 : 4)
-    inside = !inside
+    const character = line[position]
+    if (character === '\\') {
+      text += line.slice(position, position + 2)
+      position += 2
+      continue
+    }
+    if (character === '`') {
+      let runEnd = position
+      while (line[runEnd] === '`') runEnd += 1
+      const length = runEnd - position
+      const close = unclosedRuns.has(length) ? -1 : findBacktickRun(line, runEnd, length)
+      if (close < 0) unclosedRuns.add(length)
+      const spanEnd = close < 0 ? runEnd : close + length
+      text += line.slice(position, spanEnd)
+      position = spanEnd
+      continue
+    }
+    if (line.startsWith('<!--', position)) {
+      position += 4
+      inside = true
+      continue
+    }
+    text += character ?? ''
+    position += 1
   }
   return { text, open: inside }
+}
+
+/**
+ * Finds a run of exactly `length` backticks, which closes an inline code span.
+ *
+ * @param line - Source line.
+ * @param from - Position to search from.
+ * @param length - Length of the opening run.
+ * @returns The start of the closing run, or -1 when there is none.
+ */
+function findBacktickRun(line: string, from: number, length: number): number {
+  let position = from
+  while (position < line.length) {
+    const start = line.indexOf('`', position)
+    if (start < 0) return -1
+    let end = start
+    while (line[end] === '`') end += 1
+    if (end - start === length) return start
+    position = end
+  }
+  return -1
 }
 
 /**

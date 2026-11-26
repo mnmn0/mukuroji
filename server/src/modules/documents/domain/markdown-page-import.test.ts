@@ -356,6 +356,13 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
   })
 
+  test('keeps a body whole when inline code holds a comment opener before a definition', () => {
+    const source = 'See [docs][ref].\n\n## Details\n\nUse `<!--` to start a comment.\n\n[ref]: https://example.com'
+    expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
+    const escaped = 'See [docs][ref].\n\n## Details\n\nType \\<!-- literally.\n\n[ref]: https://example.com'
+    expect(convert(escaped).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: escaped }])
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])
