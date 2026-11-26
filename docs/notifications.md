@@ -24,6 +24,7 @@ Mukuroji の Inbox は、Work Item の現在状態から都度組み立てる at
 - Planning update の publish / health 悪化 / コメント: `watcher` / `project-member` / `escalation` / `update-owner` / `update-author` / `mention`（詳細は [Planning](./planning.md)）
 - Milestone の完了 / 日付の変更（`planning-entity.milestone-completed` / `planning-entity.milestone-rescheduled`）: `watcher`（下の「Milestone の watch」）
 - Triage assignment / SLA / escalation: `triage-assignment` / `triage-sla` / `triage-escalation`
+- Agent Run の blocker / handoff report、`failed` の finish、停滞（Team の Agent settings で有効にした場合）: 担当者に `agent-run-blocker` / `agent-run-handoff` / `agent-run-failed` / `agent-run-stalled`。agent は担当者の credential で動くため、actor 本人を除く規則の例外として担当者本人に届く。category は `status`（[Software factory](./software-factory.md) の「担当者への通知」）
 
 Approval と automation の各 subsystem は、実装時に同じ契約で `approval` / `automation-failure` candidate と deep link を発行します。notification projector は event type を限定せず、候補を持つ audit event を同じ重複排除・認可ルールで扱います。
 
@@ -265,7 +266,7 @@ channel の参加者全員が投稿を読めるため、送信先はその Proje
 `slackFailureReference` を記録して `SlackChannelPostFailed` ログを出し、job を失敗にして `ScheduledJobsDlq` の
 アラーム対象にします。ログに本文・URL は含みません。
 
-hourly / daily の頻度でまとめる投稿、Microsoft Teams の Webhook、Agent Run の判断待ちの投稿はまだありません。
+hourly / daily の頻度でまとめる投稿、Microsoft Teams の Webhook、Agent Run の判断待ちの channel 投稿はまだありません。Agent Run の判断待ちは担当者個人への通知（Slack DM を含む）で届きます。
 
 ## Email 配信
 

@@ -508,6 +508,60 @@ describe('public Agent Run service', () => {
       .rejects.toMatchObject({ reason: 'agent_run_not_active' })
   })
 
+  test('notifies the assignee of a failed finish only when the Team turned it on', async () => {
+    const previousAuditTable = process.env.AUDIT_EVENTS_TABLE_NAME
+    process.env.AUDIT_EVENTS_TABLE_NAME = 'AuditEvents'
+    try {
+      const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+      setTestAppDependencies({
+        transactions: {
+          /**
+           * Returns a receipt write for the transaction.
+           *
+           * @returns The receipt write.
+           */
+          async prepareIdempotencyCompletionTransactWrite() {
+            return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+          },
+        },
+      })
+      const committed: { Put?: { Item?: Record<string, unknown> } }[][] = []
+      const commit = store.commit.bind(store)
+      store.commit = async (items, fenceItemCount) => {
+        committed.push([...items])
+        return commit(items, fenceItemCount)
+      }
+      const service = createCanonicalPublicAgentRunService()
+      /**
+       * Finishes a fresh run on a Work Item and returns the metadata of its audit event.
+       *
+       * @param workItemId - Work Item of the run.
+       * @param outcome - Finish outcome.
+       * @returns Audit metadata of the finish.
+       */
+      const finish = async (workItemId: string, outcome: 'failed' | 'completed') => {
+        const held = createHeldRun(workItemId)
+        store.seed(held)
+        await runWithTestAppDependencies(() => service.finish(
+          credential, 'core-team', held.runId, { outcome, instanceIdHash: held.instanceIdHash },
+          { requestId: 'finish', idempotencyKey: `finish-${workItemId}-${outcome}` },
+          { credentialId: 'agent-key', idempotencyKey: `finish-${workItemId}-${outcome}`, requestFingerprint: 'fp', reservationId: 'reservation' },
+        ))
+        return committed.at(-1)?.find((item) => item.Put?.Item?.eventType === 'agent-run.finished')?.Put?.Item?.metadata
+      }
+      expect(await finish('task-1', 'failed')).toEqual(expect.not.objectContaining({ notificationCandidates: expect.anything() }))
+      store.state.settings.set(`${workspaceId}|core-team`, { ...createDefaultAgentSettings('core-team'), notifyAssigneeOfRunEvents: true })
+      expect(await finish('task-1', 'failed')).toMatchObject({
+        notificationTitle: 'Agent Run failed',
+        notificationCandidates: [{ memberKey: 'demo@example.com', reason: 'agent-run-failed' }],
+      })
+      expect(await finish('task-1', 'completed')).toEqual(expect.not.objectContaining({ notificationCandidates: expect.anything() }))
+    } finally {
+      if (previousAuditTable === undefined) delete process.env.AUDIT_EVENTS_TABLE_NAME
+      else process.env.AUDIT_EVENTS_TABLE_NAME = previousAuditTable
+    }
+  })
+
   test('hides a run the active index still lists after it closed', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
     const held = createHeldRun('task-1', 'laptop-1')
@@ -1773,6 +1827,46 @@ describe('Agent Run reports', () => {
     const second = await report({ kind: 'blocker', message: 'Need a decision' }, 'report-2')
     expect(second.report).toMatchObject({ sequence: 2, kind: 'blocker', verifications: [], artifacts: [] })
     expect(store.state.reports.size).toBe(2)
+  })
+
+  test('notifies the assignee of blocker and handoff reports only when the Team turned it on', async () => {
+    const previousAuditTable = process.env.AUDIT_EVENTS_TABLE_NAME
+    process.env.AUDIT_EVENTS_TABLE_NAME = 'AuditEvents'
+    try {
+      /**
+       * Reads the notification candidates of the Agent Run audit event in a write set.
+       *
+       * @param items - Writes committed together.
+       * @returns The candidates, or undefined when the event carries none.
+       */
+      const candidatesOf = (items: readonly { Put?: { Item?: Record<string, unknown> } }[] | undefined) => {
+        const event = items?.find((item) => item.Put?.Item?.eventType === 'agent-run.reported')?.Put?.Item
+        const metadata = event?.metadata
+        return typeof metadata === 'object' && metadata !== null && 'notificationCandidates' in metadata
+          ? metadata.notificationCandidates
+          : undefined
+      }
+      const { store, comments, report } = configureReport()
+      await report({ kind: 'blocker', message: 'Need a decision' }, 'report-off')
+      // The setting is off by default.
+      expect(comments[0]?.coWrites?.some((item) => item.Put?.Item?.eventType === 'agent-run.reported')).toBe(true)
+      expect(candidatesOf(comments[0]?.coWrites)).toBeUndefined()
+
+      store.state.settings.set(`${workspaceId}|core-team`, { ...createDefaultAgentSettings('core-team'), notifyAssigneeOfRunEvents: true })
+      await report({ kind: 'blocker', message: 'Need a decision' }, 'report-blocker')
+      await report({ kind: 'handoff', message: 'Over to you' }, 'report-handoff')
+      await report({ kind: 'progress', message: 'Halfway' }, 'report-progress')
+      expect(candidatesOf(comments[1]?.coWrites)).toEqual([{ memberKey: 'demo@example.com', reason: 'agent-run-blocker' }])
+      expect(candidatesOf(comments[2]?.coWrites)).toEqual([{ memberKey: 'demo@example.com', reason: 'agent-run-handoff' }])
+      expect(candidatesOf(comments[3]?.coWrites)).toBeUndefined()
+      // The event never carries the instance ID or its hash.
+      const event = JSON.stringify(comments[1]?.coWrites?.find((item) => item.Put?.Item?.eventType === 'agent-run.reported'))
+      expect(event).not.toContain('laptop-1')
+      expect(event).not.toContain(hashAgentInstanceId('laptop-1'))
+    } finally {
+      if (previousAuditTable === undefined) delete process.env.AUDIT_EVENTS_TABLE_NAME
+      else process.env.AUDIT_EVENTS_TABLE_NAME = previousAuditTable
+    }
   })
 
   test('reports verification results and artifacts on a run that resumed a paused run', async () => {

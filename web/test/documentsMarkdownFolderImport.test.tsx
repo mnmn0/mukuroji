@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type {
-  ApplyDocumentOperationsInput,
-  CreateDocumentInput,
-  DocumentBlock,
+import {
+  splitDocumentPageLinks,
+  type ApplyDocumentOperationsInput,
+  type CreateDocumentInput,
+  type DocumentBlock,
 } from '@mukuroji/contracts'
 import {
   hasImportPlaceholder,
@@ -11,7 +12,6 @@ import {
   MARKDOWN_FOLDER_IMPORT_MAX_FILES,
   planMarkdownFolderImport,
   resolveImportedPageLinks,
-  splitDocumentPageLinks,
   type MarkdownFolderFile,
   type MarkdownFolderImportPlan,
 } from '../src/documents/model/markdownFolderImport'
@@ -136,8 +136,57 @@ describe('folder Markdown import', () => {
       { type: 'embed', url: '/documents/id%3Adocs%2FREADME.md', title: 'Back' },
     ])
     expect(resolvedBlocks(planned, 'docs/guide/usage.md')).toMatchObject([
-      { type: 'paragraph', text: '`[code](setup.md)` and [not](setup.md)' },
+      { type: 'paragraph', text: '`[code](setup.md)` and \\[not](setup.md)' },
     ])
+  })
+
+  test('points links that use a reference definition or an angle-bracket target at the imported pages', () => {
+    const planned = plan([
+      {
+        path: 'a.md',
+        source: [
+          '[Guide][g]',
+          '',
+          'See [the guide][g], [spaced][s], [encoded](my%20file.md), and [titled](<my file.md> "T").',
+          '',
+          '[Other](<other.md>)',
+          '',
+          '| Page |',
+          '| --- |',
+          '| [cell][g] and [cell 2](<my file.md>) |',
+          '',
+          '- [ ] read [item][g]',
+          '',
+          '[Outside][x] and [kept](<missing file.md>)',
+          '',
+          '[g]: other.md',
+          '[s]: <my file.md>',
+          '[x]: https://example.com',
+        ].join('\n'),
+      },
+      { path: 'other.md', source: '# Other' },
+      { path: 'my file.md', source: '# Mine' },
+    ])
+
+    expect(resolvedBlocks(planned, 'a.md')).toMatchObject([
+      { type: 'embed', url: '/documents/id%3Aother.md', title: 'Guide' },
+      {
+        type: 'paragraph',
+        text: 'See [the guide](/documents/id%3Aother.md), [spaced](/documents/id%3Amy%20file.md), ' +
+          '[encoded](/documents/id%3Amy%20file.md), and [titled](/documents/id%3Amy%20file.md "T").',
+      },
+      { type: 'embed', url: '/documents/id%3Aother.md', title: 'Other' },
+      {
+        type: 'table',
+        rows: [{ cells: [{ text: '[cell](/documents/id%3Aother.md) and [cell 2](/documents/id%3Amy%20file.md)' }] }],
+      },
+      { type: 'checklist', items: [{ text: 'read [item](/documents/id%3Aother.md)' }] },
+      { type: 'paragraph', text: '[Outside](<https://example.com>) and [kept](<missing file.md>)' },
+    ])
+    const html = renderToStaticMarkup(
+      <DocumentLinkedText text="[cell](/documents/id%3Aother.md) and [cell 2](/documents/id%3Amy%20file.md)" />,
+    )
+    expect(html.match(/<a /gu)).toHaveLength(2)
   })
 
   test('creates linked pages first and leaves links in cycles for later', () => {
@@ -230,7 +279,7 @@ describe('single-page Markdown links', () => {
       { type: 'embed', url: 'https://example.com/spec', title: 'Spec' },
       { type: 'embed', url: '/documents/doc-1', title: 'Page' },
       { type: 'paragraph', text: '[Plain](http://example.com)' },
-      { type: 'paragraph', text: '[Escaped](https://example.com)' },
+      { type: 'paragraph', text: '\\[Escaped\\](https://example.com)' },
       { type: 'paragraph', text: '[Relative](other.md)' },
     ])
   })

@@ -1,9 +1,13 @@
+import { TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
+import { createMutationAuditContext, createMutationAuditEventPut, getConfiguredAuditTableName } from '../../modules/audit'
 import {
   DynamoDbAgentRunStore,
+  createAgentRunNotificationMetadata,
   runAgentRunTriageSweep,
+  type AgentRunStallNotifier,
   type AgentRunTriageFiler,
   type AgentRunTriageSweepResult,
   type AgentRunTriageWorkItemReader,
@@ -170,6 +174,98 @@ export function createAgentRunTriageFiler(
   }
 }
 
+/** Transaction write the stall notifier needs, which the DynamoDB document client provides. */
+export interface AgentRunStallNotificationWriter {
+  /**
+   * Sends one transaction.
+   * @param command - Transaction of the audit event and its Workspace condition.
+   * @returns Resolves once the transaction commits.
+   */
+  send(command: TransactWriteCommand): Promise<unknown>
+}
+
+/** Route recorded as the source of the events the sweep writes. */
+const sweepRoute = '/internal/agent-run-triage'
+
+/**
+ * Creates the notifier that tells a stalled run's assignee through an `agent-run.stalled` audit
+ * event. The event ID derives from the run ID, so a retried sweep replays the first notification.
+ * A Workspace that is closing receives none, and the event commits only while it is still active.
+ *
+ * @param writer - DynamoDB transaction writer.
+ * @param tenant - Workspace lifecycle checks.
+ * @param auditTableName - Audit table; without one, nothing is notified.
+ * @returns Stall notifier.
+ */
+export function createAgentRunStallNotifier(
+  writer: AgentRunStallNotificationWriter,
+  tenant: AgentRunTriageTenant,
+  auditTableName: string | undefined,
+): AgentRunStallNotifier {
+  return {
+    /** Writes the stall event of one run once. */
+    async notifyStalled(run, workItem) {
+      if (!await tenant.isActive(run.directoryId)) return
+      const context = createMutationAuditContext({
+        workspaceId: run.directoryId,
+        actor: { id: 'system:agent-run-triage', kind: 'system', displayName: 'Mukuroji Agent Run triage' },
+        idempotencyKey: `agent-run-stalled:${run.teamId}:${run.runId}`,
+        request: { method: 'SCHEDULE', path: sweepRoute, body: { teamId: run.teamId, runId: run.runId } },
+        source: { kind: 'system', method: 'SCHEDULE', route: sweepRoute },
+      })
+      const auditPut = createMutationAuditEventPut(auditTableName, context, {
+        directoryId: run.directoryId,
+        eventType: 'agent-run.stalled',
+        entityType: 'agent-run',
+        entityId: `team/${run.teamId}/agent-run/${run.runId}`,
+        action: 'stalled',
+        summary: 'Agent Run stalled: its lease expired without a heartbeat.',
+        changes: [],
+        metadata: {
+          adapter: 'agent-run',
+          teamId: run.teamId,
+          issueId: run.workItemId,
+          deepLink: workItem.path,
+          runId: run.runId,
+          runtime: run.runtime,
+          agentName: run.agentName,
+          ...createAgentRunNotificationMetadata(run, {
+            reason: 'agent-run-stalled',
+            ...(workItem.projectId === undefined ? {} : { projectId: workItem.projectId }),
+          }),
+        },
+      })
+      if (!auditPut) return
+      try {
+        await writer.send(new TransactWriteCommand({
+          TransactItems: [auditPut, tenant.createActiveWriteCondition(run.directoryId)],
+        }))
+      } catch (error) {
+        const reasons = readCancellationCodes(error)
+        // The event exists: an earlier sweep notified this run.
+        if (reasons[0] === 'ConditionalCheckFailed') return
+        // The Workspace started closing.
+        if (reasons[1] === 'ConditionalCheckFailed') return
+        throw error
+      }
+    },
+  }
+}
+
+/**
+ * Reads the cancellation reason codes of a cancelled DynamoDB transaction.
+ *
+ * @param error - Error from the transaction.
+ * @returns One code per transaction item, or an empty list for another error.
+ */
+function readCancellationCodes(error: unknown): (string | undefined)[] {
+  if (typeof error !== 'object' || error === null || !('name' in error) || error.name !== 'TransactionCanceledException') return []
+  const reasons = 'CancellationReasons' in error ? error.CancellationReasons : undefined
+  if (!Array.isArray(reasons)) return []
+  return reasons.map((reason: unknown) =>
+    typeof reason === 'object' && reason !== null && 'Code' in reason && typeof reason.Code === 'string' ? reason.Code : undefined)
+}
+
 /**
  * Creates the scheduled handler that files failed and stalled Agent Runs to Triage. It throws after
  * a sweep that left items for the next run, so the failure reaches the Lambda error alarm.
@@ -179,7 +275,8 @@ export function createAgentRunTriageFiler(
 export function createProductionAgentRunTriageHandler(): () => Promise<AgentRunTriageSweepResult> {
   const tableName = loadServerConfig().environment.AGENT_RUNS_TABLE_NAME?.trim()
   if (!tableName) throw new Error('Agent Run triage runtime is not configured.')
-  const store = new DynamoDbAgentRunStore(createDynamoDbDocumentClient(createDynamoDbClient()), tableName)
+  const documentClient = createDynamoDbDocumentClient(createDynamoDbClient())
+  const store = new DynamoDbAgentRunStore(documentClient, tableName)
   const workItems = createAgentRunTriageWorkItemReader(new DynamoDbTeamIssuesClient())
   const tenant = createProductionTenantAvailability()
   // The same live Team, Project, and owner checks as entries admitted through the API.
@@ -187,11 +284,13 @@ export function createProductionAgentRunTriageHandler(): () => Promise<AgentRunT
     validateAdmission: createTriageAdmissionValidator(new DynamoDbProjectDirectoryClient(), new DynamoDbWorkspaceAccessClient()),
   })
   const triage = createAgentRunTriageFiler(triageClient, tenant)
+  const notifier = createAgentRunStallNotifier(documentClient, tenant, getConfiguredAuditTableName())
   return async () => {
     const result = await runAgentRunTriageSweep({
       store,
       workItems,
       triage,
+      notifier,
       now: new Date(),
       onError: (failure) => console.warn('Agent Run triage filing failed:', failure),
     })
