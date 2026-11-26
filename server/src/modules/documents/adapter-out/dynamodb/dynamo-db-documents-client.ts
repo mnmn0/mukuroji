@@ -88,6 +88,7 @@ import type {
   UpdateDocumentCommentRequest,
   DeleteDocumentCommentRequest,
   ResolveDocumentSearchAccessRequest,
+  ReplaceDocumentContentRequest,
   RestoreDocumentVersionRequest,
   StoredDocumentComment,
   StoredDocumentPresence,
@@ -517,6 +518,27 @@ type StoredDocumentVersionPinReceiptItem = {
   /** 確定した pin の日時です。 */
   pinnedAt: string
   /** DynamoDB TTL epoch seconds です。 */
+  expiresAtEpoch: number
+}
+
+/**
+ * Durable receipt of one content replacement, keyed by the writer's Idempotency-Key, so a retry
+ * after a lost response finds its own write instead of a revision conflict.
+ */
+type StoredDocumentContentReplaceReceiptItem = {
+  /** DynamoDB partition key. */
+  workspaceId: string
+  /** Sort key in the form `CONTENT_REPLACE_RECEIPT#<documentId>#<digest>`. */
+  recordKey: string
+  /** Row discriminator. */
+  entryType: 'document-content-replace-receipt'
+  /** Member key of the writer. */
+  actorKey: string
+  /** Digest of the request the key is bound to. */
+  fingerprint: string
+  /** Revision the replacement saved. */
+  revision: number
+  /** DynamoDB TTL epoch seconds. */
   expiresAtEpoch: number
 }
 
@@ -2389,6 +2411,203 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       }),
     )
     return this.projectDocument(input.workspaceId, next, input.access)
+  }
+
+  /**
+   * Replaces the title and whole body of a page or template in one revision, as a Markdown write
+   * through the Public API does. Relations owned by a block that no longer exists are removed
+   * with it; Document-level relations stay.
+   *
+   * @param input - Page, expected revision, and new title or blocks.
+   * @returns Current Document detail after the change.
+   */
+  async replaceContent(input: ReplaceDocumentContentRequest): Promise<DocumentDetail> {
+    await this.ensureTable()
+    const authorization =
+      await this.requireMutableDocument(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'edit',
+      )
+    const row = authorization.documentRow
+    if ((input.idempotencyKey === undefined) !== (input.idempotencyFingerprint === undefined)) {
+      throw new DocumentError(400, 'InvalidIdempotencyKey', 'An idempotency key needs its request fingerprint.')
+    }
+    const receiptKey = input.idempotencyKey === undefined
+      ? undefined
+      : contentReplaceReceiptKey(input.documentId, input.access.memberKey, input.idempotencyKey)
+    const savedRevision = receiptKey === undefined
+      ? undefined
+      : await this.readContentReplaceReceipt(input, receiptKey)
+    if (savedRevision !== undefined) {
+      // The row was read before the receipt, so the first write may have saved since; the replay
+      // compares against the row as it is now.
+      const current = await this.requireMutableDocument(input.workspaceId, input.documentId, input.access, 'edit')
+      return this.replayContentReplacement(input, current.documentRow, savedRevision)
+    }
+    requireExpectedRevision(row, input.expectedRevision)
+    const next = structuredClone(row.document)
+    if (next.kind !== 'page' && next.kind !== 'template') {
+      throw new DocumentError(
+        400,
+        'UnsupportedDocumentContent',
+        'Only page and template Documents have a body that Markdown can replace.',
+      )
+    }
+    if (input.title !== undefined) {
+      assertText(input.title, 'title', DOCUMENT_MAX_TITLE_LENGTH, false)
+      next.title = input.title.trim()
+    }
+    if (input.blocks !== undefined) {
+      next.blocks = structuredClone(input.blocks)
+      const blockIds = new Set(next.blocks.map(({ id }) => id))
+      next.relations = next.relations.filter(({ source }) =>
+        source.kind !== 'block' || blockIds.has(source.blockId)
+      )
+    }
+    incrementDocument(next, input.access.memberKey, this.now())
+    validateDocumentPayload(next)
+    assertElementLinkCountsWithinLimit(row.document, next)
+    const elementRevisions = replacedElementRevisions(row.document, next, row.elementRevisions)
+    const mutationAuthorizationGuards =
+      mergeAuthorizationGuards(
+        input.workspaceId,
+        input.access.authorizationSnapshots,
+        documentAuthorizationSnapshotGuards(
+          this.tableName,
+          input.workspaceId,
+          [authorization],
+          [row.documentId],
+        ),
+      )
+    const nowEpoch = Math.floor(this.now().getTime() / 1_000)
+    const receipt: StoredDocumentContentReplaceReceiptItem | undefined =
+      receiptKey === undefined || input.idempotencyFingerprint === undefined
+        ? undefined
+        : {
+            workspaceId: input.workspaceId,
+            recordKey: receiptKey,
+            entryType: 'document-content-replace-receipt',
+            actorKey: input.access.memberKey,
+            fingerprint: input.idempotencyFingerprint,
+            revision: next.revision,
+            expiresAtEpoch: nowEpoch + DOCUMENT_OPERATION_RECEIPT_RETENTION_DAYS * SECONDS_PER_DAY,
+          }
+    try {
+      await this.commitMutation(
+        input.workspaceId,
+        row,
+        next,
+        elementRevisions,
+        'edit',
+        undefined,
+        undefined,
+        undefined,
+        mutationAuthorizationGuards,
+        this.createDocumentAuditPut(input.workspaceId, input.access, input.auditContext, {
+          eventType: 'document.updated',
+          action: 'updated',
+          document: next,
+          previous: row.document,
+          summaryVerb: 'Updated',
+        }),
+        receipt === undefined
+          ? undefined
+          : {
+              Put: {
+                TableName: this.tableName,
+                Item: receipt,
+                ConditionExpression:
+                  'attribute_not_exists(workspaceId) OR expiresAtEpoch <= :operationReceiptNowEpoch',
+                ExpressionAttributeValues: { ':operationReceiptNowEpoch': nowEpoch },
+              },
+            },
+      )
+    } catch (error) {
+      // A concurrent retry of the same write may have saved it first.
+      const raced = receiptKey === undefined
+        ? undefined
+        : await this.readContentReplaceReceipt(input, receiptKey)
+      if (raced !== undefined) {
+        const current = await this.requireMutableDocument(input.workspaceId, input.documentId, input.access, 'edit')
+        return this.replayContentReplacement(input, current.documentRow, raced)
+      }
+      throw error
+    }
+    return this.projectDocument(input.workspaceId, next, input.access)
+  }
+
+  /**
+   * Answers a retried content replacement that was already saved. The result is the Document
+   * as the replacement saved it, so the writer never receives a revision it did not write; when
+   * someone changed the Document since, the retry is a conflict and the writer reads it again.
+   *
+   * @param input - Replacement being retried.
+   * @param row - Current Document row.
+   * @param savedRevision - Revision the earlier replacement saved.
+   * @returns The Document at the saved revision.
+   * @throws DocumentError 409 when the Document changed after the saved replacement.
+   */
+  private async replayContentReplacement(
+    input: ReplaceDocumentContentRequest,
+    row: StoredDocumentItem,
+    savedRevision: number,
+  ): Promise<DocumentDetail> {
+    if (row.document.revision !== savedRevision) {
+      throw new DocumentError(
+        409,
+        'DocumentRevisionConflict',
+        'This change was saved, but the Document changed after it. Read the Document again.',
+      )
+    }
+    return this.projectDocument(input.workspaceId, row.document, input.access)
+  }
+
+  /**
+   * Reads the live receipt of this content replacement, when one was saved.
+   *
+   * @param input - Replacement being retried.
+   * @param receiptKey - Receipt sort key derived from the writer and Idempotency-Key.
+   * @returns The revision the same request saved, or undefined when it was not saved or expired.
+   * @throws DocumentError 409 when the key was used for a different request, or 503 when the
+   *   stored receipt is malformed.
+   */
+  private async readContentReplaceReceipt(
+    input: ReplaceDocumentContentRequest,
+    receiptKey: string,
+  ): Promise<number | undefined> {
+    const result = await this.client.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId: input.workspaceId, recordKey: receiptKey },
+      ConsistentRead: true,
+    }))
+    const receipt = result.Item
+    if (receipt === undefined) return undefined
+    // A row that is there but not a well-formed receipt is broken data, not a missing receipt.
+    if (
+      !isRecord(receipt) ||
+      receipt.entryType !== 'document-content-replace-receipt' ||
+      typeof receipt.expiresAtEpoch !== 'number' ||
+      !Number.isSafeInteger(receipt.expiresAtEpoch) ||
+      receipt.expiresAtEpoch < 0 ||
+      typeof receipt.revision !== 'number' ||
+      !Number.isSafeInteger(receipt.revision) ||
+      receipt.revision < 1 ||
+      typeof receipt.actorKey !== 'string' ||
+      typeof receipt.fingerprint !== 'string'
+    ) {
+      throw invalidStoredDocumentData()
+    }
+    if (receipt.expiresAtEpoch <= Math.floor(this.now().getTime() / 1_000)) return undefined
+    if (receipt.actorKey !== input.access.memberKey || receipt.fingerprint !== input.idempotencyFingerprint) {
+      throw new DocumentError(
+        409,
+        'IdempotencyKeyReused',
+        'The idempotency key has already been used with different input.',
+      )
+    }
+    return receipt.revision
   }
 
   /**
@@ -6679,6 +6898,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     authorizationMutationGuard?: DocumentAuthorizationRevisionGuard,
     mutationAuthorizationGuards?: readonly DynamoDbDocumentAuthorizationGuard[],
     auditPut?: NonNullable<TransactWriteCommandInput['TransactItems']>[number],
+    receiptPut?: NonNullable<TransactWriteCommandInput['TransactItems']>[number],
   ): Promise<void> {
     const createsVersionSnapshot =
       reason === 'restore' ||
@@ -6767,6 +6987,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
             ),
           ]),
       ...optionalAction(auditPut),
+      ...optionalAction(receiptPut),
       ...authorizationGuardConditionChecks(
         mutationAuthorizationGuards,
       ),
@@ -7586,6 +7807,41 @@ function initialElementRevisions(
     for (const frame of document.whiteboard.frames) revisions[`frame:${frame.id}`] = revision
   }
   for (const relation of document.relations) revisions[`relation:${relation.id}`] = revision
+  return revisions
+}
+
+/**
+ * Advances the element revisions that a content replacement changed: every removed, new, or
+ * changed block, and every relation the replacement removed. Untouched relations keep their revisions, and a
+ * title-only change keeps all of them, so an editor's pending block edits are not refused.
+ *
+ * @param current - Document before the replacement.
+ * @param next - Document after the replacement, at its new revision.
+ * @param existing - Stored element revisions.
+ * @returns Element revisions after the replacement.
+ */
+function replacedElementRevisions(
+  current: DocumentDetail,
+  next: DocumentDetail,
+  existing: Readonly<Record<string, number>>,
+): Record<string, number> {
+  const revisions = { ...existing }
+  const blocksOf = (document: DocumentDetail) =>
+    document.kind === 'page' || document.kind === 'template' ? document.blocks : []
+  const nextBlockIds = new Set(blocksOf(next).map(({ id }) => id))
+  const currentBlockIds = new Set(blocksOf(current).map(({ id }) => id))
+  const currentBlocks = new Map(blocksOf(current).map((block) => [block.id, stableStringify(block)]))
+  const changedBlocks = [
+    ...blocksOf(current).filter(({ id }) => !nextBlockIds.has(id)),
+    // A block that keeps its ID but not its content is changed too, so a pending edit made
+    // against the old content is refused instead of overwriting the new one.
+    ...blocksOf(next).filter((block) => !currentBlockIds.has(block.id) || currentBlocks.get(block.id) !== stableStringify(block)),
+  ]
+  for (const { id } of changedBlocks) revisions[`block:${id}`] = next.revision
+  const nextRelationIds = new Set(next.relations.map(({ id }) => id))
+  for (const { id } of current.relations) {
+    if (!nextRelationIds.has(id)) revisions[`relation:${id}`] = next.revision
+  }
   return revisions
 }
 
@@ -8757,6 +9013,18 @@ function versionPutActions(
  * @param idempotencyKey - Client Idempotency-Key.
  * @returns The receipt sort key.
  */
+/**
+ * Builds the receipt sort key of one writer's content replacement Idempotency-Key.
+ *
+ * @param documentId - Document being replaced.
+ * @param actorKey - Member key of the writer.
+ * @param idempotencyKey - Writer's key.
+ * @returns Receipt sort key.
+ */
+function contentReplaceReceiptKey(documentId: string, actorKey: string, idempotencyKey: string): string {
+  return `CONTENT_REPLACE_RECEIPT#${encodeKeyPart(documentId)}#${sha256(`${actorKey}\0${idempotencyKey}`)}`
+}
+
 function versionPinReceiptKey(documentId: string, actorKey: string, idempotencyKey: string): string {
   return `VERSION_PIN_RECEIPT#${encodeKeyPart(documentId)}#${sha256(`${actorKey}\0${idempotencyKey}`)}`
 }

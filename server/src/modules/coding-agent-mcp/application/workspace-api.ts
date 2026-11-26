@@ -1,8 +1,12 @@
 import {
   parseWorkItemKey,
+  type CreatePublicDocumentRequest,
   type CreatePublicSubtaskBatchRequest,
   type CreatePublicWorkItemRequest,
   type PublicCredentialOwner,
+  type PublicDocumentContent,
+  type PublicDocumentSummary,
+  type PublicWorkItemDocument,
   type PublicProjectMemberList,
   type PublicSubtaskBatch,
   type PublicTeamList,
@@ -12,6 +16,7 @@ import {
   type PublicWorkItemRelationMutation,
   type PublicWorkItemRelationType,
   type TeamIssueCommentResponseItem,
+  type UpdatePublicDocumentRequest,
   type UpdatePublicWorkItemRequest,
   type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
@@ -182,6 +187,74 @@ export interface WorkspaceApi {
     input: CreatePublicSubtaskBatchRequest,
     key: string,
   ): Promise<PublicSubtaskBatch>
+  /**
+   * Lists one page of the Workspace's Documents that the credential owner can view.
+   * @param filters - Optional Project and folder restrictions.
+   * @param cursor - Cursor of the previous page.
+   * @param limit - Page size.
+   * @returns One page of Documents.
+   */
+  listDocuments(filters: WorkspaceDocumentFilters, cursor?: string, limit?: number): Promise<AgentPage<PublicDocumentSummary>>
+  /**
+   * Lists one page of the Documents linked to a Work Item.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param cursor - Cursor of the previous page.
+   * @param limit - Page size.
+   * @returns One page of linked Documents.
+   */
+  workItemDocuments(teamId: string, workItemId: string, cursor?: string, limit?: number): Promise<AgentPage<PublicWorkItemDocument>>
+  /**
+   * Reads a page or template as Markdown.
+   * @param documentId - Document ID.
+   * @returns The Document content.
+   */
+  getDocument(documentId: string): Promise<PublicDocumentContent>
+  /**
+   * Creates a page from Markdown.
+   * @param input - Title, Markdown body, destination, and Work Item link.
+   * @param key - Idempotency key of the logical write.
+   * @returns Summary of the created page.
+   */
+  createDocument(input: CreatePublicDocumentRequest, key: string): Promise<PublicDocumentSummary>
+  /**
+   * Changes a Document's title or replaces its Markdown body.
+   * @param documentId - Document ID.
+   * @param input - Expected revision and the changes.
+   * @param key - Idempotency key of the logical write.
+   * @returns Summary of the changed Document.
+   */
+  updateDocument(documentId: string, input: UpdatePublicDocumentRequest, key: string): Promise<PublicDocumentSummary>
+}
+
+/** Filters for listing the Workspace's Documents through the Workspace tools. */
+export type WorkspaceDocumentFilters = {
+  /** Only Documents of this Project. */
+  projectId?: string
+  /** Only Documents directly in this folder. */
+  parentId?: string
+}
+
+/** Fields of `save_document`; an `id` updates that Document, no `id` creates a page. */
+export type WorkspaceDocumentSaveInput = {
+  /** Document to update; omitted creates a page. */
+  id?: string
+  /** Title; required when creating. */
+  title?: string
+  /** Markdown body; required when creating, and replaces the whole body when updating. */
+  content?: string
+  /** Project of a new page. */
+  projectId?: string
+  /** Folder of a new page. */
+  parentId?: string
+  /** Work Item a new page links, by key such as `ABC-123`, or by ID with `teamId`. */
+  issueId?: string
+  /** Team of a Work Item ID. */
+  teamId?: string
+  /** Revision read before the update; required when updating. */
+  expectedRevision?: number
+  /** Idempotency key of the logical write. */
+  idempotencyKey: string
 }
 
 /** One Work Item `create_subtasks` creates under the parent. */
@@ -304,6 +377,83 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
   }
 
   return {
+    /**
+     * Lists one page of Documents: the Workspace's, filtered by Project or folder, or those linked to
+     * one Work Item when `issueId` is given.
+     * @param input - Filters, or the Work Item whose linked Documents to list.
+     * @returns One page of Documents.
+     */
+    async listDocuments(input: WorkspaceDocumentFilters & {
+      /** Work Item whose linked Documents to list, by key or by ID with `teamId`. */
+      issueId?: string
+      /** Team of a Work Item ID. */
+      teamId?: string
+      /** Cursor of the previous page. */
+      cursor?: string
+      /** Page size. */
+      limit?: number
+    }) {
+      if (input.issueId === undefined) {
+        if (input.teamId !== undefined) {
+          throw new AgentTaskError('invalid_request', 'teamId applies only with issueId.')
+        }
+        return api.listDocuments({
+          ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+          ...(input.parentId === undefined ? {} : { parentId: input.parentId }),
+        }, input.cursor, input.limit)
+      }
+      if (input.projectId !== undefined || input.parentId !== undefined) {
+        throw new AgentTaskError('invalid_request', 'Pass issueId alone, or projectId and parentId without issueId.')
+      }
+      const resolved = await resolveIssue(input.issueId, input.teamId)
+      return { ...resolved, ...await api.workItemDocuments(resolved.teamId, resolved.workItemId, input.cursor, input.limit) }
+    },
+    /**
+     * Reads a page or template as Markdown.
+     * @param documentId - Document ID.
+     * @returns The Document content.
+     */
+    getDocument: (documentId: string) => api.getDocument(documentId),
+    /**
+     * Creates a page from Markdown when no `id` is given, otherwise updates the named Document.
+     * @param input - Fields to save.
+     * @returns The saved Document.
+     */
+    async saveDocument(input: WorkspaceDocumentSaveInput) {
+      if (input.id === undefined) {
+        if (input.title === undefined || input.content === undefined) {
+          throw new AgentTaskError('invalid_request', 'Creating a Document needs title and content. Pass id to update one instead.')
+        }
+        if (input.expectedRevision !== undefined) {
+          throw new AgentTaskError('invalid_request', 'expectedRevision applies only to updates. Pass id to update a Document.')
+        }
+        if (input.teamId !== undefined && input.issueId === undefined) {
+          throw new AgentTaskError('invalid_request', 'teamId applies only with issueId.')
+        }
+        const workItem = input.issueId === undefined ? undefined : await resolveIssue(input.issueId, input.teamId)
+        return api.createDocument({
+          title: input.title,
+          content: input.content,
+          ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+          ...(input.parentId === undefined ? {} : { parentId: input.parentId }),
+          ...(workItem === undefined ? {} : { workItem }),
+        }, input.idempotencyKey)
+      }
+      if (input.expectedRevision === undefined) {
+        throw new AgentTaskError('invalid_request', 'Updating needs expectedRevision. Read it with get_document first.')
+      }
+      if (input.projectId !== undefined || input.parentId !== undefined || input.issueId !== undefined || input.teamId !== undefined) {
+        throw new AgentTaskError('invalid_request', 'projectId, parentId, and issueId apply only when creating a Document.')
+      }
+      if (input.title === undefined && input.content === undefined) {
+        throw new AgentTaskError('invalid_request', 'Pass title, content, or both.')
+      }
+      return api.updateDocument(input.id, {
+        expectedRevision: input.expectedRevision,
+        ...(input.title === undefined ? {} : { title: input.title }),
+        ...(input.content === undefined ? {} : { content: input.content }),
+      }, input.idempotencyKey)
+    },
     /** Reads the credential owner. */
     whoami: () => api.me(),
     /** Lists readable Teams with their Projects. */

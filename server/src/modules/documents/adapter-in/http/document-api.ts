@@ -1535,7 +1535,13 @@ async function withDocumentPrincipal(
   }
 }
 
-function toDocumentAccessContext(principal: DocumentApiPrincipal) {
+/**
+ * Builds the Documents store access context of an authenticated Documents principal.
+ *
+ * @param principal - Authenticated Documents principal.
+ * @returns Access context the store authorizes reads and writes with.
+ */
+export function toDocumentAccessContext(principal: DocumentApiPrincipal) {
   return {
     memberKey: principal.memberKey,
     workspaceRole: principal.workspaceRole,
@@ -2173,7 +2179,14 @@ function validateDocumentScope(value: unknown): asserts value is DocumentScope {
   throw new DocumentError(400, 'InvalidDocumentScope', 'Document scope is invalid.')
 }
 
-function requireDocumentCreateCapability(
+/**
+ * Requires that the principal may create a Document in the scope, as the Web create route does.
+ *
+ * @param principal - Authenticated Documents principal.
+ * @param scope - Workspace or Project of the new Document.
+ * @throws DocumentError 403 when the principal may not create there.
+ */
+export function requireDocumentCreateCapability(
   principal: DocumentApiPrincipal,
   scope: DocumentScope,
 ): void {

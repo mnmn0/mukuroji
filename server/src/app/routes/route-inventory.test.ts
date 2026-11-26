@@ -9,11 +9,12 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(669)
-  expect(new Set(inventory).size).toBe(665)
+  expect(inventory).toHaveLength(673)
+  expect(new Set(inventory).size).toBe(669)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
+  expect(inventory).toContain('PATCH /api/v1/documents/:documentId')
   expect(inventory).toContain('POST /api/notifications/bulk')
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
   expect(inventory).toContain('POST /api/automation/templates/:templateId/application-previews')
@@ -228,6 +229,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '2acd34a185efe4fb84ed6fdcdf438a5a9aeeb003f54248b5845c6c5be6f42010',
+    'b6739d89c169f5704177ed8e80531a064b5862b4cc69bac058d7ed56f30b1138',
   )
 })

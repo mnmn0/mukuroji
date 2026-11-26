@@ -235,6 +235,34 @@ export type UpdateDocumentRequest = {
 }
 
 /**
+ * Replaces the title and whole body of a page or template, as a Markdown write through the
+ * Public API does, in one revision.
+ */
+export type ReplaceDocumentContentRequest = {
+  /** Canonical Workspace ID. */
+  workspaceId: string
+  /** Page or template to change. */
+  documentId: string
+  /** Authorization snapshot of the editor. */
+  access: DocumentAccessContext
+  /** Revision the writer read; another current revision is a conflict. */
+  expectedRevision: number
+  /** New title; omitted keeps the current one. */
+  title?: string
+  /** New body blocks; omitted keeps the current body. */
+  blocks?: DocumentBlock[]
+  /**
+   * Writer's key for this change. A retry with the same key and fingerprint returns the current
+   * Document instead of a revision conflict against its own earlier write.
+   */
+  idempotencyKey?: string
+  /** Digest of the request the key is bound to; required with `idempotencyKey`. */
+  idempotencyFingerprint?: string
+  /** Audit context that records the change in the same transaction; absent without audit. */
+  auditContext?: MutationAuditContext
+}
+
+/**
  * Document operation batch を永続化する store input です。
  */
 export type ApplyDocumentOperationsRequest = {
