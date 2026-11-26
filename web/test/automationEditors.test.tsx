@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import type { AutomationAction } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   AutomationRuleEditor,
@@ -14,6 +15,7 @@ import {
   isAutomationTriggerConfigurationValid,
   readAutomationDueDaysBefore,
   parseAutomationTemplatePayload,
+  readAutomationActionTypesForTrigger,
 } from '../src/automation/model/editorValidation'
 
 describe('Automation editors', () => {
@@ -62,6 +64,12 @@ describe('Automation editors', () => {
       />,
     )
     expect(html).toContain('予算消化率が閾値に到達')
+  })
+
+  test('offers a budget-threshold rule only actions that need no Work Item', () => {
+    const all: AutomationAction['type'][] = ['assign', 'move', 'update', 'create', 'comment', 'notify', 'approval', 'webhook']
+    expect(readAutomationActionTypesForTrigger(all, 'budget-threshold')).toEqual(['create', 'notify', 'webhook'])
+    expect(readAutomationActionTypesForTrigger(all, 'status')).toEqual(all)
   })
 
   test('renders the baseline-slip day field', () => {

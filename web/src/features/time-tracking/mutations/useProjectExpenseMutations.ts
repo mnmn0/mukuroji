@@ -1,6 +1,6 @@
 import type { DecideProjectExpenseRequest, ProjectExpense, ProjectExpenseInput } from '@mukuroji/contracts'
 import { useCallback, useState } from 'react'
-import { completeProjectFileVersionUpload, createProjectFileUpload, putPresignedFile } from '../../../files/api/uploads'
+import { completeProjectFileVersionUpload, createProjectFileUpload, putPresignedFile, type PresignedPutUpload } from '../../../files/api/uploads'
 import { FilesApiError } from '../../../files/api/errors'
 import { createMutationFingerprint, createMutationRequestContext, type MutationRequestContext } from '../../../shared/api/mutationHeaders'
 import { createProjectExpense, decideProjectExpense, deleteProjectExpense } from '../api/projectExpenses'
@@ -33,22 +33,38 @@ export type ProjectExpenseMutations = {
   remove(expense: ProjectExpense): Promise<void>
 }
 
-/** A submission whose result is unknown, kept so a retry of the same input is the same request. */
-type PendingExpenseSubmission = {
-  /** Digest of the Project, the input, and the receipts. */
-  fingerprint: string
-  /** Idempotency key and correlation ID the retry reuses. */
-  context: MutationRequestContext
+/** Upload of one receipt, kept so a retry continues it instead of uploading the file again. */
+type ReceiptUpload = {
+  /** File the upload session created. */
+  fileId: string
+  /** Version the upload session created. */
+  versionId: string
+  /** Presigned upload of the version body. */
+  upload: PresignedPutUpload
+  /** Whether the body was uploaded. */
+  bodyUploaded: boolean
+  /** Whether the version was completed, so the file is ready to attach. */
+  completed: boolean
+  /** Idempotency key and correlation ID the completion and its retries share. */
+  completionContext: MutationRequestContext
 }
 
+/** Random identity of each chosen file, so two different files with the same metadata stay apart. */
+const receiptIdentities = new WeakMap<File, string>()
+
 /**
- * Identifies a chosen receipt file without reading its body.
+ * Identifies a chosen receipt file by the object the member chose, without reading its body.
  *
  * @param file - Receipt file.
  * @returns A key that stays the same while the member keeps the same file selected.
  */
 function receiptKey(file: File) {
-  return JSON.stringify([file.name, file.size, file.lastModified, file.type])
+  let key = receiptIdentities.get(file)
+  if (key === undefined) {
+    key = globalThis.crypto.randomUUID()
+    receiptIdentities.set(file, key)
+  }
+  return key
 }
 
 /**
@@ -85,43 +101,78 @@ export type ProjectExpenseSubmitter = {
  * @returns The submitter.
  */
 export function createProjectExpenseSubmitter(): ProjectExpenseSubmitter {
-  // Receipts already uploaded, so a retry after a failure does not upload them again.
-  const uploadedReceipts = new Map<string, string>()
-  let pendingSubmission: PendingExpenseSubmission | undefined
+  // Receipt uploads started, so a retry after a failure continues them rather than starting over.
+  const receiptUploads = new Map<string, ReceiptUpload>()
+  // Idempotency context of each submission whose result is unknown, by its fingerprint.
+  const pendingSubmissions = new Map<string, MutationRequestContext>()
+
+  /**
+   * Uploads one receipt, or finishes the upload a failed attempt left part done.
+   *
+   * @param accessToken - Bearer token.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project identifier.
+   * @param key - Scoped receipt key.
+   * @param file - Receipt file.
+   * @returns The uploaded file ID.
+   */
+  async function uploadReceipt(accessToken: string, teamId: string, projectId: string, key: string, file: File) {
+    let state = receiptUploads.get(key)
+    if (state === undefined) {
+      const session = await createProjectFileUpload(teamId, projectId, accessToken, {
+        fileName: file.name,
+        contentType: file.type || 'application/octet-stream',
+        sizeBytes: file.size,
+      }, createMutationRequestContext())
+      state = {
+        fileId: session.file.id,
+        versionId: session.version.id,
+        upload: session.upload,
+        bodyUploaded: false,
+        completed: false,
+        completionContext: createMutationRequestContext(),
+      }
+      receiptUploads.set(key, state)
+    }
+    try {
+      if (!state.bodyUploaded) {
+        await putPresignedFile(state.upload, file)
+        state.bodyUploaded = true
+      }
+      if (!state.completed) {
+        await completeProjectFileVersionUpload(teamId, projectId, state.fileId, state.versionId, accessToken, state.completionContext)
+        state.completed = true
+      }
+    } catch (error) {
+      // A definite rejection, such as an expired upload URL, starts a new upload next time.
+      if (!isUncertainFailure(error)) receiptUploads.delete(key)
+      throw error
+    }
+    return state.fileId
+  }
+
   return {
     async submit(accessToken, teamId, projectId, input, receipts) {
       const scope = JSON.stringify([teamId, projectId])
       const keys = receipts.map((file) => `${scope}${receiptKey(file)}`)
       const fingerprint = await createMutationFingerprint(scope, JSON.stringify(input), ...keys)
-      const pending = pendingSubmission?.fingerprint === fingerprint
-        ? pendingSubmission
-        : { fingerprint, context: createMutationRequestContext() }
-      pendingSubmission = pending
+      let context = pendingSubmissions.get(fingerprint)
+      if (context === undefined) {
+        context = createMutationRequestContext()
+        pendingSubmissions.set(fingerprint, context)
+      }
       try {
         const receiptFileIds: string[] = []
         for (const [index, file] of receipts.entries()) {
-          const key = keys[index] ?? receiptKey(file)
-          let fileId = uploadedReceipts.get(key)
-          if (fileId === undefined) {
-            const session = await createProjectFileUpload(teamId, projectId, accessToken, {
-              fileName: file.name,
-              contentType: file.type || 'application/octet-stream',
-              sizeBytes: file.size,
-            }, createMutationRequestContext())
-            await putPresignedFile(session.upload, file)
-            await completeProjectFileVersionUpload(teamId, projectId, session.file.id, session.version.id, accessToken, createMutationRequestContext())
-            fileId = session.file.id
-            uploadedReceipts.set(key, fileId)
-          }
-          receiptFileIds.push(fileId)
+          receiptFileIds.push(await uploadReceipt(accessToken, teamId, projectId, keys[index] ?? `${scope}${receiptKey(file)}`, file))
         }
-        const expense = await createProjectExpense(accessToken, teamId, projectId, { ...input, receiptFileIds }, pending.context)
-        if (pendingSubmission === pending) pendingSubmission = undefined
-        for (const key of keys) uploadedReceipts.delete(key)
+        const expense = await createProjectExpense(accessToken, teamId, projectId, { ...input, receiptFileIds }, context)
+        pendingSubmissions.delete(fingerprint)
+        for (const key of keys) receiptUploads.delete(key)
         return expense
       } catch (error) {
         // A definite rejection stored nothing, so the next attempt is a new request.
-        if (!isUncertainFailure(error) && pendingSubmission === pending) pendingSubmission = undefined
+        if (!isUncertainFailure(error)) pendingSubmissions.delete(fingerprint)
         throw error
       }
     },

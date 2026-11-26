@@ -214,6 +214,9 @@ function ExpenseForm({
   const [error, setError] = useState<MessageKey>()
   const [saving, setSaving] = useState(false)
   const [formKey, setFormKey] = useState(0)
+  // The currency the member typed; until then the field follows the budget currency, which may
+  // arrive after the form first renders, without clearing what the member already entered.
+  const [typedCurrency, setTypedCurrency] = useState<string>()
 
   /**
    * Validates the form and submits the expense.
@@ -245,6 +248,7 @@ function ExpenseForm({
         ...(description ? { description } : {}),
       }, receipts)
       setFormKey((key) => key + 1)
+      setTypedCurrency(undefined)
     } catch {
       setError('timeTracking.projectExpenses.submitError')
     } finally {
@@ -256,9 +260,8 @@ function ExpenseForm({
     <form
       aria-label={t('timeTracking.projectExpenses.formLabel')}
       className="grid gap-3 text-sm min-[600px]:grid-cols-6"
-      // The budget currency may arrive after the form first renders; a new currency starts a new form
-      // so its field shows the currency instead of the fallback.
-      key={`${formKey}-${defaultCurrency}`}
+      // A stored expense starts a new, empty form.
+      key={formKey}
       onSubmit={(event) => { void submit(event) }}
     >
       <label className="grid gap-1 min-[600px]:col-span-2" htmlFor={`${id}-date`}>
@@ -275,7 +278,7 @@ function ExpenseForm({
       </label>
       <label className="grid gap-1" htmlFor={`${id}-currency`}>
         <span className="text-xs font-semibold text-[var(--workbench-muted)]">{t('timeTracking.projectExpenses.currency')}</span>
-        <input className="workbench-input min-h-9 px-2 uppercase" defaultValue={defaultCurrency} id={`${id}-currency`} maxLength={3} name="currency" required />
+        <input className="workbench-input min-h-9 px-2 uppercase" id={`${id}-currency`} maxLength={3} name="currency" required value={typedCurrency ?? defaultCurrency} onChange={(event) => setTypedCurrency(event.target.value)} />
       </label>
       <label className="grid gap-1 min-[600px]:col-span-4" htmlFor={`${id}-description`}>
         <span className="text-xs font-semibold text-[var(--workbench-muted)]">{t('timeTracking.projectExpenses.descriptionLabel')}</span>

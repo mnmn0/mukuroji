@@ -81,6 +81,7 @@ export function validateCreateAutomationRuleInput(value: unknown): CreateAutomat
     throw invalidInput('Automation rule must contain between 1 and 32 actions.')
   }
   const actions = input.actions.map(validateAutomationAction)
+  assertActionsFitTrigger(trigger, actions)
   const retryPolicy = input.retryPolicy === undefined
     ? undefined
     : validateAutomationRetryPolicy(input.retryPolicy)
@@ -107,6 +108,27 @@ export function validateCreateAutomationRuleInput(value: unknown): CreateAutomat
     ...(rateLimit ? { rateLimit } : {}),
     ...(allowReentry === undefined ? {} : { allowReentry }),
     ...(maxChainDepth === undefined ? {} : { maxChainDepth }),
+  }
+}
+
+/** Actions a rule can run without a Work Item to act on. */
+const ACTIONS_WITHOUT_WORK_ITEM: ReadonlySet<AutomationAction['type']> = new Set(['create', 'notify', 'webhook'])
+
+/**
+ * Rejects actions that need a Work Item for a trigger whose event has none. A budget threshold
+ * event is about a Project budget (ADR 0105), so it can only create a Work Item, notify chosen
+ * members, or call a webhook.
+ *
+ * @param trigger - Validated rule trigger.
+ * @param actions - Validated rule actions.
+ * @throws AutomationError when an action needs a Work Item the event does not have.
+ */
+function assertActionsFitTrigger(trigger: AutomationTrigger, actions: readonly AutomationAction[]) {
+  if (trigger.type !== 'budget-threshold') return
+  for (const action of actions) {
+    if (!ACTIONS_WITHOUT_WORK_ITEM.has(action.type) || (action.type === 'notify' && action.notifyAssignee)) {
+      throw invalidInput('A budget threshold rule can only create a Work Item, notify chosen members, or call a webhook.')
+    }
   }
 }
 

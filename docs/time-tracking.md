@@ -81,7 +81,7 @@ The response lists each Team with `closed` or `reopened` when the request change
 - `points` holds one cumulative point per day or Monday-based week (clipped to the range) with PV in minutes and, with a budget, in money; actual minutes and cost are absent for buckets that start after `asOf`. EV is not reconstructed for past dates.
 - The CSV export starts with a summary row (budget, BAC, PV, EV, AC, SPI, CPI, EAC in minutes and money, and approved and pending expenses in the budget currency) followed by one row per point.
 
-Budget threshold notifications and Automation triggers, Analytics metrics and widgets for earned value, and the PMO dashboard widget are still open in #345.
+Analytics metrics and widgets for earned value, and the PMO dashboard widget are still open in #345. Budget threshold notifications and the Automation trigger are described in [ADR 0105](adr/0105-project-budget-threshold-alerts.md).
 
 ## Project expenses
 

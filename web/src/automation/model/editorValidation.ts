@@ -53,6 +53,25 @@ export function automationTriggerUsesConfiguration(type: AutomationTrigger['type
   return type !== 'comment' && type !== 'schedule' && type !== 'budget-threshold'
 }
 
+/** Actions a budget threshold rule may run, because its event has no Work Item (ADR 0105). */
+const budgetThresholdActionTypes: ReadonlySet<AutomationAction['type']> = new Set(['create', 'notify', 'webhook'])
+
+/**
+ * Narrows the selectable actions to those the trigger can run, as the server checks on save.
+ *
+ * @param actionTypes - Actions allowed by the rule scope.
+ * @param triggerType - The selected trigger.
+ * @returns The actions offered for this trigger.
+ */
+export function readAutomationActionTypesForTrigger<TAction extends AutomationAction['type']>(
+  actionTypes: readonly TAction[],
+  triggerType: AutomationTrigger['type'],
+): TAction[] {
+  return triggerType === 'budget-threshold'
+    ? actionTypes.filter((type) => budgetThresholdActionTypes.has(type))
+    : [...actionTypes]
+}
+
 /** Trigger type ごとの設定値が作成可能か返します。 */
 export function isAutomationTriggerConfigurationValid(
   type: AutomationTrigger['type'],

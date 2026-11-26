@@ -31,8 +31,8 @@ export type BudgetThresholdReaderSources = {
     teamId: string
     /** Project ID. */
     projectId: string
-    /** Inclusive lower instant. */
-    from: string
+    /** Inclusive lower instant, or undefined to read from the first entry. */
+    from?: string
     /** Upper instant. */
     to: string
   }): Promise<readonly TimeEntry[]>
@@ -111,6 +111,7 @@ export function createBudgetThresholdReader(sources: BudgetThresholdReaderSource
           ...(budget.periodFrom === undefined ? {} : { periodFrom: budget.periodFrom }),
           ...(budget.periodTo === undefined ? {} : { periodTo: budget.periodTo }),
           alertPercent: budget.alertPercent ?? TIME_BUDGET_ALERT_PERCENT_DEFAULT,
+          actualCostMinor: consumption.actualCostMinor,
           consumedPercent: consumption.consumedPercent,
           ...(ownerMemberKey === undefined ? {} : { ownerMemberKey }),
           managerMemberKeys,

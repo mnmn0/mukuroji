@@ -7,9 +7,6 @@ const DAY_MS = 86_400_000
 /** Widest offset of any IANA timezone from UTC, in milliseconds. */
 const MAX_TIMEZONE_OFFSET_MS = 14 * 3_600_000
 
-/** Lower instant of the entry read of a budget without a period start. */
-const OPEN_PERIOD_START = '2000-01-01T00:00:00.000Z'
-
 /** Approved expenses of a Project within a budget period, in the budget currency. */
 export type ApprovedProjectExpenseTotal = {
   /** Approved amount in the budget currency, in minor units. */
@@ -58,8 +55,8 @@ export type ProjectBudgetConsumptionPorts = {
     teamId: string
     /** Project ID. */
     projectId: string
-    /** Inclusive lower instant, ISO 8601. */
-    from: string
+    /** Inclusive lower instant, ISO 8601, or undefined to read from the first entry. */
+    from?: string
     /** Upper instant, ISO 8601. */
     to: string
   }): Promise<readonly TimeEntry[]>
@@ -119,9 +116,9 @@ export async function loadProjectBudgetConsumption(
       workspaceId,
       teamId,
       projectId,
-      from: budget.periodFrom === undefined
-        ? OPEN_PERIOD_START
-        : new Date(Date.parse(`${budget.periodFrom}T00:00:00Z`) - MAX_TIMEZONE_OFFSET_MS).toISOString(),
+      ...(budget.periodFrom === undefined
+        ? {}
+        : { from: new Date(Date.parse(`${budget.periodFrom}T00:00:00Z`) - MAX_TIMEZONE_OFFSET_MS).toISOString() }),
       to: new Date(Date.parse(`${asOf}T00:00:00Z`) + DAY_MS + MAX_TIMEZONE_OFFSET_MS).toISOString(),
     }),
     ports.listExpenses(workspaceId, teamId, projectId),

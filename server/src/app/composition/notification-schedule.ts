@@ -164,7 +164,7 @@ export function createProductionNotificationScheduleHandler() {
       listEntries: async (input) => await timeTrackingRepository.listEntries({
         workspaceId: input.workspaceId,
         teamId: input.teamId,
-        from: input.from,
+        ...(input.from === undefined ? {} : { from: input.from }),
         to: input.to,
         projectIds: new Set([input.projectId]),
       }),

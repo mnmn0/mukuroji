@@ -56,6 +56,8 @@ type FakeClientOptions = {
   counter?: Record<string, unknown>
   /** Items returned by a query. */
   items?: Record<string, unknown>[]
+  /** Query result pages, each but the last followed by a `LastEvaluatedKey`; overrides `items`. */
+  pages?: Record<string, unknown>[][]
   /** Error thrown by every write. */
   writeError?: unknown
   /** List collecting every command. */
@@ -77,7 +79,15 @@ function fakeClient(options: FakeClientOptions): DynamoDBDocumentClient {
         const recordKey = typeof key === 'object' && key !== null && 'recordKey' in key ? key.recordKey : undefined
         return { Item: typeof recordKey === 'string' && recordKey.includes('#ENTRY#') ? options.row : options.counter }
       }
-      if (command.constructor.name === 'QueryCommand') return { Items: options.items ?? [] }
+      if (command.constructor.name === 'QueryCommand') {
+        if (!options.pages) return { Items: options.items ?? [] }
+        const start = command.input.ExclusiveStartKey
+        const index = typeof start === 'object' && start !== null && 'page' in start && typeof start.page === 'number' ? start.page : 0
+        return {
+          Items: options.pages[index] ?? [],
+          ...(index + 1 < options.pages.length ? { LastEvaluatedKey: { page: index + 1 } } : {}),
+        }
+      }
       if (options.writeError) throw options.writeError
       return {}
     },
@@ -180,6 +190,16 @@ test('deletes the expense and lowers the counter, refusing an approved expense a
       { Put: { TableName: 'audit' } },
     ],
   })
+})
+
+test('lists the expenses of every query page', async () => {
+  const sent: SentCommand[] = []
+  const store = new DynamoDbProjectExpenseStore('planning', fakeClient({
+    pages: [[expenseRow(expense)], [expenseRow({ ...expense, id: 'x2' })]],
+    sent,
+  }))
+  expect((await store.list(scope)).map((stored) => stored.id)).toEqual(['x1', 'x2'])
+  expect(sent.map((command) => command.input.ExclusiveStartKey)).toEqual([undefined, { page: 1 }])
 })
 
 test('rejects a stored row of another Project as corrupt', async () => {

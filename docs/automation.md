@@ -73,7 +73,9 @@ Notify action の `notifyAssignee: true` は、rule が対象にしている Wor
 予算期間・予算額・通貨・閾値ごとに `project-budget.threshold-reached` の audit event を1回だけ書く。trigger はこの event だけを見る。
 event の `metadata` は `teamId`、`projectId`、`budgetThresholdPercent`、`budgetConsumedPercent` を持ち、金額は持たない。
 Team の rule は自分の Team の Project の event でだけ動く。event に Work Item はないので、Work Item を変える action は使えない
-（form・webhook trigger と同じ）。通知・Work Item の作成・Webhook の action を使う。
+（form・webhook trigger と同じ）。通知・Work Item の作成・Webhook の action を使う。それ以外の action や担当者への通知
+（`notifyAssignee`）を持つ rule は保存時に `400` で拒否し、編集画面もこの3つだけを選ばせる。
+消化率は表示用に小数第1位で丸めるが、閾値の判定は丸める前の実コストで行うので、89.96% は 90% の閾値に達しない。
 
 ## 実行と冪等性
 

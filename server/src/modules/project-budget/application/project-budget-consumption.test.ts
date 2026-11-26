@@ -142,9 +142,10 @@ describe('loadProjectBudgetConsumption', () => {
   test('counts from the first record without a period, stops at an ended period, and skips a budget without an amount', async () => {
     const now = new Date('2026-06-01T00:00:00.000Z')
     const calls: string[] = []
-    expect(await loadProjectBudgetConsumption(scope, 'UTC', now, ports(budget(), [entry('2020-02-01T00:00:00.000Z', 2_500)], [], calls)))
+    expect(await loadProjectBudgetConsumption(scope, 'UTC', now, ports(budget(), [entry('1999-02-01T00:00:00.000Z', 2_500)], [], calls)))
       .toMatchObject({ asOf: '2026-06-01', consumedPercent: 25 })
-    expect(calls[0]?.startsWith('2000-01-01T00:00:00.000Z')).toBe(true)
+    // Without a period start the read has no lower bound, so the oldest entry still counts.
+    expect(calls[0]?.startsWith('undefined ')).toBe(true)
     expect(await loadProjectBudgetConsumption(scope, 'UTC', now, ports(
       budget({ periodFrom: '2026-01-01', periodTo: '2026-01-31' }),
       [entry('2026-01-31T00:00:00.000Z', 1_000), entry('2026-02-01T00:00:00.000Z', 1_000)],

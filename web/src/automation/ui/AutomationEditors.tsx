@@ -43,6 +43,7 @@ import {
   isAutomationTriggerConfigurationValid,
   isAutomationWorkflowTemplatePayloadValid,
   parseAutomationTemplatePayload,
+  readAutomationActionTypesForTrigger,
   type AutomationWorkItemTypeTriggerDirection,
   type AutomationTemplatePayloadError,
 } from '../model/editorValidation'
@@ -368,7 +369,7 @@ export function AutomationRuleEditor({
   const triggerTypes = teamScoped
     ? automationTriggerTypes.filter((type) => !teamExcludedTriggerTypes.has(type))
     : automationTriggerTypes
-  const actionTypes = teamScoped
+  const scopedActionTypes = teamScoped
     ? automationActionTypes.filter((type) => type !== 'webhook')
     : automationActionTypes
   const activeWebhookEndpoints = useMemo(
@@ -447,10 +448,13 @@ export function AutomationRuleEditor({
     : triggerType === 'work-item-type'
       ? Boolean(resolvedTriggerTeamId.trim()) && isWorkItemTypeTriggerValid
       : isAutomationTriggerConfigurationValid(triggerType, resolvedTriggerConfiguration)
-  const notifiesAssigneeOnly = actionType === 'notify' && notifyAssignee &&
+  const actionTypes = readAutomationActionTypesForTrigger(scopedActionTypes, triggerType)
+  const allowsAssigneeNotification = triggerType !== 'budget-threshold'
+  const notifiesAssignee = allowsAssigneeNotification && notifyAssignee
+  const notifiesAssigneeOnly = actionType === 'notify' && notifiesAssignee &&
     !actionConfiguration.trim()
-  const isActionValid = notifiesAssigneeOnly ||
-    isAutomationActionConfigurationValid(actionType, actionConfiguration)
+  const isActionValid = actionTypes.includes(actionType) && (notifiesAssigneeOnly ||
+    isAutomationActionConfigurationValid(actionType, actionConfiguration))
   const dueDaysBefore = readAutomationDueDaysBefore(scheduleDueDaysBefore)
   const isScheduleTimeValid = isAutomationScheduleConfigurationValid(
     scheduleTimeZone,
@@ -475,7 +479,7 @@ export function AutomationRuleEditor({
 
     try {
       await onCreate({
-        actions: [createAutomationAction(actionType, actionConfiguration, trimmedName, notifyAssignee)],
+        actions: [createAutomationAction(actionType, actionConfiguration, trimmedName, notifiesAssignee)],
         conditions: createAutomationConditions(
           trimmedConditionField,
           conditionOperator,
@@ -555,6 +559,12 @@ export function AutomationRuleEditor({
             setTriggerFromConfiguration('')
             setWorkItemTypeTriggerDirection('to')
             setTriggerTeamId(nextType === 'work-item-type' ? teams[0]?.id ?? '' : '')
+            const nextActionTypes = readAutomationActionTypesForTrigger(scopedActionTypes, nextType)
+            if (!nextActionTypes.includes(actionType)) {
+              setActionType(nextActionTypes.includes('notify') ? 'notify' : nextActionTypes[0] ?? 'notify')
+              setActionConfiguration('')
+            }
+            if (nextType === 'budget-threshold') setNotifyAssignee(false)
           }}
         />
         <SelectField
@@ -729,13 +739,13 @@ export function AutomationRuleEditor({
           <input
             className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
             data-testid="automation-rule-action-configuration"
-            required={!(actionType === 'notify' && notifyAssignee)}
+            required={!(actionType === 'notify' && notifiesAssignee)}
             type={actionType === 'webhook' ? 'url' : 'text'}
             value={actionConfiguration}
             onChange={(event) => setActionConfiguration(event.target.value)}
           />
         </label>
-        {actionType === 'notify' ? (
+        {actionType === 'notify' && allowsAssigneeNotification ? (
           <label className="flex items-center gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
             <input
               checked={notifyAssignee}

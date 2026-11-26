@@ -305,6 +305,19 @@ describe('Automation rule domain', () => {
       trigger: { type: 'budget-threshold', ignored: true },
       actions: [{ type: 'notify', recipientMemberKeys: ['finance@example.com'], title: 'Budget alert' }],
     }).trigger).toEqual({ type: 'budget-threshold' })
+    // The alert names no Work Item, so actions on one are refused when the rule is saved.
+    for (const action of [
+      { type: 'move', targetProjectId: null },
+      { type: 'comment', body: 'Over budget' },
+      { type: 'notify', recipientMemberKeys: [], notifyAssignee: true, title: 'Budget alert' },
+    ]) {
+      expect(() => validateCreateAutomationRuleInput({
+        name: 'Budget alert',
+        enabled: true,
+        trigger: { type: 'budget-threshold' },
+        actions: [action],
+      })).toThrow('A budget threshold rule can only')
+    }
   })
 
   test('matches relation changes by event type', () => {

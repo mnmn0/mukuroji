@@ -196,8 +196,9 @@ describe('collaboration projection pure helpers', () => {
   })
 
   test('sends a budget threshold alert only to a current manager of its Project', () => {
-    const event = { eventType: 'project-budget.threshold-reached', projectId: 'platform' }
+    const event = { eventType: 'project-budget.threshold-reached', projectId: 'platform', teamId: 'core' }
     const directory: ProjectDirectoryItem[] = [
+      { entryType: 'project', teamId: 'core', projectId: 'platform' },
       { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'lead@example.com', role: 'manager' },
       { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'dev@example.com', role: 'member' },
       { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'former@example.com', role: 'manager', archivedAt: '2026-11-01T00:00:00.000Z' },
@@ -208,6 +209,8 @@ describe('collaboration projection pure helpers', () => {
     expect(isCurrentBudgetThresholdRecipient(event, 'dev@example.com', directory)).toBe(false)
     expect(isCurrentBudgetThresholdRecipient(event, 'former@example.com', directory)).toBe(false)
     expect(isCurrentBudgetThresholdRecipient(event, 'elsewhere@example.com', directory)).toBe(false)
+    // A manager row of the Project does not count when the event names another Team.
+    expect(isCurrentBudgetThresholdRecipient({ ...event, teamId: 'other' }, 'lead@example.com', directory)).toBe(false)
     expect(isCurrentBudgetThresholdRecipient({ eventType: 'project-budget.threshold-reached' }, 'lead@example.com', directory)).toBe(false)
     expect(isCurrentBudgetThresholdRecipient({ eventType: 'comment.created' }, 'dev@example.com', directory)).toBe(true)
   })

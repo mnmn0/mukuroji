@@ -137,6 +137,56 @@ describe('Project expenses', () => {
     expect(expenseKeys[2]).not.toBe(expenseKeys[0])
   })
 
+  test('finishes a receipt upload whose completion went unanswered and keeps each unanswered submission key', async () => {
+    const calls: string[] = []
+    const completionKeys: (string | null)[] = []
+    const expenseKeys: (string | null)[] = []
+    let failComplete = true
+    let failExpense = true
+    globalThis.fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      calls.push(`${init?.method ?? 'GET'} ${url.replace(/^.*\/projects\/atlas/u, '')}`)
+      if (url.startsWith('https://upload.example/')) return new Response(null, { status: 200 })
+      if (url.endsWith('/complete')) {
+        completionKeys.push(new Headers(init?.headers).get('Idempotency-Key'))
+        if (failComplete) throw new TypeError('network')
+        return Response.json({ file: { id: 'file-1' }, version: { id: 'v1' } })
+      }
+      if (url.endsWith('/expenses')) {
+        expenseKeys.push(new Headers(init?.headers).get('Idempotency-Key'))
+        if (failExpense) throw new TypeError('network')
+        return Response.json({ expense: submitted }, { status: 201 })
+      }
+      return Response.json({
+        file: { id: 'file-1' },
+        version: { id: 'v1' },
+        upload: { url: 'https://upload.example/receipt', method: 'PUT', headers: {}, maxSizeBytes: 1_000 },
+      }, { status: 201 })
+    }, { preconnect: originalFetch.preconnect })
+    const submitter = createProjectExpenseSubmitter()
+    const input = { date: '2026-11-19', category: '外注費', amountMinor: 120_000, currency: 'JPY' }
+    const receipt = new File(['x'], 'receipt.pdf', { type: 'application/pdf', lastModified: 1 })
+    // A different file with the same name, size, date, and type is another receipt.
+    const lookalike = new File(['y'], 'receipt.pdf', { type: 'application/pdf', lastModified: 1 })
+
+    await expect(submitter.submit('token', 'core-team', 'atlas', input, [receipt])).rejects.toBeDefined()
+    failComplete = false
+    await expect(submitter.submit('token', 'core-team', 'atlas', input, [receipt])).rejects.toBeDefined()
+    // The retry completed the same version with the same key, without a new session or upload.
+    expect(calls.filter((call) => call.endsWith('/uploads'))).toHaveLength(1)
+    expect(calls.filter((call) => call.startsWith('PUT'))).toHaveLength(1)
+    expect(completionKeys).toHaveLength(2)
+    expect(completionKeys[1]).toBe(completionKeys[0])
+
+    // Another submission in between does not drop the first one's key.
+    await expect(submitter.submit('token', 'core-team', 'atlas', { ...input, amountMinor: 1 }, [lookalike])).rejects.toBeDefined()
+    expect(calls.filter((call) => call.endsWith('/uploads'))).toHaveLength(2)
+    failExpense = false
+    await submitter.submit('token', 'core-team', 'atlas', input, [receipt])
+    expect(expenseKeys[2]).toBe(expenseKeys[0])
+    expect(expenseKeys[1]).not.toBe(expenseKeys[0])
+  })
+
   test('shows approved expenses in the actual cost of the budget report and pending ones apart', () => {
     const markup = renderToStaticMarkup(
       <ProjectBudgetReportPanel

@@ -2262,21 +2262,22 @@ export function isCurrentBudgetThresholdRecipient(
 ) {
   if (event.eventType !== BUDGET_THRESHOLD_REACHED_EVENT_TYPE) return true
   const recipient = normalizeMemberKey(memberKey)
-  if (!event.projectId || recipient === undefined) return false
-  if (directoryItems.some((item) =>
+  if (!event.projectId || !event.teamId || recipient === undefined) return false
+  // Member rows carry no Team, so the Project row must show the Project is still active in the event's Team.
+  const projectActiveInTeam = directoryItems.some((item) =>
+    item.entryType === 'project' &&
+    item.projectId === event.projectId &&
+    item.teamId === event.teamId &&
+    !item.archivedAt
+  )
+  if (!projectActiveInTeam) return false
+  return directoryItems.some((item) =>
     item.entryType === 'project-member' &&
     item.projectId === event.projectId &&
     item.role === 'manager' &&
     item.archivedAt === undefined &&
     normalizeMemberKey(item.memberKey) === recipient
-  )) return true
-  // An Enterprise manager has no member row, so the Project itself must still be active in the Team.
-  return directoryItems.some((item) =>
-    item.entryType === 'project' &&
-    item.projectId === event.projectId &&
-    item.teamId === event.teamId &&
-    !item.archivedAt
-  ) && enterpriseManagerKeys.some((key) => normalizeMemberKey(key) === recipient)
+  ) || enterpriseManagerKeys.some((key) => normalizeMemberKey(key) === recipient)
 }
 
 /**

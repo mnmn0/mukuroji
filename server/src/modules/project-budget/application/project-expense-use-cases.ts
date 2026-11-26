@@ -173,9 +173,13 @@ export async function createProjectExpenseUseCase<TCallerCheck, TAudit>(
   scope: ProjectExpenseScope,
   body: unknown,
   mutation: ProjectExpenseMutation<TCallerCheck, TAudit> & {
+    /** Expense ID derived from the request's idempotency key. */
     expenseId: string
+    /** Digest of the request, so a reused key with another body is refused. */
     creationFingerprint: string
+    /** Member key of the manager submitting the expense. */
     submitterMemberId: string
+    /** Checks the Work Item and receipt references against the Project. */
     verifyReferences: ProjectExpenseReferenceVerifier<TCallerCheck>
   },
 ): Promise<ProjectExpenseResponse> {
@@ -230,6 +234,7 @@ export async function updateProjectExpenseUseCase<TCallerCheck, TAudit>(
   expenseId: string,
   body: unknown,
   mutation: ProjectExpenseChangeMutation<TCallerCheck, TAudit> & {
+    /** Checks the Work Item and newly added receipt references against the Project. */
     verifyReferences: ProjectExpenseReferenceVerifier<TCallerCheck>
   },
 ): Promise<ProjectExpenseResponse> {

@@ -14,7 +14,9 @@ export type ScheduledProjectBudgetStatus = {
   periodTo?: string
   /** Alert percentage of the budget, already resolved to the default when unset. */
   alertPercent: number
-  /** Time cost plus approved expenses as a percentage of the budget. */
+  /** Time cost plus approved expenses in the budget currency, in minor units. */
+  actualCostMinor: number
+  /** `actualCostMinor` as a percentage of the budget, rounded for display. */
   consumedPercent: number
   /** Lower-case member key of the charter owner, when the charter names one. */
   ownerMemberKey?: string
@@ -69,7 +71,8 @@ export function evaluateBudgetThresholdAlerts(
   statuses: readonly ScheduledProjectBudgetStatus[],
 ): BudgetThresholdAlertCandidate[] {
   return statuses.flatMap((status) => {
-    if (!(status.consumedPercent >= status.alertPercent)) return []
+    // The exact cost decides, so a use just under the threshold that rounds up to it is not alerted.
+    if (!(status.actualCostMinor * 100 >= status.alertPercent * status.amountMinor)) return []
     const managers = [...new Set(status.managerMemberKeys.map((key) => key.toLowerCase()))].sort()
     const owner = status.ownerMemberKey?.toLowerCase()
     const recipientMemberKeys = owner !== undefined && managers.includes(owner) ? [owner] : managers

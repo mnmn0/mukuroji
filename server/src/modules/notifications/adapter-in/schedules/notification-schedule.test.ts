@@ -2071,6 +2071,7 @@ describe('budget threshold alerts', () => {
             amountMinor,
             currency: 'JPY',
             alertPercent: 90,
+            actualCostMinor: amountMinor * 0.925,
             consumedPercent: 92.5,
             ownerMemberKey: 'lead@example.com',
             managerMemberKeys: ['pm@example.com', 'lead@example.com'],
@@ -2081,7 +2082,9 @@ describe('budget threshold alerts', () => {
             amountMinor,
             currency: 'JPY',
             alertPercent: 90,
-            consumedPercent: 89.9,
+            // 89.96% shows as 90% but has not reached the 90% threshold.
+            actualCostMinor: amountMinor * 0.8996,
+            consumedPercent: 90,
             managerMemberKeys: ['pm@example.com'],
           },
           {
@@ -2092,6 +2095,7 @@ describe('budget threshold alerts', () => {
             periodFrom: '2026-04-01',
             periodTo: '2027-03-31',
             alertPercent: 50,
+            actualCostMinor: amountMinor * 0.6,
             consumedPercent: 60,
             // The owner does not manage the Project, so every manager is told instead.
             ownerMemberKey: 'sponsor@example.com',
@@ -2170,6 +2174,7 @@ describe('budget threshold check failures', () => {
           amountMinor: 1_000,
           currency: 'JPY',
           alertPercent: 90,
+          actualCostMinor: 950,
           consumedPercent: 95,
           managerMemberKeys: ['pm@example.com'],
         }]
