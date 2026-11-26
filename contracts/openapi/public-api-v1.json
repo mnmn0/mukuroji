@@ -329,6 +329,10 @@
       "AgentContext": {
         "description": "What a coding agent needs to choose and carry out work in a Team. New agent settings are added to this object, so clients must ignore properties they do not know.",
         "properties": {
+          "acceptNewRuns": {
+            "description": "Whether the Team accepts new Agent Runs. While false, start, resume, and take over fail with `409` and reason `not_ready`; active runs continue.",
+            "type": "boolean"
+          },
           "acceptanceCriteriaFieldId": {
             "description": "Custom field that holds acceptance criteria for Work Items without canonical `acceptanceCriteria`; a non-empty value counts as criteria.",
             "maxLength": 256,

@@ -95,6 +95,7 @@ import {
 import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
 import { readAcceptanceCriteriaDraftSubmission } from '../../work-items/model/acceptanceCriteria'
 import { WorkItemAcceptanceCriteriaEditor } from '../../work-items/ui/WorkItemAcceptanceCriteriaEditor'
+import { WorkItemCompletionGateStatus } from '../../work-items/ui/WorkItemCompletionGateStatus'
 import { useAcceptanceCriteriaDraft } from '../../work-items/ui/useAcceptanceCriteriaDraft'
 import {
   type CanManageWorkItemDependencyEndpoint,
@@ -899,6 +900,12 @@ function IssueDetailContent({
         key={`acceptance-criteria:${editorIdentity}`}
         locale={locale}
         readOnly={isIssueReadOnly}
+      />
+      <WorkItemCompletionGateStatus
+        acceptanceCriteria={issue.acceptanceCriteria}
+        approvalSummary={issue.approvalSummary}
+        locale={locale}
+        policy={configuration?.completionGate}
       />
     </>
   )
