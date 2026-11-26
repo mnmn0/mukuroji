@@ -106,7 +106,10 @@ describe('convertMarkdownToPageBlocks', () => {
       '| `code` | x |',
     ].join('\n')
 
-    expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
+    expect(convert(source).blocks).toEqual([
+      { id: expect.any(String), type: 'paragraph', text: '## Uses **bold**' },
+      { id: expect.any(String), type: 'paragraph', text: source.split('\n').slice(2).join('\n') },
+    ])
   })
 
   test('keeps lists, quotes, reference links, and their blank lines together in one paragraph', () => {
@@ -162,6 +165,17 @@ describe('convertMarkdownToPageBlocks', () => {
     ]) {
       expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
     }
+  })
+
+  test('normalizes Markdown headings with native headings so the hierarchy stays', () => {
+    expect(convert('## **Overview**\n\n### Details').blocks).toEqual([
+      { id: expect.any(String), type: 'paragraph', text: '## **Overview**' },
+      { id: expect.any(String), type: 'heading', level: 2, text: 'Details' },
+    ])
+    expect(convert('# Title\n\n## `code`\n\n### Sub').blocks).toEqual([
+      { id: expect.any(String), type: 'paragraph', text: '## `code`' },
+      { id: expect.any(String), type: 'heading', level: 2, text: 'Sub' },
+    ])
   })
 
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {

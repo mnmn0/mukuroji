@@ -197,7 +197,8 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   member 以上（Workspace は guest 以外）、link する Work Item は持ち主が閲覧できることが要ります。更新は Document を
   閲覧できなければ `404`、閲覧だけなら `403`、`expectedRevision` が古ければ `409 conflict` です。
   Markdown は行頭の fenced code（`mermaid` は diagram）、記号を含まない見出し・task list・pipe table を block に変え、
-  それ以外は書いたままの Markdown として paragraph に残します。先頭にただ 1 つある `#` 見出しは、export が title を
+  それ以外は書いたままの Markdown として paragraph に残します。記号を含む見出しも paragraph に残しますが、階層が
+  変わらないよう `#` の数はほかの見出しと同じ規則でそろえます。先頭にただ 1 つある `#` 見出しは、export が title を
   書く場所なので、記号を含んでいても本文から除きます。参照 link や脚注の定義を含む Markdown は、どの参照も
   定義を引けるよう全体を 1 つの paragraph に残します。`<pre>` などの生の HTML block を含む Markdown も、中身が
   そのまま表示されるよう全体を 1 つの paragraph に残します。1 ページに収まらない Markdown（block が 500 を超える、空行のない段落や code が

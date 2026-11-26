@@ -43,8 +43,21 @@ type RawHeading = {
   text: string
 }
 
+/**
+ * Heading whose text holds Markdown, so it stays paragraph Markdown, found by the line scan before
+ * levels are normalized. It takes part in level normalization so its level matches native headings.
+ */
+type RawMarkdownHeading = {
+  /** Discriminator of a Markdown heading that still has its source level. */
+  type: 'raw-markdown-heading'
+  /** Number of `#` characters in the source. */
+  rawLevel: number
+  /** Heading text without markers, as Markdown. */
+  text: string
+}
+
 /** Block found by the line scan, with heading levels not yet normalized. */
-type ScannedBlock = DocumentBlock | RawHeading
+type ScannedBlock = DocumentBlock | RawHeading | RawMarkdownHeading
 
 /** Opening line of a fenced code block at the start of a line. */
 const FENCE_OPEN = /^(`{3,}|~{3,})(.*)$/u
@@ -125,15 +138,25 @@ export function convertMarkdownToPageBlocks(
   const leadingTitle = title?.text
   const shallowest = leadingTitle !== undefined
     ? 2
-    : body.reduce((lowest, block) => block.type === 'raw-heading' ? Math.min(lowest, block.rawLevel) : lowest, 6)
-  const blocks = body.map((block): DocumentBlock => block.type === 'raw-heading'
-    ? {
+    : body.reduce((lowest, block) => block.type === 'raw-heading' || block.type === 'raw-markdown-heading'
+      ? Math.min(lowest, block.rawLevel)
+      : lowest, 6)
+  const blocks = body.map((block): DocumentBlock => {
+    if (block.type === 'raw-heading') {
+      return {
         id: createId('heading'),
         type: 'heading',
         level: toHeadingLevel(block.rawLevel - shallowest + 1),
         text: block.text,
       }
-    : block)
+    }
+    if (block.type === 'raw-markdown-heading') {
+      // Written with as many `#` as an export writes for a native heading of the same level.
+      const level = toHeadingLevel(block.rawLevel - shallowest + 1)
+      return { id: createId('paragraph'), type: 'paragraph', text: `${'#'.repeat(level + 1)} ${block.text}` }
+    }
+    return block
+  })
   if (blocks.length > DOCUMENT_MAX_BLOCK_COUNT) return { ok: false, code: 'too-many-blocks' }
   return { ok: true, blocks, ...(leadingTitle === undefined ? {} : { leadingTitle }) }
 }
@@ -287,9 +310,14 @@ function scanBlocks(
     const heading = ATX_HEADING.exec(line)
     if (heading) {
       const text = (heading[2] ?? '').replace(ATX_CLOSING, '').trim()
-      if (text !== '' && !MARKDOWN_SYNTAX.test(text)) {
+      if (text !== '') {
+        // A heading always ends the paragraph before it, so it can stand as its own block. One
+        // whose text holds Markdown stays Markdown but still takes part in level normalization.
         flushParagraph()
-        blocks.push({ type: 'raw-heading', rawLevel: heading[1]?.length ?? 1, text })
+        const rawLevel = heading[1]?.length ?? 1
+        blocks.push(MARKDOWN_SYNTAX.test(text)
+          ? { type: 'raw-markdown-heading', rawLevel, text }
+          : { type: 'raw-heading', rawLevel, text })
         index += 1
         continue
       }
