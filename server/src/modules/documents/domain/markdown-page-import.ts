@@ -78,8 +78,9 @@ const MARKDOWN_SYNTAX = /[\\`*_[\]<>&~|!#$]/u
  * diagram), an ATX heading of plain text a heading, a run of plain task items a checklist, and a
  * pipe table of plain cells a table. Everything else, including lists, quotes, links, and the
  * blank lines between them, stays together as paragraph Markdown, which the page shows as
- * Markdown. Markdown with a reference or footnote definition stays whole in one paragraph, so
- * every reference keeps its definition.
+ * Markdown. Markdown with a reference or footnote definition, or with a raw HTML block, stays
+ * whole in one paragraph, so every reference keeps its definition and an HTML block keeps its
+ * contents.
  *
  * When the body starts with the only `#` heading, as Markdown a page exports does, that heading
  * (whatever Markdown its text holds) is left out and returned as `leadingTitle`, and `##` becomes level 1, so exported Markdown
@@ -102,8 +103,9 @@ export function convertMarkdownToPageBlocks(
   const bodyText = bodyLines.join('\n').replace(/^(?:[ \t]*\n)+/u, '').replace(/(?:\n[ \t]*)+$/u, '')
   // A reference or footnote definition resolves anywhere in the document, but each paragraph
   // block is shown on its own; such Markdown stays whole in one paragraph so every reference
-  // keeps its definition.
-  if (linesOutsideFences(bodyText).some((line) => REFERENCE_DEFINITION.test(line))) {
+  // keeps its definition. A raw HTML block is shown literally up to its end, so Markdown with one
+  // stays whole too and nothing inside it becomes a native block.
+  if (linesOutsideFences(bodyText).some((line) => REFERENCE_DEFINITION.test(line) || HTML_BLOCK_START.test(line))) {
     if (bodyText.length > DOCUMENT_MAX_TEXT_LENGTH) return { ok: false, code: 'block-too-long' }
     return {
       ok: true,
@@ -166,6 +168,13 @@ function findLeadingTitle(lines: readonly string[]): { text: string, next: numbe
  * more Markdown together.
  */
 const REFERENCE_DEFINITION = /^ {0,3}\[([^\]]+)\]:/u
+
+/**
+ * Start of a raw HTML block, such as `<pre>`, `<div>`, `</p>`, `<?php`, or `<![CDATA[`. Its lines
+ * up to its end are shown as one literal block, so nothing inside may become a native block; a
+ * false match, such as a line that starts with inline HTML, only keeps more Markdown together.
+ */
+const HTML_BLOCK_START = /^ {0,3}<(?:[A-Za-z][A-Za-z0-9-]*|\/[A-Za-z]|[?!])/u
 
 /**
  * Clamps a shifted heading level to the levels a page supports.

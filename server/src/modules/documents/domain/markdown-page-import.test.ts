@@ -147,6 +147,13 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(convert('- item\n\n| Name |\n| --- |\n| value |').blocks.map(({ type }) => type)).toEqual(['paragraph', 'table'])
   })
 
+  test('keeps Markdown with a raw HTML block whole in one paragraph', () => {
+    const pre = 'Intro\n\n<pre>\n## Literal heading\n</pre>\n\n## Real heading'
+    expect(convert(pre).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: pre }])
+    expect(convert('<!-- note -->\n\n## Heading').blocks.map(({ type }) => type)).toEqual(['paragraph', 'heading'])
+    expect(convert('```html\n<div>\n```\n\n## Heading').blocks.map(({ type }) => type)).toEqual(['code', 'heading'])
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])
