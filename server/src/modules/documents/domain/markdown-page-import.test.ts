@@ -60,6 +60,29 @@ describe('convertMarkdownToPageBlocks', () => {
       .toEqual(['h1 Scope', 'paragraph', 'h2 Detail', 'h3 Deeper'])
   })
 
+  test('leaves out an exported title with escaped Markdown, so a round trip adds no copy', () => {
+    const { blocks, leadingTitle } = convert('# Plan\\_1\n\n## Scope\n\nText')
+
+    expect(leadingTitle).toBe('Plan_1')
+    expect(blocks.map((block) => block.type === 'heading' ? `h${block.level} ${block.text}` : block.type))
+      .toEqual(['h1 Scope', 'paragraph'])
+    expect(convert('# A\n\n```\n# inside code\n```').leadingTitle).toBe('A')
+    expect(convert('# A\n\n# B_2').leadingTitle).toBeUndefined()
+  })
+
+  test('copies a reference definition into each paragraph a native block separated it from', () => {
+    const { blocks } = convert('See [docs][ref].\n\n## Details\n\nAgain [ref].\n\n[ref]: https://example.com')
+
+    expect(blocks.map((block) => block.type === 'paragraph' ? block.text : block.type)).toEqual([
+      'See [docs][ref].\n\n[ref]: https://example.com',
+      'heading',
+      'Again [ref].\n\n[ref]: https://example.com',
+    ])
+    const again = convert(blocks.map((block) => block.type === 'paragraph' ? block.text : '## Details').join('\n\n')).blocks
+    expect(again.map((block) => block.type === 'paragraph' ? block.text : block.type))
+      .toEqual(blocks.map((block) => block.type === 'paragraph' ? block.text : block.type))
+  })
+
   test('shifts levels so the shallowest heading is level 1 when there is no single title heading', () => {
     const { blocks, leadingTitle } = convert('# One\n\n# Two\n\n## Sub')
 

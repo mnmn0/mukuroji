@@ -251,6 +251,13 @@ export type ReplaceDocumentContentRequest = {
   title?: string
   /** New body blocks; omitted keeps the current body. */
   blocks?: DocumentBlock[]
+  /**
+   * Writer's key for this change. A retry with the same key and fingerprint returns the current
+   * Document instead of a revision conflict against its own earlier write.
+   */
+  idempotencyKey?: string
+  /** Digest of the request the key is bound to; required with `idempotencyKey`. */
+  idempotencyFingerprint?: string
   /** Audit context that records the change in the same transaction; absent without audit. */
   auditContext?: MutationAuditContext
 }

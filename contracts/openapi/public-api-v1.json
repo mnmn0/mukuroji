@@ -11382,11 +11382,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublicDocumentContent"
+                  "$ref": "#/components/schemas/PublicDocumentSummary"
                 }
               }
             },
-            "description": "The page was created.",
+            "description": "The page was created. The response is its summary; read the body with GET /api/v1/documents/{documentId}.",
             "headers": {
               "Idempotency-Replayed": {
                 "$ref": "#/components/headers/IdempotencyReplayed"
@@ -11569,11 +11569,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublicDocumentContent"
+                  "$ref": "#/components/schemas/PublicDocumentSummary"
                 }
               }
             },
-            "description": "The Document was changed.",
+            "description": "The Document was changed. The response is its summary; read the body with GET /api/v1/documents/{documentId}.",
             "headers": {
               "Idempotency-Replayed": {
                 "$ref": "#/components/headers/IdempotencyReplayed"

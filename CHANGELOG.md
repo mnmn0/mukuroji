@@ -29,7 +29,7 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   または title・本文を置き換える）を追加しました。`save_document` は `MUKUROJI_MCP_READ_ONLY=true` では出ません（#708）。
 - server API: `GET /api/v1/documents` と `GET /api/v1/documents/{documentId}`（scope `work-items:read`）、
   `POST /api/v1/documents` と `PATCH /api/v1/documents/{documentId}`（scope `work-items:write`、`Idempotency-Key` 必須）を
-  追加しました。権限は Web の Documents と同じで、閲覧できない Document は `404` です（ADR 0106、#708）。
+  追加しました。作成・更新の応答は Document の要約です。権限は Web の Documents と同じで、閲覧できない Document は `404` です（ADR 0106、#708）。
 - MCP API revision を 6 に上げました。Document のツールは revision 6 以上の server が要ります（#708）。
 - Workspace profile に `list_relations`（親・子・WBS 番号と blocks / blockedBy / related / duplicate の link）、
   `save_relation`（同じ Team の Work Item を link、`remove: true` で解除）、`create_subtasks`（親の下に親の Project で最大 20 件の

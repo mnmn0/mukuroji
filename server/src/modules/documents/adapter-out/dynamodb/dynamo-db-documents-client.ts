@@ -522,6 +522,27 @@ type StoredDocumentVersionPinReceiptItem = {
 }
 
 /**
+ * Durable receipt of one content replacement, keyed by the writer's Idempotency-Key, so a retry
+ * after a lost response finds its own write instead of a revision conflict.
+ */
+type StoredDocumentContentReplaceReceiptItem = {
+  /** DynamoDB partition key. */
+  workspaceId: string
+  /** Sort key in the form `CONTENT_REPLACE_RECEIPT#<documentId>#<digest>`. */
+  recordKey: string
+  /** Row discriminator. */
+  entryType: 'document-content-replace-receipt'
+  /** Member key of the writer. */
+  actorKey: string
+  /** Digest of the request the key is bound to. */
+  fingerprint: string
+  /** Revision the replacement saved. */
+  revision: number
+  /** DynamoDB TTL epoch seconds. */
+  expiresAtEpoch: number
+}
+
+/**
  * Full snapshot 間の revision を復元する compact delta row です。
  */
 type StoredDocumentVersionDeltaItem = {
@@ -2410,6 +2431,15 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         'edit',
       )
     const row = authorization.documentRow
+    if ((input.idempotencyKey === undefined) !== (input.idempotencyFingerprint === undefined)) {
+      throw new DocumentError(400, 'InvalidIdempotencyKey', 'An idempotency key needs its request fingerprint.')
+    }
+    const receiptKey = input.idempotencyKey === undefined
+      ? undefined
+      : contentReplaceReceiptKey(input.documentId, input.access.memberKey, input.idempotencyKey)
+    if (receiptKey !== undefined && await this.readContentReplaceReceipt(input, receiptKey)) {
+      return this.projectDocument(input.workspaceId, row.document, input.access)
+    }
     requireExpectedRevision(row, input.expectedRevision)
     const next = structuredClone(row.document)
     if (next.kind !== 'page' && next.kind !== 'template') {
@@ -2450,25 +2480,94 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
           [row.documentId],
         ),
       )
-    await this.commitMutation(
-      input.workspaceId,
-      row,
-      next,
-      elementRevisions,
-      'edit',
-      undefined,
-      undefined,
-      undefined,
-      mutationAuthorizationGuards,
-      this.createDocumentAuditPut(input.workspaceId, input.access, input.auditContext, {
-        eventType: 'document.updated',
-        action: 'updated',
-        document: next,
-        previous: row.document,
-        summaryVerb: 'Updated',
-      }),
-    )
+    const nowEpoch = Math.floor(this.now().getTime() / 1_000)
+    const receipt: StoredDocumentContentReplaceReceiptItem | undefined =
+      receiptKey === undefined || input.idempotencyFingerprint === undefined
+        ? undefined
+        : {
+            workspaceId: input.workspaceId,
+            recordKey: receiptKey,
+            entryType: 'document-content-replace-receipt',
+            actorKey: input.access.memberKey,
+            fingerprint: input.idempotencyFingerprint,
+            revision: next.revision,
+            expiresAtEpoch: nowEpoch + DOCUMENT_OPERATION_RECEIPT_RETENTION_DAYS * SECONDS_PER_DAY,
+          }
+    try {
+      await this.commitMutation(
+        input.workspaceId,
+        row,
+        next,
+        elementRevisions,
+        'edit',
+        undefined,
+        undefined,
+        undefined,
+        mutationAuthorizationGuards,
+        this.createDocumentAuditPut(input.workspaceId, input.access, input.auditContext, {
+          eventType: 'document.updated',
+          action: 'updated',
+          document: next,
+          previous: row.document,
+          summaryVerb: 'Updated',
+        }),
+        receipt === undefined
+          ? undefined
+          : {
+              Put: {
+                TableName: this.tableName,
+                Item: receipt,
+                ConditionExpression:
+                  'attribute_not_exists(workspaceId) OR expiresAtEpoch <= :operationReceiptNowEpoch',
+                ExpressionAttributeValues: { ':operationReceiptNowEpoch': nowEpoch },
+              },
+            },
+      )
+    } catch (error) {
+      // A concurrent retry of the same write may have saved it first.
+      if (receiptKey !== undefined && await this.readContentReplaceReceipt(input, receiptKey)) {
+        const current = await this.requireMutableDocument(input.workspaceId, input.documentId, input.access, 'edit')
+        return this.projectDocument(input.workspaceId, current.documentRow.document, input.access)
+      }
+      throw error
+    }
     return this.projectDocument(input.workspaceId, next, input.access)
+  }
+
+  /**
+   * Tells whether a live receipt records this content replacement as already saved.
+   *
+   * @param input - Replacement being retried.
+   * @param receiptKey - Receipt sort key derived from the writer and Idempotency-Key.
+   * @returns Whether the same request was saved before.
+   * @throws DocumentError 409 when the key was used for a different request.
+   */
+  private async readContentReplaceReceipt(
+    input: ReplaceDocumentContentRequest,
+    receiptKey: string,
+  ): Promise<boolean> {
+    const result = await this.client.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId: input.workspaceId, recordKey: receiptKey },
+      ConsistentRead: true,
+    }))
+    const receipt = result.Item
+    if (
+      !isRecord(receipt) ||
+      receipt.entryType !== 'document-content-replace-receipt' ||
+      typeof receipt.expiresAtEpoch !== 'number' ||
+      receipt.expiresAtEpoch <= Math.floor(this.now().getTime() / 1_000)
+    ) {
+      return false
+    }
+    if (receipt.actorKey !== input.access.memberKey || receipt.fingerprint !== input.idempotencyFingerprint) {
+      throw new DocumentError(
+        409,
+        'IdempotencyKeyReused',
+        'The idempotency key has already been used with different input.',
+      )
+    }
+    return true
   }
 
   /**
@@ -6759,6 +6858,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     authorizationMutationGuard?: DocumentAuthorizationRevisionGuard,
     mutationAuthorizationGuards?: readonly DynamoDbDocumentAuthorizationGuard[],
     auditPut?: NonNullable<TransactWriteCommandInput['TransactItems']>[number],
+    receiptPut?: NonNullable<TransactWriteCommandInput['TransactItems']>[number],
   ): Promise<void> {
     const createsVersionSnapshot =
       reason === 'restore' ||
@@ -6847,6 +6947,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
             ),
           ]),
       ...optionalAction(auditPut),
+      ...optionalAction(receiptPut),
       ...authorizationGuardConditionChecks(
         mutationAuthorizationGuards,
       ),
@@ -8837,6 +8938,18 @@ function versionPutActions(
  * @param idempotencyKey - Client Idempotency-Key.
  * @returns The receipt sort key.
  */
+/**
+ * Builds the receipt sort key of one writer's content replacement Idempotency-Key.
+ *
+ * @param documentId - Document being replaced.
+ * @param actorKey - Member key of the writer.
+ * @param idempotencyKey - Writer's key.
+ * @returns Receipt sort key.
+ */
+function contentReplaceReceiptKey(documentId: string, actorKey: string, idempotencyKey: string): string {
+  return `CONTENT_REPLACE_RECEIPT#${encodeKeyPart(documentId)}#${sha256(`${actorKey}\0${idempotencyKey}`)}`
+}
+
 function versionPinReceiptKey(documentId: string, actorKey: string, idempotencyKey: string): string {
   return `VERSION_PIN_RECEIPT#${encodeKeyPart(documentId)}#${sha256(`${actorKey}\0${idempotencyKey}`)}`
 }

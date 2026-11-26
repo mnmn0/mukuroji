@@ -78,10 +78,10 @@ const MARKDOWN_SYNTAX = /[\\`*_[\]<>&~|!#$]/u
  * diagram), an ATX heading of plain text a heading, a run of plain task items a checklist, and a
  * pipe table of plain cells a table. Everything else, including lists, quotes, links, and the
  * blank lines between them, stays together as paragraph Markdown, which the page shows as
- * Markdown, so a construct such as a reference link and its definition stays in one block.
+ * Markdown; a reference definition is copied into each other paragraph that uses its label.
  *
  * When the body starts with the only `#` heading, as Markdown a page exports does, that heading
- * is left out and returned as `leadingTitle`, and `##` becomes level 1, so exported Markdown
+ * (whatever Markdown its text holds) is left out and returned as `leadingTitle`, and `##` becomes level 1, so exported Markdown
  * written back keeps its heading levels. Otherwise levels are shifted so the shallowest heading
  * is level 1. Deeper headings stop at level 3.
  *
@@ -94,17 +94,12 @@ export function convertMarkdownToPageBlocks(
   createId: (prefix: string) => string,
 ): MarkdownPageImportResult {
   if (source.length > MARKDOWN_PAGE_IMPORT_MAX_LENGTH) return { ok: false, code: 'too-large' }
-  const lines = source.replace(/^﻿/u, '').split(/\r\n?|\n/u)
-  const scanned = scanBlocks(lines, createId)
+  const lines = source.replace(/^\uFEFF/u, '').split(/\r\n?|\n/u)
+  const title = findLeadingTitle(lines)
+  const scanned = scanBlocks(title === undefined ? lines : lines.slice(title.next), createId)
   if (!scanned.ok) return scanned
-  let body = scanned.blocks
-  let leadingTitle: string | undefined
-  const first = body[0]
-  const topLevelCount = body.filter((block) => block.type === 'raw-heading' && block.rawLevel === 1).length
-  if (first?.type === 'raw-heading' && first.rawLevel === 1 && topLevelCount === 1) {
-    leadingTitle = first.text
-    body = body.slice(1)
-  }
+  const body = scanned.blocks
+  const leadingTitle = title?.text
   const shallowest = leadingTitle !== undefined
     ? 2
     : body.reduce((lowest, block) => block.type === 'raw-heading' ? Math.min(lowest, block.rawLevel) : lowest, 6)
@@ -116,8 +111,89 @@ export function convertMarkdownToPageBlocks(
         text: block.text,
       }
     : block)
+  if (!shareReferenceDefinitions(blocks)) return { ok: false, code: 'block-too-long' }
   if (blocks.length > DOCUMENT_MAX_BLOCK_COUNT) return { ok: false, code: 'too-many-blocks' }
   return { ok: true, blocks, ...(leadingTitle === undefined ? {} : { leadingTitle }) }
+}
+
+/**
+ * Finds a title heading where an export writes it: the first non-blank line is a `#` heading and
+ * no other line outside a fenced code block is one. The heading text may hold any Markdown, such
+ * as the backslash escapes an export adds, because it is read as the title rather than as a block.
+ *
+ * @param lines - Source lines.
+ * @returns The unescaped title and the line after it, or undefined when there is no such heading.
+ */
+function findLeadingTitle(lines: readonly string[]): { text: string, next: number } | undefined {
+  const first = lines.findIndex((line) => line.trim() !== '')
+  const match = first < 0 ? null : ATX_HEADING.exec(lines[first] ?? '')
+  const text = (match?.[2] ?? '').replace(ATX_CLOSING, '').trim()
+  if (match?.[1] !== '#' || text === '') return undefined
+  let fence: string | undefined
+  for (let index = first + 1; index < lines.length; index += 1) {
+    const line = lines[index] ?? ''
+    if (fence !== undefined) {
+      if (closesFence(line.replace(/^ {0,3}/u, ''), fence)) fence = undefined
+      continue
+    }
+    const open = FENCE_OPEN.exec(line)
+    if (open?.[1] !== undefined && !(open[1].startsWith('`') && (open[2] ?? '').includes('`'))) {
+      fence = open[1]
+      continue
+    }
+    if (ATX_HEADING.exec(line)?.[1] === '#') return undefined
+  }
+  return { text: text.replace(/\\([!-/:-@[-`{-~])/gu, '$1'), next: first + 1 }
+}
+
+/** Reference definition line, such as `[docs]: https://example.com`. */
+const REFERENCE_DEFINITION = /^ {0,3}\[([^\]]+)\]:[ \t]*\S/u
+
+/**
+ * Normalizes a reference label the way Markdown matches it.
+ *
+ * @param label - Label text between the brackets.
+ * @returns Case-folded label with collapsed whitespace.
+ */
+function normalizeReferenceLabel(label: string): string {
+  return label.trim().replace(/\s+/gu, ' ').toLowerCase()
+}
+
+/**
+ * Copies reference definitions into each other paragraph that uses their label. Each paragraph is
+ * shown as Markdown on its own, so a reference whose definition a native block separated from it
+ * would otherwise show unresolved. A paragraph that already defines a label keeps its own.
+ *
+ * @param blocks - Page blocks; paragraphs are changed in place.
+ * @returns Whether every paragraph still fits in one block.
+ */
+function shareReferenceDefinitions(blocks: DocumentBlock[]): boolean {
+  const definitions = new Map<string, string>()
+  const ownLabels = new Map<DocumentBlock, Set<string>>()
+  for (const block of blocks) {
+    if (block.type !== 'paragraph') continue
+    const labels = new Set<string>()
+    for (const line of block.text.split('\n')) {
+      const label = REFERENCE_DEFINITION.exec(line)?.[1]
+      if (label === undefined) continue
+      const key = normalizeReferenceLabel(label)
+      labels.add(key)
+      if (!definitions.has(key)) definitions.set(key, line.trim())
+    }
+    ownLabels.set(block, labels)
+  }
+  if (definitions.size === 0) return true
+  let fits = true
+  for (const block of blocks) {
+    if (block.type !== 'paragraph') continue
+    const own = ownLabels.get(block) ?? new Set<string>()
+    const used = [...block.text.matchAll(/\[([^\]]+)\]/gu)].map((match) => normalizeReferenceLabel(match[1] ?? ''))
+    const missing = [...new Set(used)].filter((label) => !own.has(label) && definitions.has(label))
+    if (missing.length === 0) continue
+    block.text = `${block.text}\n\n${missing.map((label) => definitions.get(label) ?? '').join('\n')}`
+    if (block.text.length > DOCUMENT_MAX_TEXT_LENGTH) fits = false
+  }
+  return fits
 }
 
 /**

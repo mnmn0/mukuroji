@@ -310,8 +310,8 @@ describe('public Document service', () => {
     expect(input?.relations?.map(({ target }) => target)).toEqual([{ kind: 'work-item', workItemId: 'team/core-team/issue/task-1' }])
     expect(input?.idempotencyKey).toMatch(/^public-api:[0-9a-f]{64}$/u)
     expect(input?.auditContext).toBeDefined()
-    expect(result).toMatchObject({ id: 'doc-new', kind: 'page', title: 'Plan', revision: 1, format: 'markdown' })
-    expect(result.content).toContain('## Goals')
+    expect(result).toMatchObject({ id: 'doc-new', kind: 'page', title: 'Plan', revision: 1 })
+    expect(result).not.toHaveProperty('content')
   })
 
   test('refuses a Project page from a viewer and a link to a Work Item the owner cannot view', async () => {
@@ -358,8 +358,13 @@ describe('public Document service', () => {
         async getAuthorizationRevision() {
           return 1
         },
+        async get(input) {
+          if (input.documentId === 'linked') return createLinkedDocument('linked', [])
+          throw new DocumentError(403, 'DocumentViewDenied', 'Document access denied.')
+        },
         async replaceContent(input) {
-          if (input.documentId !== 'linked') throw new DocumentError(404, 'DocumentNotFound', 'Document was not found.')
+          // The store reports a hidden Document as an edit denial; the service must not.
+          if (input.documentId !== 'linked') throw new DocumentError(403, 'DocumentEditDenied', 'Document edit denied.')
           if (input.expectedRevision !== 4) throw new DocumentError(409, 'DocumentRevisionConflict', 'The document changed after it was read.')
           replaced.push(input)
           const document = createLinkedDocument('linked', [])
@@ -384,6 +389,7 @@ describe('public Document service', () => {
     expect(replaced).toHaveLength(1)
     expect(replaced[0]?.blocks?.map((block) => block.type === 'heading' ? `h${block.level} ${block.text}` : block.type)).toEqual(['h1 Scope', 'paragraph'])
     expect(result).toMatchObject({ id: 'linked', revision: 5 })
-    expect(result.content).toContain('New body.')
+    expect(replaced[0]?.idempotencyKey).toMatch(/^public-api:[0-9a-f]{64}$/u)
+    expect(replaced[0]?.idempotencyFingerprint).toMatch(/^[0-9a-f]{64}$/u)
   })
 })

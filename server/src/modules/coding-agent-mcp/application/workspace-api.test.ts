@@ -216,21 +216,13 @@ test('save_issue returns the saved Work Item with a warning when the key cannot 
   expect(writes).toEqual(['create:create-key', 'update:update-key'])
 })
 
-/** Markdown content of a saved page, as the Public API returns it. */
-function documentContent(id: string, revision: number) {
-  return {
-    schemaVersion: 1 as const, id, kind: 'page' as const, title: 'Plan', revision,
-    updatedAt: '2026-11-01T00:00:00.000Z', format: 'markdown' as const, content: '# Plan\n',
-  }
-}
-
 test('save_document creates a page linked to a Work Item by key and updates it with the expected revision', async () => {
   const calls: string[] = []
   const { api: base } = apiWithFailingKeyRead()
   const issues = createWorkspaceIssues({
     ...base,
-    createDocument: async (input, key) => { calls.push(`create:${key}:${JSON.stringify(input)}`); return documentContent('doc-1', 1) },
-    updateDocument: async (documentId, input, key) => { calls.push(`update:${key}:${documentId}:${JSON.stringify(input)}`); return documentContent(documentId, 2) },
+    createDocument: async (input, key) => { calls.push(`create:${key}:${JSON.stringify(input)}`); return { id: 'doc-1', kind: 'page', title: 'Plan', scope: { type: 'workspace' }, revision: 1 } },
+    updateDocument: async (documentId, input, key) => { calls.push(`update:${key}:${documentId}:${JSON.stringify(input)}`); return { id: documentId, kind: 'page', title: 'Plan', scope: { type: 'workspace' }, revision: 2 } },
   })
 
   expect(await issues.saveDocument({ title: 'Plan', content: '# Plan', projectId: 'web', issueId: 'ABC-1', idempotencyKey: 'k1' }))

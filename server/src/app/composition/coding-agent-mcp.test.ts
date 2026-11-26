@@ -566,10 +566,10 @@ function startFakeWorkspaceApi() {
         return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', subtaskCount: 1 }, { status: 201 })
       }
       if (request.method === 'POST' && url.pathname === '/api/v1/documents') {
-        return Response.json({ ...documentContent, id: 'doc-new', revision: 1 }, { status: 201 })
+        return Response.json({ id: 'doc-new', kind: 'page', title: 'Plan', scope: { type: 'project', projectId: 'project' }, revision: 1 }, { status: 201 })
       }
       if (request.method === 'PATCH' && url.pathname === '/api/v1/documents/doc-1') {
-        return Response.json({ ...documentContent, revision: 5 })
+        return Response.json({ id: 'doc-1', kind: 'page', title: 'Spec', scope: { type: 'project', projectId: 'project' }, revision: 5 })
       }
       if (request.method === 'POST' && url.pathname === '/api/v1/work-items/task/comments' && teamId === 'team') {
         return Response.json({ id: 'new-comment', actorUserId: 'owner', body: 'Linked to PR', createdAt: issue.createdAt }, { status: 201 })

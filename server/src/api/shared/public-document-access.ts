@@ -312,6 +312,26 @@ function toPublicDocumentContent(document: DocumentDetail): PublicDocumentConten
 }
 
 /**
+ * Summarizes a Document as the Public API lists it and answers its writes. A write answers with
+ * the summary rather than the body, so a saved write always fits in its idempotency receipt.
+ *
+ * @param document - Document the credential owner can view.
+ * @returns Its summary.
+ */
+function toPublicDocumentSummary(document: DocumentDetail): PublicDocumentSummary {
+  return {
+    id: document.id,
+    kind: document.kind,
+    title: document.title,
+    scope: document.scope.type === 'workspace'
+      ? { type: 'workspace' }
+      : { type: 'project', projectId: document.scope.projectId },
+    ...(document.parentId === undefined ? {} : { parentId: document.parentId }),
+    revision: document.revision,
+  }
+}
+
+/**
  * Updates the search projection and open editors after a Public API Document write. Both are
  * best effort: the write is already saved, so a failure here must not fail the response.
  *
@@ -479,7 +499,7 @@ export function createCanonicalPublicDocumentService(): PublicDocumentService {
           auditContext: createDocumentWriteAudit(credential, principal, context, 'POST', '/api/v1/documents'),
         })
         await reflectDocumentWrite(principal.workspaceId, document)
-        return toPublicDocumentContent(document)
+        return toPublicDocumentSummary(document)
       } catch (error) {
         rethrowDocumentFailure(error)
       }
@@ -490,6 +510,8 @@ export function createCanonicalPublicDocumentService(): PublicDocumentService {
       const { principal, access } = await resolveCredentialDocumentWriter(credential)
       const blocks = input.content === undefined ? undefined : readMarkdownPageBlocks(input.content)
       const path = `/api/v1/documents/${encodeURIComponent(documentId)}`
+      // A Document the owner cannot view is reported as missing, not as an edit denial.
+      await readVisibleDocument(principal.workspaceId, documentId, access)
       try {
         const document = await workItemDependencies.documents.replaceContent({
           workspaceId: principal.workspaceId,
@@ -498,10 +520,13 @@ export function createCanonicalPublicDocumentService(): PublicDocumentService {
           expectedRevision: input.expectedRevision,
           ...(input.title === undefined ? {} : { title: input.title }),
           ...(blocks === undefined ? {} : { blocks }),
+          // A retry after a lost response finds its own write instead of a revision conflict.
+          idempotencyKey: `public-api:${hashPublicWrite(credential, 'PATCH', path, context.idempotencyKey)}`,
+          idempotencyFingerprint: createHash('sha256').update(JSON.stringify(input)).digest('hex'),
           auditContext: createDocumentWriteAudit(credential, principal, context, 'PATCH', path),
         })
         await reflectDocumentWrite(principal.workspaceId, document)
-        return toPublicDocumentContent(document)
+        return toPublicDocumentSummary(document)
       } catch (error) {
         rethrowDocumentFailure(error)
       }

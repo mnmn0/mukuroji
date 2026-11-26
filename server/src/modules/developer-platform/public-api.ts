@@ -813,27 +813,27 @@ export interface PublicDocumentService {
    * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
    * @param input - Title, Markdown body, destination, and Work Item link.
    * @param context - Request, correlation, and idempotency identifiers for the audit events.
-   * @returns The created page rendered as Markdown.
+   * @returns Summary of the created page; its body is read with `getDocument`.
    */
   createDocument(
     credential: AuthenticatedDeveloperCredential,
     input: CreatePublicDocumentRequest,
     context: PublicMutationContext,
-  ): Promise<PublicDocumentContent>
+  ): Promise<PublicDocumentSummary>
   /**
    * Changes the title or replaces the Markdown body of a page or template as the credential owner.
    * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
    * @param documentId - Document ID.
    * @param input - Expected revision and the new title or body.
    * @param context - Request, correlation, and idempotency identifiers for the audit events.
-   * @returns The changed Document rendered as Markdown.
+   * @returns Summary of the changed Document; its body is read with `getDocument`.
    */
   updateDocument(
     credential: AuthenticatedDeveloperCredential,
     documentId: string,
     input: UpdatePublicDocumentRequest,
     context: PublicMutationContext,
-  ): Promise<PublicDocumentContent>
+  ): Promise<PublicDocumentSummary>
 }
 
 /** Result of one accepted OTLP logs export. */

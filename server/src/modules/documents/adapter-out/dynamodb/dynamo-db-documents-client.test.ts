@@ -1388,6 +1388,38 @@ test('replaces a page title and body in one revision and drops links owned by re
   })).rejects.toMatchObject({ status: expect.any(Number) })
 })
 
+test('returns the saved Document when a keyed content replacement is retried', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Plan',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'old' }],
+  })
+  const write = {
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    expectedRevision: 1,
+    blocks: [{ id: 'block-b', type: 'paragraph' as const, text: 'new' }],
+    idempotencyKey: 'key-1',
+    idempotencyFingerprint: 'fingerprint-1',
+  }
+
+  const first = await client.replaceContent(write)
+  const retried = await client.replaceContent(write)
+
+  expect(first.revision).toBe(2)
+  expect(retried).toMatchObject({ revision: 2, blocks: [{ id: 'block-b', text: 'new' }] })
+  await expect(client.replaceContent({ ...write, idempotencyFingerprint: 'fingerprint-2' }))
+    .rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyReused' })
+  await expect(client.replaceContent({ ...write, idempotencyKey: 'key-2', idempotencyFingerprint: 'fingerprint-2' }))
+    .rejects.toMatchObject({ status: 409, code: 'DocumentRevisionConflict' })
+})
+
 test('stores operation deltas with retention and periodically compacts them into restorable snapshots', async () => {
   const memory = createMemoryDocumentClient()
   let currentTime =

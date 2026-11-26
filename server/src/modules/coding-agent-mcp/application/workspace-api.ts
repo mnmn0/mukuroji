@@ -214,17 +214,17 @@ export interface WorkspaceApi {
    * Creates a page from Markdown.
    * @param input - Title, Markdown body, destination, and Work Item link.
    * @param key - Idempotency key of the logical write.
-   * @returns The created page.
+   * @returns Summary of the created page.
    */
-  createDocument(input: CreatePublicDocumentRequest, key: string): Promise<PublicDocumentContent>
+  createDocument(input: CreatePublicDocumentRequest, key: string): Promise<PublicDocumentSummary>
   /**
    * Changes a Document's title or replaces its Markdown body.
    * @param documentId - Document ID.
    * @param input - Expected revision and the changes.
    * @param key - Idempotency key of the logical write.
-   * @returns The changed Document.
+   * @returns Summary of the changed Document.
    */
-  updateDocument(documentId: string, input: UpdatePublicDocumentRequest, key: string): Promise<PublicDocumentContent>
+  updateDocument(documentId: string, input: UpdatePublicDocumentRequest, key: string): Promise<PublicDocumentSummary>
 }
 
 /** Filters for listing the Workspace's Documents through the Workspace tools. */

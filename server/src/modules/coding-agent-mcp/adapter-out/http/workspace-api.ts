@@ -260,7 +260,7 @@ export function createWorkspaceApi(
     },
     /** Creates a page with `POST documents`; see {@link WorkspaceApi.createDocument}. */
     createDocument(input, key) {
-      return request('documents', documentSchema, 'POST', {
+      return request('documents', documentSummarySchema, 'POST', {
         ...input,
         ...(input.projectId === undefined ? {} : { projectId: id(input.projectId, 'projectId') }),
         ...(input.parentId === undefined ? {} : { parentId: id(input.parentId, 'parentId') }),
@@ -271,7 +271,7 @@ export function createWorkspaceApi(
     },
     /** Changes a Document with `PATCH documents/{id}` and checks its ID; see {@link WorkspaceApi.updateDocument}. */
     async updateDocument(documentId, input, key) {
-      const saved = await request(`documents/${encodeURIComponent(id(documentId, 'id'))}`, documentSchema, 'PATCH', input, key)
+      const saved = await request(`documents/${encodeURIComponent(id(documentId, 'id'))}`, documentSummarySchema, 'PATCH', input, key)
       if (saved.id !== documentId) throw new AgentTaskError('invalid_response', 'The API returned another Document.')
       return saved
     },

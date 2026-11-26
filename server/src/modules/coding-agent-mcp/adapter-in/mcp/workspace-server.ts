@@ -164,7 +164,7 @@ export function createWorkspaceMcpServer(api: WorkspaceApi, readOnly = false): M
     annotations: writeAnnotations,
   }, (input) => result(() => issues.createSubtasks(input)))
   server.registerTool('save_document', {
-    description: 'Create a page from Markdown (omit id; title and content required), optionally in a Project or folder and linked to a Work Item, or change a page\'s or template\'s title or whole Markdown body by id (expectedRevision required).',
+    description: 'Create a page from Markdown (omit id; title and content required), optionally in a Project or folder and linked to a Work Item, or change a page\'s or template\'s title or whole Markdown body by id (expectedRevision required). Returns the Document summary with its new revision; read the body with get_document.',
     inputSchema: z.object({
       id: id.optional().describe('Document to update. Omit to create a page.'),
       title: z.string().trim().min(1).max(PUBLIC_DOCUMENT_TITLE_MAX_LENGTH).optional(),
