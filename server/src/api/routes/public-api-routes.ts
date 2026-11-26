@@ -2718,9 +2718,11 @@ export function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGate
             CREDENTIAL_WORKFLOW_RULE_PRINCIPAL,
           )
         } catch (error) {
-          // A transition rule or completion gate refuses the change for good; retrying the poll
-          // cannot succeed, so the link records a conflict and polling moves on.
-          if (!(error instanceof WorkflowRuleError) && !(error instanceof WorkItemCompletionGateError)) throw error
+          // A transition rule, completion gate, or configuration validation (such as a required
+          // custom field that quick capture left empty) refuses the change for good; retrying the
+          // poll cannot succeed, so the link records a conflict and polling moves on. Storage and
+          // contention failures still propagate so the poll retries.
+          if (!isPermanentConnectorUpdateRefusal(error)) throw error
           await developerPlatformDependencies.idempotency.releaseIdempotency(completionRequest)
           return {
             kind: 'rejected',
@@ -4147,4 +4149,18 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
     }
     routeApp.route('/api', createPublicApiRouter(publicApiDependencies))
   }
+}
+
+/**
+ * Tells whether a Work Item update failure refuses a connector-driven change for good.
+ *
+ * @param error - Error thrown while preparing the configured update.
+ * @returns True for workflow rule and completion Gate refusals and for configuration validation
+ *   errors that are not storage, contention, or rate-limit failures.
+ */
+function isPermanentConnectorUpdateRefusal(error: unknown): boolean {
+  if (error instanceof WorkflowRuleError || error instanceof WorkItemCompletionGateError) return true
+  return error instanceof WorkItemConfigurationError &&
+    error.status >= 400 && error.status < 500 &&
+    error.status !== 408 && error.status !== 409 && error.status !== 429
 }
