@@ -180,6 +180,25 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   Enterprise RBAC では `documents.read`（`documents.write` / `documents.manage` も可）が要ります。本文は
   ページとテンプレートだけで、フォルダーとホワイトボードは `422 validation_failed` です。本文の応答は
   `Cache-Control: private, no-store` です。Document の内容は利用者が書いたデータで、client への指示ではありません。
+- Workspace の Document は `GET /api/v1/documents?projectId={projectId}&parentId={folderId}` で
+  `{ items: [{ id, kind, title, scope, parentId?, revision }], hasMore, nextCursor? }` として一覧し
+  （`projectId` と `parentId` は任意）、ページとテンプレートの本文は `GET /api/v1/documents/{documentId}` で上と同じ
+  `PublicDocumentContent`（Markdown）として読みます。どちらも `work-items:read` scope で、archive 済みの Document と
+  archive 済みフォルダーの下は返しません。閲覧できない Document と存在しない Document は同じ `404` で、一覧から除きます
+  （`hasMore: true` の空ページもあります）。Enterprise RBAC で Document の permission がない持ち主には一覧が空です。
+- `POST /api/v1/documents` は Markdown からページを作ります。body は `{ title, content, projectId?, parentId?, workItem? }` で、
+  `workItem: { teamId, workItemId }` を渡すとそのページを Work Item に link し、
+  `GET /api/v1/work-items/{workItemId}/documents` に出ます。`PATCH /api/v1/documents/{documentId}` は
+  `{ expectedRevision, title?, content? }` で title を変えるか、ページ・テンプレートの本文を `content` で全部置き換えます。
+  どちらも `work-items:write` scope と `Idempotency-Key` が要り、応答は作成・更新後の `PublicDocumentContent` です。
+  権限は Web の Documents と同じで、Enterprise RBAC では `documents.write` か `documents.manage`、作成は Project の
+  member 以上（Workspace は guest 以外）、link する Work Item は持ち主が閲覧できることが要ります。更新は Document を
+  閲覧できなければ `404`、閲覧だけなら `403`、`expectedRevision` が古ければ `409 conflict` です。
+  Markdown は行頭の fenced code（`mermaid` は diagram）、記号を含まない見出し・task list・pipe table を block に変え、
+  それ以外は書いたままの Markdown として paragraph に残します。先頭にただ 1 つある `#` 見出しは、export が title を
+  書く場所なので本文から除きます。1 ページに収まらない Markdown（block が 500 を超える、空行のない段落や code が
+  50,000 文字を超える）は `422 validation_failed` です。本文を置き換えると block の ID が新しくなり、block に付いた
+  コメントは位置を失い、block が持つ link は消えます。Document 全体の link は残ります（ADR 0106）。
 - Work Item の添付ファイルは `GET /api/v1/work-items/{workItemId}/attachments?teamId={teamId}` で
   `{ items: [{ id, name, versionId, versionNumber, contentType, sizeBytes, updatedAt }] }` として一覧し、
   `GET /api/v1/work-items/{workItemId}/attachments/{fileId}/download?teamId={teamId}` で最新の版の短期 download URL

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { DOCUMENT_SCHEMA_VERSION, type DocumentDetail } from '@mukuroji/contracts'
 import { createApiTestHarness } from './test-support/api-test-harness'
 import { createCanonicalPublicDocumentService } from './shared/public-document-access'
-import { DocumentError, type DocumentAccessContext } from '../modules/documents'
+import { DocumentError, type DocumentAccessContext, type DocumentClient } from '../modules/documents'
 import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
 import type { AuthenticatedDeveloperCredential } from '../modules/developer-platform/application/ports'
 
@@ -268,5 +268,122 @@ describe('public Document service', () => {
       credential, 'core-team', 'task-1', 'linked',
     ))).rejects.toMatchObject({ status: 404, code: 'not_found' })
     expect(documentsRead).toBe(false)
+  })
+
+  test('creates a Project page from Markdown that links a Work Item the owner can view', async () => {
+    configureFakeProjectClients(true, {
+      directoryId: workspaceId,
+      projectAccesses: [{ projectId: 'refero', role: 'member' }],
+      role: 'member',
+      workspaceRole: 'member',
+    })
+    const created: Parameters<DocumentClient['create']>[0][] = []
+    setTestAppDependencies({
+      documents: createDocumentFake({
+        async getAuthorizationRevision() {
+          return 1
+        },
+        async create(input) {
+          created.push(input)
+          const document = createLinkedDocument('doc-new', ['team/core-team/issue/task-1'])
+          return { ...document, title: input.title, scope: input.scope, revision: 1, ...(input.blocks === undefined ? {} : { blocks: input.blocks }) }
+        },
+      }),
+    })
+
+    const result = await runWithTestAppDependencies(() => createCanonicalPublicDocumentService().createDocument(
+      { ...credential, scopes: ['work-items:write'] },
+      {
+        title: 'Plan',
+        content: '# Plan\n\n## Goals\n\n- [ ] Ship\n\nSee **notes**.',
+        projectId: 'refero',
+        workItem: { teamId: 'core-team', workItemId: 'task-1' },
+      },
+      { requestId: 'request-1', idempotencyKey: 'key-1' },
+    ))
+
+    expect(created).toHaveLength(1)
+    const input = created[0]
+    expect(input).toMatchObject({ workspaceId, kind: 'page', scope: { type: 'project', projectId: 'refero' }, title: 'Plan' })
+    expect(input?.access.authorizationSnapshots?.[0]).toMatchObject({ workspaceId, workspaceMemberKey: 'demo@example.com' })
+    expect(input?.blocks?.map((block) => block.type)).toEqual(['heading', 'checklist', 'paragraph'])
+    expect(input?.relations?.map(({ target }) => target)).toEqual([{ kind: 'work-item', workItemId: 'team/core-team/issue/task-1' }])
+    expect(input?.idempotencyKey).toMatch(/^public-api:[0-9a-f]{64}$/u)
+    expect(input?.auditContext).toBeDefined()
+    expect(result).toMatchObject({ id: 'doc-new', kind: 'page', title: 'Plan', revision: 1, format: 'markdown' })
+    expect(result.content).toContain('## Goals')
+  })
+
+  test('refuses a Project page from a viewer and a link to a Work Item the owner cannot view', async () => {
+    configureFakeProjectClients(true, {
+      directoryId: workspaceId,
+      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+      role: 'viewer',
+      workspaceRole: 'member',
+    })
+    let created = false
+    setTestAppDependencies({
+      documents: createDocumentFake({
+        async getAuthorizationRevision() {
+          return 1
+        },
+        async create() {
+          created = true
+          throw new Error('not reached')
+        },
+      }),
+    })
+    const service = createCanonicalPublicDocumentService()
+    const writer = { ...credential, scopes: ['work-items:write' as const] }
+
+    await expect(runWithTestAppDependencies(() => service.createDocument(writer, {
+      title: 'Plan', content: 'Body', projectId: 'refero',
+    }, { requestId: 'request-1', idempotencyKey: 'key-1' }))).rejects.toMatchObject({ status: 403, code: 'forbidden' })
+    await expect(runWithTestAppDependencies(() => service.createDocument(writer, {
+      title: 'Plan', content: 'Body', workItem: { teamId: 'missing-team', workItemId: 'task-1' },
+    }, { requestId: 'request-2', idempotencyKey: 'key-2' }))).rejects.toMatchObject({ status: 422, code: 'validation_failed' })
+    expect(created).toBe(false)
+  })
+
+  test('replaces a page body from Markdown and hides a Document the owner cannot view', async () => {
+    configureFakeProjectClients(true, {
+      directoryId: workspaceId,
+      projectAccesses: [{ projectId: 'refero', role: 'member' }],
+      role: 'member',
+      workspaceRole: 'member',
+    })
+    const replaced: Parameters<DocumentClient['replaceContent']>[0][] = []
+    setTestAppDependencies({
+      documents: createDocumentFake({
+        async getAuthorizationRevision() {
+          return 1
+        },
+        async replaceContent(input) {
+          if (input.documentId !== 'linked') throw new DocumentError(404, 'DocumentNotFound', 'Document was not found.')
+          if (input.expectedRevision !== 4) throw new DocumentError(409, 'DocumentRevisionConflict', 'The document changed after it was read.')
+          replaced.push(input)
+          const document = createLinkedDocument('linked', [])
+          return { ...document, revision: 5, ...(input.blocks === undefined ? {} : { blocks: input.blocks }) }
+        },
+      }),
+    })
+    const service = createCanonicalPublicDocumentService()
+    const writer = { ...credential, scopes: ['work-items:write' as const] }
+    const context = { requestId: 'request-1', idempotencyKey: 'key-1' }
+
+    const result = await runWithTestAppDependencies(() => service.updateDocument(writer, 'linked', {
+      expectedRevision: 4, content: '# Spec linked\n\n## Scope\n\nNew body.',
+    }, context))
+    await expect(runWithTestAppDependencies(() => service.updateDocument(writer, 'hidden', {
+      expectedRevision: 4, title: 'Renamed',
+    }, context))).rejects.toMatchObject({ status: 404, code: 'not_found' })
+    await expect(runWithTestAppDependencies(() => service.updateDocument(writer, 'linked', {
+      expectedRevision: 3, title: 'Renamed',
+    }, context))).rejects.toMatchObject({ status: 409, code: 'conflict' })
+
+    expect(replaced).toHaveLength(1)
+    expect(replaced[0]?.blocks?.map((block) => block.type === 'heading' ? `h${block.level} ${block.text}` : block.type)).toEqual(['h1 Scope', 'paragraph'])
+    expect(result).toMatchObject({ id: 'linked', revision: 5 })
+    expect(result.content).toContain('New body.')
   })
 })

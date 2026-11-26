@@ -88,6 +88,7 @@ import type {
   UpdateDocumentCommentRequest,
   DeleteDocumentCommentRequest,
   ResolveDocumentSearchAccessRequest,
+  ReplaceDocumentContentRequest,
   RestoreDocumentVersionRequest,
   StoredDocumentComment,
   StoredDocumentPresence,
@@ -2386,6 +2387,85 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         summaryVerb: 'Restored a version of',
         target: { type: 'document-version', id: versionItem.version.id },
         metadata: { versionId: versionItem.version.id },
+      }),
+    )
+    return this.projectDocument(input.workspaceId, next, input.access)
+  }
+
+  /**
+   * Replaces the title and whole body of a page or template in one revision, as a Markdown write
+   * through the Public API does. Relations owned by a block that no longer exists are removed
+   * with it; Document-level relations stay.
+   *
+   * @param input - Page, expected revision, and new title or blocks.
+   * @returns Current Document detail after the change.
+   */
+  async replaceContent(input: ReplaceDocumentContentRequest): Promise<DocumentDetail> {
+    await this.ensureTable()
+    const authorization =
+      await this.requireMutableDocument(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'edit',
+      )
+    const row = authorization.documentRow
+    requireExpectedRevision(row, input.expectedRevision)
+    const next = structuredClone(row.document)
+    if (next.kind !== 'page' && next.kind !== 'template') {
+      throw new DocumentError(
+        400,
+        'UnsupportedDocumentContent',
+        'Only page and template Documents have a body that Markdown can replace.',
+      )
+    }
+    if (input.title !== undefined) {
+      assertText(input.title, 'title', DOCUMENT_MAX_TITLE_LENGTH, false)
+      next.title = input.title.trim()
+    }
+    if (input.blocks !== undefined) {
+      next.blocks = structuredClone(input.blocks)
+      const blockIds = new Set(next.blocks.map(({ id }) => id))
+      next.relations = next.relations.filter(({ source }) =>
+        source.kind !== 'block' || blockIds.has(source.blockId)
+      )
+    }
+    incrementDocument(next, input.access.memberKey, this.now())
+    validateDocumentPayload(next)
+    assertElementLinkCountsWithinLimit(row.document, next)
+    const elementRevisions = restoredElementRevisions(
+      row.document,
+      next,
+      row.elementRevisions,
+      next.revision,
+    )
+    const mutationAuthorizationGuards =
+      mergeAuthorizationGuards(
+        input.workspaceId,
+        input.access.authorizationSnapshots,
+        documentAuthorizationSnapshotGuards(
+          this.tableName,
+          input.workspaceId,
+          [authorization],
+          [row.documentId],
+        ),
+      )
+    await this.commitMutation(
+      input.workspaceId,
+      row,
+      next,
+      elementRevisions,
+      'edit',
+      undefined,
+      undefined,
+      undefined,
+      mutationAuthorizationGuards,
+      this.createDocumentAuditPut(input.workspaceId, input.access, input.auditContext, {
+        eventType: 'document.updated',
+        action: 'updated',
+        document: next,
+        previous: row.document,
+        summaryVerb: 'Updated',
       }),
     )
     return this.projectDocument(input.workspaceId, next, input.access)

@@ -90,7 +90,7 @@ Team が1つだけなら、ツールと結果は従来と同じです。Project 
 
 `MUKUROJI_MCP_PROFILE=workspace` で起動すると、Team と担当者を固定しないツールを公開します。
 Linear の MCP のように、Workspace の Team・Project・メンバー・Work Item を一覧し、`ABC-123` 形式の key で
-Work Item を読み、作成・更新・コメントする用途向けです。必要な環境変数は `MUKUROJI_MCP_URL` と `MUKUROJI_MCP_TOKEN` だけで、
+Work Item を読み、作成・更新・コメントし、Document を Markdown で読み書きする用途向けです。必要な環境変数は `MUKUROJI_MCP_URL` と `MUKUROJI_MCP_TOKEN` だけで、
 `MUKUROJI_MCP_READ_ONLY=true` にすると書き込みのツールを外します。
 `MUKUROJI_MCP_TEAM_ID` などの tasks profile 用の値は読みません。既定の profile は `tasks` で、上の表のツールと設定は変わりません。
 Software factory が無効な環境でも使えます（Agent Run の API を呼びません）。
@@ -111,13 +111,17 @@ Software factory が無効な環境でも使えます（Agent Run の API を呼
 | `save_relation` | 同じ Team の 2 つの Work Item を link する。`type` は 1 つ目から見た向き（`parent` は相手が親になる、`blockedBy` は相手に止められる）。`remove: true` で解除。親は 1 つだけで、親の Work Item Type が子の Type を許さない link と循環する link は競合で失敗する |
 | `create_subtasks` | 親の下に、親と同じ Project で最大 20 件の子を作る（担当者の既定は `me`）。1 件ずつ作って親に付け、途中で失敗したら同じ引数と `idempotencyKey` で再試行すると、済んだ子を作り直さずに残りを作る。親の Type が許さない Type の子は作られた後で link に失敗し、エラーがその子の ID を示すので、`save_issue` で Type を変えてから同じ引数で再試行する。同じ `idempotencyKey` で親か子の一覧を変えると、子を作る前に再試行不可の `idempotency_conflict` で止まる（一覧を変えるなら新しい key を使う）。途中で親の Project が変わると、作り済みの子の再生が `idempotency_conflict` になるので、親を元の Project に戻して同じ引数で再試行するか、`list_relations` で子を確かめてから新しい `idempotencyKey` で残りを作る |
 
+| `list_documents` | 閲覧できる Workspace の Document（フォルダー・ページ・テンプレート・ホワイトボード）を `projectId`・`parentId`（フォルダー）で絞ってページ取得。`issueId`（key か ID と `teamId`）を渡すと、その Work Item に link された Document を `{ id, title }` で返す |
+| `get_document` | ページ・テンプレートの本文を Markdown で、title と `revision` 付きで読む。フォルダーとホワイトボードは本文がない |
+| `save_document` | `id` なしで Markdown からページを作る（`title` と `content` が必須）。`projectId`・`parentId`・`issueId` で置き場所と link する Work Item を選ぶ。`id` ありで title の変更か本文の全置き換えをする。更新には `get_document` か `list_documents` の `expectedRevision` が要る。見出し・fenced code・Mermaid・task list・表は block になり、それ以外は書いたままの Markdown として残る。本文を置き換えると block に付いたコメントは位置を失い、block が持つ link は消える |
 書き込みのツールは、毎回新しい UUID の `idempotencyKey` を要求します。応答が不確かなときは、同じ引数と key で再試行します。
 更新が revision の競合で失敗したら、`get_issue` で読み直してから改めて判断します。権限の判定は Web と同じで、
 token の持ち主が編集できない Work Item は変えられません。
 同じ MCP クライアントに tasks profile と並べて登録する場合は、サーバー名を分けます（例: `mukuroji` と `mukuroji-tasks`）。
 
 作業の分解（`create_subtasks`）は、分け方を人が確認してから行う運用にします。WBS 番号は server が木から導くので、
-title に番号を書かせません。schedule の依存関係（Gantt の矢印）と Document の link はまだ MCP から作れないため、Web で設定します。
+title に番号を書かせません。schedule の依存関係（Gantt の矢印）はまだ MCP から作れないため、Web で設定します。Document は `save_document` の `issueId` で作るときに Work Item に link できます。既存の Document を後から link するのは Web で行います。
+Document の title と本文は Work Item の本文と同じくユーザーデータで、指示としては扱いません。権限は Web の Documents と同じで、token の持ち主が閲覧できない Document は一覧に出ず、`not_found` になります。
 
 ### 自分用token
 

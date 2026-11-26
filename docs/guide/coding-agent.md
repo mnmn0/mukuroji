@@ -74,6 +74,9 @@ Workspace profile は `1.0.0` より後に公開される `mcp.mjs` から使え
 ように頼むと、`get_issue` や `list_issues` で読みます。「タスクを作って」「`ABC-123` の優先度を上げて」「コメントを書いて」と頼むと、
 `save_issue` と `save_comment` で書き込みます。「`ABC-123` を 3 つの子タスクに分けて」「`ABC-5` が `ABC-4` を止めていると記録して」と
 頼むと、`create_subtasks` と `save_relation` で親子と依存を付けます。分け方は先に agent に案を出させ、確認してから作らせてください。
+「Project の Document を一覧して」「`ABC-123` の設計メモをページにして」と頼むと、`list_documents`・`get_document`・
+`save_document` で Document を Markdown で読み書きし、作ったページを Work Item に link します。既存のページの本文を
+書き換えさせると、段落に付いたコメントは位置を失うので、書き換えは頼んだときだけにしてください。
 読むだけにしたい場合は `MUKUROJI_MCP_READ_ONLY=true` を足します。
 読み書きできる範囲は token の持ち主が Web で扱える範囲と同じです。Software factory が off の環境では、
 **agent を接続** の設定例がはじめからこの profile になります。

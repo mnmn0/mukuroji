@@ -183,7 +183,8 @@ const contextSchema = z.object({
   brief: briefText.optional(),
   projectBriefs: z.record(identifier, briefText).refine((briefs) => Object.keys(briefs).length <= AGENT_SETTINGS_MAX_PROJECT_BRIEFS),
 })
-const linkedDocumentSchema: z.ZodType<AgentTaskDocument> = z.object({ id: identifier, title: z.string() })
+/** Linked Document entry of `GET work-items/{id}/documents`. */
+export const linkedDocumentSchema: z.ZodType<AgentTaskDocument> = z.object({ id: identifier, title: z.string() })
 const attachmentSchema: z.ZodType<AgentTaskAttachment> = z.object({
   id: identifier,
   name: z.string(),
@@ -200,7 +201,8 @@ const attachmentDownloadSchema: z.ZodType<AgentAttachmentDownload> = z.object({
   url: z.string().url(),
   expiresAt: z.string(),
 })
-const documentSchema: z.ZodType<AgentDocument> = z.object({
+/** Markdown Document content returned by the Public API Document reads and writes. */
+export const documentSchema: z.ZodType<AgentDocument> = z.object({
   schemaVersion: z.literal(1), id: identifier, kind: z.enum(['page', 'template']), title: z.string(),
   revision: z.number().int().positive(), updatedAt: z.iso.datetime(), format: z.literal('markdown'), content: z.string(),
 })

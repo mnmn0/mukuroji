@@ -1299,6 +1299,95 @@ test('creates an immutable version for every mutation and restores an old snapsh
   ])
 })
 
+test('replaces a page title and body in one revision and drops links owned by removed blocks', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const relation = (id: string, source: DocumentDetail['relations'][number]['source']) => ({
+    id,
+    source,
+    target: { kind: 'project' as const, projectId: 'project-1' },
+    createdByUserId: 'owner@example.com',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  })
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Plan',
+    blocks: [
+      { id: 'block-a', type: 'paragraph', text: 'kept link' },
+      { id: 'block-b', type: 'paragraph', text: 'old' },
+    ],
+    relations: [
+      relation('relation-root', { kind: 'document' }),
+      relation('relation-block', { kind: 'block', blockId: 'block-b' }),
+    ],
+  })
+  const folder = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'folder',
+    scope: { type: 'workspace' },
+    title: 'Folder',
+  })
+
+  const replaced = await client.replaceContent({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    expectedRevision: 1,
+    title: ' Plan v2 ',
+    blocks: [{ id: 'block-c', type: 'heading', level: 1, text: 'New' }],
+  })
+  const titleOnly = await client.replaceContent({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    expectedRevision: 2,
+    title: 'Plan v3',
+  })
+  const versions = await client.listVersions({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+  })
+
+  expect(replaced).toMatchObject({
+    revision: 2,
+    title: 'Plan v2',
+    blocks: [{ id: 'block-c', type: 'heading', level: 1, text: 'New' }],
+  })
+  expect(replaced.relations.map(({ id }) => id)).toEqual(['relation-root'])
+  expect(titleOnly).toMatchObject({ revision: 3, title: 'Plan v3', blocks: [{ id: 'block-c' }] })
+  expect(versions.versions.map(({ revision, reason }) => ({ revision, reason }))).toEqual([
+    { revision: 3, reason: 'edit' },
+    { revision: 2, reason: 'edit' },
+    { revision: 1, reason: 'create' },
+  ])
+  await expect(client.replaceContent({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    expectedRevision: 2,
+    title: 'Stale',
+  })).rejects.toMatchObject({ status: 409, code: 'DocumentRevisionConflict' })
+  await expect(client.replaceContent({
+    workspaceId: 'workspace-1',
+    documentId: folder.id,
+    access: ownerAccess,
+    expectedRevision: 1,
+    title: 'Folder body',
+  })).rejects.toMatchObject({ status: 400, code: 'UnsupportedDocumentContent' })
+  await expect(client.replaceContent({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: { memberKey: 'guest@example.com', workspaceRole: 'guest' },
+    expectedRevision: 3,
+    title: 'Guest edit',
+  })).rejects.toMatchObject({ status: expect.any(Number) })
+})
+
 test('stores operation deltas with retention and periodically compacts them into restorable snapshots', async () => {
   const memory = createMemoryDocumentClient()
   let currentTime =

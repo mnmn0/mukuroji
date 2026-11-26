@@ -50,7 +50,7 @@
 | [0022](0022-work-item-notification-due-index.md) | 期限通知の schedule を Work Items table の sparse な期限 index で読む | 提案 |
 | [0023](0023-member-direct-role-assignment.md) | メンバー個人への role 割り当てを、Workspace role の代わりに評価する | 提案 |
 | [0024](0024-project-raid-log-storage.md) | Project のリスク・課題・変更要求を Planning table の1登録1行で持つ | 提案 |
-| [0025](0025-public-work-item-documents-read-scope.md) | Work Item に link された Document を `work-items:read` で Work Item 経由だけ読ませる | 提案 |
+| [0025](0025-public-work-item-documents-read-scope.md) | Work Item に link された Document を `work-items:read` で Work Item 経由だけ読ませる | 一部を置き換え済み（0106） |
 | [0026](0026-work-item-child-restore-guard-row.md) | 子の復元を親ごとの guard row で数え、親の archive を固定数の項目で fence する | 提案 |
 | [0027](0027-time-entry-visibility-and-team-time-managers.md) | Project なしの工数を Team の工数管理者が扱い、集計は一般メンバーには本人分だけ返す | 提案 |
 | [0028](0028-project-permission-team-qualified-match.md) | Project 単位の権限確認を Team と Project の組で照合し、Team を決められない旧形式の権限は効かせない | 提案 |
@@ -121,3 +121,4 @@
 | [0098](0098-team-started-work-item-index-and-board-continuation.md) | Team の started な Work Item を sparse index で引き、Factory board の上限で止まった lane を続きから読む | 提案 |
 | [0100](0100-completion-gate-manager-override.md) | 完了 Gate の override は Work Item の manager だけが Web の更新で理由付きで行い、更新の監査と活動履歴に残す | 提案 |
 | [0102](0102-retire-mail-and-storage-connector-providers.md) | Gmail・Outlook・Google Drive・OneDrive・Dropbox を connector の選択肢から外す | 提案 |
+| [0106](0106-public-workspace-documents-markdown.md) | Workspace の Document を Public API と MCP で Markdown として一覧・作成・更新し、scope は既存の `work-items:read` / `work-items:write` を使う | 提案 |

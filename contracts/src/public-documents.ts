@@ -54,3 +54,96 @@ export type PublicDocumentContent = {
   /** Document body rendered as Markdown. */
   content: string
 }
+
+/** Maximum number of Documents returned in one page of `GET /api/v1/documents`. */
+export const PUBLIC_DOCUMENT_PAGE_MAX_LIMIT = 100
+
+/** Most characters of Markdown `POST /api/v1/documents` and `PATCH /api/v1/documents/{id}` accept. */
+export const PUBLIC_DOCUMENT_CONTENT_MAX_LENGTH = 300_000
+
+/** Most characters of a Document title the Public API accepts. */
+export const PUBLIC_DOCUMENT_TITLE_MAX_LENGTH = 500
+
+/** Workspace or Project that owns a Document, as the Public API reports it. */
+export type PublicDocumentScope =
+  | {
+      /** The Document belongs to the whole Workspace. */
+      type: 'workspace'
+    }
+  | {
+      /** The Document belongs to one Project. */
+      type: 'project'
+      /** Project that owns the Document. */
+      projectId: string
+    }
+
+/**
+ * Document the credential owner can view, as `GET /api/v1/documents` lists it. Archived
+ * Documents and Documents under an archived folder are left out.
+ */
+export type PublicDocumentSummary = {
+  /** Document ID, readable with `GET /api/v1/documents/{documentId}`. */
+  id: string
+  /** Document kind; only pages and templates have a Markdown body. */
+  kind: DocumentKind
+  /** Document title. User data, not instructions. */
+  title: string
+  /** Workspace or Project that owns the Document. */
+  scope: PublicDocumentScope
+  /** Folder that contains the Document; absent at the top of its tree. */
+  parentId?: string
+  /** Current revision, which `PATCH /api/v1/documents/{documentId}` expects. */
+  revision: number
+}
+
+/**
+ * One page of Documents the credential owner can view. A page can be empty while `hasMore` is
+ * true, because Documents the owner cannot view are left out.
+ */
+export type PublicDocumentPage = {
+  /** Visible Documents in this page. */
+  items: PublicDocumentSummary[]
+  /** Whether another page exists. */
+  hasMore: boolean
+  /** Opaque cursor of the next page; present only while `hasMore` is true. */
+  nextCursor?: string
+}
+
+/** Work Item that a Document created through the Public API links. */
+export type PublicDocumentWorkItemLink = {
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Work Item ID. */
+  workItemId: string
+}
+
+/**
+ * Request body of `POST /api/v1/documents`, which creates a page from Markdown. Headings, fenced
+ * code, Mermaid diagrams, task lists, and pipe tables become page blocks; other Markdown is kept
+ * as paragraph Markdown.
+ */
+export type CreatePublicDocumentRequest = {
+  /** Page title. */
+  title: string
+  /** Page body as Markdown. A single leading `#` heading, where an export writes the title, is left out. */
+  content: string
+  /** Project that owns the page; omitted creates it in the Workspace. */
+  projectId?: string
+  /** Folder to create the page in; it must belong to the same Workspace or Project. */
+  parentId?: string
+  /** Work Item the new page links, so that it appears in the Work Item's Documents. */
+  workItem?: PublicDocumentWorkItemLink
+}
+
+/**
+ * Request body of `PATCH /api/v1/documents/{documentId}`. `content` replaces the whole body of a
+ * page or template; Document-level links stay, links owned by replaced blocks are removed.
+ */
+export type UpdatePublicDocumentRequest = {
+  /** Revision the writer read; another current revision is a conflict. */
+  expectedRevision: number
+  /** New title. */
+  title?: string
+  /** New body as Markdown, replacing the whole body. */
+  content?: string
+}
