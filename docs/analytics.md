@@ -250,7 +250,7 @@ evidence、定期配信の hash に含まれます。
 分け、group は他の metric と同じく `asOf` 時点の Work Item の state で分けます。Evidence と table は Run ごとに 1 行で、
 値はその Run のトークン数または推定費用です。
 
-推定費用は閲覧者が manager である Team の Run だけを数え、それ以外の Run は件数を warning で返します（数えられる Run の
+推定費用は閲覧者が manager である Team（Team の全 active Project の manager）の Run だけを数え、それ以外の Run は件数を warning で返します（数えられる Run の
 ない group の値は `null`）。費用が届いていない Run は 0 として数え、usage の読み取りが上限で止まった Run は合計が
 下限であることを warning で返します。`agent-cost` を含む snapshot の permission scope hash には、Work Item の Team の
 うち閲覧者が manager である Team の ID を加え、一覧・export の再検証でも同じ規則で比べます。`agent-cost` のない query の

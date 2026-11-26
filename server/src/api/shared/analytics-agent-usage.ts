@@ -12,6 +12,7 @@ import { mapInOrderWithConcurrency } from './agent-run-access'
 import { readAgentRunUsage } from './agent-run-usage-access'
 import { workItemDependencies } from './app-dependencies'
 import { requireTeamPermission, type WorkspacePrincipal } from './project-access'
+import { managesEveryTeamProject } from './team-delegated-management'
 
 /** Largest page the finished-run index returns. */
 const AGENT_USAGE_INDEX_PAGE_SIZE = 100
@@ -184,16 +185,19 @@ export async function readAnalyticsAgentCostTeamIds(
 }
 
 /**
- * Checks whether the viewer manages a Team, the role that may see estimated Agent Run cost.
+ * Checks whether the viewer manages a Team, the role that may see estimated Agent Run cost. The
+ * metric adds up the cost of every Project of the Team, so a viewer who manages only some of its
+ * Projects does not count as a Team manager (ADR 0087).
  *
  * @param principal - Viewer.
  * @param teamId - Team ID.
- * @returns Whether the viewer has the Team manager permission.
+ * @returns Whether the viewer manages every Project of the Team.
  */
 async function managesTeam(principal: WorkspacePrincipal, teamId: string): Promise<boolean> {
   try {
-    await requireTeamPermission(principal, teamId, 'manager')
-    return true
+    const context = await requireTeamPermission(principal, teamId, 'manager')
+    // A system administrator's context lists no Project access because it covers every Project.
+    return principal.isSystemAdmin || managesEveryTeamProject(context)
   } catch (error) {
     if (error instanceof ProjectDataError && error.status === 403) return false
     throw error

@@ -24,7 +24,9 @@ Analytics は Work Item の canonical row と audit event を同じ認可境界�
   割り当てで usage 行を読む。1 query で 500 Run を超えるか、index を 100 page 読んでも終わらなければ、部分集計を返さず `413`
   （`AnalyticsAgentUsageLimitExceeded`）にする。usage のない Run は数えない。新しい保存 row・index・事前集計は作らない。
 - **費用の権限**：`agent-cost` を含む query では、Work Item の Team のうち閲覧者が manager である Team を読み、
-  その Team の Run だけを数える。それ以外の Run は件数を warning で知らせ、数えられる Run がない group の値は
+  その Team の Run だけを数える。費用は Team の全 Project の Run を足すので、manager は ADR 0087 と同じく Team の全
+  active Project の manager（Enterprise では Team または Workspace の `teams.manage`）とし、一部の Project だけの
+  manager は含めない。それ以外の Run は件数を warning で知らせ、数えられる Run がない group の値は
   `null` にする。Manager である Team の集合を snapshot の permission scope hash に加え、manager でなくなった人には
   その snapshot を一覧・export で見せない。`agent-cost` のない query の hash は変えない。
 - **使えないとき**：Software factory を deploy していない環境と定期配信の runner は usage を読まず、widget は

@@ -54,10 +54,15 @@ const usageWidgets: AnalyticsWidget[] = [
  *
  * @param role - Team role of the viewer.
  * @param archivedTeamIssueCount - Fake Work Items archived from the start; the first is `onboarding-friction`.
+ * @param projectOptions - Projects of the fake Team and the viewer's access to them.
  * @returns The stores.
  */
-async function configure(role: 'manager' | 'member', archivedTeamIssueCount = 0) {
-  configureFakeProjectClients(true, { teamIssueCount: 2, role, archivedTeamIssueCount })
+async function configure(
+  role: 'manager' | 'member',
+  archivedTeamIssueCount = 0,
+  projectOptions: Pick<NonNullable<Parameters<typeof configureFakeProjectClients>[1]>, 'teamProjects' | 'projectAccesses'> = {},
+) {
+  configureFakeProjectClients(true, { teamIssueCount: 2, role, archivedTeamIssueCount, ...projectOptions })
   const runs = new InMemoryAgentRunStore()
   const usage = new InMemoryAgentRunUsageStore()
   const repository = new InMemoryAnalyticsRepository()
@@ -152,6 +157,16 @@ test('leaves the estimated cost out for members who do not manage the Team', asy
   expect(snapshot.widgets[0]?.value).toBe(1_600)
   expect(snapshot.widgets[1]).toMatchObject({ value: null, sampleSize: 0 })
   expect(snapshot.widgets[1]?.warnings).toContain('2 Agent Run(s) of Teams you do not manage were left out of the estimated cost.')
+})
+
+test('leaves the estimated cost out for managers of only some Projects of the Team', async () => {
+  await configure('manager', 0, {
+    teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }, { id: 'beta', name: 'Beta', tone: 'green' }],
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'manager' }, { teamId: 'core-team', projectId: 'beta', role: 'member' }],
+  })
+  const snapshot = await readSnapshot(createQuery(usageWidgets))
+  expect(snapshot.widgets[0]?.value).toBe(1_600)
+  expect(snapshot.widgets[1]).toMatchObject({ value: null, sampleSize: 0 })
 })
 
 test('hides a cost snapshot once its creator no longer manages the Team', async () => {

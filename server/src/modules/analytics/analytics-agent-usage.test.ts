@@ -208,6 +208,19 @@ describe('Agent usage metrics', () => {
     expect(snapshot.widgets[0]?.warnings).toEqual(['1 Agent Run(s) reported no estimated cost and counted as zero.'])
   })
 
+  test('keeps the evidence of runs of one Work Item that finished at the same instant', () => {
+    const finishedAt = '2026-01-02T10:00:00.000Z'
+    const snapshot = createAnalyticsSnapshot({
+      workItems: [coreItem],
+      events: [],
+      authorizedProjectIds,
+      agentUsage: { runs: new Map([['core\0item-1', [createRun('run-a', finishedAt, 10), createRun('run-b', finishedAt, 20)]]]) },
+      query: createQuery([{ id: 'rows', title: 'Runs', type: 'table', metric: 'agent-tokens' }]),
+    })
+    expect(snapshot.widgets[0]?.rows.map((row) => row.values.value).sort()).toEqual([10, 20])
+    expect(snapshot.evidenceCount).toBe(2)
+  })
+
   test('leaves out runs of Work Items the filter excludes', () => {
     const snapshot = createAnalyticsSnapshot({
       workItems,

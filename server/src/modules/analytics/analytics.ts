@@ -3035,9 +3035,11 @@ function calculateAgentUsageMetric(
     // Cost the viewer may not see at all is unknown, not zero.
     value: counted.length === 0 && hidden > 0 ? null : roundMetric(values.reduce((sum, value) => sum + value, 0)),
     sampleSize: counted.length,
-    evidence: counted.map(({ fact, run }, index) =>
-      createFactEvidence(fact, metric, run.finishedAt, values[index])
-    ),
+    evidence: counted.map(({ fact, run }, index) => {
+      const item = createFactEvidence(fact, metric, run.finishedAt, values[index])
+      // Runs of one Work Item can finish at the same instant, so the run tells their evidence apart.
+      return { ...item, id: hashCanonical({ metric, teamId: fact.state.teamId, workItemId: fact.state.id, runId: run.runId }) }
+    }),
     warnings: [
       ...(samples.length === 0 ? ['No Agent Runs with usage finished in this period.'] : []),
       ...(hidden === 0
