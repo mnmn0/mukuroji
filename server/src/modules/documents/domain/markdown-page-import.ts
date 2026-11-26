@@ -317,9 +317,7 @@ function scanBlocks(
     // An indented fence belongs to the list or quote around it, in the paragraph Markdown.
     if (paragraphFence !== undefined) {
       paragraph.push(line)
-      const unquoted = line.replace(/^(?:[ \t]*>[ \t]?)*/u, '')
-      const indent = /^ */u.exec(unquoted)?.[0].length ?? 0
-      if (indent <= paragraphFenceIndent && closesFence(unquoted.slice(indent), paragraphFence)) paragraphFence = undefined
+      if (closesNestedFence(line, paragraphFence, paragraphFenceIndent)) paragraphFence = undefined
       index += 1
       continue
     }
@@ -498,6 +496,21 @@ function readNestedFenceCloseIndent(line: string): number {
 }
 
 /**
+ * Tells whether a line closes a fence that may sit in a list or quote, counting indentation after
+ * quote markers.
+ *
+ * @param line - Source line.
+ * @param marker - Opening fence marker.
+ * @param maxIndent - Most leading spaces the closing line may have.
+ * @returns Whether the line closes the fence.
+ */
+function closesNestedFence(line: string, marker: string, maxIndent: number): boolean {
+  const unquoted = line.replace(/^(?:[ \t]*>[ \t]?)*/u, '')
+  const indent = /^ */u.exec(unquoted)?.[0].length ?? 0
+  return indent <= maxIndent && closesFence(unquoted.slice(indent), marker)
+}
+
+/**
  * Tells whether a line closes a fenced code block.
  *
  * @param line - Line to check.
@@ -545,16 +558,17 @@ function splitLongParagraph(text: string): string[] {
 function linesOutsideFences(text: string): string[] {
   const lines: string[] = []
   let fence: string | undefined
+  let fenceIndent = 0
   let comment = false
   for (const line of text.split('\n')) {
-    const content = fenceContent(line)
     if (!comment && fence !== undefined) {
-      if (closesFence(content, fence)) fence = undefined
+      if (closesNestedFence(line, fence, fenceIndent)) fence = undefined
       continue
     }
-    const open = comment ? undefined : readFenceOpening(content)
+    const open = comment ? undefined : readFenceOpening(fenceContent(line))
     if (open !== undefined) {
       fence = open
+      fenceIndent = readNestedFenceCloseIndent(line)
       continue
     }
     const visible = removeHtmlComments(line, comment)
@@ -622,21 +636,25 @@ function splitAtBlankLinesOutsideFences(text: string): string[] {
   const sections: string[] = []
   let lines: string[] = []
   let fence: string | undefined
+  let fenceIndent = 0
   let comment = false
   for (const line of text.split('\n')) {
-    const content = fenceContent(line)
     if (comment) {
       comment = opensHtmlComment(line, true)
     } else if (fence !== undefined) {
-      if (closesFence(content, fence)) fence = undefined
+      if (closesNestedFence(line, fence, fenceIndent)) fence = undefined
     } else if (line.trim() === '') {
       if (lines.length > 0) sections.push(lines.join('\n'))
       lines = []
       continue
     } else {
-      const open = readFenceOpening(content)
-      if (open !== undefined) fence = open
-      else comment = opensHtmlComment(line, false)
+      const open = readFenceOpening(fenceContent(line))
+      if (open !== undefined) {
+        fence = open
+        fenceIndent = readNestedFenceCloseIndent(line)
+      } else {
+        comment = opensHtmlComment(line, false)
+      }
     }
     lines.push(line)
   }

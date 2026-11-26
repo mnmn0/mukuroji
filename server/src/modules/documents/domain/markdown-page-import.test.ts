@@ -277,6 +277,11 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(indented.some((block) => block.type === 'heading')).toBe(false)
   })
 
+  test('finds a definition after a fence closed at a wide list marker indentation', () => {
+    const source = 'See [docs][ref].\n\n## Details\n\n100. ```text\n     code\n     ```\n\n[ref]: https://example.com'
+    expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])
