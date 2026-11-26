@@ -12,6 +12,7 @@ import {
   type ConnectorOutboundMutation,
   type ConnectorPage,
   type ConnectorProviderId,
+  type ConnectorPullRequestReference,
   type ExternalResourceType,
 } from './connectors'
 
@@ -644,6 +645,27 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
     }
     this.requireResourceCapability(mutation.resourceType)
     return this.resourceProtocol.create(this.createProviderRequester(credential), mutation)
+  }
+
+  /**
+   * Reads a pull request through the built-in resource protocol (ADR 0103).
+   *
+   * @param credential - Installation credential.
+   * @param reference - Repository and pull request number.
+   * @returns The pull request state, checks, and reviews.
+   * @throws ConnectorRuntimeError ConnectorCapabilityUnsupported when the protocol reads no pull requests.
+   */
+  async readPullRequest(
+    credential: ConnectorCredential,
+    reference: ConnectorPullRequestReference,
+  ) {
+    if (!this.resourceProtocol?.readPullRequest) {
+      throw new ConnectorRuntimeError(
+        'ConnectorCapabilityUnsupported',
+        'Connector cannot read pull requests.',
+      )
+    }
+    return this.resourceProtocol.readPullRequest(this.createProviderRequester(credential), reference)
   }
 
   /**

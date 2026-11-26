@@ -3,6 +3,7 @@ export * from './analytics'
 /** Re-exports AI assistance contracts for server and Web consumers. */
 export * from './ai-assistance'
 export * from './agent-runs'
+export * from './agent-run-artifact-statuses'
 export * from './api-runtime-configuration'
 export * from './audit'
 export * from './automation'

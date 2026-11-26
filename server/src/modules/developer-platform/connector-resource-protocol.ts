@@ -1,5 +1,7 @@
+import type { AgentRunPullRequestStatus } from '@mukuroji/contracts'
 import type {
   ConnectorCreateMutation,
+  ConnectorPullRequestReference,
   ConnectorExternalRecord,
   ConnectorOutboundMutation,
   ConnectorPage,
@@ -67,4 +69,12 @@ export interface ConnectorResourceProtocol {
     request: ConnectorProviderRequester,
     mutation: ConnectorCreateMutation,
   ): Promise<ConnectorExternalRecord>
+  /**
+   * Reads a pull request's state, checks, and reviews (ADR 0103); a protocol without pull
+   * requests leaves it out.
+   */
+  readPullRequest?(
+    request: ConnectorProviderRequester,
+    reference: ConnectorPullRequestReference,
+  ): Promise<AgentRunPullRequestStatus>
 }

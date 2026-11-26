@@ -200,6 +200,9 @@ Run は Work Item の archive / delete に従う。Work Item を削除または 
   時刻以下であることも条件にし、report より新しい heartbeat の lease を巻き戻さない。comment 本文は Run に記録した agent 名の
   label（`[agentName]`）と `message` で server が組み立て、構造化 field は本文へ埋め込まず row に
   保存する。Web は comment の横に検証結果と成果物を chip として表示する（Slice 2 の Web 変更）。
+- 成果物のうち GitHub の pull request は、Workspace の connector で実在と状態（open / closed / merged、draft、
+  check、review）を照会し、Work Item の partition に保存する（ADR 0103）。Team の Agent settings の
+  `artifactRepositories` で照会する repository を絞れる。照会できないものは理由付きで未確認として表示する。
 - 同じ transaction で Run row の `reportCount` を読み取り時の値で条件付き更新し（report の
   `sequence` になる）、lease を延長し、最新 report の kind と時刻（`lastReportKind`、
   `lastReportAt`）を Run row に残す。後者は Factory board 用で、Public API の Run には返さない。

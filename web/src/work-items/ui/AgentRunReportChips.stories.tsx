@@ -46,6 +46,45 @@ export const Handoff: Story = {
   },
 }
 
+/** A reported pull request checked against GitHub: open, with passing checks and an approval. */
+export const VerifiedPullRequest: Story = {
+  args: {
+    artifactStatuses: new Map([[
+      'https://github.com/example/repo/pull/12',
+      {
+        url: 'https://github.com/example/repo/pull/12', provider: 'github', repository: 'example/repo', number: 12,
+        verification: 'verified', checkedAt: '2026-11-26T00:00:00.000Z',
+        pullRequest: { state: 'open', draft: false, headSha: 'a'.repeat(40), checks: 'success', review: 'approved' },
+      },
+    ]]),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText(labels.artifactStatus.states.open)).toBeVisible()
+    await expect(canvas.getByText(labels.artifactStatus.checks.success)).toBeVisible()
+    await expect(canvas.getByText(labels.artifactStatus.reviews.approved)).toBeVisible()
+  },
+}
+
+/** A reported pull request that the Workspace could not check is marked as not checked. */
+export const UnverifiedPullRequest: Story = {
+  args: {
+    artifactStatuses: new Map([[
+      'https://github.com/example/repo/pull/12',
+      {
+        url: 'https://github.com/example/repo/pull/12', provider: 'github', repository: 'example/repo', number: 12,
+        verification: 'unverified', unverifiedReason: 'not-accessible', checkedAt: '2026-11-26T00:00:00.000Z',
+      },
+    ]]),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText(labels.artifactStatus.unverified)).toBeVisible()
+    await expect(canvas.getByTestId('agent-run-artifact-unverified'))
+      .toHaveAttribute('title', labels.artifactStatus.unverifiedReasons['not-accessible'])
+  },
+}
+
 /** Japanese text. */
 export const Japanese: Story = {
   args: {

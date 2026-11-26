@@ -513,6 +513,11 @@ export type AgentSettings = {
    * `not_ready`; active runs keep going until they finish or are released.
    */
   acceptNewRuns: boolean
+  /**
+   * Repositories whose reported pull requests Mukuroji verifies through a connector, as lowercase
+   * `owner/repo` paths. Empty means any repository the Workspace connector can read.
+   */
+  artifactRepositories: string[]
   /** Whether another instance of the same assignee may take over a stalled run. */
   allowTakeoverAfterLeaseExpiry: boolean
   /**
@@ -657,6 +662,8 @@ export type UpdateAgentSettingsRequest = {
   notifyAssigneeOfRunEvents?: boolean
   /** Whether agents may start, resume, or take over runs; omitted means true. */
   acceptNewRuns?: boolean
+  /** Repositories whose pull requests are verified; omitted means none listed, so any readable repository. */
+  artifactRepositories?: string[]
 }
 
 /** Newest Agent Runs of one Work Item for the Web application. */

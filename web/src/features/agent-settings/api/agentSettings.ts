@@ -76,6 +76,7 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     acceptanceCriteriaFieldId,
     acceptNewRuns,
     allowTakeoverAfterLeaseExpiry,
+    artifactRepositories,
     brief,
     fileFailedRunsToTriage,
     fileStalledRunsToTriage,
@@ -108,6 +109,8 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     (notifyAssigneeOfRunEvents !== undefined && typeof notifyAssigneeOfRunEvents !== 'boolean') ||
     // Servers older than the switch omit it and always accept new runs.
     (acceptNewRuns !== undefined && typeof acceptNewRuns !== 'boolean') ||
+    // Servers older than pull request verification omit the list, which then reads as any repository.
+    (artifactRepositories !== undefined && (!Array.isArray(artifactRepositories) || !artifactRepositories.every(isNonEmptyString))) ||
     (acceptanceCriteriaFieldId !== undefined && !isNonEmptyString(acceptanceCriteriaFieldId)) ||
     (brief !== undefined && typeof brief !== 'string') ||
     !projectBriefs ||
@@ -124,6 +127,7 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     revision,
     leaseMinutes,
     acceptNewRuns: acceptNewRuns !== false,
+    artifactRepositories: Array.isArray(artifactRepositories) ? artifactRepositories.filter(isNonEmptyString) : [],
     allowTakeoverAfterLeaseExpiry,
     readyStatusIds: [...readyStatusIds],
     resumableStatusIds: Array.isArray(resumableStatusIds) ? resumableStatusIds.filter(isNonEmptyString) : [],
