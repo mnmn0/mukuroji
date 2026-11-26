@@ -7,6 +7,7 @@ type Translate = (key: MessageKey) => string
  * Message keys of the resource part of an event type, keyed by everything before the last `.`.
  */
 const resourceLabelKeys: Readonly<Record<string, MessageKey>> = {
+  'agent-defaults': 'auditLog.resource.agent-defaults',
   'agent-run': 'auditLog.resource.agent-run',
   'agent-settings': 'auditLog.resource.agent-settings',
   'ai-assistance.policy': 'auditLog.resource.ai-assistance.policy',

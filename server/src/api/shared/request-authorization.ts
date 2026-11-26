@@ -314,6 +314,8 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/workspace/work-calendar/*',
     permission: 'workspace.manage',
   },
+  // Workspace agent defaults are Workspace administration.
+  { method: '*', pathPattern: '/api/workspace/agent-defaults', permission: 'workspace.manage' },
   { method: 'GET', pathPattern: '/api/workspace/*', permission: 'members.read' },
   { method: '*', pathPattern: '/api/workspace/*', permission: 'members.manage' },
   // Closing or reopening a month for every Team is Workspace administration (ADR 0076).

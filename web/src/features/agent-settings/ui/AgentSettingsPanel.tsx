@@ -456,6 +456,14 @@ export function AgentSettingsPanel({
               value={draft.brief}
               onChange={(brief) => onDraftChange({ ...draft, brief })}
             />
+            {settings.workspaceBrief && draft.brief.trim() === '' ? (
+              <div className="grid gap-1" data-testid="agent-settings-workspace-brief">
+                <p className="text-xs font-semibold text-[var(--workbench-muted)]">{t('agentSettings.briefs.inherited')}</p>
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded border border-[var(--workbench-border)] px-3 py-2 font-mono text-xs text-[var(--workbench-muted)]">
+                  {settings.workspaceBrief}
+                </pre>
+              </div>
+            ) : null}
             {projectBriefTargets.length === 0 ? (
               <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('agentSettings.briefs.noProjects')}</p>
             ) : projectBriefTargets.map((target, index) => {
