@@ -351,6 +351,11 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(result).not.toHaveProperty('leadingTitle')
   })
 
+  test('keeps a body whole when a reference label spans lines', () => {
+    const source = 'See [docs][multi line].\n\n## Details\n\n[multi\nline]: https://example.com'
+    expect(convert(source).blocks).toEqual([{ id: expect.any(String), type: 'paragraph', text: source }])
+  })
+
   test('drops an unsafe code language and runs an unclosed fence to the end', () => {
     expect(convert('```bad lang!\nx').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x', language: 'bad' }])
     expect(convert('```{weird}\nx\n```').blocks).toEqual([{ id: expect.any(String), type: 'code', code: 'x' }])

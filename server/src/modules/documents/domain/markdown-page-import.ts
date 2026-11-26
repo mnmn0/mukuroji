@@ -165,7 +165,7 @@ export function convertMarkdownToPageBlocks(
   const keepsWhole = linesOutsideFences(bodyText).some((line) => {
     if (isBlockBoundary(line)) return false
     const content = stripContainerMarkers(line)
-    return REFERENCE_DEFINITION.test(content) || HTML_BLOCK_START.test(content)
+    return REFERENCE_DEFINITION.test(content) || REFERENCE_LABEL_START.test(content) || HTML_BLOCK_START.test(content)
   })
   /** Keeps the whole body in one paragraph, which shows it as the Markdown it is. */
   const whole = (): MarkdownPageImportResult => {
@@ -239,6 +239,12 @@ const HTML_RAW_BLOCK_START = /^ {0,3}<(pre|script|style|textarea)(?:[\s>]|$)/iu
  * more Markdown together.
  */
 const REFERENCE_DEFINITION = /^ {0,3}\[(?:[^\]\\]|\\.)+\]:/u
+
+/**
+ * A line that opens a bracketed label without closing it, which may start a reference definition
+ * whose label goes on to the next line. A false match only keeps more Markdown together.
+ */
+const REFERENCE_LABEL_START = /^ {0,3}\[(?:[^\]\\]|\\.)*$/u
 
 /**
  * Start of a raw HTML block, such as `<pre>`, `<div>`, `</p>`, `<?php`, or `<![CDATA[`. Its lines
