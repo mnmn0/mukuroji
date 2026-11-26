@@ -36,6 +36,11 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   許さない Type なら `save_issue` で Type を変え、同じ引数と `idempotencyKey` で再試行すると link まで済みます（#360）。
 - MCP: `create_subtasks` の再試行で、途中で親の Project が変わって作り済みの子の再生が食い違ったときは、再試行不可の
   `idempotency_conflict` で、親を元の Project に戻すか `list_relations` で子を確かめる手順を示します（#360）。
+- server API: `POST /api/v1/work-items/{workItemId}/subtask-batches`（scope `work-items:write`、`Idempotency-Key` 必須）を
+  追加しました。親と作る予定の子の一覧に key を結び付けるだけの API で、同じ key で一覧が違うと `409 idempotency_conflict` です。
+  MCP の `create_subtasks` は子を作る前にこれを呼ぶので、同じ `idempotencyKey` で一覧を変えた呼び出しは子を足さずに失敗します（#360）。
+- server API: relation の作成・削除は、認可に使った呼び出し元の Workspace member 行（version・status）と同じ transaction で
+  確かめるので、認可の後に権限が外れた場合は書き込みません（#360）。
 - server API: relation の作成・削除は `Idempotency-Key` の receipt を relation と同じ transaction に残すので、
   応答が失われた後に同じ key で再試行すると結果を replay します（#360）。
 - server API: `GET /api/v1/work-items/{workItemId}/completion-gate?teamId=` を追加しました。Team の完了 Gate の

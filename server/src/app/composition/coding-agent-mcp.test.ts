@@ -560,6 +560,9 @@ function startFakeWorkspaceApi() {
       if (request.method === 'POST' && url.pathname === '/api/v1/work-items/task/relations' && teamId === 'team') {
         return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', relation: { type: 'blockedBy', targetWorkItemId: 'other-task' } }, { status: 201 })
       }
+      if (request.method === 'POST' && url.pathname === '/api/v1/work-items/task/subtask-batches' && teamId === 'team') {
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', subtaskCount: 1 }, { status: 201 })
+      }
       if (request.method === 'POST' && url.pathname === '/api/v1/work-items/task/comments' && teamId === 'team') {
         return Response.json({ id: 'new-comment', actorUserId: 'owner', body: 'Linked to PR', createdAt: issue.createdAt }, { status: 201 })
       }
@@ -731,6 +734,9 @@ test('the workspace profile breaks a Work Item down into subtasks and links Work
     expect(tooMany.isError).toBe(true)
 
     expect(fake.writes).toEqual([
+      { method: 'POST', path: '/api/v1/work-items/task/subtask-batches?teamId=team', key: `${keys[0]}.batch`, body: {
+        subtasks: [{ title: 'Track imports', assigneeUserId: 'owner', priority: 'medium' }],
+      } },
       { method: 'POST', path: '/api/v1/work-items', key: `${keys[0]}.subtask.0`, body: {
         teamId: 'team', title: 'Track imports', assigneeUserId: 'owner', priority: 'medium',
       } },

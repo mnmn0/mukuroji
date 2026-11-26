@@ -17,7 +17,11 @@ import {
   type PublicWorkItemEffort,
   type PublicWorkItemKey,
   type PublicWorkItemHierarchy,
+  type CreatePublicSubtaskBatchRequest,
   type CreatePublicWorkItemRelationRequest,
+  PUBLIC_SUBTASK_BATCH_LIMIT,
+  type PublicSubtaskBatch,
+  type PublicSubtaskBatchEntry,
   isPublicWorkItemRelationType,
   type PublicWorkItemRelationList,
   type PublicWorkItemRelationMutation,
@@ -1641,6 +1645,22 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     }), {
       authorizeReplay: () => relations.authorizeRelationChange(credential, teamId, workItemId, body.targetWorkItemId),
     })
+  })
+
+  router.post('/v1/work-items/:workItemId/subtask-batches', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const relations = requireRelationService(dependencies)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const body = readCreatePublicSubtaskBatchRequest(await readJson(c))
+    // Only the fingerprint of the list is kept with the key, so a later call with the same key and
+    // another list is refused here, before the client creates any subtask.
+    const authorize = () => relations.authorizeRelationChange(credential, teamId, workItemId, workItemId)
+    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, ...body }, async () => {
+      await authorize()
+      const batch: PublicSubtaskBatch = { schemaVersion: 1, teamId, workItemId, subtaskCount: body.subtasks.length }
+      return { status: 201, body: batch }
+    }, { authorizeReplay: authorize })
   })
 
   router.delete('/v1/work-items/:workItemId/relations/:targetWorkItemId/:relationType', async (c) => {
@@ -5866,6 +5886,39 @@ function readCreatePublicWorkItemRelationRequest(value: unknown): CreatePublicWo
   return {
     type: readPublicWorkItemRelationType(body.type),
     targetWorkItemId: readIdentifier(body.targetWorkItemId, 'targetWorkItemId'),
+  }
+}
+
+/** Fields of one subtask in a batch body. */
+const SUBTASK_BATCH_ENTRY_FIELDS = ['title', 'description', 'assigneeUserId', 'priority', 'workItemTypeId', 'dueDate'] as const
+
+/** Longest text a subtask batch entry may carry in one field. */
+const SUBTASK_BATCH_TEXT_MAX_LENGTH = 65_536
+
+/**
+ * Reads the body of `POST /api/v1/work-items/{workItemId}/subtask-batches`.
+ *
+ * @param value - Parsed JSON body.
+ * @returns The subtasks in order.
+ * @throws PublicApiServiceError 400 when the list is empty, too long, or has an invalid entry.
+ */
+function readCreatePublicSubtaskBatchRequest(value: unknown): CreatePublicSubtaskBatchRequest {
+  const body = requireRecord(value, 'Subtask batch body is required.')
+  assertAllowedFields(body, ['subtasks'], 'Subtask batch body')
+  if (!Array.isArray(body.subtasks) || body.subtasks.length === 0 || body.subtasks.length > PUBLIC_SUBTASK_BATCH_LIMIT) {
+    throw new PublicApiServiceError(400, 'validation_failed', `subtasks must list 1 to ${PUBLIC_SUBTASK_BATCH_LIMIT} entries.`)
+  }
+  return {
+    subtasks: body.subtasks.map((entry: unknown, index): PublicSubtaskBatchEntry => {
+      const label = `subtasks[${index}]`
+      const record = requireRecord(entry, `${label} must be an object.`)
+      assertAllowedFields(record, SUBTASK_BATCH_ENTRY_FIELDS, label)
+      const optional = Object.fromEntries(SUBTASK_BATCH_ENTRY_FIELDS
+        .filter((field) => field !== 'title')
+        .map((field) => [field, readOptionalString(record[field], `${label}.${field}`, SUBTASK_BATCH_TEXT_MAX_LENGTH)])
+        .filter(([, text]) => text !== undefined))
+      return { title: readRequiredString(record.title, `${label}.title`), ...optional }
+    }),
   }
 }
 

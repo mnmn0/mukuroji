@@ -851,6 +851,48 @@ describe('public API router', () => {
     ])
   })
 
+  test('binds a subtask batch key to the parent and the whole list, and refuses another list with the same key', async () => {
+    const calls: string[] = []
+    const { platform, router } = createTestRouter({
+      workItemRelations: {
+        async listRelations() { throw new Error('not used') },
+        async authorizeRelationChange(_credential, teamId, workItemId, targetWorkItemId) {
+          calls.push(`authorize ${teamId}/${workItemId}->${targetWorkItemId}`)
+        },
+        async createRelation() { throw new Error('not used') },
+        async deleteRelation() { throw new Error('not used') },
+      },
+    })
+    const writer = await createApiKey(platform, ['work-items:write'])
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const reserve = (key: string, body: unknown, secret = writer.secret) => router.request('http://localhost/v1/work-items/task-1/subtask-batches?teamId=team-1', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
+      body: JSON.stringify(body),
+    })
+    const list = { subtasks: [{ title: 'Design', assigneeUserId: 'owner', priority: 'medium' }] }
+
+    const reserved = await reserve('batch-key', list)
+    const replayed = await reserve('batch-key', list)
+    const changed = await reserve('batch-key', { subtasks: [...list.subtasks, { title: 'Build' }] })
+    const empty = await reserve('empty-key', { subtasks: [] })
+    const tooMany = await reserve('many-key', { subtasks: Array.from({ length: 21 }, (_, index) => ({ title: `Task ${index}` })) })
+    const unknownField = await reserve('field-key', { subtasks: [{ title: 'Design', parentId: 'task-9' }] })
+    const untitled = await reserve('title-key', { subtasks: [{ description: 'No title' }] })
+    const denied = await reserve('reader-key', list, reader.secret)
+
+    expect(reserved.status).toBe(201)
+    expect(await reserved.json()).toEqual({ schemaVersion: 1, teamId: 'team-1', workItemId: 'task-1', subtaskCount: 1 })
+    expect(replayed.status).toBe(201)
+    expect(replayed.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(changed.status).toBe(409)
+    expect(await changed.json()).toMatchObject({ code: 'idempotency_conflict', retryable: false })
+    expect([empty.status, tooMany.status, unknownField.status, untitled.status]).toEqual([400, 400, 400, 400])
+    expect(denied.status).toBe(403)
+    // The first request and the replay both check that the caller may still link children to the parent.
+    expect(calls).toEqual(['authorize team-1/task-1->task-1', 'authorize team-1/task-1->task-1'])
+  })
+
   test('lists Documents linked to a Work Item with the read scope and signs the continuation', async () => {
     const calls: { continuation: string | undefined; limit: number }[] = []
     const { platform, router } = createTestRouter({

@@ -25,6 +25,7 @@ import {
   createWorkItemConfigurationGuardConditionChecks,
 } from '../../modules/work-items/work-item-configuration'
 import { workItemDependencies } from './app-dependencies'
+import { createPlanningCallerAuthorizationConditionChecks } from './planning-access'
 import { resolveDeveloperCredentialPrincipal } from './developer-platform-access'
 import {
   canAccessAssignedProject,
@@ -109,28 +110,35 @@ function toRelationMutation(
 }
 
 /**
- * Creates the builder of the idempotency receipt committed with a relation mutation, so a retry
- * after a lost response replays it instead of failing as a duplicate or a missing relation.
+ * Creates the builder of the writes committed with a relation mutation: checks that bind the commit
+ * to the caller's authorization, and the idempotency receipt, so a retry after a lost response
+ * replays it instead of failing as a duplicate or a missing relation.
  *
- * @param workspaceId - Workspace that scopes the request.
+ * @param principal - Caller whose permissions authorized the mutation.
  * @param teamId - Team that owns both Work Items.
  * @param workItemId - Work Item named in the path.
  * @param status - Response status the receipt replays.
  * @param idempotency - Idempotency token of the request, if any.
- * @returns Builder of the receipt writes, or undefined when the request carries no token.
+ * @returns Builder of the caller checks and the receipt write.
  */
-function createRelationReceiptWrites(
-  workspaceId: string,
+export function createRelationCoWrites(
+  principal: WorkspacePrincipal,
   teamId: string,
   workItemId: string,
   status: 200 | 201,
   idempotency: IdempotencyMutationToken | undefined,
 ) {
-  const transaction = createWorkItemIdempotencyTransaction(workspaceId, idempotency)
-  if (!transaction) return undefined
+  const transaction = createWorkItemIdempotencyTransaction(principal.directoryId, idempotency)
+  // The write commits only while the caller's member row, and any enterprise role source, still match
+  // what authorized it, so a permission removed after the check cannot slip a relation through.
+  const callerChecks = createPlanningCallerAuthorizationConditionChecks(
+    principal,
+    [],
+    principal.principalKind !== 'service-account',
+  )
   return async (relation: WorkItemRelation, reciprocalRelation: WorkItemRelation) => {
-    const receipt = await transaction.prepare({ status, body: toRelationMutation(teamId, workItemId, relation, reciprocalRelation) })
-    return receipt ? [receipt.transactWriteItem] : []
+    const receipt = await transaction?.prepare({ status, body: toRelationMutation(teamId, workItemId, relation, reciprocalRelation) })
+    return [...callerChecks, ...(receipt ? [receipt.transactWriteItem] : [])]
   }
 }
 
@@ -373,7 +381,7 @@ export function createCanonicalPublicRelationService(): PublicWorkItemRelationSe
               targetWorkItemId: input.targetWorkItemId,
             }),
             actorMemberKey: principal.userKey,
-            createCoWrites: createRelationReceiptWrites(principal.directoryId, teamId, workItemId, 201, idempotency),
+            createCoWrites: createRelationCoWrites(principal, teamId, workItemId, 201, idempotency),
           },
         )
         return { endpoints, response }
@@ -413,7 +421,7 @@ export function createCanonicalPublicRelationService(): PublicWorkItemRelationSe
               endpoint.id,
               toNotificationEndpoint(teamId, endpoint),
             ])),
-            createCoWrites: createRelationReceiptWrites(principal.directoryId, teamId, workItemId, 200, idempotency),
+            createCoWrites: createRelationCoWrites(principal, teamId, workItemId, 200, idempotency),
           },
         )
         return { endpoints, response }

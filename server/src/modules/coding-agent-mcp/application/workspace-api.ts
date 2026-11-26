@@ -1,8 +1,10 @@
 import {
   parseWorkItemKey,
+  type CreatePublicSubtaskBatchRequest,
   type CreatePublicWorkItemRequest,
   type PublicCredentialOwner,
   type PublicProjectMemberList,
+  type PublicSubtaskBatch,
   type PublicTeamList,
   type PublicWorkItemHierarchy,
   type PublicWorkItemKeyLookup,
@@ -165,6 +167,21 @@ export interface WorkspaceApi {
     type: PublicWorkItemRelationType,
     key: string,
   ): Promise<PublicWorkItemRelationMutation>
+  /**
+   * Binds an idempotency key to a parent and the whole list of subtasks before any is created, so
+   * that the same key with another list is refused instead of adding the difference.
+   * @param teamId - Team of the parent.
+   * @param workItemId - Parent Work Item.
+   * @param input - The subtasks in order, as they will be created.
+   * @param key - Idempotency key of the batch.
+   * @returns The reserved batch.
+   */
+  reserveSubtaskBatch(
+    teamId: string,
+    workItemId: string,
+    input: CreatePublicSubtaskBatchRequest,
+    key: string,
+  ): Promise<PublicSubtaskBatch>
 }
 
 /** One Work Item `create_subtasks` creates under the parent. */
@@ -523,19 +540,35 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
       const parent = await resolveIssue(input.parentId, input.teamId)
       // Children join the parent's Project so that the people who see the parent also see them.
       const [{ memberId: owner }, parentIssue] = await Promise.all([api.me(), api.getIssue(parent.teamId, parent.workItemId)])
+      const entries = input.subtasks.map((subtask) => ({
+        title: subtask.title,
+        assigneeUserId: subtask.assigneeId === undefined || subtask.assigneeId === 'me' ? owner : subtask.assigneeId,
+        priority: subtask.priority ?? 'medium',
+        ...(subtask.description === undefined ? {} : { description: subtask.description }),
+        ...(subtask.typeId === undefined ? {} : { workItemTypeId: subtask.typeId }),
+        ...(subtask.dueDate === undefined ? {} : { dueDate: subtask.dueDate }),
+      }))
+      // The key is bound to the parent and the whole list first, so the same key with a changed list
+      // fails here before any subtask is created, while the same list resumes where it stopped.
+      try {
+        await api.reserveSubtaskBatch(parent.teamId, parent.workItemId, { subtasks: entries }, `${input.idempotencyKey}.batch`)
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'idempotency_conflict' && !error.retryable) {
+          throw new AgentTaskError(
+            'idempotency_conflict',
+            'This idempotencyKey was already used for create_subtasks with another parent or another list of subtasks. No subtask was created. Retry with the same arguments, or use a new idempotencyKey for a different list.',
+            false,
+          )
+        }
+        throw error
+      }
       const created: Array<{ id: string, title: string, key?: string }> = []
-      for (const [index, subtask] of input.subtasks.entries()) {
+      for (const [index, entry] of entries.entries()) {
         let childId: string | undefined
         try {
-          const assigneeUserId = subtask.assigneeId === undefined || subtask.assigneeId === 'me' ? owner : subtask.assigneeId
           const child = await api.createIssue({
             teamId: parent.teamId,
-            title: subtask.title,
-            assigneeUserId,
-            priority: subtask.priority ?? 'medium',
-            ...(subtask.description === undefined ? {} : { description: subtask.description }),
-            ...(subtask.typeId === undefined ? {} : { workItemTypeId: subtask.typeId }),
-            ...(subtask.dueDate === undefined ? {} : { dueDate: subtask.dueDate }),
+            ...entry,
             ...(parentIssue.assignedProjectId ? { assignedProjectId: parentIssue.assignedProjectId } : {}),
           }, `${input.idempotencyKey}.subtask.${index}`)
           childId = child.id

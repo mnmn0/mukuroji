@@ -1582,6 +1582,24 @@
         },
         "type": "object"
       },
+      "CreatePublicSubtaskBatchInput": {
+        "additionalProperties": false,
+        "description": "Subtasks the client will create under the Work Item, in order. Only the request's fingerprint is kept with the Idempotency-Key, so the same key with another list is refused with idempotency_conflict.",
+        "properties": {
+          "subtasks": {
+            "items": {
+              "$ref": "#/components/schemas/PublicSubtaskBatchEntry"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "subtasks"
+        ],
+        "type": "object"
+      },
       "CreatePublicWorkItemCommentRequest": {
         "additionalProperties": false,
         "properties": {
@@ -3217,6 +3235,67 @@
           "teamId",
           "projectId",
           "items"
+        ],
+        "type": "object"
+      },
+      "PublicSubtaskBatch": {
+        "description": "Reserved subtask batch. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "subtaskCount": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "workItemId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "teamId",
+          "workItemId",
+          "subtaskCount"
+        ],
+        "type": "object"
+      },
+      "PublicSubtaskBatchEntry": {
+        "additionalProperties": false,
+        "description": "One subtask as the client will send it to POST /api/v1/work-items.",
+        "properties": {
+          "assigneeUserId": {
+            "description": "Assignee of the new Work Item.",
+            "type": "string"
+          },
+          "description": {
+            "description": "Description of the new Work Item.",
+            "type": "string"
+          },
+          "dueDate": {
+            "description": "Due date of the new Work Item.",
+            "type": "string"
+          },
+          "priority": {
+            "description": "Priority of the new Work Item.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Title of the new Work Item.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "workItemTypeId": {
+            "description": "Work Item Type of the new Work Item.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
         ],
         "type": "object"
       },
@@ -14733,6 +14812,115 @@
           }
         ],
         "summary": "Remove a relation between two Work Items",
+        "tags": [
+          "Work Items"
+        ]
+      }
+    },
+    "/api/v1/work-items/{workItemId}/subtask-batches": {
+      "post": {
+        "operationId": "createPublicSubtaskBatch",
+        "parameters": [
+          {
+            "description": "Work Item ID です。",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Work Item を所有する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePublicSubtaskBatchInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicSubtaskBatch"
+                }
+              }
+            },
+            "description": "The batch was reserved, or replayed for the same key and list.",
+            "headers": {
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:write"
+            ]
+          }
+        ],
+        "summary": "Bind an idempotency key to a parent and a list of subtasks before creating them",
         "tags": [
           "Work Items"
         ]

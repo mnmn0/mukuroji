@@ -7,6 +7,7 @@ import {
   type PublicWorkItemRelationList,
   type PublicWorkItemRelationMutation,
   type PublicProjectMemberList,
+  type PublicSubtaskBatch,
   type PublicTeamList,
   type PublicWorkItemKeyLookup,
 } from '@mukuroji/contracts'
@@ -49,6 +50,9 @@ const relationListSchema: z.ZodType<PublicWorkItemRelationList> = z.object({
 })
 const relationMutationSchema: z.ZodType<PublicWorkItemRelationMutation> = z.object({
   schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, relation: relationSchema,
+})
+const subtaskBatchSchema: z.ZodType<PublicSubtaskBatch> = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, subtaskCount: z.number().int().min(1),
 })
 const hierarchySchema: z.ZodType<PublicWorkItemHierarchy> = z.object({
   schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier,
@@ -213,6 +217,12 @@ export function createWorkspaceApi(
         `work-items/${encodeURIComponent(id(workItemId, 'id'))}/relations/${encodeURIComponent(id(targetWorkItemId, 'relatedIssueId'))}/${type}`,
         relationMutationSchema, 'DELETE', undefined, key, { teamId: id(teamId, 'teamId') },
       ), teamId, workItemId)
+    },
+    /** Reserves a subtask batch with `POST subtask-batches`; see {@link WorkspaceApi.reserveSubtaskBatch}. */
+    async reserveSubtaskBatch(teamId, workItemId, input, key) {
+      return scopedRelations(await request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}/subtask-batches`, subtaskBatchSchema, 'POST', input, key, {
+        teamId: id(teamId, 'teamId'),
+      }), teamId, workItemId)
     },
     /** Adds a comment to a Work Item; see {@link WorkspaceApi.addComment}. */
     addComment(teamId, workItemId, body, key) {

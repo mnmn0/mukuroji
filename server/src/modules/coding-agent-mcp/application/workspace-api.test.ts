@@ -37,6 +37,7 @@ function apiWithFailingKeyRead() {
     relations: unexpected,
     createRelation: unexpected,
     deleteRelation: unexpected,
+    reserveSubtaskBatch: unexpected,
   }
   return { api, writes }
 }
@@ -49,6 +50,7 @@ function apiWithFailingKeyRead() {
 function apiForRelations() {
   const writes: string[] = []
   const created = new Map<string, AgentTask>()
+  const batches = new Map<string, string>()
   let failedOnce = false
   const { api: base } = apiWithFailingKeyRead()
   const api: WorkspaceApi = {
@@ -73,6 +75,16 @@ function apiForRelations() {
     deleteRelation: async (teamId, workItemId, targetWorkItemId, type, key) => {
       writes.push(`unlink:${key}:${workItemId}:${type}:${targetWorkItemId}`)
       return { schemaVersion: 1, teamId, workItemId, relation: { type, targetWorkItemId } }
+    },
+    reserveSubtaskBatch: async (teamId, workItemId, input, key) => {
+      // Like the Public API, the same key replays only the same parent and list.
+      const fingerprint = JSON.stringify({ workItemId, input })
+      if ((batches.get(key) ?? fingerprint) !== fingerprint) {
+        throw new AgentTaskError('idempotency_conflict', 'The key was used with another request.', false)
+      }
+      batches.set(key, fingerprint)
+      writes.push(`batch:${key}:${input.subtasks.map((subtask) => subtask.title).join(',')}`)
+      return { schemaVersion: 1, teamId, workItemId, subtaskCount: input.subtasks.length }
     },
     hierarchy: async (teamId, workItemId) => ({
       schemaVersion: 1, teamId, workItemId, parentWorkItemId: null, childWorkItemIds: ['child-1'], wbsNumber: '2',
@@ -102,15 +114,32 @@ test('create_subtasks puts each child under the parent in its Project and finish
     teamId: 'team', workItemId: 'parent', subtasks: [{ id: 'child-1', title: 'Design' }, { id: 'child-2', title: 'Build' }],
   })
   expect(writes).toEqual([
+    'batch:split-key.batch:Design,Build',
     'create:split-key.subtask.0:Design:web:owner',
     'link:split-key.subtask.0.parent:child-1:parent:parent',
     'create:split-key.subtask.1:Build:web:member-2',
+    'batch:split-key.batch:Design,Build',
     'create:split-key.subtask.0:Design:web:owner',
     'link:split-key.subtask.0.parent:child-1:parent:parent',
     'create:split-key.subtask.1:Build:web:member-2',
     'link:split-key.subtask.1.parent:child-2:parent:parent',
   ])
   await expect(issues.createSubtasks({ ...input, subtasks: [] })).rejects.toMatchObject({ code: 'invalid_request' })
+})
+
+test('create_subtasks refuses the same key with another list before creating any subtask', async () => {
+  const { api, writes } = apiForRelations()
+  const issues = createWorkspaceIssues(api)
+  await issues.createSubtasks({ parentId: 'ABC-1', subtasks: [{ title: 'Design' }], idempotencyKey: 'grow' })
+  writes.length = 0
+
+  await expect(issues.createSubtasks({ parentId: 'ABC-1', subtasks: [{ title: 'Design' }, { title: 'Build' }], idempotencyKey: 'grow' }))
+    .rejects.toMatchObject({
+      code: 'idempotency_conflict',
+      retryable: false,
+      message: expect.stringContaining('No subtask was created.'),
+    })
+  expect(writes).toEqual([])
 })
 
 test('create_subtasks names a created Work Item whose parent link failed and how to recover', async () => {

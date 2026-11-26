@@ -84,3 +84,45 @@ export type PublicWorkItemRelationMutation = {
   /** The relation created or removed, from the named Work Item's point of view. */
   relation: PublicWorkItemRelation
 }
+
+/** Most subtasks one `POST /api/v1/work-items/{workItemId}/subtask-batches` reserves. */
+export const PUBLIC_SUBTASK_BATCH_LIMIT = 20
+
+/** One subtask of a batch, as the client will send it to `POST /api/v1/work-items`. */
+export type PublicSubtaskBatchEntry = {
+  /** Title of the new Work Item. */
+  title: string
+  /** Description of the new Work Item. */
+  description?: string
+  /** Assignee of the new Work Item. */
+  assigneeUserId?: string
+  /** Priority of the new Work Item. */
+  priority?: string
+  /** Work Item Type of the new Work Item. */
+  workItemTypeId?: string
+  /** Due date of the new Work Item. */
+  dueDate?: string
+}
+
+/**
+ * Body of `POST /api/v1/work-items/{workItemId}/subtask-batches`.
+ *
+ * The server keeps only the request's fingerprint with its `Idempotency-Key`, so the same key with
+ * a different list is refused before any subtask is created.
+ */
+export type CreatePublicSubtaskBatchRequest = {
+  /** The subtasks the client will create under the Work Item, in order. */
+  subtasks: PublicSubtaskBatchEntry[]
+}
+
+/** Response of `POST /api/v1/work-items/{workItemId}/subtask-batches`. */
+export type PublicSubtaskBatch = {
+  /** Response schema version. */
+  schemaVersion: 1
+  /** Team that owns the parent Work Item. */
+  teamId: string
+  /** Parent Work Item the subtasks go under. */
+  workItemId: string
+  /** Number of subtasks in the batch. */
+  subtaskCount: number
+}
