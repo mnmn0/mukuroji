@@ -105,17 +105,23 @@ Software factory が無効な環境でも使えます（Agent Run の API を呼
 | `list_issues` | Team の Work Item を Project・担当者（メンバー ID か `me`）・status・Type・更新時刻で絞ってページ取得 |
 | `get_issue` | key（`ABC-123`）だけ、または ID と `teamId` で Work Item を読む。key も返す。`teamId` を渡すと値は常に ID として読む（`task-1` のような古い ID を key と取り違えないため） |
 | `list_comments` | Work Item のコメントを新しい順にページ取得。key だけでも指せる |
-| `save_issue` | `id` なしで Work Item を作成（`teamId` と `title` が必須、担当者の既定は `me`）。`id`（key か ID と `teamId`）ありで更新し、渡した項目だけを変える。更新には `get_issue` で読んだ `expectedRevision` が要る。`dueDate` は作成時だけ。`description` は作成時 100000 文字、更新時 4096 文字まで |
+| `save_issue` | `id` なしで Work Item を作成（`teamId` と `title` が必須、担当者の既定は `me`）。`id`（key か ID と `teamId`）ありで更新し、渡した項目だけを変える。更新には `get_issue` で読んだ `expectedRevision` が要る。`dueDate` は作成時だけ。`description` は作成時 100000 文字、更新時 4096 文字まで。`cycleId`・`milestoneId` で Cycle と Milestone に入れ、`null` で外す（これだけを変えるときは `expectedRevision` は要らない） |
 | `save_comment` | Work Item にコメント（4096 文字まで）を追加。key だけでも指せる |
 | `list_relations` | Work Item の親・子（兄弟の順）・WBS 番号と、blocks / blockedBy / related / duplicate の link を読む。読めない相手の link は返さない |
 | `save_relation` | 同じ Team の 2 つの Work Item を link する。`type` は 1 つ目から見た向き（`parent` は相手が親になる、`blockedBy` は相手に止められる）。`remove: true` で解除。親は 1 つだけで、親の Work Item Type が子の Type を許さない link と循環する link は競合で失敗する |
 | `create_subtasks` | 親の下に、親と同じ Project で最大 20 件の子を作る（担当者の既定は `me`）。1 件ずつ作って親に付け、途中で失敗したら同じ引数と `idempotencyKey` で再試行すると、済んだ子を作り直さずに残りを作る。親の Type が許さない Type の子は作られた後で link に失敗し、エラーがその子の ID を示すので、`save_issue` で Type を変えてから同じ引数で再試行する。同じ `idempotencyKey` で親か子の一覧を変えると、子を作る前に再試行不可の `idempotency_conflict` で止まる（一覧を変えるなら新しい key を使う）。途中で親の Project が変わると、作り済みの子の再生が `idempotency_conflict` になるので、親を元の Project に戻して同じ引数で再試行するか、`list_relations` で子を確かめてから新しい `idempotencyKey` で残りを作る |
+| `list_milestones` | 閲覧できる archive されていない Milestone を、責任者・状態・健康度・進捗・予定日付きで一覧。`teamId`（と `projectId`）で絞れる |
+| `list_cycles` | 閲覧できる archive されていない Cycle を、期間・状態・容量・cadence 付きで一覧。`teamId`（と `projectId`）で絞れる |
+| `list_planning_entities` | `type`（portfolio・roadmap・initiative・goal・phase・milestone・release・cycle）の Planning entity を一覧。Milestone の親を選ぶため |
+| `get_status_updates` | Project・Team・Initiative の健康度の更新（健康度・リスク・要約・決定事項・助けてほしいこと・次の行動・記録時の進捗）を新しい順にページ取得 |
+| `save_milestone` | `id` なしで Milestone を作成（`title`・`targetDate`・`parentId` が必須。親は Phase・Goal・Initiative・Roadmap で、Team は親と同じにする）。`id` ありで渡した項目だけを変える。Team・Project・親は作成後に変えられない |
+| `save_status_update` | 更新の cadence がある Project・Team・Initiative に健康度の更新を公開する。公開した更新は編集・削除できない |
 
 | `list_documents` | 閲覧できる Workspace の Document（フォルダー・ページ・テンプレート・ホワイトボード）を `projectId`・`parentId`（フォルダー）で絞ってページ取得。`issueId`（key か ID と `teamId`）を渡すと、その Work Item に link された Document を `{ id, title }` で返す |
 | `get_document` | ページ・テンプレートの本文を Markdown で、title と `revision` 付きで読む。フォルダーとホワイトボードは本文がない |
 | `save_document` | `id` なしで Markdown からページを作る（`title` と `content` が必須）。`projectId`・`parentId`・`issueId` で置き場所と link する Work Item を選ぶ。`id` ありで title の変更か本文の全置き換えをする。更新には `get_document` か `list_documents` の `expectedRevision` が要る。見出し・fenced code・Mermaid・task list・表は block になり、それ以外は書いたままの Markdown として残る。本文を置き換えると block に付いたコメントは位置を失い、block が持つ link は消える。結果は新しい `revision` を含む要約で、本文は `get_document` で読む |
 書き込みのツールは、毎回新しい UUID の `idempotencyKey` を要求します。応答が不確かなときは、同じ引数と key で再試行します。
-更新が revision の競合で失敗したら、`get_issue` で読み直してから改めて判断します。権限の判定は Web と同じで、
+更新が revision の競合で失敗したら、`get_issue` で読み直してから改めて判断します。Planning の書き込みでは `expectedRevision` を省略でき、省略すると最新の revision に書きます。一覧で読んだ `revision` を渡すと、その後に Planning が変わっていれば競合で失敗します。権限の判定は Web と同じで、
 token の持ち主が編集できない Work Item は変えられません。
 同じ MCP クライアントに tasks profile と並べて登録する場合は、サーバー名を分けます（例: `mukuroji` と `mukuroji-tasks`）。
 

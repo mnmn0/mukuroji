@@ -103,6 +103,15 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 - server API: `GET /api/v1/me`、`GET /api/v1/teams`、`GET /api/v1/projects/{projectId}/members`、
   `GET /api/v1/work-item-keys/{key}` を追加しました。scope は `work-items:read` で、request ごとに credential 所有者の
   現在の権限で評価します。読めない Work Item の key は、存在しない key と同じ 404 です。
+- Workspace profile に `list_milestones`・`list_cycles`・`list_planning_entities`（Planning の entity を type で一覧）・
+  `get_status_updates`（Project・Team・Initiative の健康度の更新を新しい順に）・`save_milestone`（作成と、渡した項目だけの変更）・
+  `save_status_update`（更新の cadence がある対象に健康度の更新を公開）を追加し、`save_issue` が `cycleId` と `milestoneId`
+  （`null` で外す）を受け取るようにしました（#706）。
+- server API: `GET /api/v1/planning/entities?type=`、`GET /api/v1/work-items/{workItemId}/planning?teamId=`、
+  `GET /api/v1/planning/status-updates`（scope `work-items:read`）と、`POST /api/v1/planning/milestones`、
+  `PATCH /api/v1/planning/milestones/{milestoneId}`、`PUT /api/v1/work-items/{workItemId}/planning?teamId=`、
+  `POST /api/v1/planning/status-updates`（scope `work-items:write`、`Idempotency-Key` 必須）を追加しました。権限は Web の
+  Planning と同じで、`expectedRevision` は省略すると最新の revision に書きます（#706、ADR 0107）。
 
 ### Changed
 
@@ -118,6 +127,8 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   server が古いと警告し、Workspace profile のツールは使えません。
 - MCP API revision を 5 に上げました。server は revision 1〜5 を受け付けます。revision 4 以前の server に接続した新しい MCP は
   server が古いと警告し、`list_relations`・`save_relation`・`create_subtasks` は使えません（#360）。
+- MCP API revision を 7 に上げました。server は revision 1〜7 を受け付けます。revision 6 以前の server に接続した新しい MCP は
+  server が古いと警告し、Planning のツールと `save_issue` の `cycleId`・`milestoneId` は使えません（#706）。
 - server API: Software factory が off の deploy でも、本人用 token の確認・発行・再発行
   （`/api/developer/me/agent-connection`、`POST /api/developer/me/api-keys`、`.../rotate`）と、管理者による本人用 token の
   rotate を `503` で断らないようにしました。Web の「agent を接続」は off では Workspace profile の設定例を出します。
