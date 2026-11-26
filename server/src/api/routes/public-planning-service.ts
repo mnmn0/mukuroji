@@ -773,6 +773,10 @@ export function createCanonicalPublicPlanningService(): PublicPlanningService {
         // Nothing to remove; still answer only for a Work Item the owner may change.
         requireWorkspaceBusinessWrite(principal)
         await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+        // A revision Planning changes moved past fails as the write would, though nothing is written.
+        if (link.expectedRevision !== state.revision) {
+          throw new PlanningError(409, 'PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+        }
         // Answer from the state the removal was decided on, not from a later read.
         return toPublicWorkItemPlanning(teamId, workItemId, state.revision, undefined, new Set())
       }

@@ -251,6 +251,16 @@ describe('Public API Planning', () => {
     expect(outOfCycle.cycleId).toBeUndefined()
     expect(await reserve('key-9')).toEqual({ replay: { status: 200, body: outOfCycle } })
 
+    // Nothing is left to remove, but a revision Planning changes moved past still conflicts.
+    const noOpKey = await token('key-12')
+    await expect(runWithTestAppDependencies(() => service.updateWorkItemPlanning(
+      credential,
+      'core-team',
+      'onboarding-friction',
+      { cycleId: null, expectedRevision: 0 },
+      noOpKey,
+    ))).rejects.toMatchObject({ status: 409 })
+
     const staleKey = await token('key-10')
     await expect(runWithTestAppDependencies(() => service.updateWorkItemPlanning(
       credential,
