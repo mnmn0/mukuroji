@@ -218,8 +218,9 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
       if (isSameWorkspaceDefaultsSave(receipt, update)) return structuredClone(receipt)
       throw new AgentRunError('conflict', 'This Idempotency-Key was already used for a different defaults save.')
     }
-    const current = await this.getWorkspaceAgentDefaults(directoryId)
-    if (current.revision !== update.expectedRevision) {
+    // No await between the receipt and revision checks and the write, so concurrent saves see each other.
+    const currentRevision = this.state.workspaceDefaults.get(directoryId)?.revision ?? 0
+    if (currentRevision !== update.expectedRevision) {
       throw new AgentRunError('conflict', 'Workspace agent defaults changed. Reload them before saving.', {
         pointer: '/expectedRevision',
       })

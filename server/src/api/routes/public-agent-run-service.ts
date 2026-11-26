@@ -26,6 +26,7 @@ import {
   selectAgentRunReportNotification,
   toAgentRun,
   toAgentRunReport,
+  type ResolvedAgentSettings,
   type StoredAgentRun,
   type StoredAgentRunReport,
 } from '../../modules/agent-runs'
@@ -528,7 +529,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
                       { reason: 'not_ready', pointer: '/acceptNewRuns' },
                     )
                   }
-                  if (latestSettings.revision !== settings.revision) {
+                  if (haveAgentSettingsChanged(latestSettings, settings)) {
                     return new AgentRunError('conflict', 'Agent settings changed during the request. Retry the start.')
                   }
                   return new AgentRunError('conflict', 'The Agent Run claim changed during the request. Reload the task and retry.')
@@ -920,7 +921,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         const latestSettings = await store.getSettings(principal.directoryId, teamId)
         requireAcceptingNewRuns(latestSettings)
         if (!latestSettings.allowTakeoverAfterLeaseExpiry) throw createAgentRunTakeoverDisabledError()
-        if (latestSettings.revision !== settings.revision) {
+        if (haveAgentSettingsChanged(latestSettings, settings)) {
           throw new AgentRunError('conflict', 'Agent settings changed during the request. Retry the take over.')
         }
         if (await hasAuthorizationChanged(current, authorizationSnapshot)) throw createWorkItemAuthorizationChangedError()
@@ -1044,7 +1045,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         requireAcceptingNewRuns(latestSettings)
         // A change of assignee, status, or revision is reported as such.
         requireResumable(principal, latest.detail.issue, detail.issue.revision, latestSettings.resumableStatusIds)
-        if (latestSettings.revision !== settings.revision) {
+        if (haveAgentSettingsChanged(latestSettings, settings)) {
           throw new AgentRunError('conflict', 'Agent settings changed during the request. Retry the resume.')
         }
         if (await store.getLatestRunId(principal.directoryId, teamId, workItemId) !== latestRunId) {
@@ -1095,4 +1096,21 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       }
     },
   }
+}
+
+/**
+ * Returns whether the Team settings a request used changed before its commit. A Team without
+ * saved settings also changes when the Workspace defaults it inherits are saved, since its commit
+ * is conditioned on their revision.
+ *
+ * @param latest - Settings read after the failed commit.
+ * @param used - Settings the request was checked against.
+ * @returns Whether a settings change explains the failed commit.
+ */
+function haveAgentSettingsChanged(
+  latest: Pick<ResolvedAgentSettings, 'revision' | 'workspaceDefaultsRevision'>,
+  used: Pick<ResolvedAgentSettings, 'revision' | 'workspaceDefaultsRevision'>,
+): boolean {
+  return latest.revision !== used.revision ||
+    (used.revision === 0 && latest.workspaceDefaultsRevision !== used.workspaceDefaultsRevision)
 }

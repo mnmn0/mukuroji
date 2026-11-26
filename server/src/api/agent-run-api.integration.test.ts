@@ -826,6 +826,27 @@ describe('public Agent Run service', () => {
     expect(store.state.claims.size).toBe(0)
   })
 
+  test('rejects a start of a Team without settings when the Workspace defaults change before it commits', async () => {
+    let saveBeforeCommit = true
+    const { store } = configureUnstartedAssignedWorkItem({
+      beforeCommit: () => {
+        if (!saveBeforeCommit) return
+        saveBeforeCommit = false
+        store.state.workspaceDefaults.set(workspaceId, {
+          ...createDefaultWorkspaceAgentDefaults(), revision: 1, leaseMinutes: 5, updatedAt: new Date().toISOString(), updatedBy: 'admin@example.com',
+        })
+      },
+    })
+    const service = createCanonicalPublicAgentRunService()
+    await expect(runWithTestAppDependencies(() => service.start(
+      credential, 'core-team', 'task-1',
+      readStartAgentRunRequest({ expectedRevision: 1, workflowStatusId: 'in-progress', runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-1' }),
+      { requestId: 'start', idempotencyKey: 'start-defaults-race' },
+      { credentialId: 'agent-key', idempotencyKey: 'start-defaults-race', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))).rejects.toThrow('Agent settings changed during the request. Retry the start.')
+    expect(store.state.claims.size).toBe(0)
+  })
+
   test('starts only from a ready status when the Team lists ready statuses', async () => {
     const { store } = configureUnstartedAssignedWorkItem()
     setTestAppDependencies({
