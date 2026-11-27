@@ -418,6 +418,10 @@ Phase / Milestone を持つテンプレートを適用するときは、Phase �
   Work Item の作成・更新・削除に加えて、親の変更、子の追加・削除、blocker の追加・解除、関連の追加・削除、
   並び順の変更も選べます。これらは相手の Work Item を含まず、変更された側の Work Item だけを送ります。
   Work Item を削除して消えた関係は、残った相手の Work Item の解除・削除として送ります。
+  コメントの作成（返信は含みません）と、coding agent の作業の開始・報告・終了・解放も選べます。
+  コメントの event には本文が入らないので、本文が要るときは届いた `commentId` で API からコメントを読みます。
+  agent の失敗を bot に知らせるには「Agent Run 終了」を選び、届いた event の `outcome` が `failed` のものを拾います。
+  API キーの webhooks / imports の scope は `/api/v1` では使いません（Webhook の作成と import は、この画面から行います）。
 - **Connector**: GitHub、GitLab、Slack、Microsoft Teams、Google Calendar、Outlook Calendar との連携（mail と cloud storage は連携の予定がないため一覧から外しました）。
   一覧には、運用者がこの環境で設定した provider だけが出ます（設定は [`cdk/README.md`](../../cdk/README.md) の
   connector secret）。設定がなければ「利用できる connector はありません」と表示されます。

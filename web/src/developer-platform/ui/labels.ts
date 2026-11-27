@@ -248,6 +248,31 @@ export function createDeveloperPlatformLabels(
           ? 'Import が error で停止したとき。'
           : 'An import stopped with an error.',
       },
+      {
+        value: 'comment.created',
+        label: t('developerPlatform.webhookEvents.commentCreated.label'),
+        description: t('developerPlatform.webhookEvents.commentCreated.description'),
+      },
+      {
+        value: 'agent-run.started',
+        label: t('developerPlatform.webhookEvents.agentRunStarted.label'),
+        description: t('developerPlatform.webhookEvents.agentRunStarted.description'),
+      },
+      {
+        value: 'agent-run.reported',
+        label: t('developerPlatform.webhookEvents.agentRunReported.label'),
+        description: t('developerPlatform.webhookEvents.agentRunReported.description'),
+      },
+      {
+        value: 'agent-run.finished',
+        label: t('developerPlatform.webhookEvents.agentRunFinished.label'),
+        description: t('developerPlatform.webhookEvents.agentRunFinished.description'),
+      },
+      {
+        value: 'agent-run.released',
+        label: t('developerPlatform.webhookEvents.agentRunReleased.label'),
+        description: t('developerPlatform.webhookEvents.agentRunReleased.description'),
+      },
     ],
     connectorCatalog: [
       {

@@ -740,11 +740,19 @@ describe('public Agent Run service', () => {
       })
       const run = createHeldRun('task-1')
       const workItemEventId = createAuditEventId(context, 'work-item.updated', { type: 'work-item', id: 'team/core-team/issue/task-1' })
-      const shared = createAgentRunAuditPut(context, run, 'started', 'Agent Run started.', AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM)
-      const standalone = createAgentRunAuditPut(context, run, 'finished', 'Agent Run finished.')
+      const shared = createAgentRunAuditPut(
+        context, run, 'started', 'Agent Run started.', { projectId: 'project-1' }, AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
+      )
+      const standalone = createAgentRunAuditPut(context, run, 'finished', 'Agent Run finished.', { projectId: undefined })
+      const unscoped = createAgentRunAuditPut(context, run, 'released', 'Agent Run released.', undefined)
       expect(shared?.Put?.Item?.eventId).toBeString()
       expect(shared?.Put?.Item?.eventId).not.toBe(workItemEventId)
       expect(standalone?.Put?.Item?.eventId).toBe(workItemEventId)
+      // Webhook delivery trusts only a Project scope that the same transaction fenced.
+      expect(shared?.Put?.Item?.metadata).toMatchObject({ projectId: 'project-1', projectScopeRecorded: true })
+      expect(standalone?.Put?.Item?.metadata).toMatchObject({ projectScopeRecorded: true })
+      expect(standalone?.Put?.Item?.metadata).not.toHaveProperty('projectId')
+      expect(unscoped?.Put?.Item?.metadata).not.toHaveProperty('projectScopeRecorded')
     } finally {
       if (previous === undefined) delete process.env.AUDIT_EVENTS_TABLE_NAME
       else process.env.AUDIT_EVENTS_TABLE_NAME = previous

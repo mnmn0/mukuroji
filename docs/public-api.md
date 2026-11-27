@@ -36,9 +36,11 @@ Scope は用途ごとに read/write を分離し、Work Item の削除だけは 
 | `work-items:read` | Work Item の取得と一覧、Work Item に link された Document の一覧と本文、credential 所有者・Team・Project・Project メンバーの参照と Work Item key の解決 |
 | `work-items:write` | Work Item の作成と更新、coding agent の OpenTelemetry logs（トークン使用量）の送信（[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)） |
 | `work-items:delete` | Work Item の削除 |
-| `webhooks:read` / `webhooks:write` | Subscription と delivery log の参照 / 管理・replay |
+| `webhooks:read` / `webhooks:write` | `/api/v1` の route では要求しない。Webhook subscription の作成・管理と delivery log・replay は session 認証の `/api/developer/*`（Web の開発者設定）で行い、そこでは Workspace の権限で判断する |
 | `integrations:read` / `integrations:write` | Connector と external link の参照 / 管理 |
-| `imports:read` / `imports:write` | Import record/report と export の参照 / dry-run・実行 |
+| `imports:read` / `imports:write` | `/api/v1` の route では要求しない。Import と export は session 認証の `/api/developer/*` で行う。Webhook subscription に `import.*` event を含めるには subscription の scope に `imports:read` が要る |
+
+Webhook subscription も scope を持ち、購読する event type ごとに必要な scope を作成時に検査する。`work-item.*`・`comment.*`・`agent-run.*` は `work-items:read`、`external-link.*`・`sync-conflict.*` は `integrations:read`、`import.*` は `imports:read` が要る。`webhooks:*` と `imports:*` は、既存の credential と subscription を壊さないため残している。
 
 `DELETE /api/v1/work-items/{workItemId}?teamId={teamId}` は Work Item を取り消せない形で削除する（Web には削除がなく、archive だけを出す）。子を持つ Work Item は `409 conflict` で削除しない（子を先に削除するか、別の親へ移す）。削除は Work Item の relation（相手側の row と `relationIds` を含む）と Collection の参照を同じ transaction で消し、準備の後に relation や Collection が変わった場合は `409 conflict` でやり直しを求める。relation と Collection 参照を合わせて 80 件を超える掃除は 1 transaction に収まらないため `409 conflict` で拒否し、先に一部を外してもらう。詳しくは [Work Items](work-items.md#削除と参照の掃除633)。
 
@@ -348,9 +350,11 @@ Token endpoint（`POST /v1/oauth/token`）は 2 種類の 1 分 window で制限
 
 Webhook body は `WebhookEventEnvelope` で、retry と手動 replay の間も同じ event ID を保つ。Delivery request には次の header を付ける。
 
-購読できる event type は `WebhookEventType`（contracts の `WEBHOOK_EVENT_TYPES`）で、Work Item の作成・更新・削除、[Work Item relation の event](./event-audit.md#work-item-relation-の-event)（`work-item.parent-changed`、`work-item.blocker-removed` など 10 種）、external link、同期競合、import の event を含む。Work Item の event はすべて `work-items:read` scope を要求する。event type は今後も追加するので、consumer は知らない `type` の delivery を `2xx` で受けて無視する（[ADR 0045](./adr/0045-relation-events-for-automation-and-webhooks.md)）。
+購読できる event type は `WebhookEventType`（contracts の `WEBHOOK_EVENT_TYPES`）で、Work Item の作成・更新・削除、[Work Item relation の event](./event-audit.md#work-item-relation-の-event)（`work-item.parent-changed`、`work-item.blocker-removed` など 10 種）、external link、同期競合、import の event、コメント（`comment.created`、返信は含まない）、Agent Run（`agent-run.started`・`agent-run.reported`・`agent-run.finished`・`agent-run.released`）を含む。Work Item・コメント・Agent Run の event はすべて `work-items:read` scope を要求する。event type は今後も追加するので、consumer は知らない `type` の delivery を `2xx` で受けて無視する（[ADR 0045](./adr/0045-relation-events-for-automation-and-webhooks.md)）。
 
 Relation の event は変更を記録した側の Work Item 1 件の event で、`data.entity.id` が `team/<teamId>/issue/<issueId>`、`data.metadata` が `teamId` と（Project に割り当てられていれば）`projectId` を持つ。相手の Work Item は subscription 作成者が見られない Project にあることがあるので、相手の ID・title は payload に含めない。配信の可否は、ほかの Work Item event と同じく記録した側の Team と Project に対する作成者の現在の権限で決める。Project の記録を持たない古い relation event（`metadata.projectScopeRecorded` がないもの）は配信しない。
+
+コメントと Agent Run の event も Work Item 1 件の event で、`data.metadata` が `teamId`・`issueId`・（Project に割り当てられていれば）`projectId` を持ち、配信の可否は Work Item event と同じ規則で決める。コメントの event は `data.metadata.commentId` を持つ。本文は監査記録と同じく `data.changes` で `[REDACTED]` に置き換わるので、本文が要る consumer は `GET /api/v1/work-items/{workItemId}/comments` で `commentId` のコメントを読む。Agent Run の event は `data.entity.id` が `team/<teamId>/agent-run/<runId>` で、`data.metadata` に `runId`、`runtime`、`state`、終わった run なら `outcome`（`completed`・`paused`・`failed`・`released`・`superseded`）を持つ。社内の bot が Agent Run の失敗を受け取るには `agent-run.finished` を購読し、`outcome` が `failed` のものを拾う。agent 名は利用者が付ける自由な文字列なので payload に含めない。Work Item の削除や archive に伴う解放は Work Item の event で分かるので、`agent-run.released` は配信しない。この event が webhook に加わる前に記録された event（`metadata.projectScopeRecorded` がないもの）も配信しない。
 
 Subscription 作成時は `teamIds` を必須とし、作成者がその時点で閲覧できる Team だけを登録できる。Server は event enqueue 時にも作成者の current Team access と event の `teamId` を再検証し、許可済み selector 外の Team data を endpoint へ送信しない。Subscription metadata には `createdByUserId` と `teamIds` を保存する。
 

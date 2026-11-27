@@ -5445,7 +5445,12 @@
           "sync-conflict.created",
           "sync-conflict.resolved",
           "import.completed",
-          "import.failed"
+          "import.failed",
+          "comment.created",
+          "agent-run.started",
+          "agent-run.reported",
+          "agent-run.finished",
+          "agent-run.released"
         ],
         "type": "string"
       },

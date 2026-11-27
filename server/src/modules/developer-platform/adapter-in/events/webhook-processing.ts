@@ -1746,13 +1746,21 @@ function readPreparedWebhookEvent(payload: string): WebhookEventEnvelope {
  *
  * Relation events written before `projectId` was recorded on every endpoint lack it even when
  * the Work Item is assigned to a Project, so treating them as Team-only would skip the Project
- * check. They can still reach the projection from a stream backlog, so they are not delivered.
+ * check. Comment and Agent Run events written before they became webhook events, and Agent Run
+ * releases caused by a Work Item removal, lack it too. They can still reach the projection from a
+ * stream backlog, so they are not delivered.
  *
  * @param event - Normalized audit event.
  * @returns Whether the event's Team and Project scope is complete.
  */
 function hasCompleteWebhookScope(event: AuditEventV1) {
-  if (!isWorkItemRelationEventType(event.eventType)) return true
+  if (
+    !isWorkItemRelationEventType(event.eventType) &&
+    !event.eventType.startsWith('comment.') &&
+    !event.eventType.startsWith('agent-run.')
+  ) {
+    return true
+  }
   return isRecord(event.metadata) && event.metadata.projectScopeRecorded === true
 }
 
@@ -1898,7 +1906,7 @@ const PUBLIC_WEBHOOK_EXCLUDED_CHANGE_FIELDS = ['contributorAssignments']
  * @returns The audit view with changes to non-public fields removed.
  */
 export function toPublicWebhookEventData(event: AuditEventV1): ReturnType<typeof toAuditEventView> {
-  const view = toAuditEventView(event)
+  const view = withPublicAgentRunMetadata(event, toAuditEventView(event))
   if (!view.changes) return view
   return {
     ...view,
@@ -1906,4 +1914,31 @@ export function toPublicWebhookEventData(event: AuditEventV1): ReturnType<typeof
       change.field === field || change.field.startsWith(`${field}.`)
     )),
   }
+}
+
+/** Agent Run metadata fields a webhook consumer needs to act on a run, such as a failed finish. */
+const PUBLIC_WEBHOOK_AGENT_RUN_METADATA_FIELDS = ['runId', 'runtime', 'state', 'outcome'] as const
+
+/**
+ * Adds the Agent Run fields of an `agent-run.*` event to its public metadata.
+ *
+ * The audit view keeps a Workspace-wide allowlist of metadata fields; these names are generic, so
+ * they are published only for Agent Run events, whose values are enumerations and identifiers.
+ *
+ * @param event - Normalized audit event.
+ * @param view - Public audit view of the event.
+ * @returns The view, with the Agent Run fields added for an Agent Run event.
+ */
+function withPublicAgentRunMetadata(
+  event: AuditEventV1,
+  view: ReturnType<typeof toAuditEventView>,
+): ReturnType<typeof toAuditEventView> {
+  if (!event.eventType.startsWith('agent-run.') || !isRecord(event.metadata)) return view
+  const metadata: Record<string, string> = {}
+  for (const field of PUBLIC_WEBHOOK_AGENT_RUN_METADATA_FIELDS) {
+    const value = event.metadata[field]
+    if (typeof value === 'string') metadata[field] = value
+  }
+  if (Object.keys(metadata).length === 0) return view
+  return { ...view, metadata: { ...view.metadata, ...metadata } }
 }

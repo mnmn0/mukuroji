@@ -302,12 +302,25 @@ export function createAgentRunMutationFenceExtension(
 export const AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM = 1
 
 /**
+ * Project scope of the Work Item an Agent Run event belongs to, as read in the same transaction.
+ *
+ * Pass it only when the transaction also fences the Work Item's Project, through a revision check,
+ * a Work Item write, a comment write, or a condition check on the Work Item's Project. Webhook
+ * delivery authorizes the event against this Project, so an event without it is never delivered.
+ */
+export type AgentRunAuditProjectScope = {
+  /** Project the Work Item is assigned to, or undefined for a Team-only Work Item. */
+  projectId: string | undefined
+}
+
+/**
  * Builds an immutable audit event for an Agent Run lifecycle change.
  *
  * @param auditContext - Audit context of the logical mutation.
  * @param run - Run after the change.
  * @param action - Lifecycle action.
  * @param summary - Human-readable summary.
+ * @param projectScope - Work Item Project fenced by the same transaction, or undefined when none is.
  * @param sequence - Audit sequence slot; pass {@link AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM} when another event shares the transaction.
  * @param notification - Assignee notification the event carries, when the Team turned it on.
  * @returns Audit put, or undefined when auditing is not configured.
@@ -317,6 +330,7 @@ export function createAgentRunAuditPut(
   run: StoredAgentRun,
   action: 'started' | 'resumed' | 'reported' | 'finished' | 'released' | 'taken-over' | 'answered',
   summary: string,
+  projectScope: AgentRunAuditProjectScope | undefined,
   sequence?: number,
   notification?: AgentRunAssigneeNotification,
 ): AgentRunTransactItem | undefined {
@@ -341,6 +355,12 @@ export function createAgentRunAuditPut(
       state: run.state,
       ...(run.outcome ? { outcome: run.outcome } : {}),
       ...(run.resumedFromRunId ? { resumedFromRunId: run.resumedFromRunId } : {}),
+      ...(projectScope === undefined
+        ? {}
+        : {
+            ...(projectScope.projectId === undefined ? {} : { projectId: projectScope.projectId }),
+            projectScopeRecorded: true,
+          }),
       ...(notification ? createAgentRunNotificationMetadata(run, notification) : {}),
     },
   })
@@ -437,7 +457,11 @@ export async function createAgentRunReleaseOnRemovalItems(
   const run = await store.getRun(principal.directoryId, teamId, claim.runId)
   if (!run || run.state !== 'active' || run.workItemId !== workItemId) throw createAgentRunIntegrityError()
   const released = finishAgentRun(run, 'released', principal.userKey, now)
-  const auditPut = createAgentRunAuditPut(auditContext, released, 'released', summary, AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM)
+  const auditPut = createAgentRunAuditPut(
+    // A release caused by a Work Item removal is announced by the Work Item event, so it is not
+    // delivered to webhooks.
+    auditContext, released, 'released', summary, undefined, AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
+  )
   return [...store.createCloseItems(released), ...(auditPut ? [auditPut] : [])]
 }
 

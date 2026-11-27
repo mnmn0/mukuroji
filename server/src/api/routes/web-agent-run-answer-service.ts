@@ -181,7 +181,7 @@ export async function answerWebAgentRunReport(
     commentId,
   }
   const auditPut = createAgentRunAuditPut(
-    auditContext, run, 'answered', `A member answered a ${report.kind} report.`, AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
+    auditContext, run, 'answered', `A member answered a ${report.kind} report.`, undefined, AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
   )
   const projectId = detail.issue.assignedProjectId
   const authorizationConditionChecks = await createCollaborationCommentAuthorizationConditionChecks(
