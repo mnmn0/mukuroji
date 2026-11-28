@@ -73,7 +73,7 @@ export function WorkItemConfigurationPanelContainer({
     isLoading,
     mutate,
   } = useScopedWorkItemConfiguration(accessToken, selectedScope)
-  const { settings: workPhases } = useWorkspaceWorkPhases(accessToken)
+  const { settings: workPhases, error: workPhasesError, retry: retryWorkPhases } = useWorkspaceWorkPhases(accessToken)
   const readOnly = selectedScope.kind === 'workspace'
     ? !canManageWorkspaceConfiguration
     : !canMutateTeamConfiguration
@@ -123,6 +123,8 @@ export function WorkItemConfigurationPanelContainer({
       onSave={readOnly ? undefined : handleSave}
       onScopeChange={setSelectedScopeValue}
       workPhases={workPhases}
+      hasWorkPhasesError={Boolean(workPhasesError) && !workPhases}
+      onRetryWorkPhases={retryWorkPhases}
     />
   )
 }

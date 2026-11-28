@@ -158,6 +158,9 @@ export type AnalyticsStatusTimeGroup = {
 /**
  * Splits counted hours by the workflow status or the work phase they were spent in.
  *
+ * Status IDs are unique only within a Team, so a status group is keyed by `<teamId>/<statusId>`
+ * and, when the items span more than one Team, labelled with its Team too. Phases are Workspace-wide.
+ *
  * @param items - Stretches of each Work Item with its Team.
  * @param dimension - `status` groups by status ID, `phase` by the phase of the status.
  * @param catalog - Workflow statuses of the Teams; without it, statuses are labelled by ID.
@@ -173,6 +176,7 @@ export function groupAnalyticsStatusHours(
   to: number,
 ): AnalyticsStatusTimeGroup[] {
   const groups = new Map<string, { label: string; hours: number; workItems: number }>()
+  const spansTeams = new Set(items.map((item) => item.teamId)).size > 1
   for (const item of items) {
     const statuses = catalog?.teams.get(item.teamId)
     const perItem = new Map<string, { label: string; hours: number }>()
@@ -181,10 +185,11 @@ export function groupAnalyticsStatusHours(
       if (hours <= 0) continue
       const entry = statuses?.get(segment.statusId)
       const key = dimension === 'status'
-        ? segment.statusId
+        ? `${item.teamId}/${segment.statusId}`
         : entry?.phaseKey ?? NO_WORK_PHASE_GROUP_KEY
+      const statusName = entry?.name ?? segment.statusId
       const label = dimension === 'status'
-        ? entry?.name ?? segment.statusId
+        ? spansTeams ? `${statusName} (${item.teamId})` : statusName
         : catalog?.phaseLabels.get(key) ?? key
       const current = perItem.get(key) ?? { label, hours: 0 }
       current.hours += hours

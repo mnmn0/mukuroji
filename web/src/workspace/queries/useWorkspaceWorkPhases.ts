@@ -28,6 +28,8 @@ export type WorkspaceWorkPhasesQuery = {
   settings: WorkspaceWorkPhaseSettings | undefined
   /** Failure of the latest read, if any. */
   error: unknown
+  /** Reads the phases again. */
+  retry: () => void
 }
 
 /**
@@ -40,5 +42,6 @@ export type WorkspaceWorkPhasesQuery = {
 export function useWorkspaceWorkPhases(accessToken?: string, enabled = true): WorkspaceWorkPhasesQuery {
   const key = accessToken && enabled ? [workspaceWorkPhasesKeyPrefix, accessToken] as const : null
   const query = useSWR(key, ([, token]) => getWorkspaceWorkPhases(token), workspaceWorkPhasesQueryConfig)
-  return { settings: query.data, error: query.error }
+  const { mutate } = query
+  return { settings: query.data, error: query.error, retry: () => { void mutate().catch(() => undefined) } }
 }

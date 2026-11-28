@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { AgentRunOutcome, AgentRunReport, AgentRunReportKind } from '@mukuroji/contracts'
-import { calculateFactoryAnalytics, summarizePullRequestLeadTimes } from './domain/agent-run-analytics'
+import { calculateFactoryAnalytics, selectLatestVerifiedPullRequests, summarizePullRequestLeadTimes } from './domain/agent-run-analytics'
 import { createActiveAgentRun, finishAgentRun, readStartAgentRunRequest, type StoredAgentRun } from './domain/agent-run'
 
 const hourMs = 3_600_000
@@ -154,7 +154,19 @@ describe('pull request lead times', () => {
     ])
   })
 
-  test('reports null medians without pull requests', () => {
+  test('keeps the state checked last when several Work Items name one pull request', () => {
+    const base = { url: 'https://github.com/acme/app/pull/7', provider: 'github' as const, repository: 'acme/app', number: 7, verification: 'verified' as const }
+    const open = { state: 'open' as const, draft: false, headSha: 'a', checks: 'pending' as const, review: 'none' as const }
+    const merged = { ...open, state: 'merged' as const, mergedAt: '2026-01-02T00:00:00.000Z' }
+    const picked = selectLatestVerifiedPullRequests([
+      { ...base, pullRequest: merged, checkedAt: '2026-01-03T00:00:00.000Z' },
+      { ...base, pullRequest: open, checkedAt: '2026-01-01T00:00:00.000Z' },
+      { ...base, verification: 'unverified', checkedAt: '2026-01-04T00:00:00.000Z' },
+    ])
+    expect(picked).toEqual([merged])
+  })
+
+    test('reports null medians without pull requests', () => {
     expect(summarizePullRequestLeadTimes([], period.from, period.to).every((entry) => entry.medianHours === null && entry.sampleSize === 0)).toBe(true)
   })
 })

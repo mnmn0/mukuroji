@@ -47,6 +47,7 @@ export {
 } from './domain/agent-run'
 export {
   calculateFactoryAnalytics,
+  selectLatestVerifiedPullRequests,
   summarizePullRequestLeadTimes,
   type FactoryAnalyticsInput,
   type FactoryAnalyticsReportFacts,

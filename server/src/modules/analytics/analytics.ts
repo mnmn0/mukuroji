@@ -934,6 +934,8 @@ type AnalyticsScopeChange = {
 type AnalyticsWorkItemFact = {
   /** `asOf` 時点の state です。 */
   state: AnalyticsWorkItemState
+  /** Instant the state was rebuilt at, in epoch milliseconds; a bucket may reuse facts of a later `asOf`. */
+  stateAsOf: number
   /** Work Item に対応する event です。 */
   events: AnalyticsHistoryEvent[]
   /** Creation instant の epoch milliseconds です。 */
@@ -2729,6 +2731,7 @@ function createFact(
   }
   return {
     state,
+    stateAsOf: asOf,
     events: [...events],
     createdAt,
     ...(completionAt === undefined ? {} : { completionAt }),
@@ -3155,46 +3158,47 @@ function calculateAgentUsageMetric(
 }
 
 /**
- * Builds the workflow status stretches of a fact up to an instant.
+ * Builds the workflow status stretches of a fact up to the instant its state was rebuilt at.
  *
- * @param fact - Work Item fact; its state is at the query `asOf`.
- * @param evaluationAt - Instant the stretches end at, no later than the query `asOf`.
+ * The walk starts from the fact's own state, so it must start at the fact's own `asOf`; an earlier
+ * bucket clips the stretches to its window instead of starting the walk earlier.
+ *
+ * @param fact - Work Item fact.
  * @returns Stretches in time order.
  */
-function createFactStatusSegments(fact: AnalyticsWorkItemFact, evaluationAt: number) {
+function createFactStatusSegments(fact: AnalyticsWorkItemFact) {
   return createAnalyticsStatusSegments({
     createdAt: fact.createdAt,
     statusId: fact.state.workflowStatusId,
     statusCategory: fact.state.statusCategory,
     events: fact.events,
-    asOf: evaluationAt,
+    asOf: fact.stateAsOf,
   })
 }
 
 /**
  * Adds up the hours Work Items spent in unstarted and started statuses in a window (ADR 0115).
+ * Hours keep full precision until the total, so many short stretches still add up.
  *
  * @param facts - Filtered Work Item facts of the group or bucket.
  * @param from - Window start, inclusive.
- * @param to - Window end, exclusive; no later than `evaluationAt`.
- * @param evaluationAt - Instant the facts were rebuilt at.
+ * @param to - Window end, exclusive; no later than the bucket's evaluation instant.
  * @returns Total hours, the Work Items with time, and one evidence item per Work Item.
  */
 function calculateStatusTimeMetric(
   facts: readonly AnalyticsWorkItemFact[],
   from: number,
   to: number,
-  evaluationAt: number,
 ): MetricComputation {
   const samples = facts.flatMap((fact) => {
-    const hours = sumAnalyticsStatusHours(createFactStatusSegments(fact, evaluationAt), from, to)
-    return hours > 0 ? [{ fact, hours: roundMetric(hours) }] : []
+    const hours = sumAnalyticsStatusHours(createFactStatusSegments(fact), from, to)
+    return hours > 0 ? [{ fact, hours }] : []
   })
   return {
     value: roundMetric(samples.reduce((sum, sample) => sum + sample.hours, 0)),
     sampleSize: samples.length,
     evidence: samples.map(({ fact, hours }) => {
-      const item = createFactEvidence(fact, 'status-time', Math.max(from, fact.createdAt), hours)
+      const item = createFactEvidence(fact, 'status-time', Math.max(from, fact.createdAt), roundMetric(hours))
       return { ...item, id: hashCanonical({ metric: 'status-time', teamId: fact.state.teamId, workItemId: fact.state.id }) }
     }),
     warnings: samples.length === 0 ? ['No Work Items spent time in unstarted or started statuses in this period.'] : [],
@@ -3215,13 +3219,12 @@ function createStatusTimeGroups(
   dimension: 'status' | 'phase',
   normalized: NormalizedAnalyticsQuery,
 ): AnalyticsGroup[] {
-  const evaluationAt = normalized.asOf
   return groupAnalyticsStatusHours(
-    facts.map((fact) => ({ teamId: fact.state.teamId, segments: createFactStatusSegments(fact, evaluationAt) })),
+    facts.map((fact) => ({ teamId: fact.state.teamId, segments: createFactStatusSegments(fact) })),
     dimension,
     normalized.workflowStatuses,
     normalized.periodFrom,
-    Math.min(normalized.periodTo, evaluationAt),
+    Math.min(normalized.periodTo, normalized.asOf),
   ).map((group) => ({
     key: group.key,
     label: group.label,
@@ -3778,7 +3781,7 @@ function calculateMetric(
     return calculateAgentUsageMetric(metric, facts, normalized.agentUsage, from, Math.min(to, evaluationAt))
   }
   if (metric === 'status-time') {
-    return calculateStatusTimeMetric(facts, from, Math.min(to, evaluationAt), evaluationAt)
+    return calculateStatusTimeMetric(facts, from, Math.min(to, evaluationAt))
   }
   if (metric === 'throughput' || metric === 'velocity') {
     const completed = facts.filter((fact) =>

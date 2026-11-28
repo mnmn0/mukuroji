@@ -2,6 +2,7 @@ import {
   AGENT_RUN_RUNTIMES,
   FACTORY_ANALYTICS_PULL_REQUEST_INTERVALS,
   FACTORY_ANALYTICS_STAGES,
+  type AgentRunArtifactStatus,
   type AgentRunPullRequestStatus,
   type FactoryAnalyticsPullRequestInterval,
   type FactoryAnalyticsPullRequestLeadTime,
@@ -285,6 +286,27 @@ function medianOfHours(samples: readonly number[]): number | null {
     ? sorted[middle] ?? 0
     : ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2
   return Math.round(median * 100) / 100
+}
+
+/**
+ * Picks one state per verified pull request. Several Work Items may name the same pull request,
+ * each with its own cached state, so the state checked last wins.
+ *
+ * @param statuses - Artifact states of every Work Item, in any order.
+ * @returns The latest verified state of each distinct pull request.
+ */
+export function selectLatestVerifiedPullRequests(statuses: readonly AgentRunArtifactStatus[]): AgentRunPullRequestStatus[] {
+  const latest = new Map<string, { checkedAt: number; pullRequest: AgentRunPullRequestStatus }>()
+  for (const status of statuses) {
+    if (status.verification !== 'verified' || status.pullRequest === undefined) continue
+    const key = `${status.provider}:${status.repository}#${status.number}`
+    const parsed = Date.parse(status.checkedAt)
+    const checkedAt = Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY
+    const known = latest.get(key)
+    if (known !== undefined && checkedAt <= known.checkedAt) continue
+    latest.set(key, { checkedAt, pullRequest: status.pullRequest })
+  }
+  return [...latest.values()].map((entry) => entry.pullRequest)
 }
 
 /**

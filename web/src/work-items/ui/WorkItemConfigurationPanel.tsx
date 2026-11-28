@@ -109,6 +109,10 @@ export type WorkItemConfigurationPanelProps = {
    * Workspace work phases (ADR 0115) a status can count toward; without them the phase select is hidden.
    */
   workPhases?: WorkspaceWorkPhaseSettings
+  /** Whether reading the Workspace work phases failed, which hides the phase selects until a retry. */
+  hasWorkPhasesError?: boolean
+  /** Reads the Workspace work phases again. */
+  onRetryWorkPhases?: () => void
 }
 
 const workflowStatusCategories = [
@@ -174,6 +178,8 @@ function WorkItemConfigurationPanelContent({
   scopeOptions,
   selectedScopeValue,
   workPhases,
+  hasWorkPhasesError = false,
+  onRetryWorkPhases,
 }: WorkItemConfigurationPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [draft, setDraft] = useState<WorkItemConfiguration | undefined>(() =>
@@ -318,6 +324,16 @@ function WorkItemConfigurationPanelContent({
         </form>
       )}
 
+      {hasWorkPhasesError ? (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
+          <span>{t('workItems.configuration.workPhasesLoadError')}</span>
+          {onRetryWorkPhases ? (
+            <button className="workbench-button-secondary min-h-8 px-3" onClick={onRetryWorkPhases} type="button">
+              {t('workItems.configuration.retryWorkPhases')}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {errorMessage || localErrorMessage ? (
         <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
           {localErrorMessage ?? errorMessage}

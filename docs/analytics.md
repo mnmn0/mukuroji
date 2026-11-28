@@ -264,10 +264,10 @@ warning だけを返します（hash にも Team を加えません）。
 
 [ADR 0115](adr/0115-work-phases.md)。`status-time` は、Work Item の履歴（`workflowStatusId` と `statusCategory` の変更）から
 各ステータスにいた区間を作り、期間と重なる時間のうち `unstarted`・`started` のカテゴリーの時間を足します（時間単位）。
-`groupBy` が `status` なら時間を過ごしたステータス ID、`phase` ならそのステータスの工程（Team の今の Work Item 設定で引く。
+`groupBy` が `status` なら時間を過ごしたステータス（ステータス ID は Team の中でだけ一意なので key は `<teamId>/<statusId>`。複数の Team にまたがるときは名前に Team ID を添える）、`phase` ならそのステータスの工程（Team の今の Work Item 設定で引く。
 工程のないステータスは `no-phase`）で分けます。`phase` で分けられるのはこの metric だけです。他の dimension は他の metric と同じく
 `asOf` の state で分けます。`phase` で分けるときは query の Team の Work Item 設定と tenant profile の工程名を読み、読めない
-runner では warning だけを返します。
+runner では warning だけを返します。日・週・月の bucket では、`asOf` の state から作った区間を各 bucket の期間で切り取って足します。
 
 ### SPI / CPI / EAC（EVM）
 

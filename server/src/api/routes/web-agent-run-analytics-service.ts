@@ -6,7 +6,6 @@ import {
   FACTORY_ANALYTICS_MAX_USAGE_RUNS,
   FACTORY_ANALYTICS_MAX_WORK_ITEMS,
   FACTORY_ANALYTICS_USAGE_TOP_WORK_ITEMS,
-  type AgentRunPullRequestStatus,
   type TeamFactoryAnalyticsResponse,
 } from '@mukuroji/contracts'
 import {
@@ -16,6 +15,7 @@ import {
   createAgentRunIntegrityError,
   isArtifactRepositoryAllowed,
   summarizeFactoryUsage,
+  selectLatestVerifiedPullRequests,
   summarizePullRequestLeadTimes,
   toAgentRunReport,
   type StoredAgentRunReport,
@@ -233,14 +233,8 @@ async function readPullRequestLeadTimes(
   const { artifactRepositories } = await workItemDependencies.agentRuns.getSettings(principal.directoryId, teamId)
   const statuses = await mapInOrderWithConcurrency(withUrls, analyticsReadConcurrency, ({ workItemId, history }) =>
     workItemDependencies.agentRunArtifactStatuses.getStatuses(principal.directoryId, teamId, workItemId, history.pullRequestUrls))
-  // The same pull request may be named by several Work Items; it counts once.
-  const pullRequests = new Map<string, AgentRunPullRequestStatus>()
-  for (const status of statuses.flat()) {
-    if (status.verification !== 'verified' || status.pullRequest === undefined) continue
-    if (!isArtifactRepositoryAllowed(artifactRepositories, status.repository)) continue
-    pullRequests.set(`${status.provider}:${status.repository}#${status.number}`, status.pullRequest)
-  }
-  return summarizePullRequestLeadTimes([...pullRequests.values()], period.from, period.to)
+  const allowed = statuses.flat().filter((status) => isArtifactRepositoryAllowed(artifactRepositories, status.repository))
+  return summarizePullRequestLeadTimes(selectLatestVerifiedPullRequests(allowed), period.from, period.to)
 }
 
 /**
