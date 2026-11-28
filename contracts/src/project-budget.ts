@@ -57,7 +57,7 @@ export type ProjectBudgetAgentCost = {
   amountMinor?: number
   /** Major units of the budget currency per US dollar used; present only when `included`. */
   usdExchangeRate?: number
-  /** Agent Runs with a reported cost that were counted. */
+  /** Agent Runs with reported usage that were counted, including runs whose cost was zero. */
   runCount: number
   /**
    * True when the Project had more finished Agent Runs than one report reads, or a run had more
