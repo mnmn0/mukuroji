@@ -205,14 +205,14 @@ export function createWorkItemAgentRunsLabels(locale: Locale): WorkItemAgentRuns
       .replace('{tools}', duration(activity?.toolDurationMs ?? 0))
       .replace('{wait}', duration((activity?.approvalWait.durationMs ?? 0) + (activity?.promptWait.durationMs ?? 0))),
     formatTool: (tool) => [
-      t('workItems.agentRuns.activityTool')
+      t(tool.count === 1 ? 'workItems.agentRuns.activityToolOne' : 'workItems.agentRuns.activityTool')
         .replace('{name}', toolName(tool))
         .replace('{duration}', duration(tool.durationMs))
         .replace('{count}', integer.format(tool.count)),
       tool.failureCount > 0 ? t('workItems.agentRuns.activityToolFailures').replace('{count}', integer.format(tool.failureCount)) : undefined,
     ].filter((part) => part !== undefined).join(' · '),
     formatModel: (model) => [
-      t('workItems.agentRuns.modelLine')
+      t(model.requestCount === 1 ? 'workItems.agentRuns.modelLineOne' : 'workItems.agentRuns.modelLine')
         .replace('{model}', model.model)
         .replace('{tokens}', integer.format(model.inputTokens + model.outputTokens + model.cacheReadTokens + model.cacheCreationTokens))
         .replace('{count}', integer.format(model.requestCount))

@@ -208,7 +208,7 @@ export function compareFactoryWorkItems(
         waitDurationMs: (item.activity?.approvalWait.durationMs ?? 0) + (item.activity?.promptWait.durationMs ?? 0),
         tokens: item.tokens,
         ...(includeCost && item.usage?.estimatedCostMicroUsd !== undefined ? { estimatedCostMicroUsd: item.usage.estimatedCostMicroUsd } : {}),
-        ratio: round1(ratio),
+        ratio,
         models: item.usage?.models ?? [],
         runtimes: AGENT_RUN_RUNTIMES.filter((runtime) => runtimes.has(runtime)),
         assigneeUserId: newest.assigneeUserId,
@@ -227,7 +227,8 @@ export function compareFactoryWorkItems(
       .slice(0, FACTORY_ANALYTICS_MAX_COMPARISON_GROUPS),
     outliers: outliers
       .sort((left, right) => right.ratio - left.ratio || left.workItemId.localeCompare(right.workItemId))
-      .slice(0, FACTORY_ANALYTICS_MAX_OUTLIERS),
+      .slice(0, FACTORY_ANALYTICS_MAX_OUTLIERS)
+      .map((outlier) => ({ ...outlier, ratio: round1(outlier.ratio) })),
     unsizedWorkItems: totals.filter((item) => item.entry.value === undefined).length,
   }
 }

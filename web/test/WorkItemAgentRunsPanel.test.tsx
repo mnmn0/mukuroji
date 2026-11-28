@@ -181,6 +181,21 @@ describe('Agent Run API', () => {
     await expect(listWorkItemAgentRuns('token', 'core', 'task')).rejects.toMatchObject({ status: 502 })
   })
 
+  test('shows the model time of a run that sent requests but no activity', () => {
+    const usage = {
+      inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 2,
+      models: ['claude-sonnet-5-5'], aiDurationMs: 4_000, byModel: [], hasMore: false,
+    }
+    const [active, ...rest] = agentRunFixtures
+    if (!active) throw new Error('Expected a fixture run.')
+    const runs = [{ ...active, usage, activity: undefined }, ...rest.map((run) => ({ ...run, usage, activity: undefined }))]
+    const html = renderToStaticMarkup(
+      <WorkItemAgentRunsPanel formatDateTime={(value) => value} labels={labels} runs={runs} />,
+    )
+    expect(html.split('data-testid="agent-run-activity"').length - 1).toBe(runs.length)
+    expect(html).toContain('model 4 s')
+  })
+
   test('shows token usage per run and for the Work Item, with the cost only when the server sends it', async () => {
     const usage = {
       inputTokens: 1_200, outputTokens: 300, cacheReadTokens: 40_000, cacheCreationTokens: 500, requestCount: 7,
@@ -242,8 +257,8 @@ describe('Agent Run API', () => {
     expect(html).toContain(labels.activityTitle)
     expect(html).toContain('Model 1 min 5 s · tools 3 min 20 s · waiting for approval 30 s · waiting for the next prompt 1 h 5 min')
     expect(html).toContain('Bash: 3 min 10 s · 2 calls · 1 failed')
-    expect(html).toContain('MCP github/get_issue: 10 s · 1 calls')
-    expect(html).toContain('claude-sonnet-5-5: 700 tokens · 1 requests · 1 min 0 s')
+    expect(html).toContain('MCP github/get_issue: 10 s · 1 call')
+    expect(html).toContain('claude-sonnet-5-5: 700 tokens · 1 request · 1 min 0 s')
     expect(html).toContain('data-testid="agent-run-activity"')
 
     globalThis.fetch = async () => Response.json({ items: runs, hasMore: false, usageTotal: usage, activityTotal: activity })

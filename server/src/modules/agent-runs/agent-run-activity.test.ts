@@ -162,6 +162,14 @@ describe('Factory comparison', () => {
     expect(compareFactoryWorkItems({ kind: 'size' }, [], true)).toBeUndefined()
   })
 
+  test('picks the outliers by their unrounded ratio and rounds only the returned ones', () => {
+    const normal = Array.from({ length: 22 }, (_, index) => entry(`n${String(index).padStart(2, '0')}`, 60, 100))
+    const close = Array.from({ length: 20 }, (_, index) => entry(`c${String(index).padStart(2, '0')}`, 60, 201))
+    const comparison = compareFactoryWorkItems({ kind: 'size' }, [...normal, ...close, entry('z-highest', 60, 204)], false)
+    expect(comparison?.outliers).toHaveLength(20)
+    expect(comparison?.outliers[0]).toMatchObject({ workItemId: 'z-highest', ratio: 2 })
+  })
+
   test('keeps a select option named none apart from Work Items without a value', () => {
     const axis: FactoryAnalyticsComparisonAxis = { kind: 'custom-field', customFieldId: 'story.points' }
     const comparison = compareFactoryWorkItems(axis, [

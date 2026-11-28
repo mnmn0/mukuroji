@@ -183,14 +183,20 @@ function readAnyValue(value: unknown): string | number | boolean | undefined {
  *
  * @param attributes - OTLP `KeyValue` list.
  * @param keep - Attribute keys to read.
+ * @param malformed - Receives the kept keys whose value is present but not a scalar.
  * @returns Scalars by key.
  */
-function readAttributes(attributes: unknown[], keep: ReadonlySet<string>): Map<string, string | number | boolean> {
+function readAttributes(
+  attributes: unknown[],
+  keep: ReadonlySet<string>,
+  malformed?: Set<string>,
+): Map<string, string | number | boolean> {
   const values = new Map<string, string | number | boolean>()
   for (const attribute of attributes) {
     if (!isRecord(attribute) || typeof attribute.key !== 'string' || !keep.has(attribute.key)) continue
     const value = readAnyValue(attribute.value)
     if (value !== undefined) values.set(attribute.key, value)
+    else malformed?.add(attribute.key)
   }
   return values
 }
@@ -238,6 +244,22 @@ function readNonNegativeNumber(value: string | number | boolean | undefined, max
     : typeof value === 'string' && /^\d+(\.\d+)?([eE][+-]?\d+)?$/u.test(value.trim()) ? Number(value) : Number.NaN
   if (!Number.isFinite(number) || number < 0 || number > maximum) return undefined
   return number
+}
+
+/**
+ * Reads the `duration_ms` attribute. An absent value counts as 0, but a value that is present and
+ * not a scalar makes the record malformed.
+ *
+ * @param attributes - Scalar attributes of the record.
+ * @param malformedAttributes - Keys whose value was present but not a scalar.
+ * @returns Milliseconds, or undefined when malformed or out of range.
+ */
+function readDurationMs(
+  attributes: ReadonlyMap<string, string | number | boolean>,
+  malformedAttributes: ReadonlySet<string>,
+): number | undefined {
+  if (malformedAttributes.has('duration_ms')) return undefined
+  return readNonNegativeNumber(attributes.get('duration_ms'), maximumEventDurationMs)
 }
 
 /**
@@ -337,7 +359,8 @@ export function parseAgentTelemetryLogs(body: unknown, now: Date): ParsedAgentTe
           rejectedRecords += 1
           continue
         }
-        const attributes = readAttributes(readArray(record, 'attributes'), logAttributeKeys)
+        const malformedAttributes = new Set<string>()
+        const attributes = readAttributes(readArray(record, 'attributes'), logAttributeKeys, malformedAttributes)
         const body = readAnyValue(record.body)
         const eventName = attributes.get('event.name')
         const isUsage = (typeof body === 'string' && apiRequestEventNames.has(body)) ||
@@ -349,7 +372,7 @@ export function parseAgentTelemetryLogs(body: unknown, now: Date): ParsedAgentTe
           const kind = (typeof eventName === 'string' ? activityEventKinds.get(eventName) : undefined) ??
             (typeof body === 'string' ? activityEventKinds.get(body) : undefined)
           if (kind === undefined) continue
-          const activity = readActivityEvent(kind, record, attributes, resourceAttributes, instanceIdHash)
+          const activity = readActivityEvent(kind, record, attributes, malformedAttributes, resourceAttributes, instanceIdHash)
           if (activity === undefined) {
             rejectedRecords += 1
             continue
@@ -372,7 +395,7 @@ export function parseAgentTelemetryLogs(body: unknown, now: Date): ParsedAgentTe
         const costUsd = !attributes.has('cost_usd_micros')
           ? readNonNegativeNumber(attributes.get('cost_usd'), maximumCostUsdPerRequest)
           : costMicros === undefined ? undefined : costMicros / 1_000_000
-        const durationMs = readNonNegativeNumber(attributes.get('duration_ms'), maximumEventDurationMs)
+        const durationMs = readDurationMs(attributes, malformedAttributes)
         if (
           occurredAtMs === undefined || durationMs === undefined ||
           inputTokens === undefined || outputTokens === undefined ||
@@ -451,6 +474,7 @@ function readTimelinePoint(
  * @param kind - Event kind.
  * @param record - OTLP `LogRecord`.
  * @param attributes - Allowlisted record attributes.
+ * @param malformedAttributes - Allowlisted keys whose value was present but not a scalar.
  * @param resourceAttributes - Allowlisted resource attributes.
  * @param instanceIdHash - Instance hash of the record.
  * @returns The event, or undefined when the record is malformed.
@@ -459,6 +483,7 @@ function readActivityEvent(
   kind: AgentActivityEventKind,
   record: Record<string, unknown>,
   attributes: ReadonlyMap<string, string | number | boolean>,
+  malformedAttributes: ReadonlySet<string>,
   resourceAttributes: ReadonlyMap<string, string | number | boolean>,
   instanceIdHash: string,
 ): AgentActivityEvent | undefined {
@@ -475,7 +500,7 @@ function readActivityEvent(
     mcpToolName: attributes.get('mcp_tool_name'),
     skillName: attributes.get('skill_name'),
   })
-  const durationMs = readNonNegativeNumber(attributes.get('duration_ms'), maximumEventDurationMs)
+  const durationMs = readDurationMs(attributes, malformedAttributes)
   if (tool === undefined || durationMs === undefined) return undefined
   const success = attributes.get('success')
   return {

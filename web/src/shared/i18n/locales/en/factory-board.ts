@@ -119,6 +119,8 @@ export const factoryBoardMessages = {
   'factoryBoard.analytics.comparisonAxis': 'Compare by',
   'factoryBoard.analytics.comparisonAxisSize': 'Estimate size',
   'factoryBoard.analytics.comparisonFieldsError': 'Could not load the custom fields to compare by.',
+  'factoryBoard.analytics.comparisonNoValue': 'No value',
+  'factoryBoard.analytics.comparisonBackToSize': 'Compare by estimate size',
   'factoryBoard.analytics.comparisonGroups': 'Groups',
   'factoryBoard.analytics.comparisonOutliers': 'Tasks far above their group',
   'factoryBoard.analytics.comparisonNoOutliers': 'No task is far above its group.',

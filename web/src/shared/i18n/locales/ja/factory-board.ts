@@ -119,6 +119,8 @@ export const factoryBoardMessages = {
   'factoryBoard.analytics.comparisonAxis': '比べる軸',
   'factoryBoard.analytics.comparisonAxisSize': '見積もりの規模',
   'factoryBoard.analytics.comparisonFieldsError': '比べる軸に使う custom field を読み込めませんでした。',
+  'factoryBoard.analytics.comparisonNoValue': '値なし',
+  'factoryBoard.analytics.comparisonBackToSize': '見積もりの規模で比べる',
   'factoryBoard.analytics.comparisonGroups': 'グループ',
   'factoryBoard.analytics.comparisonOutliers': 'グループより大きく外れたタスク',
   'factoryBoard.analytics.comparisonNoOutliers': '大きく外れたタスクはありません。',

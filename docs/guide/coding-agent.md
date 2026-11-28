@@ -145,7 +145,8 @@ Claude Code の OpenTelemetry を Mukuroji に送るよう設定すると、タ�
 
 - 値は、Run が動いていた間に同じ agent（instance ID）から届いた分を時刻で割り当てたものです。Run を始める前や
   終えた後の会話の分は、どのタスクにも入りません。
-- 送られるのはトークン数・推定費用・model 名・時刻だけで、prompt や会話の内容は保存されません。
+- 保存されるのはトークン数・推定費用・model 名・時刻、応答や tool の所要時間、tool・MCP server・skill の名前と成否、
+  session ID のハッシュだけです。prompt、会話の内容、tool の入力は保存されません。
 - 送信には MCP に設定している自分用 token をそのまま使います（`work-items:write`）。Claude Code はこの token を
   すべての OpenTelemetry の送信先に付けるので、metrics や traces を別の collector に送っている場合は設定しないで
   ください。

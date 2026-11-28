@@ -217,7 +217,7 @@ export function WorkItemAgentRunsPanel({
           {active.usage ? (
             <p className="text-xs font-medium text-[var(--workbench-muted)]" data-testid="agent-run-usage">{labels.formatUsageCompact(active.usage)}</p>
           ) : null}
-          {active.activity ? (
+          {active.activity || (active.usage?.aiDurationMs ?? 0) > 0 ? (
             <p className="text-xs font-medium text-[var(--workbench-muted)]" data-testid="agent-run-activity">{labels.formatActivityCompact(active.usage, active.activity)}</p>
           ) : null}
           {active.stalled ? (
@@ -241,7 +241,7 @@ export function WorkItemAgentRunsPanel({
                   {run.finishedAt ? ` – ${formatDateTime(run.finishedAt)}` : ''}
                 </span>
                 {run.usage ? <span className="whitespace-nowrap" data-testid="agent-run-usage">{labels.formatUsageCompact(run.usage)}</span> : null}
-                {run.activity ? <span className="min-w-0 [overflow-wrap:anywhere]" data-testid="agent-run-activity">{labels.formatActivityCompact(run.usage, run.activity)}</span> : null}
+                {run.activity || (run.usage?.aiDurationMs ?? 0) > 0 ? <span className="min-w-0 [overflow-wrap:anywhere]" data-testid="agent-run-activity">{labels.formatActivityCompact(run.usage, run.activity)}</span> : null}
                 {run.startedBy ? (
                   <span className="min-w-0 [overflow-wrap:anywhere]" data-testid="agent-run-started-by" title={run.startedBy.instanceIdHash}>
                     {`${labels.startedByCredential}: ${formatAgentRunCredential(run.startedBy)} · ${labels.startedByInstance}: ${shortenAgentInstanceHash(run.startedBy.instanceIdHash)}`}

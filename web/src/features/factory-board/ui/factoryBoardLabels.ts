@@ -346,6 +346,10 @@ export type FactoryAnalyticsLabels = {
   comparisonAxisSize: string
   /** Shown in place of the axis selector when the custom fields could not be read. */
   comparisonFieldsError: string
+  /** Names the group of Work Items that have no value in the compared custom field. */
+  comparisonNoValue: string
+  /** Button that goes back to comparing by estimate size after a custom-field comparison failed to load. */
+  comparisonBackToSize: string
   /** Heading of the comparison groups. */
   comparisonGroups: string
   /** Heading of the outliers. */
@@ -448,6 +452,8 @@ export function createFactoryAnalyticsLabels(locale: Locale): FactoryAnalyticsLa
     comparisonAxis: t('factoryBoard.analytics.comparisonAxis'),
     comparisonAxisSize: t('factoryBoard.analytics.comparisonAxisSize'),
     comparisonFieldsError: t('factoryBoard.analytics.comparisonFieldsError'),
+    comparisonNoValue: t('factoryBoard.analytics.comparisonNoValue'),
+    comparisonBackToSize: t('factoryBoard.analytics.comparisonBackToSize'),
     comparisonGroups: t('factoryBoard.analytics.comparisonGroups'),
     comparisonOutliers: t('factoryBoard.analytics.comparisonOutliers'),
     comparisonNoOutliers: t('factoryBoard.analytics.comparisonNoOutliers'),

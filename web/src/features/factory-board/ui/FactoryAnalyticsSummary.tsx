@@ -252,7 +252,7 @@ function ComparisonSummary({ comparison, labels, formatNumber, fields, compareFi
    * @returns Display text.
    */
   const valueName = (value: string, missing = false) => {
-    if (missing) return labels.sizeBands.none
+    if (missing) return comparison.axis.kind === 'size' ? labels.sizeBands.none : labels.comparisonNoValue
     if (comparison.axis.kind === 'size') {
       const band = WORK_ITEM_SIZE_BANDS.find((candidate) => candidate === value)
       return band === undefined ? value : labels.sizeBands[band]
@@ -450,6 +450,9 @@ export function FactoryAnalyticsSummary({
         <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
           <span>{errorMessage}</span>
           <button className="workbench-button-secondary min-h-[44px] px-3" onClick={onRetry} type="button">{labels.retry}</button>
+          {compareFieldId !== undefined && onCompareFieldChange ? (
+            <button className="workbench-button-secondary min-h-[44px] px-3" onClick={() => onCompareFieldChange(undefined)} type="button">{labels.comparisonBackToSize}</button>
+          ) : null}
         </div>
       ) : !analytics ? (
         isLoading ? <p className="text-sm text-[var(--workbench-muted)]" role="status">{labels.loading}</p> : null

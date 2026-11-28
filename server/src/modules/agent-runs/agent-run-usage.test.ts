@@ -138,6 +138,27 @@ describe('agent telemetry parsing', () => {
     expect(parsed.events).toHaveLength(1)
   })
 
+  test('rejects a duration_ms that is present but not a scalar, and reads an absent one as 0', () => {
+    const toolResult = (durationMs: unknown): Record<string, unknown> => ({
+      timeUnixNano: nanos('2026-11-22T17:05:13Z'),
+      body: { stringValue: 'claude_code.tool_result' },
+      attributes: [
+        { key: 'event.name', value: { stringValue: 'tool_result' } },
+        { key: 'tool_name', value: { stringValue: 'Bash' } },
+        ...(durationMs === undefined ? [] : [{ key: 'duration_ms', value: durationMs }]),
+      ],
+    })
+    const malformed = { arrayValue: { values: [] } }
+    const parsed = parseAgentTelemetryLogs(exportOf([
+      apiRequest('2026-11-22T17:05:12Z', { duration_ms: malformed }),
+      toolResult(malformed),
+      toolResult(undefined),
+    ]), now)
+    expect(parsed.rejectedRecords).toBe(2)
+    expect(parsed.events).toEqual([])
+    expect(parsed.activityEvents.map((event) => event.durationMs)).toEqual([0])
+  })
+
   test('accepts nothing from an export resent after its receipt expired', () => {
     // The newest event the receiver accepts is 5 minutes ahead; the receipt outlives the window for it.
     const exported = exportOf([apiRequest('2026-11-22T18:05:00Z'), apiRequest('2026-11-15T18:00:01Z')])

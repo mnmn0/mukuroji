@@ -282,6 +282,7 @@ function comparisonValue(workItem: VisibleWorkItem, axis: FactoryAnalyticsCompar
     const band = workItemSizeBand(workItem.plannedEffortMinutes)
     return band === 'none' ? undefined : band
   }
+  if (!Object.hasOwn(workItem.customFieldValues, axis.customFieldId)) return undefined
   const value = workItem.customFieldValues[axis.customFieldId]
   if (value === undefined || value === '' || (Array.isArray(value) && value.length === 0)) return undefined
   return Array.isArray(value) ? [...value].sort().join(', ') : String(value)

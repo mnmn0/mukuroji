@@ -85,6 +85,7 @@ custom field がある。費用は「なるべく安く」が方針。
 - 書き込みは 1 export あたり activity の transaction が 1 回（99 行ごと）、cursor の読み 1 回と更新が session ごとに 1 回増える。
   同時 10 session・60 秒間隔なら月 $1 未満の見込み（DynamoDB の on-demand 書き込みが主）。
 - 待ち時間は推定で、同じ session で sub-agent が並行して動いている間の承認は、他の agent の event からの間隔になり短めに出る。
+- 待ちは終わった時刻の bucket に全量を入れるので、同じ session で前の Run の最後の event から次の Run の最初の prompt までの間隔（2 時間以内）は、後の Run の待ちに入る。受信時には Run の期間が分からず、区間ごとに行を分けると書き込みが増えるため、この誤差は受け入れる。
   席を外した 2 時間超の間隔は数えない。
 - Factory analytics は Run ごとに activity の Query が 1 回増え、最大 300 回。
 - 更新した文書：`docs/coding-agent-mcp.md`、`docs/guide/coding-agent.md`、`docs/software-factory.md`、`docs/analytics.md`。

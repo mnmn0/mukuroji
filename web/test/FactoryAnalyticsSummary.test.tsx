@@ -162,6 +162,7 @@ describe('Factory analytics time breakdown and comparison', () => {
     expect(html).toContain('中央値の 4.6 倍')
     expect(html).toContain('見積もりや値がないタスク 4 件は比べていません。')
     expect(html).toContain('Story points')
+    expect(html).toMatch(/比べる軸<select[^>]*id="([^"]+)"/u)
   })
   test('names an option whose ID is none apart from the group without a value', () => {
     const group = factoryAnalyticsWithUsageFixture.comparison?.groups[0]
@@ -190,7 +191,53 @@ describe('Factory analytics time breakdown and comparison', () => {
       />,
     )
     expect(html).toContain('タスク ・ポイントなし: 3 件')
+    expect(html).toContain('タスク ・値なし: 2 件')
+    expect(html).not.toContain(`タスク ・${createFactoryAnalyticsLabels('ja').sizeBands.none}: 2 件`)
+  })
+
+  test('names the group without an estimate on the size axis', () => {
+    const group = factoryAnalyticsWithUsageFixture.comparison?.groups[0]
+    if (!group || !factoryAnalyticsWithUsageFixture.comparison) throw new Error('fixture has no group')
+    const analytics = {
+      ...factoryAnalyticsWithUsageFixture,
+      comparison: {
+        ...factoryAnalyticsWithUsageFixture.comparison,
+        axis: { kind: 'size' as const },
+        groups: [{ ...group, value: 'none', missingValue: true as const, workItemCount: 2 }],
+        outliers: [],
+      },
+    }
+    const html = renderToStaticMarkup(
+      <FactoryAnalyticsSummary
+        analytics={analytics}
+        formatNumber={(value) => String(value)}
+        isLoading={false}
+        labels={createFactoryAnalyticsLabels('ja')}
+        onPeriodDaysChange={() => undefined}
+        onRetry={() => undefined}
+        periodDays={30}
+        workItemTypeNames={{ task: 'タスク' }}
+      />,
+    )
     expect(html).toContain(`タスク ・${createFactoryAnalyticsLabels('ja').sizeBands.none}: 2 件`)
+  })
+
+  test('lets the viewer go back to the size axis when a custom-field comparison failed to load', () => {
+    const html = renderToStaticMarkup(
+      <FactoryAnalyticsSummary
+        compareFieldId="points"
+        errorMessage="読み込めませんでした"
+        formatNumber={(value) => String(value)}
+        isLoading={false}
+        labels={createFactoryAnalyticsLabels('ja')}
+        onCompareFieldChange={() => undefined}
+        onPeriodDaysChange={() => undefined}
+        onRetry={() => undefined}
+        periodDays={30}
+        workItemTypeNames={{}}
+      />,
+    )
+    expect(html).toContain('見積もりの規模で比べる')
   })
 
   test('says why the axis selector is missing when the custom fields could not be read, and reads them again', () => {
@@ -211,6 +258,6 @@ describe('Factory analytics time breakdown and comparison', () => {
     )
     expect(html).toContain('比べる軸に使う custom field を読み込めませんでした。')
     expect(html).toContain('role="alert"')
-    expect(html).not.toContain('比べる軸</label>')
+    expect(html).not.toMatch(/比べる軸<select/u)
   })
 })
