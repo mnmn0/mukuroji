@@ -1,0 +1,683 @@
+import {
+  GetCommand,
+  QueryCommand,
+  TransactWriteCommand,
+  type DynamoDBDocumentClient,
+  type TransactWriteCommandInput,
+} from '@aws-sdk/lib-dynamodb'
+import {
+  parseProjectDecisionEntry,
+  PROJECT_DECISION_LOG_MAX_ENTRIES,
+  type ProjectDecisionEntry,
+} from '@mukuroji/contracts'
+import { createAuditFieldChanges, createMutationAuditEventPut, type MutationAuditContext } from '../../../audit'
+import { ProjectDataError } from '../../../directory'
+import type {
+  CreateProjectDecisionEntryStoreInput,
+  ProjectDecisionEntryRecord,
+  ProjectDecisionLogScope,
+  ProjectDecisionLogStore as LogStore,
+  TeamProjectDecisionEntry,
+  UpdateProjectDecisionEntryStoreInput,
+} from '../../application/project-decision-log-use-cases'
+
+/** DynamoDB condition checks that pin the caller's authorization in the same transaction. */
+export type ProjectDecisionLogCallerAuthorizationCheck = NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+
+/** Decision log persistence bound to DynamoDB authorization fences and the request audit context. */
+export type ProjectDecisionLogStore = LogStore<ProjectDecisionLogCallerAuthorizationCheck, MutationAuditContext>
+
+/** Creation input bound to DynamoDB fences. */
+type CreateInput = CreateProjectDecisionEntryStoreInput<ProjectDecisionLogCallerAuthorizationCheck, MutationAuditContext>
+/** Replacement input bound to DynamoDB fences. */
+type UpdateInput = UpdateProjectDecisionEntryStoreInput<ProjectDecisionLogCallerAuthorizationCheck, MutationAuditContext>
+
+/** Planning-table record type of one decision. */
+const ENTRY_TYPE = 'project-decision-entry'
+/** Planning-table record type of the per-Project decision counter. */
+const COUNTER_TYPE = 'project-decision-log'
+/** Schema version of the counter and decision rows. */
+const SCHEMA_VERSION = 1
+/** Fields whose changes are recorded in audit events. */
+const AUDIT_FIELDS = [
+  'title',
+  'content',
+  'rationale',
+  'deciderMemberIds',
+  'deciderNote',
+  'decidedAt',
+  'relatedWorkItemIds',
+  'sources',
+  'status',
+  'supersededByEntryId',
+  'origin',
+  'revision',
+]
+/**
+ * Fields whose values are redacted in audit changes: free text, links that may name private
+ * channels, and member keys. The audit event's actor already records who changed the decision.
+ */
+const AUDIT_REDACTED_FIELDS = ['title', 'content', 'rationale', 'deciderMemberIds', 'deciderNote', 'sources']
+
+/**
+ * Builds the record key prefix of every decision log of a Team.
+ *
+ * @param teamId - Team ID.
+ * @returns The prefix, which ends with the separator before the Project ID.
+ */
+function teamPrefix(teamId: string) {
+  return `PROJECT_DECISION#${encodeURIComponent(teamId)}#`
+}
+
+/**
+ * Builds the record key prefix shared by a Project log's counter and decisions.
+ *
+ * @param scope - Team and Project.
+ * @returns The counter record key, which also prefixes every decision key.
+ */
+function counterKey(scope: Pick<ProjectDecisionLogScope, 'teamId' | 'projectId'>) {
+  return `${teamPrefix(scope.teamId)}${encodeURIComponent(scope.projectId)}`
+}
+
+/**
+ * Builds the record key of one decision.
+ *
+ * @param scope - Team and Project.
+ * @param entryId - Entry ID.
+ * @returns The decision record key.
+ */
+function entryKey(scope: Pick<ProjectDecisionLogScope, 'teamId' | 'projectId'>, entryId: string) {
+  return `${counterKey(scope)}#ENTRY#${encodeURIComponent(entryId)}`
+}
+
+/** Stores each decision as one Planning-table row, next to a per-Project decision counter (ADR 0114). */
+export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore {
+  /** Existing Planning table name. */
+  private readonly tableName: string
+  /** Injected document client. */
+  private readonly client: DynamoDBDocumentClient
+  /** Audit event table, when audit is configured. */
+  private readonly auditTableName: string | undefined
+
+  /**
+   * Creates the store.
+   *
+   * @param tableName - Existing Planning table.
+   * @param client - Configured document client.
+   * @param auditTableName - Audit event table written in the same transaction, when configured.
+   */
+  constructor(tableName: string, client: DynamoDBDocumentClient, auditTableName?: string) {
+    this.tableName = tableName
+    this.client = client
+    this.auditTableName = auditTableName
+  }
+
+  /**
+   * Reads every decision of a Project log, following every page.
+   *
+   * @param scope - Team and Project.
+   * @returns Every validated decision.
+   */
+  async list(scope: ProjectDecisionLogScope): Promise<ProjectDecisionEntry[]> {
+    const entries: ProjectDecisionEntry[] = []
+    for await (const row of this.queryRows(scope.workspaceId, `${counterKey(scope)}#ENTRY#`, true)) {
+      entries.push(parseStoredEntry(row, scope))
+      if (entries.length > PROJECT_DECISION_LOG_MAX_ENTRIES) throw corruptLog()
+    }
+    return entries
+  }
+
+  /**
+   * Reads every decision of the Team's Projects with eventually consistent reads, skipping the
+   * counter rows on the server.
+   *
+   * @param workspaceId - Workspace directory ID.
+   * @param teamId - Team ID.
+   * @returns Every validated decision with its Project.
+   */
+  async listTeam(workspaceId: string, teamId: string): Promise<TeamProjectDecisionEntry[]> {
+    const entries: TeamProjectDecisionEntry[] = []
+    for await (const row of this.queryRows(workspaceId, teamPrefix(teamId), false, ENTRY_TYPE)) {
+      const projectId = row.projectId
+      if (typeof projectId !== 'string') throw corruptLog()
+      entries.push({ projectId, entry: parseStoredEntry(row, { workspaceId, teamId, projectId }) })
+    }
+    return entries
+  }
+
+  /**
+   * Reads one decision with a strongly consistent read.
+   *
+   * @param scope - Team and Project.
+   * @param entryId - Entry ID.
+   * @returns The validated decision and its last update receipt, or `null`.
+   */
+  async get(scope: ProjectDecisionLogScope, entryId: string): Promise<ProjectDecisionEntryRecord | null> {
+    const row = await this.readRow(scope, entryId)
+    if (!row) return null
+    const entry = parseStoredEntry(row, scope)
+    const receipt = row.lastUpdateReceipt
+    const updateKey = row.lastUpdateKey
+    if (receipt !== undefined && typeof receipt !== 'string') throw corruptLog()
+    if (updateKey !== undefined && typeof updateKey !== 'string') throw corruptLog()
+    return {
+      entry,
+      ...(receipt === undefined ? {} : { lastUpdateReceipt: receipt }),
+      ...(updateKey === undefined ? {} : { lastUpdateKey: updateKey }),
+    }
+  }
+
+  /**
+   * Adds a decision and advances the per-Project counter in one transaction.
+   *
+   * @param input - Creation input.
+   * @returns The stored decision, or the decision an earlier identical request stored.
+   */
+  async create(input: CreateInput): Promise<ProjectDecisionEntry> {
+    requireCallerAuthorization(input.callerAuthorization)
+    const audit = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
+      directoryId: input.workspaceId,
+      eventType: 'project.decision_recorded',
+      entityType: 'project',
+      entityId: input.projectId,
+      target: { type: ENTRY_TYPE, id: input.entry.id },
+      action: 'decision_recorded',
+      occurredAt: input.now,
+      changes: createAuditFieldChanges(undefined, { ...input.entry }, AUDIT_FIELDS, AUDIT_REDACTED_FIELDS),
+      metadata: { origin: input.entry.origin, projectId: input.projectId, teamId: input.teamId },
+    })
+    try {
+      await this.client.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: {
+                ...rowIdentity(input, input.entry.id),
+                creationFingerprint: input.creationFingerprint,
+                ...input.entry,
+              },
+              ConditionExpression: 'attribute_not_exists(recordKey)',
+            },
+          },
+          {
+            Update: {
+              TableName: this.tableName,
+              Key: { workspaceId: input.workspaceId, recordKey: counterKey(input) },
+              UpdateExpression: 'SET #count = if_not_exists(#count, :zero) + :one, #type = if_not_exists(#type, :type), #teamId = if_not_exists(#teamId, :teamId), #projectId = if_not_exists(#projectId, :projectId), #schemaVersion = if_not_exists(#schemaVersion, :schemaVersion)',
+              // An existing counter must be this Project's, in the known schema, not negative, and
+              // below the limit.
+              ConditionExpression: 'attribute_not_exists(recordKey) OR (#type = :type AND #schemaVersion = :schemaVersion AND #teamId = :teamId AND #projectId = :projectId AND #count >= :zero AND #count < :max)',
+              ExpressionAttributeNames: {
+                '#count': 'entryCount',
+                '#type': 'entryType',
+                '#teamId': 'teamId',
+                '#projectId': 'projectId',
+                '#schemaVersion': 'schemaVersion',
+              },
+              ExpressionAttributeValues: {
+                ':zero': 0,
+                ':one': 1,
+                ':max': PROJECT_DECISION_LOG_MAX_ENTRIES,
+                ':type': COUNTER_TYPE,
+                ':teamId': input.teamId,
+                ':projectId': input.projectId,
+                ':schemaVersion': SCHEMA_VERSION,
+              },
+            },
+          },
+          ...input.callerAuthorization,
+          ...(audit ? [audit] : []),
+        ],
+      }))
+    } catch (error) {
+      const reasons = readCancellationCodes(error)
+      const transactionSize = 2 + input.callerAuthorization.length + (audit ? 1 : 0)
+      const callerAuthorizationFailed = reasons
+        ?.slice(2, 2 + input.callerAuthorization.length)
+        .includes('ConditionalCheckFailed') ?? false
+      // A caller whose access changed gets the same answer as for any other write, even when
+      // the decision or the counter also failed.
+      if (callerAuthorizationFailed) return storageFailure(error, transactionSize)
+      if (reasons?.[0] === 'ConditionalCheckFailed') {
+        // The entry ID comes from the request's idempotency key, so an existing decision means
+        // the same request was already applied, unless it carried different content.
+        const row = await this.readRow(input, input.entry.id)
+        if (row && row.creationFingerprint === input.creationFingerprint) return parseStoredEntry(row, input)
+        throw new ProjectDataError(409, 'ProjectDecisionEntryIdempotencyConflict', 'This Idempotency-Key was already used for another decision.')
+      }
+      if (reasons?.[1] === 'ConditionalCheckFailed') {
+        // Only a valid counter at the limit means the log is full; any other counter is corrupt.
+        if (isCounterAtLimit(await this.readCounter(input), input)) throw logFull()
+        throw corruptLog()
+      }
+      return storageFailure(error, transactionSize)
+    }
+    return input.entry
+  }
+
+  /**
+   * Replaces a decision when it still has the previous revision.
+   *
+   * @param input - Replacement input.
+   * @returns The stored decision.
+   */
+  async update(input: UpdateInput): Promise<ProjectDecisionEntry> {
+    requireCallerAuthorization(input.callerAuthorization)
+    const action = describeUpdateAction(input.previous, input.next)
+    const audit = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
+      directoryId: input.workspaceId,
+      eventType: `project.${action}`,
+      entityType: 'project',
+      entityId: input.projectId,
+      target: { type: ENTRY_TYPE, id: input.next.id },
+      action,
+      occurredAt: input.now,
+      changes: createAuditFieldChanges({ ...input.previous }, { ...input.next }, AUDIT_FIELDS, AUDIT_REDACTED_FIELDS),
+      metadata: { origin: input.next.origin, projectId: input.projectId, teamId: input.teamId },
+    })
+    const previousRow = await this.readRow(input, input.next.id)
+    const creationFingerprint = previousRow?.creationFingerprint
+    if (typeof creationFingerprint !== 'string') {
+      throw new ProjectDataError(409, 'ProjectDecisionEntryConflict', 'The decision changed. Reload and try again.')
+    }
+    try {
+      await this.client.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: {
+                ...rowIdentity(input, input.next.id),
+                creationFingerprint,
+                lastUpdateReceipt: input.updateReceipt,
+                lastUpdateKey: input.updateKey,
+                ...input.next,
+              },
+              ConditionExpression: '#type = :type AND #revision = :revision',
+              ExpressionAttributeNames: { '#type': 'entryType', '#revision': 'revision' },
+              ExpressionAttributeValues: { ':type': ENTRY_TYPE, ':revision': input.previous.revision },
+            },
+          },
+          ...input.callerAuthorization,
+          ...(audit ? [audit] : []),
+        ],
+      }))
+    } catch (error) {
+      return storageFailure(error, 1 + input.callerAuthorization.length + (audit ? 1 : 0))
+    }
+    return input.next
+  }
+
+  /**
+   * Reads every row under a record key prefix, following every page.
+   *
+   * @param workspaceId - Workspace directory ID.
+   * @param prefix - Record key prefix.
+   * @param consistentRead - Whether to read strongly consistent.
+   * @param entryType - Record type the server keeps, when only one type is wanted.
+   * @returns The raw rows.
+   */
+  private async *queryRows(
+    workspaceId: string,
+    prefix: string,
+    consistentRead: boolean,
+    entryType?: string,
+  ): AsyncGenerator<Record<string, unknown>> {
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const page = await this.client.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: '#workspaceId = :workspaceId AND begins_with(#recordKey, :prefix)',
+        ...(entryType === undefined ? {} : { FilterExpression: '#entryType = :entryType' }),
+        ExpressionAttributeNames: {
+          '#workspaceId': 'workspaceId',
+          '#recordKey': 'recordKey',
+          ...(entryType === undefined ? {} : { '#entryType': 'entryType' }),
+        },
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':prefix': prefix,
+          ...(entryType === undefined ? {} : { ':entryType': entryType }),
+        },
+        ConsistentRead: consistentRead,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      })).catch((error: unknown) => storageFailure(error))
+      yield* page.Items ?? []
+      exclusiveStartKey = page.LastEvaluatedKey
+    } while (exclusiveStartKey)
+  }
+
+  /**
+   * Reads the raw per-Project counter row with a strongly consistent read.
+   *
+   * @param scope - Team and Project.
+   * @returns The raw row, or `undefined`.
+   */
+  private async readCounter(scope: ProjectDecisionLogScope): Promise<Record<string, unknown> | undefined> {
+    const { Item: row } = await this.client
+      .send(new GetCommand({
+        TableName: this.tableName,
+        Key: { workspaceId: scope.workspaceId, recordKey: counterKey(scope) },
+        ConsistentRead: true,
+      }))
+      .catch((error: unknown) => storageFailure(error))
+    return row
+  }
+
+  /**
+   * Reads the raw row of one decision with a strongly consistent read.
+   *
+   * @param scope - Team and Project.
+   * @param entryId - Entry ID.
+   * @returns The raw row, or `undefined`.
+   */
+  private async readRow(scope: ProjectDecisionLogScope, entryId: string): Promise<Record<string, unknown> | undefined> {
+    const { Item: row } = await this.client
+      .send(new GetCommand({
+        TableName: this.tableName,
+        Key: { workspaceId: scope.workspaceId, recordKey: entryKey(scope, entryId) },
+        ConsistentRead: true,
+      }))
+      .catch((error: unknown) => storageFailure(error))
+    return row
+  }
+}
+
+/** Isolated store for route and application tests. */
+export class InMemoryProjectDecisionLogStore implements ProjectDecisionLogStore {
+  /** Decisions and their creation and update receipts keyed by Workspace, Team, Project, and entry. */
+  private readonly rows = new Map<string, {
+    scope: ProjectDecisionLogScope
+    entry: ProjectDecisionEntry
+    creationFingerprint: string
+    lastUpdateReceipt?: string
+    lastUpdateKey?: string
+  }>()
+
+  /**
+   * Reads copies of every decision of a Project log.
+   *
+   * @param scope - Team and Project.
+   * @returns The decisions.
+   */
+  async list(scope: ProjectDecisionLogScope): Promise<ProjectDecisionEntry[]> {
+    return this.rowsOf(scope).map((row) => structuredClone(row.entry))
+  }
+
+  /**
+   * Reads copies of every decision of a Team.
+   *
+   * @param workspaceId - Workspace directory ID.
+   * @param teamId - Team ID.
+   * @returns The decisions with their Projects.
+   */
+  async listTeam(workspaceId: string, teamId: string): Promise<TeamProjectDecisionEntry[]> {
+    return [...this.rows.values()]
+      .filter((row) => row.scope.workspaceId === workspaceId && row.scope.teamId === teamId)
+      .map((row) => ({ projectId: row.scope.projectId, entry: structuredClone(row.entry) }))
+  }
+
+  /**
+   * Selects the stored rows of a Project log.
+   *
+   * @param scope - Team and Project.
+   * @returns The rows, not copied.
+   */
+  private rowsOf(scope: ProjectDecisionLogScope) {
+    return [...this.rows.values()].filter((row) =>
+      row.scope.workspaceId === scope.workspaceId &&
+      row.scope.teamId === scope.teamId &&
+      row.scope.projectId === scope.projectId)
+  }
+
+  /**
+   * Reads a copy of one decision.
+   *
+   * @param scope - Team and Project.
+   * @param entryId - Entry ID.
+   * @returns The decision and its last update receipt, or `null`.
+   */
+  async get(scope: ProjectDecisionLogScope, entryId: string): Promise<ProjectDecisionEntryRecord | null> {
+    const row = this.rows.get(memoryKey(scope, entryId))
+    if (!row) return null
+    return {
+      entry: structuredClone(row.entry),
+      ...(row.lastUpdateReceipt === undefined ? {} : { lastUpdateReceipt: row.lastUpdateReceipt }),
+      ...(row.lastUpdateKey === undefined ? {} : { lastUpdateKey: row.lastUpdateKey }),
+    }
+  }
+
+  /**
+   * Adds a decision.
+   *
+   * @param input - Creation input.
+   * @returns The stored decision, or the decision an earlier identical request stored.
+   */
+  async create(input: CreateInput): Promise<ProjectDecisionEntry> {
+    requireCallerAuthorization(input.callerAuthorization)
+    const key = memoryKey(input, input.entry.id)
+    const existing = this.rows.get(key)
+    if (existing) {
+      if (existing.creationFingerprint === input.creationFingerprint) return structuredClone(existing.entry)
+      throw new ProjectDataError(409, 'ProjectDecisionEntryIdempotencyConflict', 'This Idempotency-Key was already used for another decision.')
+    }
+    // Counting and adding happen without an await in between, so concurrent creates cannot both
+    // pass the limit or the duplicate check.
+    if (this.rowsOf(input).length >= PROJECT_DECISION_LOG_MAX_ENTRIES) throw logFull()
+    this.rows.set(key, {
+      scope: { workspaceId: input.workspaceId, teamId: input.teamId, projectId: input.projectId },
+      entry: structuredClone(input.entry),
+      creationFingerprint: input.creationFingerprint,
+    })
+    return input.entry
+  }
+
+  /**
+   * Replaces a decision when it still has the previous revision.
+   *
+   * @param input - Replacement input.
+   * @returns The stored decision.
+   */
+  async update(input: UpdateInput): Promise<ProjectDecisionEntry> {
+    requireCallerAuthorization(input.callerAuthorization)
+    const key = memoryKey(input, input.next.id)
+    const existing = this.rows.get(key)
+    if (!existing || existing.entry.revision !== input.previous.revision) {
+      throw new ProjectDataError(409, 'ProjectDecisionEntryConflict', 'The decision changed. Reload and try again.')
+    }
+    this.rows.set(key, {
+      scope: existing.scope,
+      entry: structuredClone(input.next),
+      creationFingerprint: existing.creationFingerprint,
+      lastUpdateReceipt: input.updateReceipt,
+      lastUpdateKey: input.updateKey,
+    })
+    return input.next
+  }
+}
+
+/**
+ * Builds the in-memory key of one decision.
+ *
+ * @param scope - Team and Project.
+ * @param entryId - Entry ID.
+ * @returns The key.
+ */
+function memoryKey(scope: ProjectDecisionLogScope, entryId: string) {
+  return JSON.stringify([scope.workspaceId, scope.teamId, scope.projectId, entryId])
+}
+
+/**
+ * Builds the identity attributes of one decision row.
+ *
+ * @param scope - Team and Project.
+ * @param entryId - Entry ID.
+ * @returns The key, record type, schema version, and owning Team and Project.
+ */
+function rowIdentity(scope: ProjectDecisionLogScope, entryId: string) {
+  return {
+    workspaceId: scope.workspaceId,
+    recordKey: entryKey(scope, entryId),
+    entryType: ENTRY_TYPE,
+    schemaVersion: SCHEMA_VERSION,
+    teamId: scope.teamId,
+    projectId: scope.projectId,
+  }
+}
+
+/**
+ * Names the audit action of a decision replacement.
+ *
+ * @param previous - Decision before the change.
+ * @param next - Decision after the change.
+ * @returns `decision_superseded`, `decision_withdrawn`, or `decision_reinstated` for a status
+ * change, else `decision_updated`.
+ */
+function describeUpdateAction(previous: ProjectDecisionEntry, next: ProjectDecisionEntry) {
+  if (previous.status !== next.status) {
+    if (next.status === 'superseded') return 'decision_superseded'
+    if (next.status === 'withdrawn') return 'decision_withdrawn'
+    return 'decision_reinstated'
+  }
+  return 'decision_updated'
+}
+
+/**
+ * Refuses a write without the caller's commit-time authorization fences.
+ *
+ * @param checks - Caller authorization checks.
+ */
+function requireCallerAuthorization(checks: readonly unknown[]) {
+  if (checks.length === 0) {
+    throw new ProjectDataError(503, 'ProjectDecisionLogAuthorizationUnavailable', 'Caller authorization is unavailable.')
+  }
+}
+
+/**
+ * Validates a stored decision row.
+ *
+ * @param row - Raw DynamoDB item.
+ * @param scope - Expected Workspace, Team, and Project.
+ * @returns The decision.
+ * @throws ProjectDataError when the row is malformed or belongs to another scope.
+ */
+function parseStoredEntry(row: Record<string, unknown>, scope: ProjectDecisionLogScope): ProjectDecisionEntry {
+  const entry = parseProjectDecisionEntry(row)
+  if (
+    !entry ||
+    row.workspaceId !== scope.workspaceId ||
+    row.recordKey !== entryKey(scope, entry.id) ||
+    row.entryType !== ENTRY_TYPE ||
+    row.schemaVersion !== SCHEMA_VERSION ||
+    row.teamId !== scope.teamId ||
+    row.projectId !== scope.projectId
+  ) {
+    throw corruptLog()
+  }
+  return entry
+}
+
+/**
+ * Tells whether a counter row belongs to the Project, has the known schema, and is at the limit.
+ *
+ * @param row - Raw counter row, or `undefined` when it is missing.
+ * @param scope - Team and Project the counter must belong to.
+ * @returns Whether the counter is valid and full.
+ */
+function isCounterAtLimit(row: Record<string, unknown> | undefined, scope: ProjectDecisionLogScope) {
+  return row !== undefined &&
+    row.entryType === COUNTER_TYPE &&
+    row.schemaVersion === SCHEMA_VERSION &&
+    row.teamId === scope.teamId &&
+    row.projectId === scope.projectId &&
+    typeof row.entryCount === 'number' &&
+    Number.isSafeInteger(row.entryCount) &&
+    row.entryCount >= PROJECT_DECISION_LOG_MAX_ENTRIES
+}
+
+/**
+ * Creates the error for a full decision log.
+ *
+ * @returns The error.
+ */
+function logFull() {
+  return new ProjectDataError(413, 'ProjectDecisionLogFull', `A Project decision log can hold at most ${PROJECT_DECISION_LOG_MAX_ENTRIES} decisions.`)
+}
+
+/**
+ * Creates the error for a malformed stored log.
+ *
+ * @returns The error.
+ */
+function corruptLog() {
+  return new ProjectDataError(502, 'ProjectDecisionLogCorruptState', 'The stored decision log is invalid.')
+}
+
+/**
+ * Reads the cancellation reason codes of a cancelled transaction.
+ *
+ * @param error - Thrown SDK error.
+ * @returns The codes in transaction order, or `undefined` for any other error.
+ */
+function readCancellationCodes(error: unknown): (string | undefined)[] | undefined {
+  if (
+    typeof error !== 'object' ||
+    error === null ||
+    !('name' in error) ||
+    error.name !== 'TransactionCanceledException' ||
+    !('CancellationReasons' in error) ||
+    !Array.isArray(error.CancellationReasons)
+  ) {
+    return undefined
+  }
+  return error.CancellationReasons.map((reason: unknown) =>
+    typeof reason === 'object' && reason !== null && 'Code' in reason ? String(reason.Code) : undefined)
+}
+
+/** DynamoDB cancellation codes that mean the request may succeed if retried. */
+const TRANSIENT_CANCELLATION_CODES = ['TransactionConflict', 'ProvisionedThroughputExceeded', 'ThrottlingError']
+
+/**
+ * Maps a DynamoDB failure to a Project data error.
+ *
+ * A transaction cancelled only by failed conditions is a conflict. One cancelled by throttling
+ * or a competing transaction is retryable, and any other cancellation is a storage failure.
+ *
+ * @param error - Thrown SDK error.
+ * @param transactionSize - Number of items in the cancelled transaction, or 0 for a plain read.
+ * @returns Never; always throws.
+ */
+function storageFailure(error: unknown, transactionSize = 0): never {
+  if (error instanceof ProjectDataError) throw error
+  const codes = readCancellationCodes(error)
+  if (codes && transactionSize > 0 && codes.length === transactionSize) {
+    const isConditionOrNone = (code: string | undefined) => code === 'None' || code === 'ConditionalCheckFailed'
+    if (codes.includes('ConditionalCheckFailed') && codes.every(isConditionOrNone)) {
+      throw new ProjectDataError(409, 'ProjectDecisionEntryConflict', 'The decision or your permissions changed. Reload and try again.')
+    }
+    if (
+      codes.some((code) => code !== undefined && TRANSIENT_CANCELLATION_CODES.includes(code)) &&
+      codes.every((code) => isConditionOrNone(code) || (code !== undefined && TRANSIENT_CANCELLATION_CODES.includes(code)))
+    ) {
+      throw retryableFailure()
+    }
+  }
+  const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : undefined
+  if (
+    typeof name === 'string' &&
+    ['ProvisionedThroughputExceededException', 'ThrottlingException', 'RequestLimitExceeded', 'InternalServerError', 'TransactionInProgressException', 'TimeoutError'].includes(name)
+  ) {
+    throw retryableFailure()
+  }
+  throw new ProjectDataError(502, 'ProjectDecisionLogStorageFailure', 'Decision log storage request failed.')
+}
+
+/**
+ * Creates the error for a storage failure that may succeed when retried.
+ *
+ * @returns The error.
+ */
+function retryableFailure() {
+  return new ProjectDataError(503, 'ProjectDecisionLogRetryable', 'Decision log storage is temporarily unavailable.')
+}

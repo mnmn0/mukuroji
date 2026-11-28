@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(691)
-  expect(new Set(inventory).size).toBe(687)
+  expect(inventory).toHaveLength(695)
+  expect(new Set(inventory).size).toBe(691)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -62,6 +62,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/raid-log')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/raid-log/entries')
   expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/raid-log/entries/:entryId')
+  expect(inventory).toContain('GET /api/teams/:teamId/decision-log')
+  expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/decision-log')
+  expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/decision-log/entries')
+  expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/decision-log/entries/:entryId')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/status-report/pdf')
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/status-shares')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/status-shares')
@@ -247,6 +251,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'ccfa50380b28c7f91436aab436ff8651a16a60a29a626f2df9f8070feb6b0430',
+    'e9641b99a7966ec6835a1f9d76d452606e1ed065aa950c3e59da692718e739f8',
   )
 })

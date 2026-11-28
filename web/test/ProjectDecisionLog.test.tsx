@@ -1,0 +1,152 @@
+import { afterEach, describe, expect, test } from 'bun:test'
+import { renderToStaticMarkup } from 'react-dom/server'
+import type { ProjectDecisionEntry } from '@mukuroji/contracts'
+import { getTeamDecisionLog } from '../src/projects/api/decisionLog'
+import {
+  fromDateTimeLocalValue,
+  isAdrSourceUrl,
+  toProjectDecisionEntryInput,
+  toProjectDecisionFormValues,
+} from '../src/projects/model/projectDecisionForm'
+import { ProjectDecisionLogPanel } from '../src/projects/ui/ProjectDecisionLogPanel'
+import { createTranslator } from '../src/shared/i18n/i18n'
+
+const originalFetch = globalThis.fetch
+
+afterEach(() => {
+  globalThis.fetch = originalFetch
+})
+
+/** A recorded decision with every optional field. */
+const decision: ProjectDecisionEntry = {
+  id: 'd1',
+  title: '検索は S3 Vectors にする',
+  content: 'OpenSearch Serverless は使わない。',
+  rationale: '常時課金を避けるため。',
+  deciderMemberIds: ['pm@example.com'],
+  deciderNote: '顧客 A社 山田さん',
+  decidedAt: '2026-11-27T01:00:00.000Z',
+  relatedWorkItemIds: ['wi-1'],
+  sources: [
+    { url: 'https://example.slack.com/archives/C1/p1', label: 'Slack thread' },
+    { url: 'https://github.com/o/r/blob/main/docs/adr/0114-decision-log.md' },
+  ],
+  status: 'active',
+  origin: 'project',
+  recordedByMemberId: 'pm@example.com',
+  revision: 1,
+  createdAt: '2026-11-28T00:00:00.000Z',
+  updatedAt: '2026-11-28T00:00:00.000Z',
+}
+
+describe('decision form model', () => {
+  test('round-trips a decision through the form values', () => {
+    const values = toProjectDecisionFormValues(decision)
+    expect(fromDateTimeLocalValue(values.decidedAtLocal)).toBe('2026-11-27T01:00:00.000Z')
+    expect(toProjectDecisionEntryInput(values, 'project')).toEqual({
+      title: decision.title,
+      content: decision.content,
+      rationale: decision.rationale,
+      deciderMemberIds: decision.deciderMemberIds,
+      deciderNote: decision.deciderNote,
+      decidedAt: decision.decidedAt,
+      relatedWorkItemIds: decision.relatedWorkItemIds,
+      sources: decision.sources,
+      status: decision.status,
+      origin: decision.origin,
+    })
+  })
+
+  test('drops empty optional fields and empty source rows, and prefills a new decision', () => {
+    const values = toProjectDecisionFormValues(undefined, {
+      title: 'Work Item title',
+      relatedWorkItemIds: ['wi-1'],
+    }, new Date('2026-11-28T03:04:00.000Z'))
+    const input = toProjectDecisionEntryInput({
+      ...values,
+      content: ' 内容 ',
+      rationale: ' ',
+      sources: [{ url: ' ' }],
+      supersededByEntryId: 'd2',
+    }, 'work-item')
+    expect(input).toEqual({
+      title: 'Work Item title',
+      content: '内容',
+      decidedAt: '2026-11-28T03:04:00.000Z',
+      relatedWorkItemIds: ['wi-1'],
+      status: 'active',
+      origin: 'work-item',
+    })
+  })
+
+  test('recognizes ADR links', () => {
+    expect(isAdrSourceUrl('https://github.com/o/r/blob/main/docs/adr/0114-decision-log.md')).toBe(true)
+    expect(isAdrSourceUrl('https://github.com/o/r/issues/830')).toBe(false)
+    expect(isAdrSourceUrl('not a url')).toBe(false)
+  })
+})
+
+describe('Project decision log panel', () => {
+  test('shows what, why, who, related Work Items, and sources, marking ADR links', () => {
+    const html = renderToStaticMarkup(
+      <ProjectDecisionLogPanel
+        canEdit
+        entries={[decision, { ...decision, id: 'd0', title: '古い決定', status: 'superseded', supersededByEntryId: 'd1' }]}
+        formatDateTime={(value) => value.slice(0, 10)}
+        hasLoadError={false}
+        isLoading={false}
+        memberOptions={[{ id: 'pm@example.com', label: 'PM 佐藤' }]}
+        t={createTranslator('ja')}
+        workItemOptions={[{ id: 'wi-1', label: 'MUK-1 検索' }]}
+        onReload={() => undefined}
+        onSave={async () => undefined}
+      />,
+    )
+    expect(html).toContain('検索は S3 Vectors にする')
+    expect(html).toContain('常時課金を避けるため。')
+    expect(html).toContain('決めた人: PM 佐藤, 顧客 A社 山田さん')
+    expect(html).toContain('関連: MUK-1 検索')
+    expect(html).toContain('href="https://example.slack.com/archives/C1/p1"')
+    expect(html).toContain('ADR: ')
+    expect(html).toContain('rel="noopener noreferrer"')
+    // Superseded decisions are hidden until the viewer asks for them.
+    expect(html).not.toContain('古い決定')
+    expect(html).toContain('data-testid="project-decision-log-add"')
+  })
+
+  test('hides editing for a viewer', () => {
+    const html = renderToStaticMarkup(
+      <ProjectDecisionLogPanel
+        canEdit={false}
+        entries={[decision]}
+        formatDateTime={(value) => value}
+        hasLoadError={false}
+        isLoading={false}
+        memberOptions={[]}
+        t={createTranslator('en')}
+        onReload={() => undefined}
+        onSave={async () => undefined}
+      />,
+    )
+    expect(html).not.toContain('project-decision-log-add')
+    expect(html).not.toContain('project-decision-edit')
+  })
+})
+
+describe('Team decision log API', () => {
+  test('sends the filters and rejects a response for another Team', async () => {
+    const requested: string[] = []
+    globalThis.fetch = Object.assign(async (input: RequestInfo | URL) => {
+      requested.push(String(input))
+      return new Response(JSON.stringify({
+        teamId: 'core-team',
+        truncated: false,
+        items: [{ kind: 'decision', projectId: 'atlas', decidedAt: decision.decidedAt, entry: decision }],
+      }), { status: 200 })
+    }, { preconnect: originalFetch.preconnect })
+    const response = await getTeamDecisionLog('token', 'core-team', { keyword: 'S3', projectId: 'atlas' })
+    expect(response.items).toHaveLength(1)
+    expect(requested[0]).toContain('/teams/core-team/decision-log?q=S3&projectId=atlas')
+    await expect(getTeamDecisionLog('token', 'other-team', {})).rejects.toThrow()
+  })
+})

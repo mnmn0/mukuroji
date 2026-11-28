@@ -13,6 +13,10 @@ import {
   InMemoryProjectRaidLogStore,
 } from '../../modules/project-raid-log'
 import {
+  DynamoDbProjectDecisionLogStore,
+  InMemoryProjectDecisionLogStore,
+} from '../../modules/project-decision-log'
+import {
   DynamoDbProjectExpenseStore,
   InMemoryProjectExpenseStore,
 } from '../../modules/project-budget'
@@ -733,6 +737,11 @@ export function createProductionWorkItemDependencies(
       createDynamoDbDocumentClient(),
     ),
     projectRaidLogs: new DynamoDbProjectRaidLogStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      getConfiguredAuditTableName(),
+    ),
+    projectDecisionLogs: new DynamoDbProjectDecisionLogStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
       getConfiguredAuditTableName(),
@@ -2077,6 +2086,7 @@ export function createTestAppDependencies(): AppDependencies {
       updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
       savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
       projectRaidLogs: new InMemoryProjectRaidLogStore(),
+      projectDecisionLogs: new InMemoryProjectDecisionLogStore(),
       projectExpenses: new InMemoryProjectExpenseStore(),
       calendarFeeds: new InMemoryCalendarFeedStore(),
       projectStatusShares: new InMemoryProjectStatusShareStore(),
@@ -2225,6 +2235,7 @@ export function overrideAppDependencies(
       ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
       ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
       ...(overrides.projectRaidLogs ? { projectRaidLogs: overrides.projectRaidLogs } : {}),
+      ...(overrides.projectDecisionLogs ? { projectDecisionLogs: overrides.projectDecisionLogs } : {}),
       ...(overrides.projectExpenses ? { projectExpenses: overrides.projectExpenses } : {}),
       ...(overrides.calendarFeeds ? { calendarFeeds: overrides.calendarFeeds } : {}),
       ...(overrides.projectStatusShares ? { projectStatusShares: overrides.projectStatusShares } : {}),
