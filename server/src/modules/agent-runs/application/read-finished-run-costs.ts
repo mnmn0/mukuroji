@@ -61,6 +61,18 @@ export type FinishedRunCostReadPorts = {
   }>
 }
 
+/** Read progress of one finished-run group. */
+type FinishedRunGroupRead = {
+  /** Group of the index. */
+  group: (typeof FINISHED_RUN_GROUPS)[number]
+  /** Continuation of the next page; absent before the first page and after the last. */
+  cursor?: string
+  /** Whether the last page was read. */
+  done: boolean
+  /** Oldest finish time the group returned so far, epoch milliseconds. */
+  oldestRead: number
+}
+
 /** What a finished-run cost read returns. */
 export type FinishedRunCosts = {
   /** Runs with a reported cost, newest finish first. */
@@ -80,9 +92,9 @@ export type FinishedRunCosts = {
 /**
  * Reads the estimated cost of the Agent Runs of a Team that finished within an instant range on
  * given Work Items, attributing usage to each run the same way as ADR 0061. Runs without a reported
- * cost are left out. The read stops after `maxRuns` runs with a cost or
- * {@link MAX_FINISHED_RUN_INDEX_PAGES} index pages and then marks itself truncated; the index lists
- * the newest runs first, so a cut read keeps the most recent runs.
+ * cost are left out. Both finished-run groups are merged by finish time, newest first. The read
+ * stops after `maxRuns` runs with a cost or {@link MAX_FINISHED_RUN_INDEX_PAGES} index pages and
+ * then marks itself truncated, keeping the most recent runs.
  *
  * The caller has already decided the viewer may see the cost of these Work Items (ADR 0119).
  *
@@ -110,12 +122,22 @@ export async function readFinishedAgentRunCosts(
 ): Promise<FinishedRunCosts> {
   const sinceAt = input.since === undefined ? Number.NEGATIVE_INFINITY : Date.parse(input.since)
   const untilAt = Date.parse(input.until)
-  const references: { runId: string; workItemId: string }[] = []
+  // A range that ends before it starts, such as a report period after today, has no runs, and the
+  // index query would reject the reversed bounds.
+  if (!(sinceAt <= untilAt)) return { runs: [], truncated: false }
+  const references: { runId: string; workItemId: string; finishedAt: number }[] = []
   let truncated = false
   let pagesLeft = MAX_FINISHED_RUN_INDEX_PAGES
-  for (const group of FINISHED_RUN_GROUPS) {
-    let cursor: string | undefined
-    do {
+  // Both groups are read a page at a time in turn, so neither uses up the page allowance before
+  // the other, and their runs are merged by finish time afterwards.
+  const groups = FINISHED_RUN_GROUPS.map((group): FinishedRunGroupRead => ({
+    group,
+    done: false,
+    oldestRead: Number.POSITIVE_INFINITY,
+  }))
+  while (groups.some((state) => !state.done)) {
+    for (const state of groups) {
+      if (state.done) continue
       if (pagesLeft <= 0) {
         truncated = true
         break
@@ -124,28 +146,39 @@ export async function readFinishedAgentRunCosts(
       const page = await ports.listFinishedRunsByTime(
         input.workspaceId,
         input.teamId,
-        group,
+        state.group,
         input.since,
-        cursor,
+        state.cursor,
         FINISHED_RUN_INDEX_PAGE_SIZE,
         input.until,
       )
       for (const entry of page.runs) {
         const finishedAt = Date.parse(entry.finishedAt)
+        if (finishedAt < state.oldestRead) state.oldestRead = finishedAt
         if (!(finishedAt >= sinceAt && finishedAt <= untilAt) || !input.workItemIds.has(entry.workItemId)) continue
-        references.push({ runId: entry.runId, workItemId: entry.workItemId })
+        references.push({ runId: entry.runId, workItemId: entry.workItemId, finishedAt })
       }
-      cursor = page.nextCursor
-    } while (cursor !== undefined)
+      state.cursor = page.nextCursor
+      state.done = page.nextCursor === undefined
+    }
+    if (pagesLeft <= 0 && groups.some((state) => !state.done)) {
+      truncated = true
+      break
+    }
   }
+  // When a group was cut, runs older than the oldest run it returned may be missing from it, so
+  // only runs at or after that point are kept and the kept runs are the newest ones of both groups.
+  const cutAt = Math.max(...groups.filter((state) => !state.done).map((state) => state.oldestRead), Number.NEGATIVE_INFINITY)
+  references.sort((left, right) => right.finishedAt - left.finishedAt)
+  const kept = references.filter((reference) => reference.finishedAt >= cutAt)
   const runs: FinishedRunCosts['runs'] = []
   // Runs are read in batches so the limit stops reading once enough runs with a cost are found.
-  for (let start = 0; start < references.length; start += FINISHED_RUN_COST_READ_CONCURRENCY) {
+  for (let start = 0; start < kept.length; start += FINISHED_RUN_COST_READ_CONCURRENCY) {
     if (runs.length >= input.maxRuns) {
       truncated = true
       break
     }
-    const batch = references.slice(start, start + FINISHED_RUN_COST_READ_CONCURRENCY)
+    const batch = kept.slice(start, start + FINISHED_RUN_COST_READ_CONCURRENCY)
     const costs = await Promise.all(batch.map(async (reference) => await readRunCost(ports, input.workspaceId, input.teamId, reference)))
     for (const cost of costs) {
       if (cost === undefined) continue
@@ -174,7 +207,7 @@ async function readRunCost(
   ports: FinishedRunCostReadPorts,
   workspaceId: string,
   teamId: string,
-  reference: { runId: string; workItemId: string },
+  reference: { runId: string; workItemId: string; finishedAt: number },
 ): Promise<{ finishedAt: string; costMicroUsd: number; hasMore: boolean } | undefined> {
   const run = await ports.getRun(workspaceId, teamId, reference.runId)
   // The index is eventually consistent; a run it lists but the table no longer holds adds nothing.

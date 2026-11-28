@@ -139,3 +139,38 @@ describe('readFinishedAgentRunCosts', () => {
       .rejects.toMatchObject({ category: 'temporarily_unavailable' })
   })
 })
+
+describe('readFinishedAgentRunCosts ordering and bounds', () => {
+  test('merges both groups by finish time before the run limit', async () => {
+    const failed = run('f1', 'a', '2026-01-05T00:30:00.000Z')
+    const newer = run('o1', 'a', '2026-01-05T05:00:00.000Z')
+    const rows = new Map([[failed.runId, failed], [newer.runId, newer]])
+    const base = ports()
+    const costs = await readFinishedAgentRunCosts({
+      ...base,
+      listFinishedRunsByTime: async (_directoryId, _teamId, group) => {
+        const entry = group === 'failed' ? failed : newer
+        return { runs: [{ runId: entry.runId, workItemId: entry.workItemId, finishedAt: entry.finishedAt ?? '' }] }
+      },
+      getRun: async (_directoryId, _teamId, runId) => rows.get(runId),
+    }, { workspaceId: 'w', teamId: 't', workItemIds: new Set(['a']), until: '2026-01-06T00:00:00.000Z', maxRuns: 1 })
+
+    expect(costs.runs).toEqual([{ finishedAt: '2026-01-05T05:00:00.000Z', costMicroUsd: 1_000_000 }])
+    expect(costs.truncated).toBe(true)
+  })
+
+  test('reads nothing for a range that ends before it starts', async () => {
+    const calls: string[] = []
+    const base = ports()
+    const costs = await readFinishedAgentRunCosts({
+      ...base,
+      listFinishedRunsByTime: async (...args) => {
+        calls.push(String(args[2]))
+        return await base.listFinishedRunsByTime(...args)
+      },
+    }, { workspaceId: 'w', teamId: 't', workItemIds: new Set(['a']), since: '2026-02-01T00:00:00.000Z', until: '2026-01-06T00:00:00.000Z', maxRuns: 10 })
+
+    expect(costs).toEqual({ runs: [], truncated: false })
+    expect(calls).toEqual([])
+  })
+})

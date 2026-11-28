@@ -264,7 +264,8 @@ async function readReportInput(
   let agentCost: ProjectAgentCostInput | undefined
   if (agentCostRate !== undefined && ports.listAgentRunCosts) {
     const asOf = today < request.to ? today : request.to
-    const read = projectWorkItemIds.size === 0
+    // A report period that starts after today has no finished runs yet.
+    const read = projectWorkItemIds.size === 0 || today < request.from
       ? { runs: [], truncated: false }
       : await ports.listAgentRunCosts({
           workspaceId,

@@ -226,4 +226,16 @@ describe('loadProjectBudgetConsumption Agent Run cost (ADR 0119)', () => {
     expect(reads).toEqual([])
     expect(consumption).toMatchObject({ actualCostMinor: 3_000 })
   })
+
+  test('fails instead of counting a partial Work Item scope', async () => {
+    const base = agentPorts({ JPY: 150 }, [])
+    let page = 0
+    await expect(loadProjectBudgetConsumption(scope, 'Asia/Tokyo', new Date('2026-01-20T00:00:00.000Z'), {
+      ...base,
+      listWorkItems: async () => {
+        page += 1
+        return { issues: [], nextStartAfterIssueId: `page-${page}` }
+      },
+    })).rejects.toBeInstanceOf(RangeError)
+  })
 })

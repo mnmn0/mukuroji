@@ -198,6 +198,7 @@ export async function loadProjectBudgetConsumption(
  * @param ports - Project-scoped reads.
  * @returns The cost in minor units, or 0 when the Workspace does not count it or has no rate.
  * @throws Error when a Team Work Item page read does not advance.
+ * @throws RangeError when the Team has more Work Item pages than one check reads.
  */
 async function loadAgentCostMinor(
   scope: {
@@ -230,7 +231,11 @@ async function loadAgentCostMinor(
       throw new Error(`Team "${scope.teamId}" Work Item read did not advance.`)
     }
     startAfterIssueId = page.nextStartAfterIssueId
-  } while (startAfterIssueId !== undefined && pages < MAX_AGENT_COST_WORK_ITEM_PAGES)
+    if (startAfterIssueId !== undefined && pages >= MAX_AGENT_COST_WORK_ITEM_PAGES) {
+      // A partial Work Item scope would silently leave runs out and could hold an alert back.
+      throw new RangeError(`Team "${scope.teamId}" has more Work Item pages than one budget check reads (${MAX_AGENT_COST_WORK_ITEM_PAGES}).`)
+    }
+  } while (startAfterIssueId !== undefined)
   if (workItemIds.size === 0) return 0
   const read = await listAgentRunCosts({
     workspaceId: scope.workspaceId,

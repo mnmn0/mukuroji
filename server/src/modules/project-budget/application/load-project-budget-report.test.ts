@@ -221,6 +221,18 @@ describe('loadProjectBudgetReport Agent Run cost (ADR 0119)', () => {
     expect(report.earnedValue?.money?.actualCostMinor).toBe(6_000)
   })
 
+  test('reads no Agent Runs for a report period after today', async () => {
+    const reads: unknown[] = []
+    const report = await loadProjectBudgetReport(
+      { ...request, from: '2026-02-01', to: '2026-02-10' },
+      agentPorts({ includeInProjectBudgets: true, usdExchangeRates: { JPY: 150 } }, reads),
+      100,
+    )
+
+    expect(reads).toEqual([])
+    expect(report.agentCost).toMatchObject({ status: 'included', amountMinor: 0, runCount: 0 })
+  })
+
   test('reads no Agent Runs when the Workspace does not count them', async () => {
     const reads: unknown[] = []
     const report = await loadProjectBudgetReport(request, agentPorts({ includeInProjectBudgets: false, usdExchangeRates: { JPY: 150 } }, reads), 100)
