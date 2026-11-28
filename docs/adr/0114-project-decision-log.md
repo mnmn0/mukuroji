@@ -33,7 +33,7 @@
 4. 読み取りは Project の viewer、記録・編集は Project の member（Enterprise は `projects.read` / `projects.write`）で、
    リスク・課題・変更要求の登録簿と同じ判定にする。
 5. Team の意思決定ログ（`GET /api/teams/:teamId/decision-log`）は、読み取りのたびに `begins_with(recordKey, PROJECT_DECISION#<teamId>#)`
-   の Query（counter 行は filter で除く、eventually consistent）で Team の決定を読み、呼び出し元が見られる Project のものだけを残す。
+   の Query（counter 行は record key で見分けて読み飛ばし、壊れた決定行は 502 にする。eventually consistent）で Team の決定を読み、呼び出し元が見られる Project のものだけを残す。
    同じ Project の登録簿から承認・却下済みの変更要求を足し、決めた日時の新しい順に 100 件まで返す（それより多ければ `truncated`）。
    キーワード（100 文字まで）と Project で絞れる。Work Item の decision メモは既存の Workspace 検索（`context-item`）で読み、
    画面で同じページに出す。決定を検索 index には入れない。

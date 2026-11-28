@@ -54,7 +54,12 @@ type FakeClientOptions = {
   /** Counter row returned by counter reads. */
   counter?: Record<string, unknown>
   /** Query pages returned in order, each with the key of the page after it. */
-  pages?: { items: Record<string, unknown>[]; lastEvaluatedKey?: Record<string, unknown> }[]
+  pages?: {
+    /** Rows of the page, as the query returns them. */
+    items: Record<string, unknown>[]
+    /** Key the next request starts after, or `undefined` on the last page. */
+    lastEvaluatedKey?: Record<string, unknown>
+  }[]
   /** Error thrown by every write. */
   writeError?: unknown
   /** List collecting every command. */
@@ -193,7 +198,11 @@ test('requires the exact count it read, and answers a concurrent add as retryabl
   const write = sent.find((command) => command.constructor.name === 'TransactWriteCommand')
   const items = write?.input.TransactItems
   expect(Array.isArray(items) ? items[1] : undefined).toMatchObject({
-    Update: { ExpressionAttributeValues: { ':count': 5, ':next': 6 } },
+    Update: {
+      ConditionExpression: expect.stringContaining('#count = :count'),
+      ExpressionAttributeNames: { '#count': 'entryCount' },
+      ExpressionAttributeValues: { ':count': 5, ':next': 6 },
+    },
   })
   expect(await createWith(fakeClient({ counter, writeError: cancellation(['None', 'ConditionalCheckFailed', 'None', 'None']) })))
     .toMatchObject({ status: 503 })
@@ -236,11 +245,12 @@ test('does not turn a revision failure into success when a caller fence was not 
   }
 })
 
-test('reads every decision of a Team on the server-side filter, across pages', async () => {
+test('reads every decision of a Team across pages, skipping counters by their key', async () => {
   const sent: SentCommand[] = []
   const other = { ...entry, id: 'e2' }
+  const counter = { workspaceId: 'w', recordKey: 'PROJECT_DECISION#t#p', entryType: 'project-decision-log', schemaVersion: 1, teamId: 't', projectId: 'p', entryCount: 1 }
   const pages = [
-    { items: [entryRow(entry)], lastEvaluatedKey: { workspaceId: 'w', recordKey: 'PROJECT_DECISION#t#p#ENTRY#e1' } },
+    { items: [counter, entryRow(entry)], lastEvaluatedKey: { workspaceId: 'w', recordKey: 'PROJECT_DECISION#t#p#ENTRY#e1' } },
     { items: [entryRow(other, 'q')] },
   ]
   const store = new DynamoDbProjectDecisionLogStore('planning', fakeClient({ pages, sent }))
@@ -251,10 +261,10 @@ test('reads every decision of a Team on the server-side filter, across pages', a
   const queries = sent.filter((command) => command.constructor.name === 'QueryCommand')
   expect(queries).toHaveLength(2)
   expect(queries[0]?.input).toMatchObject({
-    FilterExpression: '#entryType = :entryType',
-    ExpressionAttributeValues: { ':prefix': 'PROJECT_DECISION#t#', ':entryType': 'project-decision-entry' },
+    ExpressionAttributeValues: { ':prefix': 'PROJECT_DECISION#t#' },
     ConsistentRead: false,
   })
+  expect(queries[0]?.input.FilterExpression).toBeUndefined()
   expect(queries[1]?.input.ExclusiveStartKey).toEqual(pages[0]?.lastEvaluatedKey)
 })
 
@@ -263,6 +273,18 @@ test('fails closed on a row from another Project or scope', async () => {
   expect(await store.get(scope, 'e1').catch((error: unknown) => error)).toMatchObject({ status: 502 })
   const listing = new DynamoDbProjectDecisionLogStore('planning', fakeClient({ pages: [{ items: [{ ...entryRow(entry), teamId: 'other' }] }] }))
   expect(await listing.listTeam('w', 't').catch((error: unknown) => error)).toMatchObject({ status: 502 })
+  const { entryType: _entryType, ...untyped } = entryRow(entry)
+  const missingType = new DynamoDbProjectDecisionLogStore('planning', fakeClient({ pages: [{ items: [untyped] }] }))
+  expect(await missingType.listTeam('w', 't').catch((error: unknown) => error)).toMatchObject({ status: 502 })
+})
+
+test('reports an update of a decision without its creation fingerprint as corrupt, not a conflict', async () => {
+  const next: ProjectDecisionEntry = { ...entry, title: 'Renamed', revision: 2, updatedAt: '2026-11-20T00:00:00.000Z' }
+  const { creationFingerprint: _fingerprint, ...row } = entryRow(entry)
+  const result = await new DynamoDbProjectDecisionLogStore('planning', fakeClient({ row }), 'audit')
+    .update({ ...scope, now: next.updatedAt, callerAuthorization, auditContext, previous: entry, previousReceipts: [], next, updateReceipt: 'r1', updateKey: 'k1' })
+    .then((value) => value, (error: unknown) => error)
+  expect(result).toMatchObject({ status: 502, code: 'ProjectDecisionLogCorruptState' })
 })
 
 test('reports a lost caller fence as a conflict and throttling as retryable', async () => {

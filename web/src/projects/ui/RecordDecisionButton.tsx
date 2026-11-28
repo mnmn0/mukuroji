@@ -43,7 +43,12 @@ export type RecordDecisionButtonProps = {
  * Another account never sees them, and signing out drops them.
  */
 const unsentDrafts = new Map<string, RecordDecisionUnsentDraft>()
-onSessionDraftsDiscarded(() => unsentDrafts.clear())
+/** Counts sign-outs, so a save that fails after one does not keep its form again. */
+let discardGeneration = 0
+onSessionDraftsDiscarded(() => {
+  discardGeneration += 1
+  unsentDrafts.clear()
+})
 
 /**
  * Builds the key a failed form is kept under.
@@ -86,6 +91,8 @@ export function RecordDecisionButton({
   const [openedAs, setOpenedAs] = useState(0)
   // A failed save's form is reopened as it was, so its retry reuses the same Idempotency-Key.
   const storeKey = unsentDraftStoreKey(accessToken, draftKey)
+  // Sign-outs seen when the dialog was last opened; a later one means the form must not come back.
+  const generationAtOpen = useRef(discardGeneration)
   const [unsentDraft, setUnsentDraftState] = useState<RecordDecisionUnsentDraft | undefined>(
     () => (storeKey === undefined ? undefined : unsentDrafts.get(storeKey)),
   )
@@ -95,10 +102,18 @@ export function RecordDecisionButton({
    * @param draft - Form to keep, or `undefined` once it was saved.
    */
   const setUnsentDraft = (draft: RecordDecisionUnsentDraft | undefined) => {
+    if (draft && generationAtOpen.current !== discardGeneration) return
     setUnsentDraftState(draft)
     if (storeKey === undefined) return
     if (draft) unsentDrafts.set(storeKey, draft)
     else unsentDrafts.delete(storeKey)
+  }
+  /** Opens a new dialog with a fresh prefill, replacing any dialog that is open. */
+  const openDialog = () => {
+    generationAtOpen.current = discardGeneration
+    openCount.current += 1
+    setOpenedAs(openCount.current)
+    setPrefill(createPrefill())
   }
   return (
     <>
@@ -109,9 +124,7 @@ export function RecordDecisionButton({
         type="button"
         onClick={() => {
           setRecordedProjectName(undefined)
-          openCount.current += 1
-          setOpenedAs(openCount.current)
-          setPrefill(createPrefill())
+          openDialog()
         }}
       >
         {t('projects.decisionLog.record.button')}
@@ -128,6 +141,10 @@ export function RecordDecisionButton({
           save={save}
           {...(unsentDraft ? { unsentDraft } : {})}
           onUnsent={setUnsentDraft}
+          onDiscardUnsent={() => {
+            setUnsentDraft(undefined)
+            openDialog()
+          }}
           {...(defaultProject ? { defaultProject } : {})}
           lockProject={lockProject}
           origin={origin}

@@ -104,6 +104,25 @@ export const ReopenedAfterFailure: Story = {
   },
 }
 
+/** Reopened after a failed save whose Project can no longer be chosen. */
+export const UnsentProjectMissing: Story = {
+  args: {
+    defaultProject: projects[1],
+    lockProject: true,
+    origin: 'work-item',
+    projects: [projects[1]],
+    unsentDraft: {
+      projectKey: JSON.stringify(['core-team', 'atlas']),
+      values: toProjectDecisionFormValues(undefined, { title: '前回送った決定' }),
+    },
+    onDiscardUnsent: () => undefined,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('record-decision-discard-unsent')).toBeVisible()
+  },
+}
+
 /** English labels. */
 export const English: Story = {
   args: { t: createTranslator('en') },

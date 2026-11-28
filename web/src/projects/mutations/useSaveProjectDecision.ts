@@ -31,7 +31,7 @@ export type ProjectDecisionSaveScope = {
  * A failed save keeps its request context for the page's lifetime, so saving the same input again,
  * from any screen, reuses its Idempotency-Key and the server returns the result of an attempt
  * whose response was lost. A context is dropped once the server answers, with success or a client
- * error. A conflict also
+ * error other than 401. A conflict also
  * reloads the log, so the form can move onto the latest revision.
  *
  * @param scope - Session.
@@ -61,7 +61,9 @@ export function useSaveProjectDecision({ accessToken }: ProjectDecisionSaveScope
         ? (await updateProjectDecision(accessToken, teamId, projectId, entry.id, entry.revision, input, context)).entry
         : (await createProjectDecision(accessToken, teamId, projectId, input, context)).entry
     } catch (error) {
-      if (error instanceof ProjectDirectoryApiError && error.status < 500) {
+      // An expired session says nothing about the earlier attempt, so its key is kept for the
+      // retry after signing in again.
+      if (error instanceof ProjectDirectoryApiError && error.status < 500 && error.status !== 401) {
         clearAttempt()
         if (error.status === 409) void mutate(key)
       }

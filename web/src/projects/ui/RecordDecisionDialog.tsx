@@ -64,6 +64,11 @@ export type RecordDecisionDialogProps = {
    * @param draft - Project and values sent with the failed save.
    */
   onUnsent?: (draft: RecordDecisionUnsentDraft) => void
+  /**
+   * Drops the failed form and starts the dialog again, offered when its Project can no longer be
+   * chosen.
+   */
+  onDiscardUnsent?: () => void
   /** Labels of the Work Items the prefill names. */
   workItemOptions?: readonly ProjectDecisionReferenceOption[]
   /** Screen the decision is recorded from. */
@@ -95,6 +100,7 @@ export function RecordDecisionDialog({
   prefill,
   unsentDraft,
   onUnsent,
+  onDiscardUnsent,
   workItemOptions,
   origin,
   t,
@@ -115,6 +121,9 @@ export function RecordDecisionDialog({
   })
   const selected = projects.find((project) => projectKey(project) === selectedKey)
   const projectId = selected?.id ?? ''
+  // A failed save is retried only in its own Project, so a Project that left the choices is not
+  // silently replaced: the member discards the draft to start again.
+  const unsentProjectMissing = unsentDraft !== undefined && selectedKey === unsentDraft.projectKey && !selected
   const [values, setValues] = useState(() => unsentDraft?.values ?? toProjectDecisionFormValues(undefined, prefill))
   const [saveError, setSaveError] = useState<string>()
   // A Team-qualified lookup resolves a Project ID that several Teams share.
@@ -189,6 +198,22 @@ export function RecordDecisionDialog({
               ))}
             </select>
           </label>
+          {unsentProjectMissing ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <p className="text-sm font-semibold text-fg-red-700" role="alert">{t('projects.decisionLog.record.unsentProjectMissing')}</p>
+              {onDiscardUnsent ? (
+                <button
+                  className="workbench-button-secondary min-h-9 px-3"
+                  data-testid="record-decision-discard-unsent"
+                  disabled={isSaving}
+                  type="button"
+                  onClick={onDiscardUnsent}
+                >
+                  {t('projects.decisionLog.record.discardUnsent')}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           {members.error ? (
             <div className="flex flex-wrap items-center gap-3">
               <p className="text-sm font-semibold text-fg-red-700" role="alert">{t('projects.decisionLog.record.membersError')}</p>

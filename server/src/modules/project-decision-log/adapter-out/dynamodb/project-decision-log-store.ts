@@ -131,8 +131,10 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
   }
 
   /**
-   * Reads every decision of the Team's Projects with eventually consistent reads, skipping the
-   * counter rows on the server.
+   * Reads every decision of the Team's Projects with eventually consistent reads.
+   *
+   * Counter rows are told apart by their record key, not by a stored attribute, so a decision row
+   * whose attributes are broken fails the read instead of being left out.
    *
    * @param workspaceId - Workspace directory ID.
    * @param teamId - Team ID.
@@ -140,7 +142,12 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
    */
   async listTeam(workspaceId: string, teamId: string): Promise<TeamProjectDecisionEntry[]> {
     const entries: TeamProjectDecisionEntry[] = []
-    for await (const row of this.queryRows(workspaceId, teamPrefix(teamId), false, ENTRY_TYPE)) {
+    const prefix = teamPrefix(teamId)
+    for await (const row of this.queryRows(workspaceId, prefix, false)) {
+      const recordKey = row.recordKey
+      if (typeof recordKey !== 'string' || !recordKey.startsWith(prefix)) throw corruptLog()
+      // A Project's counter key is the prefix and the Project ID alone; decision keys go on.
+      if (!recordKey.slice(prefix.length).includes('#ENTRY#')) continue
       const projectId = row.projectId
       if (typeof projectId !== 'string') throw corruptLog()
       entries.push({ projectId, entry: parseStoredEntry(row, { workspaceId, teamId, projectId }) })
@@ -281,10 +288,11 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
       metadata: { origin: input.next.origin, projectId: input.projectId, teamId: input.teamId },
     })
     const previousRow = await this.readRow(input, input.next.id)
-    const creationFingerprint = previousRow?.creationFingerprint
-    if (typeof creationFingerprint !== 'string') {
-      throw new ProjectDataError(409, 'ProjectDecisionEntryConflict', 'The decision changed. Reload and try again.')
-    }
+    // A decision removed meanwhile is a conflict; a stored decision without its creation
+    // fingerprint is broken, and reloading would not fix it.
+    if (!previousRow) throw new ProjectDataError(409, 'ProjectDecisionEntryConflict', 'The decision changed. Reload and try again.')
+    const creationFingerprint = previousRow.creationFingerprint
+    if (typeof creationFingerprint !== 'string') throw corruptLog()
     try {
       await this.client.send(new TransactWriteCommand({
         TransactItems: [
@@ -332,31 +340,20 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
    * @param workspaceId - Workspace directory ID.
    * @param prefix - Record key prefix.
    * @param consistentRead - Whether to read strongly consistent.
-   * @param entryType - Record type the server keeps, when only one type is wanted.
    * @returns The raw rows.
    */
   private async *queryRows(
     workspaceId: string,
     prefix: string,
     consistentRead: boolean,
-    entryType?: string,
   ): AsyncGenerator<Record<string, unknown>> {
     let exclusiveStartKey: Record<string, unknown> | undefined
     do {
       const page = await this.client.send(new QueryCommand({
         TableName: this.tableName,
         KeyConditionExpression: '#workspaceId = :workspaceId AND begins_with(#recordKey, :prefix)',
-        ...(entryType === undefined ? {} : { FilterExpression: '#entryType = :entryType' }),
-        ExpressionAttributeNames: {
-          '#workspaceId': 'workspaceId',
-          '#recordKey': 'recordKey',
-          ...(entryType === undefined ? {} : { '#entryType': 'entryType' }),
-        },
-        ExpressionAttributeValues: {
-          ':workspaceId': workspaceId,
-          ':prefix': prefix,
-          ...(entryType === undefined ? {} : { ':entryType': entryType }),
-        },
+        ExpressionAttributeNames: { '#workspaceId': 'workspaceId', '#recordKey': 'recordKey' },
+        ExpressionAttributeValues: { ':workspaceId': workspaceId, ':prefix': prefix },
         ConsistentRead: consistentRead,
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       })).catch((error: unknown) => storageFailure(error))
@@ -405,9 +402,13 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
 export class InMemoryProjectDecisionLogStore implements ProjectDecisionLogStore {
   /** Decisions and their creation and update receipts keyed by Workspace, Team, Project, and entry. */
   private readonly rows = new Map<string, {
+    /** Workspace, Team, and Project the decision belongs to. */
     scope: ProjectDecisionLogScope
+    /** Latest stored decision. */
     entry: ProjectDecisionEntry
+    /** Fingerprint of the creating request's input, kept through every update. */
     creationFingerprint: string
+    /** Receipts of the latest updates, oldest first, as on the DynamoDB row. */
     updateReceipts: ProjectDecisionUpdateReceipt[]
   }>()
 

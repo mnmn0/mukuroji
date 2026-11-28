@@ -202,6 +202,27 @@ describe('record decision dialog', () => {
     expect(html).not.toContain('新しい下書き')
   })
 
+  test('offers to discard a failed form whose Project can no longer be chosen', () => {
+    const values = toProjectDecisionFormValues(undefined, { title: '前回送った決定' })
+    const html = renderToStaticMarkup(
+      <RecordDecisionDialog
+        defaultProject={{ teamId: 'core-team', id: 'borealis' }}
+        lockProject
+        origin="work-item"
+        prefill={{ title: '新しい下書き' }}
+        projects={[{ teamId: 'core-team', id: 'borealis', name: 'Borealis' }]}
+        save={async () => undefined}
+        t={createTranslator('ja')}
+        unsentDraft={{ projectKey: JSON.stringify(['core-team', 'atlas']), values }}
+        onClose={() => undefined}
+        onDiscardUnsent={() => undefined}
+        onRecorded={() => undefined}
+      />,
+    )
+    expect(html).toContain('data-testid="record-decision-discard-unsent"')
+    expect(html).toContain('前回送った決定')
+  })
+
   test('keeps the decided time of a failed save, so the retried request is the same one', () => {
     const values = { ...toProjectDecisionFormValues(undefined, { title: '前回送った決定' }), decidedAtLocal: '2026-01-02T03:04' }
     const sent = toProjectDecisionEntryInput(values, 'document')
@@ -257,6 +278,24 @@ describe('saving a decision', () => {
     expect(keys).toHaveLength(2)
     expect(keys[0]).toBeTruthy()
     expect(keys[1]).toBe(keys[0])
+  })
+
+  test('keeps the Idempotency-Key through a 401, for the retry after signing in again', async () => {
+    const keys: (string | null)[] = []
+    const statuses = [503, 401]
+    globalThis.fetch = async (_input, init) => {
+      keys.push(new Headers(init?.headers).get('Idempotency-Key'))
+      const status = statuses[keys.length - 1]
+      return status
+        ? new Response(JSON.stringify({ code: 'Failed' }), { status })
+        : Response.json({ teamId: 'core-team', projectId: 'atlas', entry: decision }, { status: 201 })
+    }
+    const input = toProjectDecisionEntryInput(toProjectDecisionFormValues(undefined, { title: '再認証を挟む決定' }), 'work-item')
+    await expect(mountSave()('core-team', 'atlas', undefined, input)).rejects.toThrow()
+    await expect(mountSave()('core-team', 'atlas', undefined, input)).rejects.toThrow()
+    expect(await mountSave()('core-team', 'atlas', undefined, input)).toEqual(decision)
+    expect(keys).toHaveLength(3)
+    expect(new Set(keys).size).toBe(1)
   })
 
   test('drops the kept Idempotency-Key on sign-out', async () => {
