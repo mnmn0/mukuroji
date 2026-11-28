@@ -17,7 +17,7 @@
 1. 決定は既存の Planning table（`workspaceId` / `recordKey`）に1件1行で置く。record key は
    `PROJECT_DECISION#<teamId>#<projectId>#ENTRY#<entryId>`（各 ID は `encodeURIComponent`）、`entryType = project-decision-entry`。
    同じ prefix の `PROJECT_DECISION#<teamId>#<projectId>`（`entryType = project-decision-log`）に件数 counter を置き、
-   追加の transaction で `entryCount < 200` を条件に1増やす。決定・counter・呼び出し元の認可 fence・audit event を
+   追加の前に件数を読み、100 未満なら transaction でその件数のままであることを条件に1増やす（競合した追加は再試行を促す 503）。決定・counter・呼び出し元の認可 fence・audit event を
    1つの transaction で書く。更新は決定ごとの `revision` を CAS にする。削除はなく、状態（有効・置き換え済み・取り消し）で表す。
 2. 決定は要約（200 文字）、決めた内容と理由（各 2,000 文字）、決めた人（Project member の member key、10 人まで）、
    Project 外の決めた人の自由記述（200 文字）、決めた日時（UTC、server 時刻より24時間を超えて先は不可、秒の小数はミリ秒まで）、関連 Work Item（同じ
