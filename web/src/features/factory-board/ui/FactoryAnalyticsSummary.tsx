@@ -36,6 +36,10 @@ export type FactoryAnalyticsSummaryProps = {
   projectNames?: Readonly<Record<string, string>>
   /** Workspace work phases, for the names of the usage per phase; built-in phases are translated without them. */
   workPhases?: WorkspaceWorkPhaseSettings
+  /** Whether reading the Workspace work phases failed. */
+  hasWorkPhasesError?: boolean
+  /** Reads the Workspace work phases again. */
+  onRetryWorkPhases?: () => void
 }
 
 /** Props of the token usage part. */
@@ -48,6 +52,10 @@ type UsageSummaryProps = {
   projectNames: Readonly<Record<string, string>>
   /** Workspace work phases, for phase names. */
   workPhases?: WorkspaceWorkPhaseSettings
+  /** Whether reading the Workspace work phases failed. */
+  hasWorkPhasesError: boolean
+  /** Reads the Workspace work phases again. */
+  onRetryWorkPhases?: () => void
 }
 
 /**
@@ -67,7 +75,7 @@ function totalTokens(usage: AgentRunUsage): number {
  * @param props - Usage, text, and Project names.
  * @returns Usage part.
  */
-function UsageSummary({ usage, labels, projectNames, workPhases }: UsageSummaryProps) {
+function UsageSummary({ hasWorkPhasesError, labels, onRetryWorkPhases, projectNames, usage, workPhases }: UsageSummaryProps) {
   const projectMax = Math.max(1, ...usage.projects.map((project) => totalTokens(project.usage)))
   const phaseMax = Math.max(1, ...usage.phases.map((phase) => totalTokens(phase.usage)))
   const workItemMax = Math.max(1, ...usage.workItems.map((item) => totalTokens(item.usage)))
@@ -111,6 +119,14 @@ function UsageSummary({ usage, labels, projectNames, workPhases }: UsageSummaryP
         {usage.phases.length > 0 ? (
           <section className="flex min-w-0 flex-col gap-1" data-testid="factory-analytics-usage-phases">
             <h4 className="text-xs font-semibold text-[var(--workbench-muted)]">{labels.usagePhasesHeading}</h4>
+            {hasWorkPhasesError ? (
+              <div className="flex flex-wrap items-center gap-2 rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-fg-red-700" role="alert">
+                <span>{labels.workPhasesLoadError}</span>
+                {onRetryWorkPhases ? (
+                  <button className="workbench-button-secondary min-h-[44px] px-3" onClick={onRetryWorkPhases} type="button">{labels.retryWorkPhases}</button>
+                ) : null}
+              </div>
+            ) : null}
             <ul className="flex flex-col gap-1.5">
               {usage.phases.map((phase) => (
                 <UsageRow
@@ -244,6 +260,8 @@ export function FactoryAnalyticsSummary({
   formatNumber,
   projectNames = {},
   workPhases,
+  hasWorkPhasesError = false,
+  onRetryWorkPhases,
 }: FactoryAnalyticsSummaryProps) {
   const headingId = useId()
   const periodId = useId()
@@ -383,7 +401,14 @@ export function FactoryAnalyticsSummary({
               ) : null}
 
               {analytics.usage ? (
-                <UsageSummary labels={labels} projectNames={projectNames} usage={analytics.usage} workPhases={workPhases} />
+                <UsageSummary
+                  hasWorkPhasesError={hasWorkPhasesError}
+                  labels={labels}
+                  projectNames={projectNames}
+                  usage={analytics.usage}
+                  workPhases={workPhases}
+                  {...(onRetryWorkPhases ? { onRetryWorkPhases } : {})}
+                />
               ) : null}
             </>
           )}

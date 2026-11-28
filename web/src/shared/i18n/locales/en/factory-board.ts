@@ -111,6 +111,8 @@ export const factoryBoardMessages = {
   'factoryBoard.analytics.usageNoProject': 'No Project',
   'factoryBoard.analytics.usageWorkItemsHeading': 'Tasks with the most tokens',
   'factoryBoard.analytics.usagePhasesHeading': 'By work phase',
+  'factoryBoard.analytics.workPhasesLoadError': 'The Workspace phase names could not be loaded, so phases show their standard names or keys.',
+  'factoryBoard.analytics.retryWorkPhases': 'Reload phases',
   'factoryBoard.analytics.pullRequestHeading': 'Pull request intervals (median)',
   'factoryBoard.analytics.pullRequestHint': 'Pull requests that runs reported and the service checked. An interval counts when it ended in the period.',
   'factoryBoard.analytics.pullRequestSamples': '{count} pull requests',

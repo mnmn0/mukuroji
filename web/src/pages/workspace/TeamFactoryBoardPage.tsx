@@ -61,7 +61,7 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
   const reports = useFactoryBoardReports(accessToken, teamId, selectedWorkItemId)
   const [analyticsDays, setAnalyticsDays] = useState<FactoryAnalyticsPeriodDays>(DEFAULT_FACTORY_ANALYTICS_PERIOD_DAYS)
   const analytics = useFactoryAnalytics(accessToken, teamId, analyticsDays)
-  const { settings: workPhases } = useWorkspaceWorkPhases(accessToken)
+  const { settings: workPhases, error: workPhasesError, retry: retryWorkPhases } = useWorkspaceWorkPhases(accessToken)
   const onRelease = useReleaseFactoryBoardRun(accessToken, teamId, async (released) => {
     // Show the committed release from the response, so a failed refresh cannot bring back the active run.
     await board.applyRelease(released)
@@ -103,6 +103,8 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
           periodDays={analyticsDays}
           projectNames={projectNames}
           workPhases={workPhases}
+          hasWorkPhasesError={Boolean(workPhasesError) && !workPhases}
+          onRetryWorkPhases={retryWorkPhases}
         />
         <FactoryBoard
           board={board.data}

@@ -312,6 +312,10 @@ export type FactoryAnalyticsLabels = {
   usageWorkItemsHeading: string
   /** Heading of the usage per work phase. */
   usagePhasesHeading: string
+  /** Shown when the Workspace phase names could not be read. */
+  workPhasesLoadError: string
+  /** Button that reads the Workspace phase names again. */
+  retryWorkPhases: string
   /**
    * Names a work phase of the usage per phase.
    * @param phaseKey - Phase key, or the group of runs without a phase.
@@ -399,6 +403,8 @@ export function createFactoryAnalyticsLabels(locale: Locale): FactoryAnalyticsLa
     usageNoProject: t('factoryBoard.analytics.usageNoProject'),
     usageWorkItemsHeading: t('factoryBoard.analytics.usageWorkItemsHeading'),
     usagePhasesHeading: t('factoryBoard.analytics.usagePhasesHeading'),
+    workPhasesLoadError: t('factoryBoard.analytics.workPhasesLoadError'),
+    retryWorkPhases: t('factoryBoard.analytics.retryWorkPhases'),
     phaseName: (phaseKey, settings) => readWorkPhaseDisplayName(phaseKey, settings, t),
     pullRequestHeading: t('factoryBoard.analytics.pullRequestHeading'),
     pullRequestHint: t('factoryBoard.analytics.pullRequestHint'),

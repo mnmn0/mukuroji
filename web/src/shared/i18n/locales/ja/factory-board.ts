@@ -111,6 +111,8 @@ export const factoryBoardMessages = {
   'factoryBoard.analytics.usageNoProject': 'Project なし',
   'factoryBoard.analytics.usageWorkItemsHeading': 'トークンが多いタスク',
   'factoryBoard.analytics.usagePhasesHeading': '工程別',
+  'factoryBoard.analytics.workPhasesLoadError': 'Workspace の工程名を読み込めなかったため、工程は標準の名前か key で表示しています。',
+  'factoryBoard.analytics.retryWorkPhases': '工程を再読み込み',
   'factoryBoard.analytics.pullRequestHeading': 'プルリクエストの間隔（中央値）',
   'factoryBoard.analytics.pullRequestHint': 'Run が報告し、サービスが確かめたプルリクエストです。間隔の終わりが期間内のものを数えます。',
   'factoryBoard.analytics.pullRequestSamples': '{count} 件',

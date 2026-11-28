@@ -101,4 +101,21 @@ test('reads phase usage and pull request intervals, and shows both', async () =>
   expect(markup).toContain(ja('workspace.workPhase.none'))
   expect(markup).toContain('data-testid="factory-analytics-pull-requests"')
   expect(markup).toContain('作成から最初のレビュー')
+  expect(markup).not.toContain(ja('factoryBoard.analytics.workPhasesLoadError'))
+
+  const failed = renderToStaticMarkup(
+    <FactoryAnalyticsSummary
+      analytics={factoryAnalyticsWithUsageFixture}
+      formatNumber={(value) => String(value)}
+      hasWorkPhasesError
+      isLoading={false}
+      labels={createFactoryAnalyticsLabels('ja')}
+      onPeriodDaysChange={() => undefined}
+      onRetry={() => undefined}
+      onRetryWorkPhases={() => undefined}
+      periodDays={30}
+    />,
+  )
+  expect(failed).toContain(ja('factoryBoard.analytics.workPhasesLoadError'))
+  expect(failed).toContain(ja('factoryBoard.analytics.retryWorkPhases'))
 })
