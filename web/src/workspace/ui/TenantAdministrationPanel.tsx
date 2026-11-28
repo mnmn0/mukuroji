@@ -473,7 +473,7 @@ export function TenantAdministrationPanel({
           <WorkPhaseFields
             categories={timeEntryCategories}
             categoryName={(key) => readTimeEntryCategoryDisplayName(key, timeEntryCategories, t)}
-            disabled={tenantLifecycleLocked}
+            disabled={isSaving || tenantLifecycleLocked}
             onChange={(next) => onChangeProfile({ ...profile, workPhases: next })}
             settings={workPhases}
             t={t}

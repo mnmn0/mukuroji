@@ -782,6 +782,26 @@ describe('Analytics work item history rows', () => {
     ])
   })
 
+  test('does not read a version 1 row, which dropped workflow status ID changes', () => {
+    const key = { workspaceId, teamId: 'core', workItemId: 'old-row' }
+    const row = mergeAnalyticsWorkItemHistoryEntries(
+      createEmptyAnalyticsWorkItemHistoryRow(key),
+      [{
+        eventId: 'old-row-1',
+        eventType: 'work-item.created',
+        action: 'created',
+        occurredAt: '2026-01-01T00:00:00.000Z',
+        changes: [],
+        metadata: { afterRevision: 1 },
+      }],
+      Date.parse('2026-01-02T00:00:00.000Z') / 1000,
+    )
+    const stored = toStoredAnalyticsWorkItemHistoryRow(row)
+
+    expect(parseStoredAnalyticsWorkItemHistoryRow(stored)).toBeDefined()
+    expect(parseStoredAnalyticsWorkItemHistoryRow({ ...stored, schemaVersion: 1 })).toBeUndefined()
+  })
+
   test('drops expired entries on write and expires the row with its oldest entry', () => {
     const key = { workspaceId, teamId: 'core', workItemId: 'ttl' }
     const now = Date.parse('2026-06-01T00:00:00.000Z') / 1000

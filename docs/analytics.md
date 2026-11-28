@@ -156,7 +156,7 @@ Group-byの`cycle`と`milestone`はPlanningのWork Item linkの現在の所属�
 scope keyをsnapshotのpermission scope hashへ含めるので、その権限が変わったsnapshotは
 非表示または`403`になります。定期配信はPlanningを読まないため、この widget は
 `Cycle and Milestone membership is not available for this run.` の warning だけを返します。
-Work Item history row（ADR 0042）は`priority`の変更も保持します。Throughput、cycle/lead time、scope changeなどの
+Work Item history row（ADR 0042）は`priority`の変更も保持します。`workflowStatusId`の変更も保持し、それより前の version 1 の row は読まずに entity timeline から読みます（ADR 0115）。Throughput、cycle/lead time、scope changeなどの
 event metricは`asOf`以前かつ指定期間内の有効なeventだけを使います。
 
 ## Metric definitions

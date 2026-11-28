@@ -34,6 +34,8 @@ AI コスト、待ち時間を比べたいという要望である。工数に�
   `groupBy` が `status` ならステータス ID、`phase` ならステータスの工程で、時間を過ごしたステータスごとに分ける。
   それ以外の dimension は他の metric と同じく `asOf` の状態で分ける。`phase` で分けられるのは `status-time` だけ。
   Analytics の履歴は監査 diff から作るので、`workflowStatusId` の変更も履歴に残すようにした。
+  Work Item history row（ADR 0042）は `schemaVersion` を 2 に上げた。`workflowStatusId` の変更を持たない version 1 の row は
+  読まずに entity timeline から読み、次の event で timeline から作り直す。Row は audit の projection なので data migration は作らない。
 - プルリクエストの間隔は Factory 分析の `pullRequestLeadTimes`。ADR 0103 で照会済み（`verified`）のプルリクエストの状態に、
   作成・最初のレビュー・承認の時刻を足して保存する（作成者自身のレビューと下書きのレビューは数えない。承認は取り消されていないもののうち最も早い時刻）。
   区間の終わりが期間内のものの中央値を出す。提供元への追加の照会はしない。

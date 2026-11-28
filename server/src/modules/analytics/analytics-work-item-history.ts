@@ -6,8 +6,12 @@ export const ANALYTICS_WORK_ITEM_HISTORY_RECORD_PREFIX = 'WORK_ITEM_HISTORY#'
 /** `entryType` of a per-Work-Item Analytics history row. */
 export const ANALYTICS_WORK_ITEM_HISTORY_ENTRY_TYPE = 'analytics-work-item-history'
 
-/** Schema version of a per-Work-Item Analytics history row. */
-export const ANALYTICS_WORK_ITEM_HISTORY_SCHEMA_VERSION = 1
+/**
+ * Schema version of a per-Work-Item Analytics history row. Version 2 also keeps `workflowStatusId`
+ * changes (ADR 0115). A version 1 row is read as missing, so reads use the audit timeline and the
+ * next event rebuilds the row from it; the row is a projection, so no data migration is needed.
+ */
+export const ANALYTICS_WORK_ITEM_HISTORY_SCHEMA_VERSION = 2
 
 /**
  * Serialized size above which a history row keeps no entries and is marked as overflowed.

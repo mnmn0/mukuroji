@@ -90,6 +90,8 @@ export function WorkPhaseFields({ settings, categories, categoryName, disabled, 
                 maxLength={MAX_WORK_PHASE_LABEL_LENGTH}
                 onChange={(event) => rename(index, phase, event.target.value)}
                 placeholder={builtInLabel}
+                // A custom phase needs a name; an empty built-in name falls back to the translated one.
+                required={builtInLabel === undefined}
                 value={phase.label ?? ''}
               />
               <label className="inline-flex items-center gap-1.5 text-sm text-[var(--workbench-text)]">

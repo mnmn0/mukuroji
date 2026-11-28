@@ -69,6 +69,7 @@ import {
   createAnalyticsStatusSegments,
   groupAnalyticsStatusHours,
   sumAnalyticsStatusHours,
+  type AnalyticsStatusSegment,
   type AnalyticsWorkflowStatusCatalog,
 } from './analytics-status-time'
 import {
@@ -3166,22 +3167,33 @@ function calculateAgentUsageMetric(
 }
 
 /**
+ * Status stretches already built per fact. A fact never changes after it is built and carries its
+ * own `stateAsOf`, so buckets that share a fact reuse one walk of its history.
+ */
+const factStatusSegments = new WeakMap<AnalyticsWorkItemFact, readonly AnalyticsStatusSegment[]>()
+
+/**
  * Builds the workflow status stretches of a fact up to the instant its state was rebuilt at.
  *
  * The walk starts from the fact's own state, so it must start at the fact's own `asOf`; an earlier
- * bucket clips the stretches to its window instead of starting the walk earlier.
+ * bucket clips the stretches to its window instead of starting the walk earlier. The stretches are
+ * built once per fact and must not be changed by callers.
  *
  * @param fact - Work Item fact.
  * @returns Stretches in time order.
  */
 function createFactStatusSegments(fact: AnalyticsWorkItemFact) {
-  return createAnalyticsStatusSegments({
+  const cached = factStatusSegments.get(fact)
+  if (cached !== undefined) return cached
+  const segments = createAnalyticsStatusSegments({
     createdAt: fact.createdAt,
     statusId: fact.state.workflowStatusId,
     statusCategory: fact.state.statusCategory,
     events: fact.events,
     asOf: fact.stateAsOf,
   })
+  factStatusSegments.set(fact, segments)
+  return segments
 }
 
 /**
