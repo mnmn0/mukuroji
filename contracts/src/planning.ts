@@ -622,6 +622,19 @@ export type PlanningSnapshot = {
    * 範囲外の entity、link、dependency は含まず、critical path と roll-up も範囲内で算出します。
    */
   readScope?: PlanningReadScope
+  /**
+   * Teams where the caller's Enterprise grant at the Team itself authorizes Team-scoped Planning
+   * actions without a Project role (ADR 0123). Only the Web `GET /api/planning` response carries it.
+   */
+  viewerTeamGrants?: PlanningViewerTeamGrant[]
+}
+
+/** Team-scoped Planning role the server grants the caller through a grant at the Team itself. */
+export type PlanningViewerTeamGrant = {
+  /** Team the grant applies to. */
+  teamId: string
+  /** `manager` with `teams.manage`; `member` with `teams.write` or `planning.write`. */
+  role: 'manager' | 'member'
 }
 
 /**

@@ -152,6 +152,7 @@ import {
   type PlanningWorkItemReadScope,
   readPlanningIdentifier,
   readPlanningPublishState,
+  listPlanningViewerTeamGrants,
   readPlanningWorkItemState,
   requirePlanningUpdateProjectPermission,
   requirePlanningUpdateTargetPermission,
@@ -3813,7 +3814,12 @@ export function registerPlanningRoutes(routeApp: Hono): void {
 
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-      return c.json(await readPlanningSnapshotAsPrincipal(principal, readPlanningReadScopeQuery(c)))
+      const [snapshot, viewerTeamGrants] = await Promise.all([
+        readPlanningSnapshotAsPrincipal(principal, readPlanningReadScopeQuery(c)),
+        listPlanningViewerTeamGrants(principal),
+      ])
+      // The Web offers Team-scoped actions that a grant at the Team allows (ADR 0123).
+      return c.json({ ...snapshot, viewerTeamGrants })
     } catch (error) {
       return toPlanningErrorResponse(c, error)
     }

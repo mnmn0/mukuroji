@@ -228,8 +228,8 @@ export function PlanningPage() {
   )
   const projectRoles = projectRolesResult?.roles ?? emptyProjectRoles
   const planningAccess = useMemo(
-    () => createPlanningAccessSnapshot(teams, projectRoles),
-    [projectRoles, teams],
+    () => createPlanningAccessSnapshot(teams, projectRoles, snapshot?.viewerTeamGrants),
+    [snapshot?.viewerTeamGrants, projectRoles, teams],
   )
   const manageableCreateScopeTeams = useMemo(
     () => filterManageablePlanningScopeTeams(user, teams, planningAccess),

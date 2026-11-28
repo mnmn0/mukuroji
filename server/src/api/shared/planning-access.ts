@@ -3,6 +3,7 @@ import {
   type PlanningSnapshot,
   type PlanningUpdateTargetSummary,
   type PlanningUpdateTarget,
+  type PlanningViewerTeamGrant,
   type PlanningWorkItemSummary,
   type WorkItemDependencyEndpoint,
   type EnterprisePermissionId,
@@ -39,6 +40,7 @@ import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { toCognitoDirectoryErrorResponse } from './enterprise-access'
 import {
   createOrgStructureAuthorizationConditionChecks,
+  hasDirectEnterpriseTeamPermission,
   type ProjectPrincipal,
   readLegacyProjectScopeAccesses,
   requireAssignedProjectPermission,
@@ -371,6 +373,31 @@ export async function requirePlanningUpdateTargetPermission(
 }
 
 /**
+ * Lists the Teams where a grant at the Team itself authorizes the caller's Team-scoped Planning
+ * actions without a Project role, as `requireTeamPermission` and
+ * `requirePlanningUpdateTeamPermission` accept them, so the Web offers those actions (ADR 0123).
+ *
+ * @param principal - Principal of the current request.
+ * @returns Team grants, empty for a system administrator, who may do everything, and for a
+ * principal with no grant at a Team or the Workspace.
+ */
+export async function listPlanningViewerTeamGrants(principal: WorkspacePrincipal): Promise<PlanningViewerTeamGrant[]> {
+  if (principal.isSystemAdmin) return []
+  if (!principal.enterpriseRouteAuthorizedAtResource && (principal.enterpriseTeamAccesses?.length ?? 0) === 0) return []
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
+  return directory.teams.flatMap((team): PlanningViewerTeamGrant[] => {
+    if (hasDirectEnterpriseTeamPermission(principal, team.id, 'teams.manage')) return [{ teamId: team.id, role: 'manager' }]
+    if (
+      hasDirectEnterpriseTeamPermission(principal, team.id, 'teams.write') ||
+      hasDirectEnterpriseTeamPermission(principal, team.id, 'planning.write')
+    ) {
+      return [{ teamId: team.id, role: 'member' }]
+    }
+    return []
+  })
+}
+
+/**
  * Authorizes a Team-scoped update target without trusting ambiguous Project IDs.
  *
  * @param principal - Authenticated Workspace principal.
@@ -384,14 +411,12 @@ export async function requirePlanningUpdateTeamPermission(
   minimumRole: ProjectRole,
   readContext?: TeamPermissionReadContext,
 ): Promise<void> {
-  const directPlanningRead = minimumRole === 'viewer' && (
-    principal.enterpriseTeamAccesses?.some((access) => access.teamId === teamId && access.permissions.includes('planning.read')) ||
-    principal.enterpriseRouteAuthorizedAtResource && principal.enterprisePermissions?.includes('planning.read') && (
-      principal.enterpriseAuthorizationResource?.kind === 'workspace' ||
-      principal.enterpriseAuthorizationResource?.kind === 'team' && principal.enterpriseAuthorizationResource.targetId === teamId
-    )
-  )
-  if (directPlanningRead) {
+  // Planning permissions granted at the Team itself authorize its viewer and member actions, so a
+  // reviewer or update owner accepted for `planning.write` at the Team may act (ADR 0123).
+  const directPlanningPermission = minimumRole === 'viewer'
+    ? 'planning.read'
+    : minimumRole === 'member' ? 'planning.write' : undefined
+  if (directPlanningPermission && hasDirectEnterpriseTeamPermission(principal, teamId, directPlanningPermission)) {
     const directory = readContext?.directory ?? await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
     if (!directory.teams.some((team) => team.id === teamId)) throw new PlanningError(404, 'TeamNotFound', 'The Planning Team was not found.')
     return

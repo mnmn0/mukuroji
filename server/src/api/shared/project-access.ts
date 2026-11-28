@@ -1203,6 +1203,33 @@ export async function getEffectiveProjectAccessList(principal: ProjectPrincipal)
 }
 
 /**
+ * Checks whether the current request grants an Enterprise permission at a Team itself, through a
+ * Team-scoped assignment or an assignment at the Workspace or that Team, rather than through a
+ * Project of the Team.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team to check.
+ * @param permission - Enterprise permission to look for.
+ * @returns True when the permission is granted directly at the Team.
+ */
+export function hasDirectEnterpriseTeamPermission(
+  principal: ProjectPrincipal,
+  teamId: string,
+  permission: EnterpriseTeamAccess['permissions'][number],
+): boolean {
+  return principal.enterpriseTeamAccesses?.some((access) =>
+    access.teamId === teamId && access.permissions.includes(permission)
+  ) === true ||
+    principal.enterpriseRouteAuthorizedAtResource === true &&
+      (
+        principal.enterpriseAuthorizationResource?.kind === 'workspace' ||
+        principal.enterpriseAuthorizationResource?.kind === 'team' &&
+          principal.enterpriseAuthorizationResource.targetId === teamId
+      ) &&
+      principal.enterprisePermissions?.includes(permission) === true
+}
+
+/**
  * Requires the principal to hold at least the given role on a Team.
  *
  * @param principal - Authenticated Workspace principal.
@@ -1233,18 +1260,7 @@ export async function requireTeamPermission(
     : minimumRole === 'member'
       ? 'teams.write'
       : 'teams.read'
-  if (
-    principal.enterpriseTeamAccesses?.some((access) =>
-      access.teamId === teamId && access.permissions.includes(enterprisePermission)
-    ) ||
-    principal.enterpriseRouteAuthorizedAtResource &&
-      (
-        principal.enterpriseAuthorizationResource?.kind === 'workspace' ||
-        principal.enterpriseAuthorizationResource?.kind === 'team' &&
-          principal.enterpriseAuthorizationResource.targetId === teamId
-      ) &&
-      principal.enterprisePermissions?.includes(enterprisePermission)
-  ) {
+  if (hasDirectEnterpriseTeamPermission(principal, teamId, enterprisePermission)) {
     const role = minimumRole === 'manager'
       ? 'manager'
       : minimumRole === 'member'

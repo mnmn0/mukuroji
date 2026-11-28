@@ -135,3 +135,4 @@
 | [0120](0120-artifact-status-refresh-sequence-and-stale-authorization.md) | pull request の照会は refresh の連番で接続を順に試し、古い credential の 401 で再認証にしない | 提案 |
 | [0121](0121-retry-retired-channel-webhook-deletion.md) | 削除・差し替えた channel 投稿先の古い Webhook secret の削除を再試行する | 提案 |
 | [0122](0122-charter-owner-sync-use-case-and-streamed-project-customer-links.md) | Charter owner の同期を Planning の use case に置き、Project ごとの顧客リンクは件数上限なしで数える | 提案 |
+| [0123](0123-team-update-target-direct-planning-grants.md) | Team の近況では Team に付与された Planning の権限を member の操作に使い、Web にもその付与を渡す | 提案 |
