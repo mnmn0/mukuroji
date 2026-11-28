@@ -3449,16 +3449,35 @@ describe('collaboration projection pure helpers', () => {
   test('drops a GitHub pull request notification once its repository is unlinked or moved to another Team', async () => {
     const previous = process.env.PLANNING_TABLE_NAME
     process.env.PLANNING_TABLE_NAME = 'PLANNING_TABLE_NAME'
-    let link: Record<string, unknown> | undefined = { entryType: 'github-repository-link', repositoryId: '42', teamId: 'core' }
+    let link: Record<string, unknown> | undefined = {
+      workspaceId: 'workspace-1', recordKey: 'GITHUB_REPOSITORY#42', entryType: 'github-repository-link', schemaVersion: 1,
+      repositoryId: '42', repository: 'acme/app', installationId: '7', private: true, teamId: 'core', revision: 1,
+      linkedAt: '2026-11-27T00:00:00.000Z',
+    }
     let snapshotSyncedAt: string | undefined = '2026-11-28T00:00:00.000Z'
     let requestedReviewers = ['someone-else']
+    let snapshotOverrides: Record<string, unknown> = {}
+    /**
+     * Builds the stored snapshot row the fence reads.
+     *
+     * @param syncedAt - Read time of the snapshot.
+     * @returns A row the integration store would write.
+     */
+    const snapshotRow = (syncedAt: string): Record<string, unknown> => ({
+      workspaceId: 'workspace-1', recordKey: 'GITHUB_PULL_REQUEST#42#0000000007', entryType: 'github-pull-request', schemaVersion: 1,
+      repositoryId: '42', repository: 'acme/app', number: 7, title: 'Review me', url: 'https://github.com/acme/app/pull/7',
+      state: 'open', draft: false, headRef: 'feature', baseRef: 'main', headSha: 'a'.repeat(40), mergeable: 'mergeable',
+      reviewDecision: 'review-required', requestedReviewerLogins: requestedReviewers, requestedTeamSlugs: [], reviews: [],
+      checks: { state: 'success', failedNames: [], total: 1 }, createdAt: '2026-11-27T00:00:00.000Z',
+      updatedAt: syncedAt, syncedAt, ...snapshotOverrides,
+    })
     const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
       if (command instanceof GetCommand && command.input.TableName === 'PLANNING_TABLE_NAME') {
         expect(command.input.ConsistentRead).toBe(true)
         if (command.input.Key?.recordKey === 'GITHUB_REPOSITORY#42') return link ? { Item: link, $metadata: {} } : { $metadata: {} }
         if (command.input.Key?.recordKey === 'GITHUB_PULL_REQUEST#42#0000000007') {
           return snapshotSyncedAt
-            ? { Item: { syncedAt: snapshotSyncedAt, state: 'open', requestedReviewerLogins: requestedReviewers }, $metadata: {} }
+            ? { Item: snapshotRow(snapshotSyncedAt), $metadata: {} }
             : { $metadata: {} }
         }
       }
@@ -3487,11 +3506,20 @@ describe('collaboration projection pure helpers', () => {
       requestedReviewers = ['Bob']
       expect((await readGitHubPullRequestNotificationFence(event)).current).toBe(true)
       requestedReviewers = ['someone-else']
+      // An unreadable snapshot fails the event instead of being trusted.
+      snapshotOverrides = { schemaVersion: 99 }
+      await expect(readGitHubPullRequestNotificationFence(event)).rejects.toMatchObject({ code: 'GitHubIntegrationCorrupt' })
+      snapshotOverrides = { syncedAt: 'not a time' }
+      await expect(readGitHubPullRequestNotificationFence(event)).rejects.toMatchObject({ code: 'GitHubIntegrationCorrupt' })
+      snapshotOverrides = {}
       // Delivery checks only the link, since later reads are expected by then.
       expect((await readGitHubPullRequestNotificationFence(event, { checkSnapshot: false })).current).toBe(true)
       snapshotSyncedAt = '2026-11-28T00:00:00.000Z'
       link = { ...link, teamId: 'other' }
       expect((await readGitHubPullRequestNotificationFence(event)).current).toBe(false)
+      // An unreadable link fails delivery too, rather than authorizing it.
+      link = { ...link, teamId: 'core', schemaVersion: 99 }
+      await expect(readGitHubPullRequestNotificationFence(event, { checkSnapshot: false })).rejects.toMatchObject({ code: 'GitHubIntegrationCorrupt' })
       link = undefined
       expect((await readGitHubPullRequestNotificationFence(event)).current).toBe(false)
       // Other events are not fenced on a repository link.

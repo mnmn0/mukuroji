@@ -35,7 +35,11 @@ import {
   createGitHubRepositoryLinkRecordKey,
   GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX,
   GITHUB_REPOSITORY_LINK_ENTRY_TYPE,
+  GitHubIntegrationError,
+  parseGitHubPullRequestSnapshotRow,
+  parseGitHubRepositoryLinkRow,
   readGitHubNotificationPullRequest,
+  type GitHubPullRequestSnapshot,
 } from '../../../github-integration'
 import {
   REQUEST_REQUESTER_EVENT_TYPE_PREFIX,
@@ -2037,18 +2041,15 @@ export async function readMemberAccessExpiryNoticeFence(
  * @param stored - Stored snapshot row.
  * @returns Whether the snapshot shows the same review request, CI failure, or conflict.
  */
-function isGitHubNotificationStillShown(event: AuditProjectionEvent, stored: Record<string, unknown>): boolean {
+function isGitHubNotificationStillShown(event: AuditProjectionEvent, stored: GitHubPullRequestSnapshot): boolean {
   if (stored.state !== 'open') return false
   const kind = event.eventType.slice(GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX.length)
   if (kind === 'review_requested') {
     const login = event.githubRecipientLogin?.toLowerCase()
-    return login !== undefined && Array.isArray(stored.requestedReviewerLogins) &&
-      stored.requestedReviewerLogins.some((reviewer) => typeof reviewer === 'string' && reviewer.toLowerCase() === login)
+    return login !== undefined && stored.requestedReviewerLogins.some((reviewer) => reviewer.toLowerCase() === login)
   }
   if (event.githubHeadSha === undefined || stored.headSha !== event.githubHeadSha) return false
-  if (kind === 'checks_failed') {
-    return typeof stored.checks === 'object' && stored.checks !== null && 'state' in stored.checks && stored.checks.state === 'failure'
-  }
+  if (kind === 'checks_failed') return stored.checks.state === 'failure'
   if (kind === 'conflict') {
     return stored.mergeable === 'conflicting' || (stored.mergeable === 'unknown' && stored.lastKnownMergeable === 'conflicting')
   }
@@ -2083,18 +2084,26 @@ export async function readGitHubPullRequestNotificationFence(
   const tableName = requireEnv('PLANNING_TABLE_NAME')
   const key = { workspaceId: event.workspaceId, recordKey: createGitHubRepositoryLinkRecordKey(pullRequest.repositoryId) }
   const result = await documentClient.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true }))
-  const link = result.Item
-  if (link?.entryType !== GITHUB_REPOSITORY_LINK_ENTRY_TYPE || link.teamId !== event.teamId) return { current: false }
+  if (!result.Item) return { current: false }
+  // An unreadable row fails the event, so it is retried and reaches the DLQ instead of being trusted.
+  const link = parseGitHubRepositoryLinkRow(result.Item, event.workspaceId)
+  if (link.teamId !== event.teamId) return { current: false }
   if (options.checkSnapshot) {
-    const readAt = event.githubPullRequestSyncedAt
+    const readAt = readTimestamp(event.githubPullRequestSyncedAt)
     if (!readAt) return { current: false }
-    const stored = (await documentClient.send(new GetCommand({
+    const row = (await documentClient.send(new GetCommand({
       TableName: tableName,
       Key: { workspaceId: event.workspaceId, recordKey: createGitHubPullRequestRecordKey(pullRequest.repositoryId, pullRequest.number) },
       ConsistentRead: true,
     }))).Item
-    const storedAt = readTimestamp(stored?.syncedAt)
-    if (stored && storedAt && storedAt > readAt && !isGitHubNotificationStillShown(event, stored)) return { current: false }
+    if (row) {
+      const stored = parseGitHubPullRequestSnapshotRow(row)
+      const storedAt = readTimestamp(stored.syncedAt)
+      if (!storedAt) {
+        throw new GitHubIntegrationError('unavailable', 'GitHubIntegrationCorrupt', 'GitHub integration data is unavailable.', { retryable: false })
+      }
+      if (storedAt > readAt && !isGitHubNotificationStillShown(event, stored)) return { current: false }
+    }
   }
   return {
     current: true,

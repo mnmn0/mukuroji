@@ -7,6 +7,7 @@ export {
   GITHUB_REPOSITORY_LINK_ENTRY_TYPE,
   readGitHubNotificationPullRequest,
 } from './domain/notification-scope'
+export type { GitHubPullRequestSnapshot } from './domain/pull-request-snapshot'
 export type {
   GitHubAppCredentialSource,
   GitHubAppGateway,
@@ -37,6 +38,8 @@ export {
 export {
   DynamoDbGitHubIntegrationStore,
   InMemoryGitHubIntegrationStore,
+  parseGitHubPullRequestSnapshotRow,
+  parseGitHubRepositoryLinkRow,
 } from './adapter-out/dynamodb/github-integration-store'
 export {
   DynamoDbGitHubNotificationSink,

@@ -139,7 +139,7 @@ export class DynamoDbGitHubIntegrationStore implements GitHubIntegrationStore<Mu
    */
   async listRepositoryLinks(workspaceId: string): Promise<GitHubRepositoryLinkRecord[]> {
     const rows = await this.queryPrefix(workspaceId, LINK_PREFIX, Number.POSITIVE_INFINITY, true)
-    return rows.items.map((row) => parseLinkRow(row, workspaceId))
+    return rows.items.map((row) => parseGitHubRepositoryLinkRow(row, workspaceId))
   }
 
   /**
@@ -151,7 +151,7 @@ export class DynamoDbGitHubIntegrationStore implements GitHubIntegrationStore<Mu
    */
   async getRepositoryLink(workspaceId: string, repositoryId: string): Promise<GitHubRepositoryLinkRecord | null> {
     const row = await this.readItem(workspaceId, `${LINK_PREFIX}${repositoryId}`)
-    return row ? parseLinkRow(row, workspaceId) : null
+    return row ? parseGitHubRepositoryLinkRow(row, workspaceId) : null
   }
 
   /**
@@ -424,7 +424,7 @@ export class DynamoDbGitHubIntegrationStore implements GitHubIntegrationStore<Mu
   async listPullRequestSnapshots(workspaceId: string, options: { exhaustive?: boolean } = {}): Promise<GitHubPullRequestSnapshotPage> {
     const pages = options.exhaustive === true ? Number.POSITIVE_INFINITY : SNAPSHOT_PAGES_MAX
     const rows = await this.queryPrefix(workspaceId, PULL_REQUEST_PREFIX, pages, false)
-    return { snapshots: rows.items.map(parseSnapshotRow), incomplete: rows.incomplete }
+    return { snapshots: rows.items.map(parseGitHubPullRequestSnapshotRow), incomplete: rows.incomplete }
   }
 
   /**
@@ -439,7 +439,7 @@ export class DynamoDbGitHubIntegrationStore implements GitHubIntegrationStore<Mu
    */
   async getPullRequestSnapshot(workspaceId: string, repositoryId: string, number: number): Promise<GitHubPullRequestSnapshot | null> {
     const row = await this.readItem(workspaceId, pullRequestKey(repositoryId, number))
-    return row ? parseSnapshotRow(row) : null
+    return row ? parseGitHubPullRequestSnapshotRow(row) : null
   }
 
   /**
@@ -781,13 +781,14 @@ export class InMemoryGitHubIntegrationStore implements GitHubIntegrationStore<un
 }
 
 /**
- * Parses a link row.
+ * Parses a repository link row, rejecting an unreadable one.
  *
  * @param row - Stored row.
  * @param workspaceId - Partition it was read from.
  * @returns The link.
+ * @throws GitHubIntegrationError `GitHubIntegrationCorrupt` when the row cannot be read.
  */
-function parseLinkRow(row: Record<string, unknown>, workspaceId: string): GitHubRepositoryLinkRecord {
+export function parseGitHubRepositoryLinkRow(row: Record<string, unknown>, workspaceId: string): GitHubRepositoryLinkRecord {
   const { repositoryId, repository, installationId, teamId, revision, linkedAt } = row
   if (
     row.workspaceId !== workspaceId ||
@@ -807,12 +808,13 @@ function parseLinkRow(row: Record<string, unknown>, workspaceId: string): GitHub
 }
 
 /**
- * Parses a snapshot row.
+ * Parses a pull request snapshot row, rejecting an unreadable one.
  *
  * @param row - Stored row.
  * @returns The snapshot.
+ * @throws GitHubIntegrationError `GitHubIntegrationCorrupt` when the row cannot be read.
  */
-function parseSnapshotRow(row: Record<string, unknown>): GitHubPullRequestSnapshot {
+export function parseGitHubPullRequestSnapshotRow(row: Record<string, unknown>): GitHubPullRequestSnapshot {
   const checks = isRecord(row.checks) ? row.checks : undefined
   const reviews = Array.isArray(row.reviews) ? row.reviews : undefined
   if (
