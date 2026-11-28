@@ -15,12 +15,27 @@ export function createGitHubRepositoryLinkRecordKey(repositoryId: string): strin
 }
 
 /**
- * Reads the repository ID of a pull request notification's audit entity, `<repositoryId>#<number>`.
+ * Builds the Planning table record key of a pull request snapshot row. The number is zero-padded
+ * so the rows of a repository sort by number.
+ *
+ * @param repositoryId - GitHub repository ID.
+ * @param number - Pull request number.
+ * @returns The record key.
+ */
+export function createGitHubPullRequestRecordKey(repositoryId: string, number: number): string {
+  return `GITHUB_PULL_REQUEST#${repositoryId}#${String(number).padStart(10, '0')}`
+}
+
+/**
+ * Reads the pull request of a notification's audit entity, `<repositoryId>#<number>`.
  *
  * @param entityId - Audit entity ID.
- * @returns The repository ID, or `undefined` when the entity ID has another shape.
+ * @returns The repository ID and number, or `undefined` when the entity ID has another shape.
  */
-export function readGitHubNotificationRepositoryId(entityId: string | undefined): string | undefined {
-  const match = /^([1-9][0-9]{0,19})#[1-9][0-9]{0,9}$/.exec(entityId ?? '')
-  return match?.[1]
+export function readGitHubNotificationPullRequest(
+  entityId: string | undefined,
+): { repositoryId: string, number: number } | undefined {
+  const match = /^([1-9][0-9]{0,19})#([1-9][0-9]{0,9})$/.exec(entityId ?? '')
+  if (!match?.[1] || !match[2]) return undefined
+  return { repositoryId: match[1], number: Number(match[2]) }
 }

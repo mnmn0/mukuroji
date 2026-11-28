@@ -372,12 +372,15 @@ test('links only repositories the App can read to an existing Team', async () =>
     .toMatchObject({ revision: 2 })
 })
 
-test('reports retryable job failures and malformed messages to SQS', async () => {
+test('reports every job failure and malformed message to SQS', async () => {
   const store = new InMemoryGitHubIntegrationStore()
   await store.saveRepositoryLink({ workspaceId: WORKSPACE_ID, record: link })
   const failing: GitHubAppGateway = {
     ...fakeGateway([]).gateway,
-    async readPullRequests() {
+    async readPullRequests(_reference, numbers) {
+      if (numbers.includes(6)) {
+        throw new GitHubIntegrationError('unavailable', 'GitHubResponseMalformed', 'GitHub returned an unexpected answer.', { retryable: false })
+      }
       throw new GitHubIntegrationError('unavailable', 'GitHubRequestRejected', 'GitHub answered 502.')
     },
   }
@@ -392,10 +395,15 @@ test('reports retryable job failures and malformed messages to SQS', async () =>
     log: (message) => logs.push(message),
   })
   const job = { installationId: '7', repositoryId: '42', repository: 'acme/app', attempt: 0, kind: 'pull-requests', numbers: [5] }
-  const response = await handler({ Records: [{ messageId: 'm1', body: JSON.stringify(job) }, { messageId: 'm2', body: 'not json' }] })
-  // A malformed message goes back to SQS so it reaches the DLQ instead of being lost.
-  expect(response).toEqual({ batchItemFailures: [{ itemIdentifier: 'm1' }, { itemIdentifier: 'm2' }] })
-  expect(logs).toEqual(['GitHub sync job failed.', 'GitHub sync worker received a malformed message.'])
+  const response = await handler({ Records: [
+    { messageId: 'm1', body: JSON.stringify(job) },
+    { messageId: 'm2', body: 'not json' },
+    { messageId: 'm3', body: JSON.stringify({ ...job, numbers: [6] }) },
+  ] })
+  // A malformed message and a failure retrying will not fix go back to SQS too, so they reach the
+  // DLQ instead of being lost.
+  expect(response).toEqual({ batchItemFailures: [{ itemIdentifier: 'm1' }, { itemIdentifier: 'm2' }, { itemIdentifier: 'm3' }] })
+  expect(logs).toEqual(['GitHub sync job failed.', 'GitHub sync worker received a malformed message.', 'GitHub sync job failed.'])
 })
 
 test('notifies new reviewers and the author of new CI failures and conflicts, once', () => {

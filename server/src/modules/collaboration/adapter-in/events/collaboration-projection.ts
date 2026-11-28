@@ -31,10 +31,11 @@ import {
 import type { DocumentProjectRole, GetDocumentRequest } from '../../../documents'
 import { TriageError } from '../../../triage'
 import {
+  createGitHubPullRequestRecordKey,
   createGitHubRepositoryLinkRecordKey,
   GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX,
   GITHUB_REPOSITORY_LINK_ENTRY_TYPE,
-  readGitHubNotificationRepositoryId,
+  readGitHubNotificationPullRequest,
 } from '../../../github-integration'
 import {
   REQUEST_REQUESTER_EVENT_TYPE_PREFIX,
@@ -204,6 +205,8 @@ export type AuditProjectionEvent = {
   accessExpiryMemberKey?: string
   /** Access expiry an access expiry notice announces, as stored on the member row when scanned. */
   accessExpiresAt?: string
+  /** Read time of the pull request snapshot a GitHub notification was found in (ADR 0079). */
+  githubPullRequestSyncedAt?: string
   /** notification/realtime consumer へ配送する event かどうかです。 */
   outboxStatus: 'pending' | 'suppressed'
 }
@@ -2031,20 +2034,38 @@ export async function readMemberAccessExpiryNoticeFence(
  * notification carries a condition on the link row, written in the same transaction as the
  * notification, so a link change that lands before the save cancels it.
  *
+ * When projecting, the notification is also dropped if a snapshot read after the one it was found
+ * in is already stored, so an overlapping sync of an older read does not report a state GitHub has
+ * since left. A missing snapshot does not drop it: the notification is written before its snapshot.
+ *
  * @param event - Parsed audit event.
+ * @param options - Whether to compare with the stored snapshot; delivery checks only the link.
+ * @param options.checkSnapshot - Whether a newer stored snapshot drops the notification.
  * @returns Whether the event should still be projected, and the condition for a GitHub notification.
  */
 export async function readGitHubPullRequestNotificationFence(
   event: AuditProjectionEvent,
+  options: { checkSnapshot: boolean } = { checkSnapshot: true },
 ): Promise<{ current: boolean; condition?: ProjectionConditionCheck }> {
   if (!event.eventType.startsWith(GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX)) return { current: true }
-  const repositoryId = readGitHubNotificationRepositoryId(event.entityId)
-  if (!repositoryId || !event.teamId) return { current: false }
+  const pullRequest = readGitHubNotificationPullRequest(event.entityId)
+  if (!pullRequest || !event.teamId) return { current: false }
   const tableName = requireEnv('PLANNING_TABLE_NAME')
-  const key = { workspaceId: event.workspaceId, recordKey: createGitHubRepositoryLinkRecordKey(repositoryId) }
+  const key = { workspaceId: event.workspaceId, recordKey: createGitHubRepositoryLinkRecordKey(pullRequest.repositoryId) }
   const result = await documentClient.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true }))
   const link = result.Item
   if (link?.entryType !== GITHUB_REPOSITORY_LINK_ENTRY_TYPE || link.teamId !== event.teamId) return { current: false }
+  if (options.checkSnapshot) {
+    const readAt = event.githubPullRequestSyncedAt
+    if (!readAt) return { current: false }
+    const stored = (await documentClient.send(new GetCommand({
+      TableName: tableName,
+      Key: { workspaceId: event.workspaceId, recordKey: createGitHubPullRequestRecordKey(pullRequest.repositoryId, pullRequest.number) },
+      ConsistentRead: true,
+    }))).Item
+    const storedAt = readTimestamp(stored?.syncedAt)
+    if (storedAt && storedAt > readAt) return { current: false }
+  }
   return {
     current: true,
     condition: {
@@ -3119,7 +3140,7 @@ export async function authorizeNotificationDelivery(
       throw error
     }
   }
-  if (!(await readGitHubPullRequestNotificationFence(sourceEvent)).current) return false
+  if (!(await readGitHubPullRequestNotificationFence(sourceEvent, { checkSnapshot: false })).current) return false
   const currentScope = await readCurrentWorkItemScope(sourceEvent)
   if (!currentScope.exists) return false
   const recipientReasons = {
@@ -3560,6 +3581,9 @@ export function parseAuditProjectionEvent(
       ? { accessExpiryMemberKey: readString(metadata.accessExpiryMemberKey) }
       : {}),
     ...(readTimestamp(metadata.accessExpiresAt) ? { accessExpiresAt: readTimestamp(metadata.accessExpiresAt) } : {}),
+    ...(readTimestamp(metadata.githubPullRequestSyncedAt)
+      ? { githubPullRequestSyncedAt: readTimestamp(metadata.githubPullRequestSyncedAt) }
+      : {}),
     outboxStatus: value.outboxStatus === 'suppressed' ? 'suppressed' : 'pending',
   }
 }

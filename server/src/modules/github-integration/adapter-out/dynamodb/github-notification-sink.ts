@@ -142,6 +142,8 @@ export function createGitHubNotificationAuditEvent(
       actorMemberKey: 'system',
       // The recipient must still read this Team when the notification is delivered.
       teamId: delivery.teamId,
+      // A notification read before a newer stored snapshot is dropped by the projection.
+      githubPullRequestSyncedAt: pullRequest.syncedAt,
       deepLink: '/reviews',
       notificationCandidates: [{ memberKey: delivery.memberKey, reason: NOTIFICATION_REASONS[delivery.kind] }],
     },

@@ -3450,11 +3450,14 @@ describe('collaboration projection pure helpers', () => {
     const previous = process.env.PLANNING_TABLE_NAME
     process.env.PLANNING_TABLE_NAME = 'PLANNING_TABLE_NAME'
     let link: Record<string, unknown> | undefined = { entryType: 'github-repository-link', repositoryId: '42', teamId: 'core' }
+    let snapshotSyncedAt: string | undefined = '2026-11-28T00:00:00.000Z'
     const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
-      if (command instanceof GetCommand && command.input.TableName === 'PLANNING_TABLE_NAME' &&
-        command.input.Key?.recordKey === 'GITHUB_REPOSITORY#42') {
+      if (command instanceof GetCommand && command.input.TableName === 'PLANNING_TABLE_NAME') {
         expect(command.input.ConsistentRead).toBe(true)
-        return link ? { Item: link, $metadata: {} } : { $metadata: {} }
+        if (command.input.Key?.recordKey === 'GITHUB_REPOSITORY#42') return link ? { Item: link, $metadata: {} } : { $metadata: {} }
+        if (command.input.Key?.recordKey === 'GITHUB_PULL_REQUEST#42#0000000007') {
+          return snapshotSyncedAt ? { Item: { syncedAt: snapshotSyncedAt }, $metadata: {} } : { $metadata: {} }
+        }
       }
       throw new Error('Unexpected command.')
     })
@@ -3462,12 +3465,24 @@ describe('collaboration projection pure helpers', () => {
       const event = parseAuditProjectionEvent({
         eventId: 'github', eventType: 'github.pull_request_review_requested', workspaceId: 'workspace-1',
         entityType: 'github-pull-request', entityId: '42#7', occurredAt: '2026-11-28T00:00:00.000Z', outboxStatus: 'pending',
-        metadata: { teamId: 'core', notificationCandidates: [{ memberKey: 'bob@example.com', reason: 'review-requested' }] },
+        metadata: {
+          teamId: 'core', githubPullRequestSyncedAt: '2026-11-28T00:00:00.000Z',
+          notificationCandidates: [{ memberKey: 'bob@example.com', reason: 'review-requested' }],
+        },
       })
       if (!event) throw new Error('Expected a parsed event.')
       const fence = await readGitHubPullRequestNotificationFence(event)
       expect(fence.current).toBe(true)
       expect(fence.condition?.ConditionCheck.ExpressionAttributeValues).toEqual({ ':entryType': 'github-repository-link', ':teamId': 'core' })
+      // The notification is written before its snapshot, so a missing snapshot keeps it.
+      snapshotSyncedAt = undefined
+      expect((await readGitHubPullRequestNotificationFence(event)).current).toBe(true)
+      // A later read is already stored: the notification describes a state GitHub has left.
+      snapshotSyncedAt = '2026-11-28T01:00:00.000Z'
+      expect((await readGitHubPullRequestNotificationFence(event)).current).toBe(false)
+      // Delivery checks only the link, since later reads are expected by then.
+      expect((await readGitHubPullRequestNotificationFence(event, { checkSnapshot: false })).current).toBe(true)
+      snapshotSyncedAt = '2026-11-28T00:00:00.000Z'
       link = { ...link, teamId: 'other' }
       expect((await readGitHubPullRequestNotificationFence(event)).current).toBe(false)
       link = undefined

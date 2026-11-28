@@ -33,7 +33,11 @@ import type {
   SaveMemberLoginInput,
   SaveRepositoryLinkInput,
 } from '../../application/ports'
-import { createGitHubRepositoryLinkRecordKey, GITHUB_REPOSITORY_LINK_ENTRY_TYPE } from '../../domain/notification-scope'
+import {
+  createGitHubPullRequestRecordKey,
+  createGitHubRepositoryLinkRecordKey,
+  GITHUB_REPOSITORY_LINK_ENTRY_TYPE,
+} from '../../domain/notification-scope'
 
 /** Record types in the Planning table. */
 const LINK_TYPE = GITHUB_REPOSITORY_LINK_ENTRY_TYPE
@@ -57,15 +61,14 @@ const SNAPSHOT_PAGES_MAX = 10
 type TransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number]
 
 /**
- * Builds the record key of a pull request snapshot. The number is zero-padded so the rows of a
- * repository sort by number.
+ * Builds the record key of a pull request snapshot.
  *
  * @param repositoryId - Repository ID.
  * @param number - Pull request number.
  * @returns The record key.
  */
 function pullRequestKey(repositoryId: string, number: number): string {
-  return `${PULL_REQUEST_PREFIX}${repositoryId}#${String(number).padStart(10, '0')}`
+  return createGitHubPullRequestRecordKey(repositoryId, number)
 }
 
 /**
