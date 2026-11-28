@@ -133,8 +133,9 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
   /**
    * Reads every decision of the Team's Projects with eventually consistent reads.
    *
-   * Counter rows are told apart by their record key, not by a stored attribute, so a decision row
-   * whose attributes are broken fails the read instead of being left out.
+   * Counter rows are told apart by their record key, not by a stored attribute, and are checked
+   * too, so a broken counter, a decision row whose attributes are broken, or a row with an
+   * unknown key fails the read instead of being left out.
    *
    * @param workspaceId - Workspace directory ID.
    * @param teamId - Team ID.
@@ -146,10 +147,14 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
     for await (const row of this.queryRows(workspaceId, prefix, false)) {
       const recordKey = row.recordKey
       if (typeof recordKey !== 'string' || !recordKey.startsWith(prefix)) throw corruptLog()
-      // A Project's counter key is the prefix and the Project ID alone; decision keys go on.
-      if (!recordKey.slice(prefix.length).includes('#ENTRY#')) continue
       const projectId = row.projectId
-      if (typeof projectId !== 'string') throw corruptLog()
+      if (typeof projectId !== 'string' || row.workspaceId !== workspaceId) throw corruptLog()
+      // A Project's counter key is the prefix and the encoded Project ID alone, and it must hold a
+      // valid counter; decision keys go on with `#ENTRY#`; any other key is broken.
+      if (recordKey === counterKey({ teamId, projectId })) {
+        readCounterCount(row, { workspaceId, teamId, projectId })
+        continue
+      }
       entries.push({ projectId, entry: parseStoredEntry(row, { workspaceId, teamId, projectId }) })
     }
     return entries

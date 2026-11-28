@@ -250,17 +250,30 @@ describe('record decision dialog', () => {
   })
 })
 
+/**
+ * Builds an unsigned JWT-shaped token, enough for reading its subject.
+ *
+ * @param subject - Account subject.
+ * @param issuedAt - Issue time, so two tokens of one account differ.
+ * @returns The token.
+ */
+function fakeJwt(subject: string, issuedAt: number) {
+  const encode = (value: unknown) => btoa(JSON.stringify(value)).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_')
+  return `${encode({ alg: 'none' })}.${encode({ sub: subject, iat: issuedAt })}.signature`
+}
+
 describe('saving a decision', () => {
   /**
    * Mounts the save hook once and returns its save function, like one screen that is later left.
    *
+   * @param accessToken - Session token the mount uses.
    * @returns The save function of that mount.
    */
-  function mountSave() {
+  function mountSave(accessToken = 'token') {
     let save: ReturnType<typeof useSaveProjectDecision> | undefined
     /** Captures the hook's save function. */
     function Capture() {
-      save = useSaveProjectDecision({ accessToken: 'token' })
+      save = useSaveProjectDecision({ accessToken })
       return null
     }
     renderToStaticMarkup(<Capture />)
@@ -296,9 +309,13 @@ describe('saving a decision', () => {
         : Response.json({ teamId: 'core-team', projectId: 'atlas', entry: decision }, { status: 201 })
     }
     const input = toProjectDecisionEntryInput(toProjectDecisionFormValues(undefined, { title: '再認証を挟む決定' }), 'work-item')
-    await expect(mountSave()('core-team', 'atlas', undefined, input)).rejects.toThrow()
-    await expect(mountSave()('core-team', 'atlas', undefined, input)).rejects.toThrow()
-    expect(await mountSave()('core-team', 'atlas', undefined, input)).toEqual(decision)
+    // Each attempt uses a refreshed token of the same account, as after signing in again.
+    const expired = fakeJwt('member-1', 1)
+    const refreshed = fakeJwt('member-1', 2)
+    expect(refreshed).not.toBe(expired)
+    await expect(mountSave(expired)('core-team', 'atlas', undefined, input)).rejects.toThrow()
+    await expect(mountSave(expired)('core-team', 'atlas', undefined, input)).rejects.toThrow()
+    expect(await mountSave(refreshed)('core-team', 'atlas', undefined, input)).toEqual(decision)
     expect(keys).toHaveLength(3)
     expect(new Set(keys).size).toBe(1)
   })

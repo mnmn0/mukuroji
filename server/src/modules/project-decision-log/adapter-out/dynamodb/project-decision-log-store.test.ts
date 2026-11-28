@@ -276,6 +276,15 @@ test('fails closed on a row from another Project or scope', async () => {
   const { entryType: _entryType, ...untyped } = entryRow(entry)
   const missingType = new DynamoDbProjectDecisionLogStore('planning', fakeClient({ pages: [{ items: [untyped] }] }))
   expect(await missingType.listTeam('w', 't').catch((error: unknown) => error)).toMatchObject({ status: 502 })
+  const counter = { workspaceId: 'w', recordKey: 'PROJECT_DECISION#t#p', entryType: 'project-decision-log', schemaVersion: 1, teamId: 't', projectId: 'p', entryCount: 1 }
+  for (const broken of [
+    { ...counter, entryCount: 1.5 },
+    { ...counter, entryType: undefined },
+    { ...entryRow(entry), recordKey: 'PROJECT_DECISION#t#p#BROKEN#e1' },
+  ]) {
+    const listingBroken = new DynamoDbProjectDecisionLogStore('planning', fakeClient({ pages: [{ items: [broken] }] }))
+    expect(await listingBroken.listTeam('w', 't').catch((error: unknown) => error)).toMatchObject({ status: 502 })
+  }
 })
 
 test('reports an update of a decision without its creation fingerprint as corrupt, not a conflict', async () => {
