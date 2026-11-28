@@ -1,12 +1,11 @@
 import type { TeamDecisionLogItem, WorkspaceSearchResult } from '@mukuroji/contracts'
 import { useMemo, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
-import useSWR from 'swr'
-import { searchWorkspace } from '../../search/api/search'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import type { ProjectDirectoryTeam } from '../api'
 import { useTeamDecisionLog } from '../queries/useProjectDecisionLog'
-import { useActiveProjectMembers } from '../queries/useProjectMembers'
+import { useActiveDirectoryMembers } from '../queries/useProjectMembers'
+import { useTeamDecisionNotes } from '../queries/useTeamDecisionNotes'
 import { createDecisionDateTimeFormatter } from '../model/projectDecisionMessages'
 import { ProjectDecisionCard } from './ProjectDecisionLogPanel'
 
@@ -23,9 +22,6 @@ export type TeamDecisionLogViewProps = {
 const inputClassName =
   'h-10 rounded-md border border-tone-d3d8df bg-surface px-3 text-sm font-medium text-fg-1c1d1f outline-none transition focus:border-tone-2563eb focus:ring-4 focus:ring-tone-2563eb/10'
 
-/** Most decision notes the view reads from Workspace search. */
-const DECISION_NOTE_LIMIT = 50
-
 /**
  * Lists decisions and decided change requests across a Team's Projects, newest first, with the
  * decision notes kept on the Team's Work Items.
@@ -41,25 +37,14 @@ export function TeamDecisionLogView({ accessToken, locale, team }: TeamDecisionL
   const projects = useMemo(() => team.projects ?? [], [team.projects])
   const projectNames = useMemo(() => new Map(projects.map((project) => [project.id, project.name])), [projects])
   const log = useTeamDecisionLog(accessToken, team.id, { keyword, projectId }, true)
-  const members = useActiveProjectMembers(accessToken, projects.map((project) => project.id), projects.length > 0)
+  const teams = useMemo(() => [team], [team])
+  // Team-qualified lookups resolve a Project ID that several Teams share.
+  const members = useActiveDirectoryMembers(accessToken, teams, projects.length > 0)
   const memberNames = useMemo(
     () => new Map((members.data?.members ?? []).map((member) => [member.id, member.name || member.email])),
     [members.data],
   )
-  const notes = useSWR(
-    accessToken ? ['team-decision-notes', accessToken, team.id, keyword, projectId] as const : null,
-    async ([, token, teamId, currentKeyword, currentProjectId]) => {
-      const response = await searchWorkspace(token, {
-        entityTypes: ['context-item'],
-        teamIds: [teamId],
-        ...(currentKeyword ? { keyword: currentKeyword } : {}),
-        ...(currentProjectId ? { projectIds: [currentProjectId] } : {}),
-      }, { limit: DECISION_NOTE_LIMIT })
-      // Curated context items carry their kind as the subtitle.
-      return response.results.filter((result) => result.subtitle === 'decision')
-    },
-    { shouldRetryOnError: false, keepPreviousData: true },
-  )
+  const notes = useTeamDecisionNotes(accessToken, team.id, { keyword, projectId })
   const formatDateTime = useMemo(() => createDecisionDateTimeFormatter(locale), [locale])
 
   /**
@@ -143,15 +128,18 @@ export function TeamDecisionLogView({ accessToken, locale, team }: TeamDecisionL
         {notes.error ? (
           <p className="text-sm font-semibold text-fg-red-700" role="alert">{t('projects.decisionLog.team.memos.error')}</p>
         ) : null}
-        {notes.data && notes.data.length === 0 ? (
+        {notes.data && notes.data.notes.length === 0 ? (
           <p className="text-sm font-medium text-fg-505967">{t('projects.decisionLog.team.memos.empty')}</p>
         ) : null}
-        {notes.data && notes.data.length > 0 ? (
+        {notes.data && notes.data.notes.length > 0 ? (
           <ul className="grid gap-2" data-testid="team-decision-notes">
-            {notes.data.map((note) => (
+            {notes.data.notes.map((note) => (
               <DecisionNoteRow formatDateTime={formatDateTime} key={note.id} note={note} projectNames={projectNames} />
             ))}
           </ul>
+        ) : null}
+        {notes.data?.truncated ? (
+          <p className="text-sm font-medium text-fg-505967" role="status">{t('projects.decisionLog.team.memos.truncated')}</p>
         ) : null}
       </section>
     </div>

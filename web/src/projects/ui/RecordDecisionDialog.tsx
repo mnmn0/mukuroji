@@ -9,7 +9,8 @@ import {
 } from '../model/projectDecisionForm'
 import { describeProjectDecisionSaveError } from '../model/projectDecisionMessages'
 import { useSaveProjectDecision } from '../mutations/useSaveProjectDecision'
-import { useActiveProjectMembers } from '../queries/useProjectMembers'
+import { isActiveProjectAssignmentCandidate } from '../api/members'
+import { useProjectMembers } from '../queries/useProjectMembers'
 import { ProjectDecisionForm, type ProjectDecisionReferenceOption } from './ProjectDecisionForm'
 
 /** One Project a decision may be recorded in. */
@@ -89,9 +90,12 @@ export function RecordDecisionDialog({
   const [values, setValues] = useState(() => toProjectDecisionFormValues(undefined, prefill))
   const [isSaving, setIsSaving] = useState(false)
   const [saveError, setSaveError] = useState<string>()
-  const members = useActiveProjectMembers(accessToken, projectId ? [projectId] : [], Boolean(projectId))
+  // A Team-qualified lookup resolves a Project ID that several Teams share.
+  const members = useProjectMembers(accessToken, projectId || undefined, Boolean(projectId), selected?.teamId)
   const memberOptions = useMemo(
-    () => (members.data?.members ?? []).map((member) => ({ id: member.id, label: member.name || member.email })),
+    () => (members.data ?? [])
+      .filter(isActiveProjectAssignmentCandidate)
+      .map((member) => ({ id: member.id, label: member.name || member.email })),
     [members.data],
   )
   const save = useSaveProjectDecision({ accessToken })

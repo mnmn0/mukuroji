@@ -68,5 +68,6 @@ export const decisionLogMessages = {
   'projects.decisionLog.team.memos.title': 'Decision notes on Work Items',
   'projects.decisionLog.team.memos.description': 'Notes kept as “decision” in Work Item collaboration.',
   'projects.decisionLog.team.memos.empty': 'No decision note matches.',
+  'projects.decisionLog.team.memos.truncated': 'More decision notes may exist. Narrow the list with a keyword or a Project.',
   'projects.decisionLog.team.memos.error': 'Decision notes could not be searched.',
 } as const satisfies Record<Extract<MessageKey, `projects.decisionLog.${string}`>, string>

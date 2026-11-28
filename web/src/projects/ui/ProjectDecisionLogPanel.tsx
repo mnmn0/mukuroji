@@ -183,7 +183,9 @@ export function ProjectDecisionLogPanel({
     if (editor.mode === 'closed' || isSaving) return
     setIsSaving(true)
     setSaveError(undefined)
-    const base = editor.mode === 'edit' ? (entries?.find((entry) => entry.id === editor.entry.id) ?? editor.entry) : undefined
+    // The revision captured when the editor opened guards the save, so a change another member
+    // saved meanwhile answers a conflict instead of being overwritten with these stale fields.
+    const base = editor.mode === 'edit' ? editor.entry : undefined
     try {
       await onSave(base, toProjectDecisionEntryInput(editor.values, base?.origin ?? 'project'))
       setEditor({ mode: 'closed' })

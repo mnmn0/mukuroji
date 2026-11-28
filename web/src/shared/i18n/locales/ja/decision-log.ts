@@ -66,5 +66,6 @@ export const decisionLogMessages = {
   'projects.decisionLog.team.memos.title': 'Work Item の決定メモ',
   'projects.decisionLog.team.memos.description': 'Work Item のコラボレーションに残した「決定」のメモです。',
   'projects.decisionLog.team.memos.empty': '条件に合う決定メモはありません。',
+  'projects.decisionLog.team.memos.truncated': '表示しきれない決定メモがあります。キーワードや Project で絞り込んでください。',
   'projects.decisionLog.team.memos.error': '決定メモを検索できませんでした。',
 } as const
