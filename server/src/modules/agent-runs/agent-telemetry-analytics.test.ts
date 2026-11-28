@@ -19,7 +19,7 @@ import {
 import { InMemoryAgentTelemetryAnalyticsSink } from './adapter-out/in-memory/agent-telemetry-analytics-sink'
 import { InMemoryAgentRunUsageStore } from './adapter-out/in-memory/agent-run-usage-store'
 import { DynamoDbAgentRunUsageStore, type AgentRunUsageDocumentClient } from './adapter-out/dynamodb/agent-run-usage-store'
-import { runAgentAnalyticsDailyExport, AGENT_ANALYTICS_EXPORT_MAX_RUNS } from './adapter-in/schedules/agent-analytics-daily-export'
+import { runAgentAnalyticsDailyExport } from './adapter-in/schedules/agent-analytics-daily-export'
 import { createAgentTelemetryAnalyticsSink } from '../../app/composition/agent-telemetry-analytics'
 
 const startedAt = new Date('2026-11-20T03:00:00.000Z')
@@ -98,6 +98,10 @@ describe('analytics rows', () => {
     expect(records.map((record) => Buffer.from(record).toString())).toEqual(['{"id":0}\n{"id":1}\n{"id":2}\n'])
     const large = Array.from({ length: 3 }, () => ({ text: 'x'.repeat(400 * 1024) }))
     expect(packAgentAnalyticsRecords(large)).toHaveLength(2)
+    // Firehose splits at most 500 JSON rows out of one record.
+    const small = Array.from({ length: 1_201 }, (_, index) => ({ id: index }))
+    const smallRecords = packAgentAnalyticsRecords(small).map((record) => Buffer.from(record).toString().split('\n').length - 1)
+    expect(smallRecords).toEqual([500, 500, 201])
     const many = Array.from({ length: AGENT_ANALYTICS_MAX_RECORDS_PER_BATCH + 1 }, () => new Uint8Array(1))
     expect(batchAgentAnalyticsRecords(many).map((batch) => batch.length)).toEqual([AGENT_ANALYTICS_MAX_RECORDS_PER_BATCH, 1])
   })
@@ -177,7 +181,7 @@ describe('daily analytics export', () => {
       sink,
       now: new Date('2026-11-28T00:00:00.000Z'),
     })
-    expect(result).toEqual({ runs: 2, workItems: 1, skipped: 3, truncated: false })
+    expect(result).toEqual({ runs: 2, workItems: 1, skipped: 3 })
     expect(read.sort()).toEqual(['run_1', 'run_2', 'run_3', 'run_missing'])
     expect(sink.runs.map((row) => [row.run_id, row.state, row.outcome])).toEqual(expect.arrayContaining([
       ['run_1', 'finished', 'completed'],
@@ -186,7 +190,26 @@ describe('daily analytics export', () => {
     expect(sink.workItems).toEqual([expect.objectContaining({
       work_item_id: 'task-1', status_category: 'completed', size_band: 'up-to-3d', actual_end_date: '2026-11-21', archived: false,
     })])
-    expect(AGENT_ANALYTICS_EXPORT_MAX_RUNS).toBeGreaterThan(0)
+  })
+})
+
+describe('daily analytics export paging', () => {
+  test('exports every noted run across pages and writes each Work Item once', async () => {
+    const usage = new InMemoryAgentRunUsageStore()
+    const sink = new InMemoryAgentTelemetryAnalyticsSink()
+    const ids = Array.from({ length: 1_203 }, (_, index) => `run_${String(index).padStart(4, '0')}`)
+    for (const runId of ids) await usage.watchRunForAnalytics({ directoryId: 'w', teamId: 'core', runId }, startedAt)
+    const result = await runAgentAnalyticsDailyExport({
+      usage,
+      readRun: async (_directoryId, _teamId, runId) => run(runId),
+      readWorkItem: async () => ({ statusCategory: 'started' }),
+      isWorkspaceActive: async () => true,
+      sink,
+      now: new Date('2026-11-28T00:00:00.000Z'),
+    })
+    expect(result).toEqual({ runs: 1_203, workItems: 1, skipped: 0 })
+    expect(new Set(sink.runs.map((row) => row.run_id)).size).toBe(1_203)
+    expect(sink.workItems).toHaveLength(1)
   })
 })
 

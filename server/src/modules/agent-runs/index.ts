@@ -157,7 +157,6 @@ export {
 } from './adapter-out/dynamodb/agent-run-usage-store'
 export { InMemoryAgentRunUsageStore } from './adapter-out/in-memory/agent-run-usage-store'
 export {
-  AGENT_ANALYTICS_EXPORT_MAX_RUNS,
   runAgentAnalyticsDailyExport,
   type AgentAnalyticsDailyExportResult,
 } from './adapter-in/schedules/agent-analytics-daily-export'

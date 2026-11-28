@@ -817,6 +817,115 @@ describe('AwsTenantOperationResourceOwner', () => {
     }
   })
 
+  test('extends the closure quiescence while Firehose may still deliver analytics rows', async () => {
+    const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    }))
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'export',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: { ...createConfig(), agentAnalyticsBucketName: 'agent-analytics' },
+      pseudonymKey: testPseudonymKey,
+      // 20 minutes after the request: past the 16-minute barrier, inside the 30-minute one.
+      clock: () => new Date('2026-08-02T00:20:00.000Z'),
+    })
+    const operation: TenantOperation = {
+      ...createOperation(),
+      currentStep: 'export',
+      completedSteps: [],
+      revision: 1,
+    }
+    const job: TenantOperationExecutionJob = {
+      version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+      workspaceId: operation.workspaceId,
+      operationId: operation.operationId,
+      step: 'export',
+    }
+
+    try {
+      const result = await owner.execute(job, operation)
+      expect(result.status).toBe('continuing')
+      if (result.status !== 'continuing') throw new Error('Expected a delayed continuation.')
+      expect(result.delaySeconds).toBe(600)
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
+  test('deletes the shared analytics delivery-error prefix on closure', async () => {
+    const workspaceId = 'workspace-1'
+    const errorObjectKey = 'agent-analytics-errors/events/processing-failed/dt=2026-08-01/part-1'
+    const listedPrefixes: string[] = []
+    const deletionBodies: string[] = []
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          const listedPrefix = readHttpQueryValue(request, 'prefix')
+          if (listedPrefix) {
+            listedPrefixes.push(listedPrefix)
+            return createS3XmlResponse(
+              `<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
+              `<Name>agent-analytics</Name><Prefix>${listedPrefix}</Prefix>` +
+              `<MaxKeys>20</MaxKeys><IsTruncated>false</IsTruncated>` +
+              `<Version><Key>${errorObjectKey}</Key><VersionId>version-1</VersionId>` +
+              '<IsLatest>true</IsLatest><Size>7</Size></Version></ListVersionsResult>',
+            )
+          }
+          deletionBodies.push(readTextRequestBody(request))
+          return createS3XmlResponse(
+            '<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>',
+          )
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    }))
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'data',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: { ...createConfig(), agentAnalyticsBucketName: 'agent-analytics' },
+      pseudonymKey: testPseudonymKey,
+    })
+
+    try {
+      // Regular files start at index 17; the three analytics tables follow the audit exports
+      // (17-20 and 21-23), so the delivery-error prefix is index 24.
+      await owner.execute(createDataJob(24, workspaceId), createOperation(workspaceId))
+      expect(listedPrefixes).toEqual(['agent-analytics-errors/'])
+      expect(deletionBodies).toHaveLength(1)
+      expect(deletionBodies[0]).toContain(errorObjectKey)
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
   test('redacts reusable credentials before writing an export page', async () => {
     const dynamoRequests: unknown[] = []
     const lowLevelClient = new DynamoDBClient({

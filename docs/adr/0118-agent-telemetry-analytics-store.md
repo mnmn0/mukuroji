@@ -50,17 +50,22 @@ ADR 0117 で、tool・待ち時間・model ごとの時間を DynamoDB に足し
   `agent_events` と `agent_runs` を結ぶ。ADR 0061 と同じ規則を SQL で書ける。
 - **書き込み**：
   - 受け口は usage・activity の保存（ADR 0061・0117）が終わってから、重複でない export だけを送る。1 回の export の行を
-    改行区切りの JSON 1 record（最大 900 KiB）にまとめ、Firehose の record de-aggregation で行に戻す。Firehose は record ごとに
+    改行区切りの JSON 1 record（最大 900 KiB、500 行まで。de-aggregation の上限）にまとめ、Firehose の record de-aggregation で行に戻す。Firehose は record ごとに
     5 KB 単位で課金するので、行ごとに送るより安い。`event_id` は export の ID と順番から作り、再送された export を Athena で
     除ける。
   - 送信の失敗は log に残して捨て、API の応答は変えない（best-effort）。Firehose が断った record は 2 回まで送り直す。
   - Run の開始時は、その Run の ID を Agent Runs table の global partition `agent-analytics-watch#<UTC 日付>` に置く
     （ID だけ、TTL 32 日）。日次の job（scheduled-jobs Lambda、UTC 0 時、`agent-run-triage` の停止 scope を共有）が過去 30 日分の
-    ID を読み、閉鎖中・閉鎖済みの Workspace を除いて、Run と Work Item の今の値を書く。1 回 5,000 Run まで。
+    ID を読み、閉鎖中・閉鎖済みの Workspace を除いて、Run と Work Item の今の値を書く。上限を置かず、500 件ずつの page を読むたびに書き出すので、メモリは 1 page 分で済み、記録した Run を取りこぼさない。
 - **保持と workgroup**：data は 400 日（ADR 0061 の usage と同じ）、Firehose の失敗 object は 30 日、Athena の結果は 7 日で消える。
   workgroup は query ごとの scan 上限 1 GiB を強制し、結果を SSE-S3 で暗号化する。
 - **Workspace の閉鎖とエクスポート**：analytics bucket を tenant lifecycle の file namespace に 3 つ（table ごとの
   `workspace_key=<hash>/`）加え、エクスポートでは読み、閉鎖では消し、検証では残っていないことを確かめる。
+  Firehose が変換できなかった record は Workspace で分けられない共有の `agent-analytics-errors/` に入り、どの Workspace の行も
+  含みうるので、閉鎖ではこの prefix を全部消し、エクスポートには入れない（失敗 object は 30 日で消える調査用の写しで、失っても
+  data は欠けない）。analytics bucket がある環境では、閉鎖の最初のエクスポートを要求から 30 分待つ。Firehose は最大 900 秒
+  buffer し、その 1.5 倍まで遅れて届け、dynamic partitioning を 300 秒送り直すので、閉鎖前に受けた record は 27.5 分以内に S3 に
+  届く。
 
 ## 検討した選択肢
 

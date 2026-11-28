@@ -235,6 +235,9 @@ const comparisonFieldTypes: ReadonlySet<CustomFieldDefinition['type']> = new Set
 /** Largest record Firehose accepts is 1,000 KiB; records stay well below it. */
 const maximumRecordBytes = 900 * 1024
 
+/** Most rows Firehose splits out of one record; JSON deaggregation stops at 500. */
+export const AGENT_ANALYTICS_MAX_ROWS_PER_RECORD = 500
+
 /** Largest number of records one `PutRecordBatch` call accepts. */
 export const AGENT_ANALYTICS_MAX_RECORDS_PER_BATCH = 500
 
@@ -426,7 +429,8 @@ export function buildAgentAnalyticsWorkItemRow(
  * 5 KB steps per record, so packing keeps the billed size close to the real one.
  *
  * @param rows - Rows to send.
- * @returns Records, each below the Firehose record limit.
+ * @returns Records, each below the Firehose record limit and holding at most
+ *   {@link AGENT_ANALYTICS_MAX_ROWS_PER_RECORD} rows.
  */
 export function packAgentAnalyticsRecords(rows: readonly object[]): Uint8Array[] {
   const records: Uint8Array[] = []
@@ -436,7 +440,7 @@ export function packAgentAnalyticsRecords(rows: readonly object[]): Uint8Array[]
     const line = `${JSON.stringify(row)}\n`
     const lineSize = Buffer.byteLength(line)
     if (lineSize > maximumRecordBytes) continue
-    if (size + lineSize > maximumRecordBytes && lines.length > 0) {
+    if ((size + lineSize > maximumRecordBytes || lines.length === AGENT_ANALYTICS_MAX_ROWS_PER_RECORD) && lines.length > 0) {
       records.push(Buffer.from(lines.join('')))
       lines = []
       size = 0

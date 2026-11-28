@@ -10,9 +10,6 @@ import {
   type AgentAnalyticsWorkItemRow,
 } from '../../domain/agent-telemetry-analytics'
 
-/** Largest number of runs one daily export reads; later runs wait for the next day. */
-export const AGENT_ANALYTICS_EXPORT_MAX_RUNS = 5_000
-
 /** Runs read at a time. */
 const readConcurrency = 8
 
@@ -43,8 +40,6 @@ export type AgentAnalyticsDailyExportResult = {
   workItems: number
   /** Runs skipped because the run, its Work Item, or its Workspace is gone. */
   skipped: number
-  /** Whether more runs were noted than one export reads. */
-  truncated: boolean
 }
 
 /**
@@ -59,17 +54,47 @@ export type AgentAnalyticsDailyExportResult = {
 export async function runAgentAnalyticsDailyExport(
   dependencies: AgentAnalyticsDailyExportDependencies,
 ): Promise<AgentAnalyticsDailyExportResult> {
-  const result: AgentAnalyticsDailyExportResult = { runs: 0, workItems: 0, skipped: 0, truncated: false }
+  const result: AgentAnalyticsDailyExportResult = { runs: 0, workItems: 0, skipped: 0 }
   if (!dependencies.sink.enabled) return result
-  const watches = await listWatches(dependencies)
-  result.truncated = watches.length > AGENT_ANALYTICS_EXPORT_MAX_RUNS
-  const selected = watches.slice(0, AGENT_ANALYTICS_EXPORT_MAX_RUNS)
   const activeWorkspaces = new Map<string, Promise<boolean>>()
+  const writtenWorkItems = new Set<string>()
+  const today = Date.UTC(dependencies.now.getUTCFullYear(), dependencies.now.getUTCMonth(), dependencies.now.getUTCDate())
+  // Every page of every day is read and written before the next, so no noted run is left out and
+  // memory stays bounded by one page.
+  for (let offset = 0; offset <= AGENT_ANALYTICS_WATCH_DAYS; offset += 1) {
+    const day = new Date(today - offset * 86_400_000).toISOString().slice(0, 10)
+    let cursor: string | undefined
+    do {
+      const page = await dependencies.usage.listAnalyticsWatches(day, cursor, watchPageSize)
+      await exportWatchPage(dependencies, page.watches, activeWorkspaces, writtenWorkItems, result)
+      cursor = page.nextCursor
+    } while (cursor !== undefined)
+  }
+  return result
+}
+
+/**
+ * Reads one page of noted runs and writes their state and their Work Items' values. A Work Item
+ * already written by an earlier page of this export is not written again.
+ *
+ * @param dependencies - Stores, sink, and export time.
+ * @param watches - Noted runs of the page.
+ * @param activeWorkspaces - Workspace availability read so far.
+ * @param writtenWorkItems - Work Items written so far, by key.
+ * @param result - Counts to add to.
+ */
+async function exportWatchPage(
+  dependencies: AgentAnalyticsDailyExportDependencies,
+  watches: readonly AgentAnalyticsWatch[],
+  activeWorkspaces: Map<string, Promise<boolean>>,
+  writtenWorkItems: Set<string>,
+  result: AgentAnalyticsDailyExportResult,
+): Promise<void> {
   const workItemReads = new Map<string, Promise<AgentAnalyticsWorkItem | undefined>>()
   const runRows: AgentAnalyticsRunRow[] = []
   const workItemRows = new Map<string, AgentAnalyticsWorkItemRow>()
-  for (let start = 0; start < selected.length; start += readConcurrency) {
-    await Promise.all(selected.slice(start, start + readConcurrency).map(async (watch) => {
+  for (let start = 0; start < watches.length; start += readConcurrency) {
+    await Promise.all(watches.slice(start, start + readConcurrency).map(async (watch) => {
       const active = activeWorkspaces.get(watch.directoryId) ?? dependencies.isWorkspaceActive(watch.directoryId)
       activeWorkspaces.set(watch.directoryId, active)
       if (!await active) {
@@ -90,35 +115,14 @@ export async function runAgentAnalyticsDailyExport(
         return
       }
       runRows.push(buildAgentAnalyticsRunStateRow(run, dependencies.now))
-      workItemRows.set(key, buildAgentAnalyticsWorkItemRow(run.directoryId, run.teamId, run.workItemId, workItem, dependencies.now))
+      if (!writtenWorkItems.has(key)) {
+        workItemRows.set(key, buildAgentAnalyticsWorkItemRow(run.directoryId, run.teamId, run.workItemId, workItem, dependencies.now))
+      }
     }))
   }
   if (runRows.length > 0) await dependencies.sink.putRuns(runRows)
   if (workItemRows.size > 0) await dependencies.sink.putWorkItems([...workItemRows.values()])
-  result.runs = runRows.length
-  result.workItems = workItemRows.size
-  return result
-}
-
-/**
- * Lists the runs noted on each UTC day of the window, newest day first, one more than the export
- * reads so it can tell that some were left.
- *
- * @param dependencies - Store and export time.
- * @returns Notes in day order.
- */
-async function listWatches(dependencies: AgentAnalyticsDailyExportDependencies): Promise<AgentAnalyticsWatch[]> {
-  const watches: AgentAnalyticsWatch[] = []
-  const today = Date.UTC(dependencies.now.getUTCFullYear(), dependencies.now.getUTCMonth(), dependencies.now.getUTCDate())
-  for (let offset = 0; offset <= AGENT_ANALYTICS_WATCH_DAYS; offset += 1) {
-    const day = new Date(today - offset * 86_400_000).toISOString().slice(0, 10)
-    let cursor: string | undefined
-    do {
-      const page = await dependencies.usage.listAnalyticsWatches(day, cursor, watchPageSize)
-      watches.push(...page.watches)
-      if (watches.length > AGENT_ANALYTICS_EXPORT_MAX_RUNS) return watches
-      cursor = page.nextCursor
-    } while (cursor !== undefined)
-  }
-  return watches
+  for (const key of workItemRows.keys()) writtenWorkItems.add(key)
+  result.runs += runRows.length
+  result.workItems += workItemRows.size
 }
