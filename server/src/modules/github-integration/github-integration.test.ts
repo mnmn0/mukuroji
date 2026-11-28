@@ -371,9 +371,18 @@ test('keeps a snapshot written after the one a cleanup read', async () => {
   const store = new InMemoryGitHubIntegrationStore()
   await store.putPullRequestSnapshot(WORKSPACE_ID, snapshot({ number: 1 }, '2026-11-01T00:00:00.000Z'))
   await store.putPullRequestSnapshot(WORKSPACE_ID, snapshot({ number: 1 }, '2026-11-02T00:00:00.000Z'))
-  expect(await store.deletePullRequestSnapshot(WORKSPACE_ID, '42', 1, '2026-11-01T00:00:00.000Z')).toBe('stale')
+  expect(await store.deletePullRequestSnapshot(WORKSPACE_ID, '42', 1, { syncedAt: '2026-11-01T00:00:00.000Z' })).toBe('stale')
   expect(await store.getPullRequestSnapshot(WORKSPACE_ID, '42', 1)).not.toBeNull()
-  expect(await store.deletePullRequestSnapshot(WORKSPACE_ID, '42', 1, '2026-11-02T00:00:00.000Z')).toBe('deleted')
+  expect(await store.deletePullRequestSnapshot(WORKSPACE_ID, '42', 1, { syncedAt: '2026-11-02T00:00:00.000Z' })).toBe('deleted')
+  expect(await store.getPullRequestSnapshot(WORKSPACE_ID, '42', 1)).toBeNull()
+})
+
+test('keeps a snapshot read after the read that found the pull request gone', async () => {
+  const store = new InMemoryGitHubIntegrationStore()
+  await store.putPullRequestSnapshot(WORKSPACE_ID, snapshot({ number: 1 }, '2026-11-02T00:00:00.000Z'))
+  expect(await store.deletePullRequestSnapshot(WORKSPACE_ID, '42', 1, { readAt: '2026-11-01T00:00:00.000Z' })).toBe('stale')
+  expect(await store.getPullRequestSnapshot(WORKSPACE_ID, '42', 1)).not.toBeNull()
+  expect(await store.deletePullRequestSnapshot(WORKSPACE_ID, '42', 1, { readAt: '2026-11-03T00:00:00.000Z' })).toBe('deleted')
   expect(await store.getPullRequestSnapshot(WORKSPACE_ID, '42', 1)).toBeNull()
 })
 

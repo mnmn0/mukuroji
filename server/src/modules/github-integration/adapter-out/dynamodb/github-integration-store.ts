@@ -25,6 +25,7 @@ import {
 import { GitHubIntegrationError } from '../../domain/github-integration-error'
 import type { GitHubPullRequestSnapshot } from '../../domain/pull-request-snapshot'
 import type {
+  GitHubPullRequestSnapshotDeleteFence,
   DeleteMemberLoginInput,
   DeleteRepositoryLinkInput,
   GitHubIntegrationStore,
@@ -476,24 +477,24 @@ export class DynamoDbGitHubIntegrationStore implements GitHubIntegrationStore<Mu
    * @param workspaceId - Workspace.
    * @param repositoryId - Repository ID.
    * @param number - Pull request number.
-   * @param expectedSyncedAt - When given, deletes only the snapshot read at this time.
+   * @param fence - The snapshot read time to match, or the GitHub read time it must precede.
    * @returns `deleted`, or `stale` when a newer snapshot was kept.
    */
   async deletePullRequestSnapshot(
     workspaceId: string,
     repositoryId: string,
     number: number,
-    expectedSyncedAt?: string,
+    fence: GitHubPullRequestSnapshotDeleteFence,
   ): Promise<'deleted' | 'stale'> {
     try {
       await this.client.send(new DeleteCommand({
         TableName: this.tableName,
         Key: { workspaceId, recordKey: pullRequestKey(repositoryId, number) },
-        ...(expectedSyncedAt === undefined ? {} : {
-          ConditionExpression: 'attribute_not_exists(recordKey) OR #syncedAt = :syncedAt',
-          ExpressionAttributeNames: { '#syncedAt': 'syncedAt' },
-          ExpressionAttributeValues: { ':syncedAt': expectedSyncedAt },
-        }),
+        ConditionExpression: 'syncedAt' in fence
+          ? 'attribute_not_exists(recordKey) OR #syncedAt = :syncedAt'
+          : 'attribute_not_exists(recordKey) OR #syncedAt < :syncedAt',
+        ExpressionAttributeNames: { '#syncedAt': 'syncedAt' },
+        ExpressionAttributeValues: { ':syncedAt': 'syncedAt' in fence ? fence.syncedAt : fence.readAt },
       }))
       return 'deleted'
     } catch (error) {
@@ -762,18 +763,18 @@ export class InMemoryGitHubIntegrationStore implements GitHubIntegrationStore<un
    * @param workspaceId - Workspace.
    * @param repositoryId - Repository ID.
    * @param number - Number.
-   * @param expectedSyncedAt - When given, deletes only the snapshot read at this time.
+   * @param fence - The snapshot read time to match, or the GitHub read time it must precede.
    * @returns `deleted`, or `stale` when a newer snapshot was kept.
    */
   async deletePullRequestSnapshot(
     workspaceId: string,
     repositoryId: string,
     number: number,
-    expectedSyncedAt?: string,
+    fence: GitHubPullRequestSnapshotDeleteFence,
   ): Promise<'deleted' | 'stale'> {
     const key = `${workspaceId}\0${pullRequestKey(repositoryId, number)}`
     const current = this.snapshots.get(key)
-    if (expectedSyncedAt !== undefined && current && current.syncedAt !== expectedSyncedAt) return 'stale'
+    if (current && ('syncedAt' in fence ? current.syncedAt !== fence.syncedAt : current.syncedAt >= fence.readAt)) return 'stale'
     this.snapshots.delete(key)
     return 'deleted'
   }

@@ -176,6 +176,13 @@ export type GitHubPullRequestSnapshotPage = {
   incomplete: boolean
 }
 
+
+/** Which stored pull request snapshot a delete may remove. */
+export type GitHubPullRequestSnapshotDeleteFence =
+  /** Only the snapshot read at this time; a cleanup of a snapshot it observed. */
+  | { syncedAt: string }
+  /** Only a snapshot read before this time; GitHub reported the pull request gone at it. */
+  | { readAt: string }
 /** Persistence of repository links, member logins, and pull request snapshots. */
 export interface GitHubIntegrationStore<AuditContext = unknown> {
   /**
@@ -279,11 +286,17 @@ export interface GitHubIntegrationStore<AuditContext = unknown> {
    * @param workspaceId - Workspace.
    * @param repositoryId - Repository ID.
    * @param number - Pull request number.
-   * @param expectedSyncedAt - When given, deletes only the snapshot read at this time, so a newer
-   *   snapshot a concurrent sync wrote is kept.
+   * @param fence - Which stored snapshot may be deleted, so a newer snapshot a concurrent sync
+   *   wrote is kept: `syncedAt` deletes only the snapshot read at that time, and `readAt` deletes
+   *   only a snapshot read before the GitHub read that found the pull request gone.
    * @returns `deleted`, or `stale` when a newer snapshot was kept.
    */
-  deletePullRequestSnapshot(workspaceId: string, repositoryId: string, number: number, expectedSyncedAt?: string): Promise<'deleted' | 'stale'>
+  deletePullRequestSnapshot(
+    workspaceId: string,
+    repositoryId: string,
+    number: number,
+    fence: GitHubPullRequestSnapshotDeleteFence,
+  ): Promise<'deleted' | 'stale'>
 }
 
 /** Queue of sync jobs. */

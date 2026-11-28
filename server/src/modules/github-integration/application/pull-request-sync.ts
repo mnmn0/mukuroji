@@ -160,7 +160,7 @@ export async function processGitHubSyncJob(
       break
   }
   // Linking a repository reads every open pull request; only a webhook announces a new one.
-  const result = await storeSnapshots(dependencies, workspaceId, link, snapshots, missing, job.kind !== 'repository')
+  const result = await storeSnapshots(dependencies, workspaceId, link, snapshots, missing, syncedAt, job.kind !== 'repository')
   const requeued = await queueMergeableRetries(dependencies, reference, unresolvedNumbers(snapshots), job.attempt + 1)
   return { skipped: false, ...result, requeued }
 }
@@ -243,7 +243,7 @@ export async function reconcileGitHubPullRequests(
   for (const snapshot of stored.snapshots) {
     if (!linked.has(snapshot.repositoryId) || isExpiredPullRequestSnapshot(snapshot, now)) {
       // A sync that wrote a newer snapshot since it was listed keeps it.
-      if (await dependencies.store.deletePullRequestSnapshot(workspaceId, snapshot.repositoryId, snapshot.number, snapshot.syncedAt) === 'deleted') {
+      if (await dependencies.store.deletePullRequestSnapshot(workspaceId, snapshot.repositoryId, snapshot.number, { syncedAt: snapshot.syncedAt }) === 'deleted') {
         deleted += 1
       }
     } else if (snapshot.state === 'open') {
@@ -266,7 +266,7 @@ export async function reconcileGitHubPullRequests(
       const reference = { installationId: link.installationId, repositoryId: link.repositoryId, repository: name }
       const open = await dependencies.gateway.readOpenPullRequests(reference, {}, syncedAt)
       const openNumbers = new Set(open.snapshots.map((snapshot) => snapshot.number))
-      const result = await storeSnapshots(dependencies, workspaceId, link, open.snapshots, [], false)
+      const result = await storeSnapshots(dependencies, workspaceId, link, open.snapshots, [], syncedAt, false)
       written += result.written
       const unresolved = unresolvedNumbers(open.snapshots)
       // A stored open pull request missing from the list is read by number, which tells whether it
@@ -278,7 +278,7 @@ export async function reconcileGitHubPullRequests(
           stale.slice(index, index + GITHUB_SYNC_JOB_MAX_NUMBERS),
           syncedAt,
         )
-        const chunk = await storeSnapshots(dependencies, workspaceId, link, read.snapshots, read.missing, false)
+        const chunk = await storeSnapshots(dependencies, workspaceId, link, read.snapshots, read.missing, syncedAt, false)
         written += chunk.written
         deleted += chunk.deleted
         unresolved.push(...unresolvedNumbers(read.snapshots))
@@ -306,6 +306,7 @@ export async function reconcileGitHubPullRequests(
  * @param link - Repository link, which names the Team the notifications are scoped to.
  * @param snapshots - Snapshots read from GitHub.
  * @param missing - Numbers GitHub no longer shows.
+ * @param readAt - When GitHub was read; a snapshot stored from a later read is not deleted.
  * @param notifyNew - Whether a pull request seen for the first time notifies its reviewers.
  * @returns Counts of written and deleted snapshots.
  */
@@ -315,6 +316,7 @@ async function storeSnapshots(
   link: GitHubRepositoryLinkRecord,
   snapshots: readonly GitHubPullRequestSnapshot[],
   missing: readonly number[],
+  readAt: string,
   notifyNew: boolean,
 ): Promise<{ written: number, deleted: number }> {
   const { store } = dependencies
@@ -329,6 +331,10 @@ async function storeSnapshots(
     }
     if (await store.putPullRequestSnapshot(workspaceId, carryLastKnownMergeable(previous, snapshot)) === 'written') written += 1
   }
-  for (const number of missing) await store.deletePullRequestSnapshot(workspaceId, link.repositoryId, number)
-  return { written, deleted: missing.length }
+  let deleted = 0
+  for (const number of missing) {
+    // A concurrent sync that read the pull request after this one keeps its snapshot.
+    if (await store.deletePullRequestSnapshot(workspaceId, link.repositoryId, number, { readAt }) === 'deleted') deleted += 1
+  }
+  return { written, deleted }
 }
