@@ -281,7 +281,11 @@ export class InMemorySlackIngestStore implements SlackIngestStore {
     channelId: string,
     beforeTs: string | undefined,
     limit: number,
-  ): Promise<{ deleted: number, done: boolean }> {
+    mappingRevision: number,
+  ): Promise<{ deleted: number, done: boolean, superseded?: true }> {
+    if (this.channels.get(`${workspaceId}#${channelId}`)?.mappingRevision !== mappingRevision) {
+      return { deleted: 0, done: true, superseded: true }
+    }
     const prefix = `${workspaceId}#${channelId}#`
     const keys = [...this.messages.keys()]
       .filter((key) => key.startsWith(prefix) && (beforeTs === undefined || key.slice(prefix.length) <= beforeTs))

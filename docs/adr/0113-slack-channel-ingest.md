@@ -79,6 +79,8 @@ Workspace の export と削除は既存の developer-platform の対象に入る
   （親を探すために保持期間より前の履歴を読み続けると、静かな channel でも全履歴を読むことになるため）。
   対応づけたあとに届いた返信は、親の古さにかかわらず event で取り込む。
 - 掃除（prune）は Slack の credential を使わないので、secret を消したあとも実行する。
+  掃除の削除も channel の mapping revision を同じ transaction で確かめ、対応づけし直したあとに読み込んだ発言は消さない。
+- worker は event と過去分の job を始める前に Workspace のライフサイクルを読み直し、closing・closed なら何もしない（掃除だけは続ける）。
 - 対応づけの変更と保持日数の変更は監査ログに残す。
 
 ### Work Item との紐付け

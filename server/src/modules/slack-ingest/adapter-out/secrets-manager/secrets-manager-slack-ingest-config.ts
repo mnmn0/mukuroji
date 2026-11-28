@@ -10,7 +10,7 @@ export const SLACK_INGEST_SECRET_NAME = 'mukuroji/slack-ingest'
 const CACHE_MS = 5 * 60_000
 
 /** Workspace ID shape accepted from the secret. */
-const WORKSPACE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u
+const WORKSPACE_ID_PATTERN = /^[\x21-\x7e]{1,256}$/u
 
 /**
  * Reports whether an error is a named AWS SDK error.

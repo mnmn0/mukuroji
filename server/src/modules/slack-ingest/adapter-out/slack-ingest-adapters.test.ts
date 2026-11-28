@@ -117,6 +117,33 @@ test('a message write fenced out by a mapping change reports unmapped', async ()
   }, 1)).toBe('unmapped')
 })
 
+test('channel cleanup reads consistently and fences every delete on the mapping revision', async () => {
+  const sent: SentCommand[] = []
+  const client = {
+    async send(command: { constructor: { name: string }, input: Record<string, unknown> }) {
+      sent.push({ name: command.constructor.name, input: command.input })
+      if (command.constructor.name === 'QueryCommand') return { Items: [messageRow] }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        throw Object.assign(new Error('cancelled'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+        })
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const store = new DynamoDbSlackIngestStore('dev-platform', client)
+  expect(await store.deleteChannelMessages('w', 'C012345678', undefined, 1000, 4)).toEqual({ deleted: 0, done: true, superseded: true })
+  expect(sent.find((command) => command.name === 'QueryCommand')?.input.ConsistentRead).toBe(true)
+  const items = sent.find((command) => command.name === 'TransactWriteCommand')?.input.TransactItems
+  expect(items).toEqual([
+    { ConditionCheck: expect.objectContaining({ ConditionExpression: 'mappingRevision = :revision', ExpressionAttributeValues: { ':revision': 4 } }) },
+    { Delete: { TableName: 'dev-platform', Key: { workspaceId: 'w', recordKey: messageRow.recordKey } } },
+    { Delete: { TableName: 'dev-platform', Key: { workspaceId: 'w', recordKey: 'slack-ingest#key#MK-1#1700000000.000100#C012345678' } } },
+    { Delete: { TableName: 'dev-platform', Key: { workspaceId: 'w', recordKey: 'slack-ingest#key#MK-2#1700000000.000100#C012345678' } } },
+  ])
+})
+
 test('a malformed stored row fails closed', async () => {
   const { client } = createClient({ 'slack-ingest#channel#C012345678': { recordKey: 'slack-ingest#channel#C012345678', channelId: 'C012345678' } })
   const store = new DynamoDbSlackIngestStore('dev-platform', client)
@@ -164,7 +191,9 @@ test('the secret must hold every field in its expected shape', () => {
   const valid = { signingSecret: '0123456789abcdef0123456789abcdef', botToken: 'xoxb-123-456-abcdef', teamId: 'T012345678', workspaceId: 'ws-1' }
   expect(parseSlackIngestSecret(JSON.stringify(valid))).toEqual(valid)
   expect(parseSlackIngestSecret(JSON.stringify({ ...valid, appId: 'A012345678' }))).toMatchObject({ appId: 'A012345678' })
-  for (const broken of [{ ...valid, botToken: 'xoxp-user' }, { ...valid, teamId: 'x' }, { ...valid, workspaceId: '' }]) {
+  // Existing canonical Workspace IDs such as `user#<email>` are accepted.
+  expect(parseSlackIngestSecret(JSON.stringify({ ...valid, workspaceId: 'user#owner@example.com' }))).toMatchObject({ workspaceId: 'user#owner@example.com' })
+  for (const broken of [{ ...valid, botToken: 'xoxp-user' }, { ...valid, teamId: 'x' }, { ...valid, workspaceId: '' }, { ...valid, workspaceId: 'has space' }]) {
     expect(() => parseSlackIngestSecret(JSON.stringify(broken))).toThrow()
   }
   expect(() => parseSlackIngestSecret('{')).toThrow()

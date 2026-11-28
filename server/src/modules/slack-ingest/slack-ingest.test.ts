@@ -131,6 +131,7 @@ function createWorld() {
     queue,
     createSlackWebApi: () => slack,
     now: () => NOW,
+    isWorkspaceActive: async () => true,
   }
   return { store, slack, queued, queue, ports }
 }
@@ -377,6 +378,22 @@ test('a superseded backfill stops, and jobs for another Workspace end', async ()
   await store.setChannelTarget(WS, CHANNEL, { kind: 'team', teamId: 'team-a' }, 0, audit)
   expect(await runSlackIngestJob({ kind: 'backfill', workspaceId: WS, channelId: CHANNEL, mappingRevision: 0 }, ports)).toBe('superseded')
   expect(await runSlackIngestJob({ kind: 'backfill', workspaceId: 'other', channelId: CHANNEL, mappingRevision: 1 }, ports)).toBe('not-configured')
+  const closing = { ...ports, isWorkspaceActive: async () => false }
+  expect(await runSlackIngestJob({ kind: 'backfill', workspaceId: WS, channelId: CHANNEL, mappingRevision: 1 }, closing)).toBe('workspace-inactive')
+})
+
+test('a cleanup queued before a remap does not delete what the new mapping keeps', async () => {
+  const { store, queued, ports } = createWorld()
+  const admin = { config: ports.config, store, queue: ports.queue }
+  await store.recordMembership(WS, { channelId: CHANNEL, isPrivate: false, membership: 'joined', now: NOW.toISOString() })
+  await updateSlackChannelTarget(WS, CHANNEL, { kind: 'team', teamId: 'team-a' }, admin, audit)
+  await updateSlackChannelTarget(WS, CHANNEL, null, admin, audit)
+  await updateSlackChannelTarget(WS, CHANNEL, { kind: 'team', teamId: 'team-b' }, admin, audit)
+  await runSlackIngestJob(posted(RECENT_TS, 'MK-1 kept'), ports)
+  const purge = queued.find((entry) => entry.job.kind === 'prune')
+  if (!purge) throw new Error('purge was not queued')
+  expect(await runSlackIngestJob(purge.job, ports)).toBe('superseded')
+  expect((await store.listMessageRefsByKey(WS, 'MK-1', 10)).refs).toHaveLength(1)
 })
 
 test('unmapping deletes stored messages and a shorter retention prunes old ones', async () => {

@@ -3,6 +3,7 @@ import { createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-
 import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
 import { createSqsClient } from '../../infrastructure/aws/sqs-client'
 import { readServerEnvironment, type ServerEnvironment } from '../../infrastructure/config/server-config'
+import { DynamoDbTenantAdministrationClient, TenantAdministrationError } from '../../modules/tenant-administration'
 import {
   DynamoDbSlackIngestStore,
   FetchSlackWebApi,
@@ -73,13 +74,26 @@ export function createProductionSlackIngestHandler(
 ): (event: SlackIngestSqsEvent) => Promise<SlackIngestBatchResponse> {
   const queueUrl = environment.SLACK_INGEST_QUEUE_URL?.trim()
   const tableName = environment.DEVELOPER_PLATFORM_TABLE_NAME?.trim()
-  if (!queueUrl || !tableName) throw new Error('Slack ingest worker is not configured.')
+  const tenantTableName = environment.TENANT_ADMINISTRATION_TABLE_NAME?.trim()
+  if (!queueUrl || !tableName || !tenantTableName) throw new Error('Slack ingest worker is not configured.')
+  const tenant = new DynamoDbTenantAdministrationClient(tenantTableName, createDynamoDbDocumentClient())
   const ports = {
     config: new SecretsManagerSlackIngestConfigSource(createSecretsManagerClient()),
     store: new DynamoDbSlackIngestStore(tableName, createDynamoDbDocumentClient()),
     queue: new SqsSlackIngestQueue(createSqsClient(), queueUrl),
     createSlackWebApi: (botToken: string) => new FetchSlackWebApi(botToken),
     now: () => new Date(),
+    isWorkspaceActive: async (workspaceId: string) => {
+      try {
+        await tenant.assertActive(workspaceId)
+        return true
+      } catch (error) {
+        if (error instanceof TenantAdministrationError && (error.code === 'TenantClosing' || error.code === 'TenantClosed')) {
+          return false
+        }
+        throw error
+      }
+    },
   }
   return async (event) => await processSlackIngestBatch(event, ports)
 }

@@ -59,6 +59,13 @@ export type SlackIngestWorkerPorts = {
    */
   createSlackWebApi(botToken: string): SlackWebApi
   /**
+   * Reports whether the Workspace still allows normal access (not closing or closed).
+   *
+   * @param workspaceId - Workspace ID.
+   * @returns Whether ingest may change its data.
+   */
+  isWorkspaceActive(workspaceId: string): Promise<boolean>
+  /**
    * Returns the current time.
    *
    * @returns Now.
@@ -94,6 +101,8 @@ export async function runSlackIngestJob(job: SlackIngestJob, ports: SlackIngestW
   const config = await ports.config.read()
   // The operator removed the app or tied it to another Workspace; queued work for this one ends.
   if (!config || config.workspaceId !== job.workspaceId) return 'not-configured'
+  // A closing or closed Workspace takes no more ingest, including jobs queued before closure.
+  if (!await ports.isWorkspaceActive(job.workspaceId)) return 'workspace-inactive'
   const context: JobContext = {
     workspaceId: job.workspaceId,
     ports,
@@ -406,7 +415,14 @@ async function runPrune(
     const settings = await store.getSettings(job.workspaceId)
     beforeTs = retentionCutoffTs(Math.floor(now.getTime() / 1000), settings.retentionDays)
   }
-  const result = await store.deleteChannelMessages(job.workspaceId, job.channelId, beforeTs, PRUNE_BATCH_LIMIT)
+  const result = await store.deleteChannelMessages(
+    job.workspaceId,
+    job.channelId,
+    beforeTs,
+    PRUNE_BATCH_LIMIT,
+    job.mappingRevision,
+  )
+  if (result.superseded) return 'superseded'
   if (!result.done) await ports.queue.send(job)
   return result.done ? 'pruned' : 'prune-continues'
 }

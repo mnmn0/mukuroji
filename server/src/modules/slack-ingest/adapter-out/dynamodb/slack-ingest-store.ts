@@ -1,6 +1,5 @@
 import {
   BatchGetCommand,
-  BatchWriteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -41,6 +40,9 @@ const INSTALLATION_KEY = `${PREFIX}installation`
 const SCHEMA_VERSION = 1
 /** Attempts of a conditional message write that lost a race. */
 const MESSAGE_WRITE_ATTEMPTS = 3
+
+/** Most deletes in one cleanup transaction, leaving room for the mapping fence. */
+const TRANSACTION_DELETE_LIMIT = 99
 /** Backfill states accepted from storage. */
 const BACKFILL_STATUSES: readonly SlackChannelBackfillStatus[] = ['pending', 'running', 'completed', 'failed']
 
@@ -840,14 +842,16 @@ export class DynamoDbSlackIngestStore implements SlackIngestStore<MutationAuditC
    * @param channelId - Channel ID.
    * @param beforeTs - Deletes only older messages, when given.
    * @param limit - Most messages.
-   * @returns Count and whether none remain.
+   * @param mappingRevision - Expected channel mapping revision.
+   * @returns Count, whether none remain, and whether the mapping changed.
    */
   async deleteChannelMessages(
     workspaceId: string,
     channelId: string,
     beforeTs: string | undefined,
     limit: number,
-  ): Promise<{ deleted: number, done: boolean }> {
+    mappingRevision: number,
+  ): Promise<{ deleted: number, done: boolean, superseded?: true }> {
     const prefix = messagePrefix(channelId)
     const rows: MessageRow[] = []
     const refs: SlackMessageRef[] = []
@@ -864,6 +868,8 @@ export class DynamoDbSlackIngestStore implements SlackIngestStore<MutationAuditC
           ...(beforeTs ? { ':end': `${prefix}${beforeTs}` } : {}),
         },
         Limit: limit - rows.length,
+        // A message written just before the cleanup must be seen, or the job would end early.
+        ConsistentRead: true,
         ...(startKey ? { ExclusiveStartKey: startKey } : {}),
       }))
       for (const row of response.Items ?? []) {
@@ -874,20 +880,39 @@ export class DynamoDbSlackIngestStore implements SlackIngestStore<MutationAuditC
       startKey = response.LastEvaluatedKey
     } while (startKey && rows.length < limit)
 
-    const deletes: Record<string, unknown>[] = []
+    // Each transaction holds the mapping fence and whole messages with their key rows.
+    const fence: TransactItem = {
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: channelKey(channelId) },
+        ConditionExpression: 'mappingRevision = :revision',
+        ExpressionAttributeValues: { ':revision': mappingRevision },
+      },
+    }
+    const transactions: Record<string, unknown>[][] = []
+    let pending: Record<string, unknown>[] = []
     rows.forEach((row, index) => {
       const ref = refs[index]
       if (!ref) return
-      deletes.push({ workspaceId, recordKey: messageKey(ref) })
-      for (const key of row.keys) deletes.push({ workspaceId, recordKey: keyIndexKey(key, ref) })
+      const keys = [
+        { workspaceId, recordKey: messageKey(ref) },
+        ...row.keys.map((key) => ({ workspaceId, recordKey: keyIndexKey(key, ref) })),
+      ]
+      if (pending.length + keys.length > TRANSACTION_DELETE_LIMIT) {
+        transactions.push(pending)
+        pending = []
+      }
+      pending.push(...keys)
     })
-    for (const batch of chunk(deletes, 25)) {
-      let requests = batch.map((Key) => ({ DeleteRequest: { Key } }))
-      for (let attempt = 0; requests.length > 0; attempt += 1) {
-        if (attempt >= 5) throw new SlackIngestError('unavailable', 'SlackIngestDeleteUnavailable', 'Slack data deletion is temporarily unavailable.')
-        const response = await this.client.send(new BatchWriteCommand({ RequestItems: { [this.tableName]: requests } }))
-        const unprocessed = response.UnprocessedItems?.[this.tableName] ?? []
-        requests = unprocessed.flatMap((item) => item.DeleteRequest?.Key ? [{ DeleteRequest: { Key: item.DeleteRequest.Key } }] : [])
+    if (pending.length > 0) transactions.push(pending)
+    for (const keys of transactions) {
+      try {
+        await this.client.send(new TransactWriteCommand({
+          TransactItems: [fence, ...keys.map((Key) => ({ Delete: { TableName: this.tableName, Key } }))],
+        }))
+      } catch (error) {
+        if (isConditionFailureAt(error, 0)) return { deleted: 0, done: true, superseded: true }
+        throw error
       }
     }
     return { deleted: rows.length, done: startKey === undefined && rows.length < limit }

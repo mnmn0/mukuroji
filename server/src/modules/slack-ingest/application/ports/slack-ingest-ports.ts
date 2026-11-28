@@ -294,20 +294,24 @@ export interface SlackIngestStore<AuditContext = unknown> {
     limit: number,
   ): Promise<{ refs: SlackMessageRef[], truncated: boolean }>
   /**
-   * Deletes up to `limit` stored messages of a channel and their key rows.
+   * Deletes up to `limit` stored messages of a channel and their key rows. Every delete is
+   * conditional on the channel's mapping revision, so a cleanup job cannot delete messages that
+   * a newer mapping loaded.
    *
    * @param workspaceId - Workspace ID.
    * @param channelId - Channel ID.
    * @param beforeTs - Deletes only messages older than this timestamp, when given.
    * @param limit - Most messages to delete in this call.
-   * @returns How many were deleted and whether none remain.
+   * @param mappingRevision - Channel mapping revision the cleanup belongs to.
+   * @returns How many were deleted, whether none remain, and whether the mapping changed.
    */
   deleteChannelMessages(
     workspaceId: string,
     channelId: string,
     beforeTs: string | undefined,
     limit: number,
-  ): Promise<{ deleted: number, done: boolean }>
+    mappingRevision: number,
+  ): Promise<{ deleted: number, done: boolean, superseded?: true }>
   /**
    * Reads a cached author display name.
    *

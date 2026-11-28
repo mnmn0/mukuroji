@@ -39,7 +39,7 @@ export function buildSlackIngestWorker(
   scope: cdk.Stack,
   input: SlackIngestWorkerInput,
 ): void {
-  const { developerPlatformTable } = input.dataStores;
+  const { developerPlatformTable, tenantAdministrationTable } = input.dataStores;
   const { slackIngestDlq, slackIngestQueue } = input.workerChannels;
   const { depsLockFilePath, projectRoot, serverHandlersDirectory } = input.lambdaBuildPaths;
 
@@ -72,6 +72,7 @@ export function buildSlackIngestWorker(
       DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
       MUKUROJI_RUNTIME_ROLE: 'slack-ingest-worker',
       SLACK_INGEST_QUEUE_URL: slackIngestQueue.queueUrl,
+      TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
     },
   });
   bindRuntimeControls(input.runtimeControls, slackIngestFunction, 'slack-ingest');
@@ -83,7 +84,6 @@ export function buildSlackIngestWorker(
   slackIngestQueue.grants.sendMessages(slackIngestFunction);
   slackIngestFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: [
-      'dynamodb:BatchWriteItem',
       'dynamodb:ConditionCheckItem',
       'dynamodb:DeleteItem',
       'dynamodb:GetItem',
@@ -92,6 +92,11 @@ export function buildSlackIngestWorker(
       'dynamodb:UpdateItem',
     ],
     resources: [developerPlatformTable.tableArn],
+  }));
+  // Jobs stop once the Workspace is closing or closed.
+  slackIngestFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem'],
+    resources: [tenantAdministrationTable.tableArn],
   }));
   slackIngestFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['secretsmanager:GetSecretValue'],

@@ -24,7 +24,7 @@ export type SlackIngestBatchResponse = {
 }
 
 /** Workspace ID shape. */
-const WORKSPACE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u
+const WORKSPACE_ID_PATTERN = /^[\x21-\x7e]{1,256}$/u
 
 /**
  * Reports whether a value is an object that is not an array.
