@@ -372,10 +372,13 @@ export class DynamoDbGitHubIntegrationStore implements GitHubIntegrationStore<Mu
    * Lists the snapshots.
    *
    * @param workspaceId - Workspace.
+   * @param options - Whether to read every snapshot.
+   * @param options.exhaustive - Whether every page is read.
    * @returns Snapshots and whether the read stopped at its bound.
    */
-  async listPullRequestSnapshots(workspaceId: string): Promise<GitHubPullRequestSnapshotPage> {
-    const rows = await this.queryPrefix(workspaceId, PULL_REQUEST_PREFIX, SNAPSHOT_PAGES_MAX, false)
+  async listPullRequestSnapshots(workspaceId: string, options: { exhaustive?: boolean } = {}): Promise<GitHubPullRequestSnapshotPage> {
+    const pages = options.exhaustive === true ? Number.POSITIVE_INFINITY : SNAPSHOT_PAGES_MAX
+    const rows = await this.queryPrefix(workspaceId, PULL_REQUEST_PREFIX, pages, false)
     return { snapshots: rows.items.map(parseSnapshotRow), incomplete: rows.incomplete }
   }
 

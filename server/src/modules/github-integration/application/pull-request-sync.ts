@@ -164,14 +164,16 @@ export async function processGitHubSyncJob(
   const unknown = snapshots
     .filter((snapshot) => snapshot.state === 'open' && snapshot.mergeable === 'unknown')
     .map((snapshot) => snapshot.number)
-    .slice(0, GITHUB_SYNC_JOB_MAX_NUMBERS)
   const nextAttempt = job.attempt + 1
   const requeued = unknown.length > 0 && nextAttempt < GITHUB_SYNC_JOB_MAX_ATTEMPTS
   if (requeued) {
-    await dependencies.queue.send(
-      { ...reference, attempt: nextAttempt, kind: 'pull-requests', numbers: unknown },
-      MERGEABLE_RETRY_DELAY_SECONDS * nextAttempt,
-    )
+    // A job carries a bounded number of pull requests, so the unresolved ones are split.
+    for (let index = 0; index < unknown.length; index += GITHUB_SYNC_JOB_MAX_NUMBERS) {
+      await dependencies.queue.send(
+        { ...reference, attempt: nextAttempt, kind: 'pull-requests', numbers: unknown.slice(index, index + GITHUB_SYNC_JOB_MAX_NUMBERS) },
+        MERGEABLE_RETRY_DELAY_SECONDS * nextAttempt,
+      )
+    }
   }
   return { skipped: false, ...result, requeued }
 }
@@ -209,7 +211,8 @@ export async function reconcileGitHubPullRequests(
 ): Promise<GitHubReconcileResult> {
   const links = await dependencies.store.listRepositoryLinks(workspaceId)
   const linked = new Map(links.map((link) => [link.repositoryId, link]))
-  const stored = await dependencies.store.listPullRequestSnapshots(workspaceId)
+  // Maintenance reads every snapshot; a bounded read would leave the same tail unreconciled each run.
+  const stored = await dependencies.store.listPullRequestSnapshots(workspaceId, { exhaustive: true })
   let deleted = 0
   const storedOpen = new Map<string, number[]>()
   for (const snapshot of stored.snapshots) {

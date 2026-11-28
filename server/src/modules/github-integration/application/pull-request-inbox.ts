@@ -152,9 +152,14 @@ export async function deleteGitHubLoginHolder<AuditContext>(
   login: string,
   context: { auditContext?: AuditContext, now: string },
 ): Promise<void> {
+  const notFound = () => new GitHubIntegrationError('not-found', 'GitHubLoginNotFound', 'No member has registered this GitHub login.')
   const memberKey = await store.findMemberByLogin(workspaceId, login)
-  if (!memberKey) throw new GitHubIntegrationError('not-found', 'GitHubLoginNotFound', 'No member has registered this GitHub login.')
-  await deleteGitHubLogin(store, { workspaceId, memberKey }, context)
+  if (!memberKey) throw notFound()
+  // The member may have changed their login since it was looked up; only the requested one is
+  // removed, and the store's conditions reject a change that lands before the delete.
+  const current = await store.getMemberLogin(workspaceId, memberKey)
+  if (current?.toLowerCase() !== login.toLowerCase()) throw notFound()
+  await store.deleteMemberLogin({ workspaceId, memberKey, login: current, ...context })
 }
 
 /** Dependencies of the administrator use cases. */

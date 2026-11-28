@@ -242,9 +242,11 @@ export interface GitHubIntegrationStore<AuditContext = unknown> {
    * Lists the snapshots of a Workspace.
    *
    * @param workspaceId - Workspace.
+   * @param options - Whether to read past the usual bound, for maintenance.
+   * @param options.exhaustive - Whether every snapshot is read; the result is then never incomplete.
    * @returns The snapshots, and whether the read stopped at its bound.
    */
-  listPullRequestSnapshots(workspaceId: string): Promise<GitHubPullRequestSnapshotPage>
+  listPullRequestSnapshots(workspaceId: string, options?: { exhaustive?: boolean }): Promise<GitHubPullRequestSnapshotPage>
   /**
    * Reads one snapshot with a consistent read.
    *

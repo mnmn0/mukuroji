@@ -12,6 +12,7 @@ import {
   reconcileGitHubPullRequests,
 } from './application/pull-request-sync'
 import {
+  deleteGitHubLoginHolder,
   readGitHubPullRequestInbox,
   saveGitHubLogin,
   saveGitHubRepositoryLink,
@@ -279,6 +280,39 @@ test('stores snapshots of linked repositories only and retries an unknown confli
   // The last attempt does not requeue again.
   const last = await processGitHubSyncJob({ store, gateway, queue, notifications: new InMemoryGitHubNotificationSink() }, WORKSPACE_ID, { ...job, attempt: 3, numbers: [5] }, new Date('2026-11-28T03:00:00Z'))
   expect(last.requeued).toBe(false)
+})
+
+test('splits more unresolved conflict states than one job holds into several retries', async () => {
+  const store = new InMemoryGitHubIntegrationStore()
+  const queue = new InMemoryGitHubSyncQueue()
+  await store.saveRepositoryLink({ workspaceId: WORKSPACE_ID, record: link })
+  const open = Array.from({ length: 25 }, (_, index) => snapshot({ number: index + 1, mergeable: 'UNKNOWN' }))
+  const { gateway } = fakeGateway(open)
+  const job = { installationId: '7', repositoryId: '42', repository: 'acme/app', attempt: 0, kind: 'repository' as const }
+  await processGitHubSyncJob({ store, gateway, queue, notifications: new InMemoryGitHubNotificationSink() }, WORKSPACE_ID, job, new Date('2026-11-28T02:00:00Z'))
+  expect(queue.sent.map((sent) => sent.job.kind === 'pull-requests' ? sent.job.numbers.length : 0)).toEqual([20, 5])
+})
+
+test('removes only the login an administrator asked to remove', async () => {
+  const store = new InMemoryGitHubIntegrationStore()
+  await store.saveMemberLogin({ workspaceId: WORKSPACE_ID, memberKey: 'alice@example.com', login: 'alice', now: 'now' })
+  /** Store whose member changes their login right after the administrator's lookup. */
+  class ChangingLoginStore extends InMemoryGitHubIntegrationStore {
+    /**
+     * Reads the member's login as changed.
+     *
+     * @returns The new login.
+     */
+    override async getMemberLogin(): Promise<string> {
+      return 'alice-new'
+    }
+  }
+  const changing = new ChangingLoginStore()
+  await changing.saveMemberLogin({ workspaceId: WORKSPACE_ID, memberKey: 'alice@example.com', login: 'alice', now: 'now' })
+  await expect(deleteGitHubLoginHolder(changing, WORKSPACE_ID, 'Alice', { now: 'now' })).rejects.toMatchObject({ code: 'GitHubLoginNotFound' })
+  expect(await changing.findMemberByLogin(WORKSPACE_ID, 'alice')).toBe('alice@example.com')
+  await deleteGitHubLoginHolder(store, WORKSPACE_ID, 'ALICE', { now: 'now' })
+  expect(await store.findMemberByLogin(WORKSPACE_ID, 'alice')).toBeNull()
 })
 
 test('reconciles open pull requests and removes unlinked and expired snapshots', async () => {
