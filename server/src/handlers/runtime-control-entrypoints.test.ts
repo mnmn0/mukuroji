@@ -102,6 +102,11 @@ const runtimeControlledEntrypoints: readonly RuntimeControlledEntrypoint[] = [
     surface: 'request-intake-email',
   },
   {
+    filename: 'slack-ingest-handler.ts',
+    exportName: 'slackIngestHandler',
+    surface: 'slack-ingest',
+  },
+  {
     filename: 'tenant-operation-execution-handler.ts',
     exportName: 'handler',
     surface: 'tenant-operation-execution',

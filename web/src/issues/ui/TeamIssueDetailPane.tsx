@@ -1,3 +1,4 @@
+import { WorkItemSlackMessagesPanelContainer } from '../../features/slack-ingest/ui/WorkItemSlackMessagesPanel'
 import type {
   AiWorkItemSource,
   PlanningSnapshot,
@@ -1202,6 +1203,15 @@ function IssueDetailContent({
               <WorkItemExternalLinksPanelContainer
                 accessToken={externalLinksAccessToken}
                 canManage={canManageExternalLinks && !isAiSummaryOperationPending}
+                locale={locale}
+                teamId={issue.teamId}
+                workItemId={issue.id}
+              />
+            ) : null}
+            {accessToken && hasWorkItemDetailPanel('team', 'slack-messages') ? (
+              <WorkItemSlackMessagesPanelContainer
+                key={`${issue.teamId}:${issue.id}:slack-messages`}
+                accessToken={accessToken}
                 locale={locale}
                 teamId={issue.teamId}
                 workItemId={issue.id}

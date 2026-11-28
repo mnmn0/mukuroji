@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(695)
-  expect(new Set(inventory).size).toBe(691)
+  expect(inventory).toHaveLength(700)
+  expect(new Set(inventory).size).toBe(696)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -247,10 +247,16 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/notification-preferences/slack-destination')
   expect(inventory).toContain('POST /api/teams/:teamId/notification-channel/test')
   expect(inventory).toContain('DELETE /api/teams/:teamId/projects/:projectId/notification-channel')
+  // Slack channel ingest (#828, ADR 0113): Slack's signed request URL, administration, and Work Item reads.
+  expect(inventory).toContain('POST /api/public/slack/events')
+  expect(inventory).toContain('GET /api/workspace/slack-ingest')
+  expect(inventory).toContain('PUT /api/workspace/slack-ingest/settings')
+  expect(inventory).toContain('PUT /api/workspace/slack-ingest/channels/:channelId/target')
+  expect(inventory).toContain('GET /api/teams/:teamId/issues/:issueId/slack-messages')
   // Attachment refs for coding agents (#409).
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'e9641b99a7966ec6835a1f9d76d452606e1ed065aa950c3e59da692718e739f8',
+    'f9f2e8f8ed9837af94ba026f1e74ec77acea40ef84f8d933b62e750affb64e04',
   )
 })

@@ -1085,6 +1085,8 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(planningStatements).toContain(transactionConditionCheckStatement);
   expect(developerPlatformDataStatement).toEqual({
     Action: [
+      // A Work Item's Slack panel reads the messages that mention its key in one batch.
+      'dynamodb:BatchGetItem',
       'dynamodb:ConditionCheckItem',
       'dynamodb:DeleteItem',
       'dynamodb:GetItem',
@@ -1139,6 +1141,9 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Resource: [
       {
         'Fn::GetAtt': ['AuditExportQueueD1DB7896', 'Arn'],
+      },
+      {
+        'Fn::GetAtt': ['SlackIngestQueue0C5702B8', 'Arn'],
       },
       {
         'Fn::GetAtt': ['WebhookDeliveryQueue2A244492', 'Arn'],

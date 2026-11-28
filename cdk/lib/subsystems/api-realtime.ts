@@ -299,6 +299,7 @@ function bindApiRuntimeConfiguration(
   } = input.parameters;
   const {
     auditExportQueue,
+    slackIngestQueue,
     webhookDeliveryQueue,
     workItemImportQueue,
   } = input.workerChannels;
@@ -401,6 +402,7 @@ function bindApiRuntimeConfiguration(
       WORK_ITEM_IMPORT_QUEUE_URL: workItemImportQueue.queueUrl,
       AUDIT_EXPORT_BUCKET_NAME: auditExportBucket.bucketName,
       AUDIT_EXPORT_QUEUE_URL: auditExportQueue.queueUrl,
+      SLACK_INGEST_QUEUE_URL: slackIngestQueue.queueUrl,
       ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET:
         enterpriseIdentityTokenHashSecret.valueAsString,
       ENTERPRISE_SSO_STATE_SECRET: enterpriseSsoStateSecret.valueAsString,
@@ -487,6 +489,7 @@ export function buildApiRuntime(
   } = input.parameters;
   const {
     auditExportQueue,
+    slackIngestQueue,
     webhookDeliveryQueue,
     workItemImportQueue,
   } = input.workerChannels;
@@ -740,6 +743,8 @@ export function buildApiRuntime(
       }),
       new iam.PolicyStatement({
         actions: [
+          // Work Item Slack messages are read in batches (ADR 0113).
+          'dynamodb:BatchGetItem',
           'dynamodb:ConditionCheckItem',
           'dynamodb:DeleteItem',
           'dynamodb:GetItem',
@@ -759,9 +764,20 @@ export function buildApiRuntime(
         actions: ['sqs:SendMessage'],
         resources: [
           auditExportQueue.queueArn,
+          slackIngestQueue.queueArn,
           webhookDeliveryQueue.queueArn,
           workItemImportQueue.queueArn,
         ],
+      }),
+      // The operator creates the Slack app secret; without it the Slack routes answer not configured (ADR 0113).
+      new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [scope.formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          resourceName: 'mukuroji/slack-ingest-??????',
+          arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+        })],
       }),
     ],
   });

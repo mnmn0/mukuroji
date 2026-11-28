@@ -54,6 +54,7 @@ const settingsPanelLabelKeys: Record<SettingsPanelId, MessageKey> = {
   'directory': 'workspace.settings.panel.directory',
   'time-periods': 'workspace.settings.panel.time-periods',
   'developer-platform': 'workspace.settings.panel.developer-platform',
+  'slack-ingest': 'workspace.settings.panel.slack-ingest',
   'automation': 'workspace.settings.panel.automation',
   'audit-log': 'workspace.settings.panel.audit-log',
   'team-profile': 'workspace.settings.panel.team-profile',

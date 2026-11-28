@@ -13,6 +13,7 @@ export type WorkItemDetailPanel =
   | 'files'
   | 'external-links'
   | 'web-links'
+  | 'slack-messages'
   | 'related-documents'
   | 'relations'
   | 'dependencies'
@@ -42,6 +43,7 @@ const SHARED_WORK_ITEM_DETAIL_PANELS: readonly WorkItemDetailPanel[] = [
   'files',
   'external-links',
   'web-links',
+  'slack-messages',
   'related-documents',
   'relations',
   'dependencies',

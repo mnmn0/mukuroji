@@ -38,6 +38,7 @@ const controlledFunctionScopes = new Map([
     'automation-schedule,triage-schedule,agent-run-triage,notification-schedule,analytics-schedule',
   ],
   ['RequestEmailIngestionFunction84289AE7', 'request-intake-email'],
+  ['SlackIngestFunctionA72271CA', 'slack-ingest'],
   ['TenantAccessCapabilityFunction394667B9', 'tenant-operation-execution'],
   ['TenantDataCapabilityFunction8F76A72C', 'tenant-operation-execution'],
   ['TenantExportCapabilityFunction9B1A8023', 'tenant-operation-execution'],
@@ -525,13 +526,13 @@ test('grants every controlled data-plane role only the exact configuration ARN',
     }],
     Version: '2012-10-17',
   });
-  expect(readPolicy.Roles).toHaveLength(20);
+  expect(readPolicy.Roles).toHaveLength(21);
   expect(readPolicy.Roles).toEqual(
     expect.arrayContaining(controlledRoleReferences),
   );
 });
 
-test('binds exact runtime-control settings through API config and nineteen direct environments', () => {
+test('binds exact runtime-control settings through API config and twenty direct environments', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
   const lambdaEntries = Object.entries(
     synthesizedTemplate.findResources('AWS::Lambda::Function'),

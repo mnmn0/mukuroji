@@ -2208,6 +2208,10 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({ json: {} })
   })
 
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/slack-messages$/, async (route) => {
+    await route.fulfill({ json: { messages: [], truncated: false } })
+  })
+
   await page.route('**/api/realtime/tickets', async (route) => {
     await route.fulfill({ status: 503, json: { message: 'Use polling fallback.' } })
   })

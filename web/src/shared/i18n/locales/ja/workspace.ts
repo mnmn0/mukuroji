@@ -584,6 +584,7 @@ export const workspaceMessages = {
   'workspace.settings.panel.directory': 'Team と Project の管理',
   'workspace.settings.panel.time-periods': '全 Team の月締め',
   'workspace.settings.panel.developer-platform': 'API と外部連携',
+  'workspace.settings.panel.slack-ingest': 'Slack の取り込み',
   'workspace.settings.panel.automation': '自動化',
   'workspace.settings.panel.audit-log': '監査ログ',
   'workspace.settings.panel.team-profile': 'チームの設定',

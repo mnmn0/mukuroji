@@ -292,6 +292,7 @@ const expectedWorkflowConfiguration = {
   REQUEST_QUEUE_INDEX_NAME: base64('RequestQueueIndex'),
   REQUEST_RATE_LIMIT_PER_HOUR: base64(ref('RequestRateLimitPerHour')),
   REQUEST_TOKEN_HASH_SECRET: base64(ref('RequestTokenHashSecret')),
+  SLACK_INGEST_QUEUE_URL: base64(ref('SlackIngestQueue0C5702B8')),
   TRIAGE_OWNER_ACTIVITY_INDEX_NAME: base64('triage-owner-activity-index'),
   TRIAGE_TEAM_ACTIVITY_INDEX_NAME: base64('triage-team-activity-index'),
   TRIAGE_WAKE_INDEX_NAME: base64('triage-wake-index'),

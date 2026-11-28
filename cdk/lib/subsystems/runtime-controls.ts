@@ -30,6 +30,7 @@ export type RuntimeControlScope =
   | 'notification-schedule'
   | 'realtime'
   | 'request-intake-email'
+  | 'slack-ingest'
   | 'tenant-operation-execution'
   | 'triage-schedule'
   | 'webhook-delivery'

@@ -92,6 +92,7 @@ import {
   shouldBootstrapLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
 import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
+import { createProductionSlackIngestDependencies } from './slack-ingest'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { DynamoDbCollectionsStore, InMemoryCollectionsStore } from '../../modules/collections'
 import { DynamoDbInboxDigestStore, DynamoDbSavedUpdateFeedsStore, InMemorySavedUpdateFeedsStore, DynamoDbUpdateFeedReadStateStore, InMemoryUpdateFeedReadStateStore, DynamoDbUpdateFeedDigestStore, InMemoryUpdateFeedDigestStore } from '../../modules/update-feed'
@@ -1807,6 +1808,7 @@ export function createProductionDeveloperPlatformDependencies(): DeveloperPlatfo
     workItemImportSources: createDefaultWorkItemImportSourceStore(),
     workItemImportQueue: createDefaultWorkItemImportQueue(),
     queueWebhookDelivery: createProductionQueueWebhookDeliveryMessage(),
+    slackIngest: createProductionSlackIngestDependencies(),
   }
 }
 
@@ -1963,6 +1965,7 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
       workItemImportSources: createLazyWorkItemImportSourceStore(),
       workItemImportQueue: createLazyWorkItemImportQueue(),
       queueWebhookDelivery: createProductionQueueWebhookDeliveryMessage(),
+      slackIngest: createProductionSlackIngestDependencies(),
     },
   }
 }
@@ -2317,6 +2320,7 @@ export function overrideAppDependencies(
       ...(overrides.idempotency ? { idempotency: overrides.idempotency } : {}),
       ...(overrides.rateLimits ? { rateLimits: overrides.rateLimits } : {}),
       ...(overrides.transactions ? { transactions: overrides.transactions } : {}),
+      ...(overrides.slackIngest ? { slackIngest: overrides.slackIngest } : {}),
       ...(overrides.publicWorkItems
         ? { publicWorkItems: overrides.publicWorkItems }
         : {}),

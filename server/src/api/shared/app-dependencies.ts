@@ -237,6 +237,9 @@ export const developerPlatformDependencies: DeveloperPlatformDependencies = {
   get idempotency() {
     return requireAppDependencies().developerPlatform.idempotency
   },
+  get slackIngest() {
+    return requireAppDependencies().developerPlatform.slackIngest
+  },
   get rateLimits() {
     return requireAppDependencies().developerPlatform.rateLimits
   },
