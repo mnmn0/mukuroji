@@ -1,6 +1,6 @@
 # 0108. Analytics の `agent-tokens` / `agent-cost` は query のたびに終了済み Run と usage 行を読み、費用を見られる Team を snapshot の scope に固定する
 
-- 状態: 提案
+- 状態: 一部を置き換え済み（[0111](0111-agent-run-cost-visibility.md)、費用を見られる人と snapshot の scope）
 - 日付: 2026-11-26
 - 関連: Issue #729, Issue #355, [ADR 0061](0061-agent-token-usage-over-otlp.md),
   [ADR 0006](0006-finished-run-index.md), [docs/analytics.md](../analytics.md)

@@ -3215,7 +3215,7 @@ describe('Factory board route', () => {
     expect(JSON.stringify(body)).not.toContain('cursor')
   })
 
-  test('adds up the telemetry usage of the period\'s runs per Project and Work Item, without the cost for non-managers', async () => {
+  test('adds up the telemetry usage of the period\'s runs per Project and Work Item, with the cost only of the viewer\'s own runs for a member (ADR 0111)', async () => {
     const now = Date.now()
     const { store } = configureBoard([
       { id: 'task-refero', statusCategory: 'completed', assignedProjectId: 'refero' },
@@ -3224,40 +3224,43 @@ describe('Factory board route', () => {
     ])
     const usage = new InMemoryAgentRunUsageStore()
     setTestAppDependencies({ agentRunUsage: usage })
+    const teammate = 'teammate@example.com'
     store.seed(finishAgentRun(createRunAt('task-refero', new Date(now - 3 * hourMs)), 'completed', 'agent', new Date(now - 2 * hourMs)))
-    store.seed(finishAgentRun(createRunAt('task-loose', new Date(now - 5 * hourMs)), 'completed', 'agent', new Date(now - 4 * hourMs)))
+    store.seed(finishAgentRun({ ...createRunAt('task-loose', new Date(now - 5 * hourMs)), assigneeUserId: teammate }, 'completed', 'agent', new Date(now - 4 * hourMs)))
     store.seed(finishAgentRun(createRunAt('task-hidden', new Date(now - 7 * hourMs)), 'completed', 'agent', new Date(now - 6 * hourMs)))
     /**
-     * Records one bucket of the fixture member's laptop instance.
+     * Records one bucket of a member's laptop instance.
      *
      * @param at - Bucket time.
      * @param inputTokens - Input tokens.
      * @param batchId - Export ID.
+     * @param memberKey - Member whose agent reported it.
      */
-    const record = (at: number, inputTokens: number, batchId: string) => usage.recordBatch(workspaceId, 'demo@example.com', batchId, [{
+    const record = (at: number, inputTokens: number, batchId: string, memberKey = 'demo@example.com') => usage.recordBatch(workspaceId, memberKey, batchId, [{
       bucketStart: formatUsageBucketStart(at), instanceIdHash: hashAgentInstanceId('laptop-1'), model: 'claude-sonnet-5-5',
       inputTokens, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicroUsd: inputTokens * 10, requestCount: 1,
     }])
     await record(now - 2.5 * hourMs, 500, 'refero')
-    await record(now - 4.5 * hourMs, 200, 'loose')
+    await record(now - 4.5 * hourMs, 200, 'loose', teammate)
     await record(now - 6.5 * hourMs, 900, 'hidden')
     // Usage outside every run is not part of the period's runs.
     await record(now - 3.5 * hourMs, 50, 'between')
 
     const body = await readAnalytics(now)
+    // The member sees the cost of their own run only, so the total, which has a teammate's run, has none.
     expect(body.usage).toEqual({
       total: { inputTokens: 700, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 2, models: ['claude-sonnet-5-5'], hasMore: false },
       projects: [
-        { projectId: 'refero', usage: expect.objectContaining({ inputTokens: 500 }) },
-        { usage: expect.objectContaining({ inputTokens: 200 }) },
+        { projectId: 'refero', usage: expect.objectContaining({ inputTokens: 500, estimatedCostMicroUsd: 5_000 }) },
+        { usage: expect.not.objectContaining({ estimatedCostMicroUsd: expect.anything() }) },
       ],
       workItems: [
-        { workItemId: 'task-refero', title: 'Title of task-refero', projectId: 'refero', usage: expect.objectContaining({ inputTokens: 500 }) },
+        { workItemId: 'task-refero', title: 'Title of task-refero', projectId: 'refero', usage: expect.objectContaining({ inputTokens: 500, estimatedCostMicroUsd: 5_000 }) },
         { workItemId: 'task-loose', title: 'Title of task-loose', usage: expect.objectContaining({ inputTokens: 200 }) },
       ],
       runsHasMore: false,
     })
-    expect(JSON.stringify(body)).not.toContain('estimatedCostMicroUsd')
+    expect(body.usage?.workItems[1]?.usage.estimatedCostMicroUsd).toBeUndefined()
     expect(JSON.stringify(body)).not.toContain('task-hidden')
   })
 
@@ -3480,10 +3483,8 @@ describe('Agent telemetry usage', () => {
     return Array.isArray(body.resourceLogs) ? body.resourceLogs : []
   }
 
-  test('attributes received usage to the run of the same member and instance, with cost only for managers', async () => {
-    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
-    const held = createHeldRun('task-1', 'laptop')
-    store.seed(held)
+  test('attributes received usage to the run of the same member and instance, with cost for its runner and managers (ADR 0111)', async () => {
+    configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
     const usage = new InMemoryAgentRunUsageStore()
     setTestAppDependencies({ agentRunUsage: usage })
     const telemetry = createCanonicalPublicAgentTelemetryService()
@@ -3493,23 +3494,36 @@ describe('Agent telemetry usage', () => {
     expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, body))).toEqual({ rejectedRecords: 0, duplicate: true })
     // Usage of another instance of the same member is not this run's.
     await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, usageExport(new Date(Date.now() - 20_000), 'desktop')))
+    // A teammate's agent reported the same usage.
+    await usage.recordBatch(workspaceId, 'teammate@example.com', 'teammate-batch', [...usage.buckets.values()])
+    const own = createHeldRun('task-1', 'laptop')
+    const teammates = { ...own, assigneeUserId: 'teammate@example.com' }
 
-    const history = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
-    expect(history.status).toBe(200)
-    const listed: unknown = await history.json()
-    expect(listed).toMatchObject({
-      items: [{ runId: held.runId, usage: { inputTokens: 100, outputTokens: 20, requestCount: 1, models: ['claude-sonnet-5-5'] } }],
+    /**
+     * Lists the Work Item's runs with one run seeded, as a caller with the given Team role.
+     *
+     * @param run - Run to seed.
+     * @param role - Caller's Team role.
+     * @returns The response body.
+     */
+    const listAs = async (run: typeof own, role: 'member' | 'manager'): Promise<unknown> => {
+      const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', role })
+      store.seed(run)
+      setTestAppDependencies({ agentRunUsage: usage })
+      const history = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
+      expect(history.status).toBe(200)
+      return history.json()
+    }
+
+    const hidden = await listAs(teammates, 'member')
+    expect(hidden).toMatchObject({
+      items: [{ runId: own.runId, usage: { inputTokens: 100, outputTokens: 20, requestCount: 1, models: ['claude-sonnet-5-5'] } }],
       usageTotal: { inputTokens: 100, requestCount: 1 },
     })
-    expect(JSON.stringify(listed)).not.toContain('estimatedCostMicroUsd')
-
-    configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'manager' })
-    const managerStore = getTestAppDependencies().workItems.agentRuns
-    if (!(managerStore instanceof InMemoryAgentRunStore)) throw new Error('Expected the in-memory store.')
-    managerStore.seed(held)
-    setTestAppDependencies({ agentRunUsage: usage })
-    const managed = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
-    expect(await managed.json()).toMatchObject({ items: [{ usage: { estimatedCostMicroUsd: 10_000 } }], usageTotal: { estimatedCostMicroUsd: 10_000 } })
+    expect(JSON.stringify(hidden)).not.toContain('estimatedCostMicroUsd')
+    // The member whose agent ran sees its cost, and so does a manager of the Work Item's Project.
+    expect(await listAs(own, 'member')).toMatchObject({ items: [{ usage: { estimatedCostMicroUsd: 10_000 } }], usageTotal: { estimatedCostMicroUsd: 10_000 } })
+    expect(await listAs(teammates, 'manager')).toMatchObject({ items: [{ usage: { estimatedCostMicroUsd: 10_000 } }], usageTotal: { estimatedCostMicroUsd: 10_000 } })
   })
 
   test('recognizes a retried export after one of its events aged out of the accepted window', async () => {

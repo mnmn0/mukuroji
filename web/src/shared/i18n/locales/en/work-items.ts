@@ -852,7 +852,7 @@ export const workItemsMessages = {
   'workItems.agentRuns.usageCost': 'Est. {cost}',
   'workItems.agentRuns.usageRequests': '{count} requests',
   'workItems.agentRuns.usagePartial': 'Some usage is not included because there was too much to read.',
-  'workItems.agentRuns.usageHint': 'Usage the agent sent over OpenTelemetry, assigned to the run that was active at the time. The estimated cost is the agent’s own estimate and is shown only to Team managers.',
+  'workItems.agentRuns.usageHint': 'Usage the agent sent over OpenTelemetry, assigned to the run that was active at the time. The estimated cost is the agent’s own estimate and is shown to Workspace administrators, the managers of the Team or of the Work Item’s Project, and the member whose agent ran.',
   'workItems.agentRuns.state.running': 'Running',
   'workItems.agentRuns.state.stalled': 'Stalled',
   'workItems.agentRuns.state.completed': 'Completed',

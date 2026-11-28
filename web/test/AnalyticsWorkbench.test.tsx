@@ -546,10 +546,10 @@ describe('AnalyticsWorkbench', () => {
     expect(tokens).toContain('1,234,567 トークン')
     expect(tokens).toContain('一度に読める量を超えた Agent Run が 2件あるため')
     const cost = render(usageResult('agent-cost', 'usd', 12.345, [
-      '1 Agent Run(s) of Teams you do not manage were left out of the estimated cost.',
+      '1 Agent Run(s) whose cost you may not see were left out of the estimated cost.',
     ]))
     expect(cost).toContain('$12.35')
-    expect(cost).toContain('自分が manager ではない Team の Agent Run 1件は推定費用に含めていません。')
+    expect(cost).toContain('費用を見られない Agent Run 1件は推定費用に含めていません。')
     expect(cost).toContain('coding agent の見積もりで、請求額とは一致しません。')
   })
 

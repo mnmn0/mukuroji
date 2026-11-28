@@ -54,15 +54,16 @@ const usageWidgets: AnalyticsWidget[] = [
  *
  * @param role - Team role of the viewer.
  * @param archivedTeamIssueCount - Fake Work Items archived from the start; the first is `onboarding-friction`.
- * @param projectOptions - Projects of the fake Team and the viewer's access to them.
+ * @param projectOptions - Projects of the fake Team, the viewer's access to them, and the viewer's
+ *   Workspace role (a member unless given, so that Workspace administration does not show every cost).
  * @returns The stores.
  */
 async function configure(
   role: 'manager' | 'member',
   archivedTeamIssueCount = 0,
-  projectOptions: Pick<NonNullable<Parameters<typeof configureFakeProjectClients>[1]>, 'teamProjects' | 'projectAccesses'> = {},
+  projectOptions: Pick<NonNullable<Parameters<typeof configureFakeProjectClients>[1]>, 'teamProjects' | 'projectAccesses' | 'workspaceRole'> = {},
 ) {
-  configureFakeProjectClients(true, { teamIssueCount: 2, role, archivedTeamIssueCount, ...projectOptions })
+  configureFakeProjectClients(true, { teamIssueCount: 2, role, archivedTeamIssueCount, workspaceRole: 'member', ...projectOptions })
   const runs = new InMemoryAgentRunStore()
   const usage = new InMemoryAgentRunUsageStore()
   const repository = new InMemoryAnalyticsRepository()
@@ -151,22 +152,37 @@ test('adds up the tokens and, for Team managers, the estimated cost of the perio
   expect(page.items.map((item) => [item.workItemId, item.value])).toEqual([['work-item-1', 500], ['onboarding-friction', 1_100]])
 })
 
-test('leaves the estimated cost out for members who do not manage the Team', async () => {
+test('leaves the estimated cost out for members who neither manage nor ran the agent (ADR 0111)', async () => {
   await configure('member')
   const snapshot = await readSnapshot(createQuery(usageWidgets))
   expect(snapshot.widgets[0]?.value).toBe(1_600)
   expect(snapshot.widgets[1]).toMatchObject({ value: null, sampleSize: 0 })
-  expect(snapshot.widgets[1]?.warnings).toContain('2 Agent Run(s) of Teams you do not manage were left out of the estimated cost.')
+  expect(snapshot.widgets[1]?.warnings).toContain('2 Agent Run(s) whose cost you may not see were left out of the estimated cost.')
 })
 
-test('leaves the estimated cost out for managers of only some Projects of the Team', async () => {
+test('shows every estimated cost to a Workspace administrator who manages no Project (ADR 0111)', async () => {
+  await configure('member', 0, { workspaceRole: 'admin' })
+  const snapshot = await readSnapshot(createQuery(usageWidgets))
+  expect(snapshot.widgets[1]).toMatchObject({ value: 0.14, sampleSize: 2 })
+})
+
+test('shows a Project manager the estimated cost of the Project\'s runs only (ADR 0111)', async () => {
+  const teamProjects: Array<{ id: string; name: string; tone: 'blue' | 'green' }> = [{ id: 'refero', name: 'Refero', tone: 'blue' }, { id: 'beta', name: 'Beta', tone: 'green' }]
+  // The fake Work Items are in Refero.
   await configure('manager', 0, {
-    teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }, { id: 'beta', name: 'Beta', tone: 'green' }],
+    teamProjects,
     projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'manager' }, { teamId: 'core-team', projectId: 'beta', role: 'member' }],
   })
-  const snapshot = await readSnapshot(createQuery(usageWidgets))
-  expect(snapshot.widgets[0]?.value).toBe(1_600)
-  expect(snapshot.widgets[1]).toMatchObject({ value: null, sampleSize: 0 })
+  const managed = await readSnapshot(createQuery(usageWidgets))
+  expect(managed.widgets[1]).toMatchObject({ value: 0.14, sampleSize: 2 })
+
+  await configure('manager', 0, {
+    teamProjects,
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'member' }, { teamId: 'core-team', projectId: 'beta', role: 'manager' }],
+  })
+  const other = await readSnapshot(createQuery(usageWidgets))
+  expect(other.widgets[0]?.value).toBe(1_600)
+  expect(other.widgets[1]).toMatchObject({ value: null, sampleSize: 0 })
 })
 
 test('hides a cost snapshot once its creator no longer manages the Team', async () => {
@@ -192,7 +208,46 @@ test('hides a cost snapshot once its creator no longer manages the Team', async 
   }
   expect(await list()).toBe(1)
 
-  configureFakeProjectClients(true, { teamIssueCount: 2, role: 'member' })
+  configureFakeProjectClients(true, { teamIssueCount: 2, role: 'member', workspaceRole: 'member' })
+  setTestAppDependencies({ analytics: repository })
+  expect(await list()).toBe(0)
+})
+
+test('hides a Project manager\'s cost snapshot once a Work Item leaves the managed Project (ADR 0111)', async () => {
+  const teamProjects: Array<{ id: string; name: string; tone: 'blue' | 'green' }> = [{ id: 'refero', name: 'Refero', tone: 'blue' }, { id: 'beta', name: 'Beta', tone: 'green' }]
+  const projectAccesses: Array<{ teamId: string; projectId: string; role: 'manager' | 'member' }> = [
+    { teamId: 'core-team', projectId: 'refero', role: 'manager' },
+    { teamId: 'core-team', projectId: 'beta', role: 'member' },
+  ]
+  const { repository } = await configure('manager', 0, { teamProjects, projectAccesses })
+  const query = createQuery([usageWidgets[1]!])
+  await repository.createReport(workspaceId, 'demo@example.com', {
+    id: 'cost-report',
+    name: 'Cost report',
+    visibility: 'personal',
+    timeZone: query.timeZone,
+    filter: query.filter,
+    widgets: query.widgets,
+  })
+  const created = await analyticsApiRequest('/api/analytics/reports/cost-report/snapshots', { asOf: query.asOf })
+  expect(created.status).toBe(201)
+  const list = async () => {
+    const response = await app.request('/api/analytics/reports/cost-report/snapshots', { headers: { Authorization: 'Bearer test-token' } })
+    expect(response.status).toBe(200)
+    const body: { snapshots: AnalyticsSnapshotRecord[] } = await response.json()
+    return body.snapshots.length
+  }
+  expect(await list()).toBe(1)
+
+  // Beta is still readable, so only where the Work Item is changes.
+  configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    role: 'manager',
+    workspaceRole: 'member',
+    teamProjects,
+    projectAccesses,
+    detailAssignedProjectIds: { 'work-item-1': 'beta' },
+  })
   setTestAppDependencies({ analytics: repository })
   expect(await list()).toBe(0)
 })

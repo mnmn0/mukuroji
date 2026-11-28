@@ -91,7 +91,7 @@ import {
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { canReadAnalyticsReport } from '../shared/analytics-access'
 import {
-  readAnalyticsAgentCostTeamIds,
+  readAnalyticsAgentCostAccess,
   readAuthorizedAnalyticsAgentUsage,
 } from '../shared/analytics-agent-usage'
 import {
@@ -1304,7 +1304,7 @@ async function readCurrentAnalyticsPermissionScopeHash(
     readsPlanningGroups
       ? (await readAuthorizedAnalyticsPlanningGroups(principal, current.workItems)).entityScopeKeys
       : undefined,
-    readsAgentCost ? await readAnalyticsAgentCostTeamIds(principal, current.workItems) : undefined,
+    readsAgentCost ? (await readAnalyticsAgentCostAccess(principal, current.workItems)).scopeKeys : undefined,
     earnedValueProjectKeys,
   )
 }

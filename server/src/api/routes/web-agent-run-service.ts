@@ -65,6 +65,7 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from '../shared/work-item-access'
+import { readAgentRunCostAccess } from '../shared/agent-run-cost-access'
 import { readAgentRunUsage } from '../shared/agent-run-usage-access'
 import { isRecord } from '../shared/value-guards'
 import { readWorkspaceMemberNamesForDisplay, type TeamPermissionContext } from '../shared/workspace-access'
@@ -216,14 +217,17 @@ export async function listWebWorkItemAgentRuns(
 ): Promise<WorkItemAgentRunsResponse> {
   const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
   const page = await workItemDependencies.agentRuns.listWorkItemRuns(principal.directoryId, teamId, workItemId, undefined, limit)
-  const [manager, writable] = await Promise.all([
+  const [manager, writable, costAccess] = await Promise.all([
     isTeamManager(principal, teamId),
     canWriteForRelease(principal, teamId, detail.issue.assignedProjectId),
+    readAgentRunCostAccess(principal, teamId),
   ])
   const credentialNames = await readCredentialNamesForManager(manager, principal.directoryId)
   const now = new Date()
-  // Tokens are visible to every viewer of the Work Item; the estimated cost only to Team managers.
-  const usages = await Promise.all(page.runs.map((run) => readAgentRunUsage(principal.directoryId, run, manager)))
+  // Tokens are visible to every viewer of the Work Item; the estimated cost to the managers of its
+  // Project or Team, administrators, and the member whose agent ran (ADR 0111).
+  const usages = await Promise.all(page.runs.map((run) =>
+    readAgentRunUsage(principal.directoryId, run, costAccess.allows(run, detail.issue.assignedProjectId))))
   const usageTotal = combineAgentRunUsage(usages)
   return {
     items: page.runs.map((run, index) => toAgentRunView(

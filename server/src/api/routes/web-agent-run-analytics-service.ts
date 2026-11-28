@@ -24,7 +24,7 @@ import { readAgentRunUsage } from '../shared/agent-run-usage-access'
 import { workItemDependencies } from '../shared/app-dependencies'
 import { canAccessAssignedProject, requireTeamPermission, type WorkspacePrincipal } from '../shared/project-access'
 import type { TeamPermissionContext } from '../shared/workspace-access'
-import { isTeamManager } from './web-agent-run-service'
+import { readAgentRunCostAccess } from '../shared/agent-run-cost-access'
 
 /** Largest page the Agent Run store returns. */
 const analyticsPageSize = 100
@@ -240,7 +240,8 @@ export async function getWebTeamFactoryAnalytics(
 
 /**
  * Adds up the telemetry usage of the newest runs that finished in the period, up to
- * {@link FACTORY_ANALYTICS_MAX_USAGE_RUNS}. The estimated cost is read only for Team managers.
+ * {@link FACTORY_ANALYTICS_MAX_USAGE_RUNS}. The estimated cost is read only for the runs the viewer
+ * may see it of (ADR 0111); a total, Project, or Work Item shows it only when every run in it does.
  *
  * @param principal - Viewer.
  * @param teamId - Team ID.
@@ -260,9 +261,9 @@ async function readPeriodUsage(
   })).sort((left, right) => right.finishedAt - left.finishedAt || (left.run.runId < right.run.runId ? -1 : 1))
   if (runs.length === 0) return undefined
   const evaluated = runs.slice(0, FACTORY_ANALYTICS_MAX_USAGE_RUNS)
-  const includeCost = await isTeamManager(principal, teamId)
-  const usages = await mapInOrderWithConcurrency(evaluated, analyticsReadConcurrency, ({ run }) =>
-    readAgentRunUsage(principal.directoryId, run, includeCost))
+  const costAccess = await readAgentRunCostAccess(principal, teamId)
+  const usages = await mapInOrderWithConcurrency(evaluated, analyticsReadConcurrency, ({ run, workItem }) =>
+    readAgentRunUsage(principal.directoryId, run, costAccess.allows(run, workItem.projectId)))
   return summarizeFactoryUsage(
     evaluated.flatMap(({ workItemId, workItem }, index) => {
       const usage = usages[index]

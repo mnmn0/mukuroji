@@ -139,7 +139,8 @@ agent は要件として読みますが、Document に書かれていること�
 
 Claude Code の OpenTelemetry を Mukuroji に送るよう設定すると、タスク詳細の **Agent Run** 欄に、Run ごとの
 トークン数と、そのタスクで使ったトークンの合計（入力・出力・キャッシュ読み取り・キャッシュ書き込み、model）が
-表示されます。Team の管理者には推定費用（Claude Code の見積もり）も表示されます。設定のしかたは
+表示されます。推定費用（Claude Code の見積もり）は、ワークスペースの管理者、チームの管理者、そのタスクのプロジェクトの
+管理者と、自分の agent が走らせた Run の本人に表示されます。設定のしかたは
 [coding agent MCP の「トークン使用量の送信」](../coding-agent-mcp.md#トークン使用量の送信claude-codeopentelemetry)
 を見てください。
 

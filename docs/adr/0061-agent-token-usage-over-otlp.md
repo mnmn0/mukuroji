@@ -1,6 +1,6 @@
 # 0061. Coding agent のトークン使用量を OTLP/HTTP JSON で受け取り、読み取り時に時刻で Run に割り当てる
 
-- 状態: 提案
+- 状態: 一部を置き換え済み（[0111](0111-agent-run-cost-visibility.md)、推定費用を見られる人）
 - 日付: 2026-11-22
 - 関連: Issue #729, Issue #355, [ADR 0052](0052-personal-tokens-without-software-factory.md),
   [docs/software-factory.md](../software-factory.md), [docs/coding-agent-mcp.md](../coding-agent-mcp.md)

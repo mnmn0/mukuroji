@@ -6,13 +6,12 @@ import {
   type AnalyticsAgentUsage,
   type AnalyticsAgentUsageRun,
 } from '../../modules/analytics'
-import { ProjectDataError } from '../../modules/directory'
 import { isSoftwareFactoryDeployed } from '../../infrastructure/config/software-factory'
 import { mapInOrderWithConcurrency } from './agent-run-access'
+import { readAgentRunCostAccess, type AgentRunCostAccess } from './agent-run-cost-access'
 import { readAgentRunUsage } from './agent-run-usage-access'
 import { workItemDependencies } from './app-dependencies'
-import { requireTeamPermission, type WorkspacePrincipal } from './project-access'
-import { managesEveryTeamProject } from './team-delegated-management'
+import type { WorkspacePrincipal } from './project-access'
 
 /** Largest page the finished-run index returns. */
 const AGENT_USAGE_INDEX_PAGE_SIZE = 100
@@ -101,13 +100,13 @@ async function collectTeamFinishedRuns(
 
 /**
  * Reads the telemetry usage of the Agent Runs that finished in the query period on the authorized
- * Work Items (ADR 0061). The estimated cost is read only for Teams the viewer manages, and only when
- * `includeCost` is set. Runs without usage are left out.
+ * Work Items (ADR 0061). The estimated cost is read only for the runs the viewer may see it of
+ * (ADR 0111), and only when `includeCost` is set. Runs without usage are left out.
  *
  * @param principal - Viewer whose access already bounded `workItems`.
  * @param workItems - Authorized Work Items the query counts; only their runs are read.
- * @param scopeWorkItems - Every authorized Work Item of the query scope. The managed Teams are read
- *   among their Teams, the same set the snapshot permission check reads again.
+ * @param scopeWorkItems - Every authorized Work Item of the query scope. Whose cost the viewer may
+ *   see is read among their Teams, the same set the snapshot permission check reads again.
  * @param period - Normalized query period; its end is already capped at the as-of time.
  * @param includeCost - Whether the query has an `agent-cost` widget.
  * @returns The usage, or undefined when the deployment has no Software factory.
@@ -136,8 +135,8 @@ export async function readAuthorizedAnalyticsAgentUsage(
   for (const [teamId, workItemIds] of teams) {
     await collectTeamFinishedRuns(principal.directoryId, teamId, workItemIds, since, until, references, budget)
   }
-  const costTeamIds = includeCost ? await readAnalyticsAgentCostTeamIds(principal, scopeWorkItems) : undefined
-  const costTeams = new Set(costTeamIds ?? [])
+  const costAccess = includeCost ? await readAnalyticsAgentCostAccess(principal, scopeWorkItems) : undefined
+  const projectIds = new Map(workItems.map((item) => [`${item.teamId}\0${item.id}`, item.assignedProjectId]))
   const usages = await mapInOrderWithConcurrency(references, AGENT_USAGE_READ_CONCURRENCY, async ({ teamId, entry }) => {
     const run = await workItemDependencies.agentRuns.getRun(principal.directoryId, teamId, entry.runId)
     // The index is eventually consistent; a run it lists but the table no longer holds adds nothing.
@@ -145,13 +144,15 @@ export async function readAuthorizedAnalyticsAgentUsage(
     if (run.teamId !== teamId || run.workItemId !== entry.workItemId) throw createAgentRunIntegrityError()
     const finishedAt = run.finishedAt === undefined ? Number.NaN : Date.parse(run.finishedAt)
     if (!Number.isFinite(finishedAt)) return undefined
-    const usage = await readAgentRunUsage(principal.directoryId, run, costTeams.has(teamId))
+    const costVisible = costAccess?.teams.get(teamId)?.allows(run, projectIds.get(`${teamId}\0${run.workItemId}`)) ?? false
+    const usage = await readAgentRunUsage(principal.directoryId, run, costVisible)
     if (usage === undefined) return undefined
     const usageRun: AnalyticsAgentUsageRun = {
       runId: run.runId,
       finishedAt,
       tokens: usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheCreationTokens,
       ...(usage.estimatedCostMicroUsd === undefined ? {} : { estimatedCostMicroUsd: usage.estimatedCostMicroUsd }),
+      costVisible,
       hasMore: usage.hasMore,
     }
     return { key: `${teamId}\0${run.workItemId}`, usageRun }
@@ -163,43 +164,46 @@ export async function readAuthorizedAnalyticsAgentUsage(
     list.push(usage.usageRun)
     runs.set(usage.key, list)
   }
-  return { runs, ...(costTeamIds === undefined ? {} : { costTeamIds }) }
+  return { runs, ...(costAccess === undefined ? {} : { costScopeKeys: costAccess.scopeKeys }) }
+}
+
+/** Whose estimated Agent Run cost the viewer may see among the Teams of an Analytics scope. */
+export type AnalyticsAgentCostAccess = {
+  /** Decision of each Team of the scope. */
+  teams: ReadonlyMap<string, AgentRunCostAccess>
+  /** Scope keys of every Team, sorted, for the snapshot permission scope. */
+  scopeKeys: string[]
 }
 
 /**
- * Reads the Teams whose estimated Agent Run cost the viewer may see among the Teams of the given
- * Work Items, for the permission check of a stored `agent-cost` snapshot.
+ * Reads whose estimated Agent Run cost the viewer may see among the Teams of the given Work Items
+ * (ADR 0111), also for the permission check of a stored `agent-cost` snapshot.
  *
  * @param principal - Viewer.
- * @param workItems - Currently authorized Work Items of the snapshot query.
- * @returns Managed Team IDs, sorted.
+ * @param workItems - Currently authorized Work Items of the query scope.
+ * @returns The decision of each Team and the keys of the whole scope, including the Work Items now
+ *   in a Project the viewer manages without managing the Team.
  */
-export async function readAnalyticsAgentCostTeamIds(
+export async function readAnalyticsAgentCostAccess(
   principal: WorkspacePrincipal,
   workItems: readonly CanonicalWorkItem[],
-): Promise<string[]> {
+): Promise<AnalyticsAgentCostAccess> {
   const teamIds = [...new Set(workItems.map((item) => item.teamId))].sort()
-  return (await mapInOrderWithConcurrency(teamIds, AGENT_USAGE_READ_CONCURRENCY, async (teamId) =>
-    await managesTeam(principal, teamId) ? teamId : undefined
-  )).flatMap((teamId) => teamId === undefined ? [] : [teamId])
-}
-
-/**
- * Checks whether the viewer manages a Team, the role that may see estimated Agent Run cost. The
- * metric adds up the cost of every Project of the Team, so a viewer who manages only some of its
- * Projects does not count as a Team manager (ADR 0087).
- *
- * @param principal - Viewer.
- * @param teamId - Team ID.
- * @returns Whether the viewer manages every Project of the Team.
- */
-async function managesTeam(principal: WorkspacePrincipal, teamId: string): Promise<boolean> {
-  try {
-    const context = await requireTeamPermission(principal, teamId, 'manager')
-    // A system administrator's context lists no Project access because it covers every Project.
-    return principal.isSystemAdmin || managesEveryTeamProject(context)
-  } catch (error) {
-    if (error instanceof ProjectDataError && error.status === 403) return false
-    throw error
+  const decisions = await mapInOrderWithConcurrency(teamIds, AGENT_USAGE_READ_CONCURRENCY, async (teamId) => {
+    const decision: [string, AgentRunCostAccess] = [teamId, await readAgentRunCostAccess(principal, teamId)]
+    return decision
+  })
+  const teams = new Map(decisions)
+  // A Project manager's view depends on which Work Items are in the managed Projects now, so moving
+  // a Work Item out of them must change the snapshot scope too.
+  const managedWorkItemKeys = workItems.flatMap((item) => {
+    const access = teams.get(item.teamId)
+    return access !== undefined && !access.coversTeam && access.managesProject(item.assignedProjectId)
+      ? [`work-item:${item.teamId}\0${item.id}`]
+      : []
+  })
+  return {
+    teams,
+    scopeKeys: [...decisions.flatMap(([, access]) => access.scopeKeys), ...managedWorkItemKeys].sort(),
   }
 }
