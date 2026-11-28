@@ -149,6 +149,7 @@ export const timeTrackingMessages = {
   'timeTracking.report.downloading': 'ダウンロード中…',
   'timeTracking.report.invalidRange': '開始日は終了日以前の日付にしてください。',
   'timeTracking.report.loadError': '集計を読み込めませんでした。',
+  'timeTracking.report.investmentCategoriesLoadError': '投資区分を読み込めなかったため、人月・割合・Capex と Opex の合計を表示していません。',
   'timeTracking.report.empty': 'この期間に記録された工数はありません。',
   'timeTracking.report.weekOf': '{date} の週',
   'timeTracking.report.noProject': 'Project なし',

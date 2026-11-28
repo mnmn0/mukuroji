@@ -149,6 +149,7 @@ export const timeTrackingMessages = {
   'timeTracking.report.downloading': 'Downloading…',
   'timeTracking.report.invalidRange': 'The start date must be on or before the end date.',
   'timeTracking.report.loadError': 'The report could not be loaded.',
+  'timeTracking.report.investmentCategoriesLoadError': 'The investment categories could not be loaded, so person-months, shares, and Capex and Opex totals are not shown.',
   'timeTracking.report.empty': 'No time was recorded in this period.',
   'timeTracking.report.weekOf': 'Week of {date}',
   'timeTracking.report.noProject': 'No Project',

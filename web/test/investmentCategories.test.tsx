@@ -132,6 +132,29 @@ test('shows person-months, share, Capex and Opex, and the Project filter', () =>
   expect(markup).toContain('>Atlas<')
 })
 
+test('says why the investment columns are missing when the categories fail to load', () => {
+  const markup = renderToStaticMarkup(
+    <TimeReport
+      formatters={createTimeTrackingFormatters('en')}
+      groupBy="investment"
+      hasInvestmentCategoriesError
+      labels={{ members: {}, projects: {}, workItems: {} }}
+      locale="en"
+      onChangeGroupBy={noop}
+      onChangeRange={noop}
+      onDownloadCsv={async () => undefined}
+      onRetry={noop}
+      onRetryInvestmentCategories={noop}
+      range={timeReportFixtureRange}
+      summary={timeReportFixtureInvestmentSummary}
+      t={en}
+    />,
+  )
+  expect(markup).toContain('data-testid="time-report-investment-error"')
+  expect(markup).toContain(en('timeTracking.report.investmentCategoriesLoadError'))
+  expect(markup).not.toContain(en('timeTracking.report.column.personMonths'))
+})
+
 test('lists Project defaults and Work Item overrides for managers', () => {
   const markup = renderToStaticMarkup(
     <InvestmentAssignmentsPanel

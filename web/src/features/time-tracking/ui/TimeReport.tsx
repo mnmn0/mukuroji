@@ -69,6 +69,10 @@ export type TimeReportProps = {
    * shares, and Capex and Opex totals.
    */
   investmentCategories?: WorkspaceInvestmentCategorySettings
+  /** Whether reading the Workspace investment categories failed; an investment report then says why its columns are missing. */
+  hasInvestmentCategoriesError?: boolean
+  /** Reads the Workspace investment categories again. */
+  onRetryInvestmentCategories?: () => void
   /** Project the report is narrowed to, with the Projects offered; absent hides the filter. */
   projectFilter?: TimeReportProjectFilter
 }
@@ -120,6 +124,8 @@ export function TimeReport({
   summary,
   t,
   investmentCategories,
+  hasInvestmentCategoriesError = false,
+  onRetryInvestmentCategories,
   projectFilter,
 }: TimeReportProps) {
   const id = useId()
@@ -246,6 +252,14 @@ export function TimeReport({
         <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
           <span>{t('timeTracking.report.loadError')}</span>
           <button className="workbench-button-secondary min-h-8 px-3" onClick={onRetry} type="button">{t('timeTracking.retry')}</button>
+        </div>
+      ) : null}
+      {groupBy === 'investment' && hasInvestmentCategoriesError ? (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" data-testid="time-report-investment-error" role="alert">
+          <span>{t('timeTracking.report.investmentCategoriesLoadError')}</span>
+          {onRetryInvestmentCategories ? (
+            <button className="workbench-button-secondary min-h-8 px-3" onClick={onRetryInvestmentCategories} type="button">{t('timeTracking.retry')}</button>
+          ) : null}
         </div>
       ) : null}
       {isLoading ? <p className="text-sm font-medium text-[var(--workbench-muted)]" role="status">{t('timeTracking.loading')}</p> : null}

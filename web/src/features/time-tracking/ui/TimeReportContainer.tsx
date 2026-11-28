@@ -162,6 +162,8 @@ export function TimeReportContainer({
         range={range}
         t={t}
         {...(investmentCategories.settings ? { investmentCategories: investmentCategories.settings } : {})}
+        hasInvestmentCategoriesError={Boolean(investmentCategories.error) && !investmentCategories.settings}
+        onRetryInvestmentCategories={() => { investmentCategories.retry() }}
         {...(report.data ? { summary: report.data } : {})}
       />
       {canSeeCosts ? (
