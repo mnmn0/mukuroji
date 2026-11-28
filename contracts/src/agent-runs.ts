@@ -943,7 +943,7 @@ export type FactoryAnalyticsWorkItemUsage = {
 
 /**
  * Telemetry usage of the runs that finished in the period, on Work Items the viewer can see. The
- * estimated cost is included only for Team managers.
+ * estimated cost is included only for the runs whose cost the viewer may see (ADR 0111).
  */
 export type FactoryAnalyticsUsage = {
   /**
