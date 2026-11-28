@@ -28,6 +28,10 @@ export type ProjectDecisionFormValues = {
   status: ProjectDecisionStatus
   /** Decision replacing this one, when superseded. */
   supersededByEntryId: string
+  /** Stored decision time of the decision being edited, kept while the time input is unchanged. */
+  originalDecidedAt?: string
+  /** Time input value the edited decision opened with. */
+  originalDecidedAtLocal?: string
 }
 
 /** Values a screen fills in before the form opens. */
@@ -84,6 +88,8 @@ export function toProjectDecisionFormValues(
       deciderMemberIds: entry.deciderMemberIds ?? [],
       deciderNote: entry.deciderNote ?? '',
       decidedAtLocal: toDateTimeLocalValue(new Date(entry.decidedAt)),
+      originalDecidedAt: entry.decidedAt,
+      originalDecidedAtLocal: toDateTimeLocalValue(new Date(entry.decidedAt)),
       relatedWorkItemIds: entry.relatedWorkItemIds ?? [],
       sources: entry.sources ?? [],
       status: entry.status,
@@ -118,7 +124,10 @@ export function toProjectDecisionEntryInput(values: ProjectDecisionFormValues, o
     .map((source) => ({ url: source.url.trim(), label: source.label?.trim() ?? '' }))
     .filter((source) => source.url.length > 0)
     .map((source) => (source.label ? { url: source.url, label: source.label } : { url: source.url }))
-  const decidedAt = fromDateTimeLocalValue(values.decidedAtLocal) ?? values.decidedAtLocal
+  // The input holds minutes in local time, so an untouched time keeps the stored instant exactly.
+  const decidedAt = values.originalDecidedAt !== undefined && values.decidedAtLocal === values.originalDecidedAtLocal
+    ? values.originalDecidedAt
+    : fromDateTimeLocalValue(values.decidedAtLocal) ?? values.decidedAtLocal
   return {
     title: values.title.trim(),
     content: values.content.trim(),

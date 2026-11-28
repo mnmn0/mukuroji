@@ -57,6 +57,14 @@ describe('decision form model', () => {
     })
   })
 
+  test('keeps the stored decision time to the millisecond while the time input is unchanged', () => {
+    const precise = { ...decision, decidedAt: '2026-11-27T01:00:45.500Z' }
+    const values = toProjectDecisionFormValues(precise)
+    expect(toProjectDecisionEntryInput({ ...values, title: 'renamed' }, 'project').decidedAt).toBe('2026-11-27T01:00:45.500Z')
+    const changed = toProjectDecisionEntryInput({ ...values, decidedAtLocal: '2026-11-26T10:00' }, 'project').decidedAt
+    expect(changed).toBe(fromDateTimeLocalValue('2026-11-26T10:00'))
+  })
+
   test('drops empty optional fields and empty source rows, and prefills a new decision', () => {
     const values = toProjectDecisionFormValues(undefined, {
       title: 'Work Item title',
