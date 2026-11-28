@@ -18,6 +18,8 @@ export function TeamDecisionLogPage() {
       <div className="px-[clamp(16px,3vw,34px)] py-5">
         {team ? (
           <TeamDecisionLogView
+            // A new Team starts with its own filters and without the previous Team's results.
+            key={team.id}
             accessToken={workspace.canLoadWorkspaceData ? workspace.accessToken : undefined}
             locale={workspace.locale}
             team={team}

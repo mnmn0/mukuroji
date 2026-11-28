@@ -371,7 +371,8 @@ export function parseProjectDecisionEntryInput(value: unknown): ProjectDecisionE
       ...(rationale === undefined ? {} : { rationale }),
       ...(deciderMemberIds === undefined ? {} : { deciderMemberIds }),
       ...(deciderNote === undefined ? {} : { deciderNote }),
-      decidedAt: value.decidedAt,
+      // One representation keeps stored timestamps comparable however the client wrote them.
+      decidedAt: new Date(value.decidedAt).toISOString(),
       ...(relatedWorkItemIds === undefined ? {} : { relatedWorkItemIds }),
       ...(sources === undefined ? {} : { sources }),
       status: value.status,
@@ -451,9 +452,21 @@ export function parseProjectDecisionEntry(value: unknown): ProjectDecisionEntry 
  * @returns The sort order.
  */
 export function compareProjectDecisionEntries(left: ProjectDecisionEntry, right: ProjectDecisionEntry): number {
-  return right.decidedAt.localeCompare(left.decidedAt) ||
-    right.createdAt.localeCompare(left.createdAt) ||
+  return compareTimestampsNewestFirst(left.decidedAt, right.decidedAt) ||
+    compareTimestampsNewestFirst(left.createdAt, right.createdAt) ||
     left.id.localeCompare(right.id)
+}
+
+/**
+ * Orders two ISO timestamps newest first by the instant they name, so timestamps written with
+ * different fractional-second precision still sort chronologically.
+ *
+ * @param left - One timestamp.
+ * @param right - The other timestamp.
+ * @returns A negative number when `left` is newer, positive when older, and 0 when equal.
+ */
+export function compareTimestampsNewestFirst(left: string, right: string): number {
+  return Date.parse(right) - Date.parse(left)
 }
 
 /**

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   compareProjectDecisionEntries,
+  compareTimestampsNewestFirst,
   normalizeProjectDecisionSourceUrl,
   parseProjectDecisionEntry,
   parseProjectDecisionEntryInput,
@@ -164,5 +165,17 @@ describe('responses', () => {
     expect(teamDecisionLogItemMatches(item, 'opensearch')).toBe(true)
     expect(teamDecisionLogItemMatches(item, 'aurora')).toBe(false)
     expect(teamDecisionLogItemMatches(item, '')).toBe(true)
+  })
+})
+
+describe('decision timestamps', () => {
+  test('orders timestamps with different fractional precision by instant', () => {
+    expect(compareTimestampsNewestFirst('2026-11-28T10:00:00Z', '2026-11-28T10:00:00.500Z')).toBeGreaterThan(0)
+    expect(compareTimestampsNewestFirst('2026-11-28T10:00:00.500Z', '2026-11-28T10:00:00Z')).toBeLessThan(0)
+  })
+
+  test('stores decidedAt in one representation', () => {
+    const parsed = parseProjectDecisionEntryInput({ title: 't', content: 'c', decidedAt: '2026-11-28T10:00:00Z', status: 'active', origin: 'project' })
+    expect(parsed.ok && parsed.value.decidedAt).toBe('2026-11-28T10:00:00.000Z')
   })
 })

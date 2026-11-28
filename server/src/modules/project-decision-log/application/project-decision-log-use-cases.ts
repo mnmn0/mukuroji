@@ -1,5 +1,6 @@
 import {
   compareProjectDecisionEntries,
+  compareTimestampsNewestFirst,
   parseProjectDecisionEntryInput,
   teamDecisionLogItemMatches,
   TEAM_DECISION_LOG_MAX_ITEMS,
@@ -353,7 +354,7 @@ export async function readTeamDecisionLogUseCase<TCallerCheck, TAudit>(
   }
   const matching = items.filter((item) => teamDecisionLogItemMatches(item, keyword))
   matching.sort((left, right) =>
-    right.decidedAt.localeCompare(left.decidedAt) ||
+    compareTimestampsNewestFirst(left.decidedAt, right.decidedAt) ||
     left.projectId.localeCompare(right.projectId) ||
     left.entry.id.localeCompare(right.entry.id))
   return {
