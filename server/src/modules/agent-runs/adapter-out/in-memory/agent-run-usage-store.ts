@@ -1,9 +1,10 @@
 import { type AgentUsageBucket } from '../../domain/agent-run-usage'
-import { agentActivityRowKey, type AgentActivityRow, type AgentSessionCursorClaim } from '../../domain/agent-run-activity'
+import { agentActivityRowKey, type AgentActivityRow, type AgentSessionCursor } from '../../domain/agent-run-activity'
 import {
   agentActivityPartition,
   agentSessionCursorPartition,
   type AgentActivityRowPage,
+  type AgentActivityWrite,
   agentUsagePartition,
   agentUsageRecordKey,
   AGENT_USAGE_MAX_SCANNED_BUCKETS_FACTOR,
@@ -68,11 +69,34 @@ export class InMemoryAgentRunUsageStore implements AgentRunUsageStore {
   }
 
   /** @inheritdoc */
-  async recordActivityBatch(directoryId: string, memberKey: string, batchId: string, rows: readonly (AgentActivityRow | undefined)[]): Promise<'recorded' | 'duplicate'> {
-    const receipt = `${directoryId}|${memberKey}|activity#${batchId}`
-    if (this.#receipts.has(receipt)) return 'duplicate'
-    this.#receipts.add(receipt)
-    for (const row of rows) {
+  async recordActivityBatch(directoryId: string, memberKey: string, batchId: string, activity: AgentActivityWrite): Promise<'recorded' | 'duplicate' | 'cursor-moved'> {
+    const toolReceipt = `${directoryId}|${memberKey}|activity#${batchId}`
+    const waitReceipt = `${toolReceipt}#wait`
+    let recorded = false
+    if (!this.#receipts.has(toolReceipt) && activity.toolSlots.some((slot) => slot !== undefined)) {
+      this.#receipts.add(toolReceipt)
+      this.#addActivity(directoryId, memberKey, activity.toolSlots)
+      recorded = true
+    }
+    if (activity.waitSlots.every((slot) => slot === undefined) && activity.claims.length === 0) return recorded ? 'recorded' : 'duplicate'
+    if (this.#receipts.has(waitReceipt)) return recorded ? 'recorded' : 'duplicate'
+    const partition = agentSessionCursorPartition(directoryId, memberKey)
+    if (activity.claims.some((claim) => this.sessionCursors.get(`${partition}|${claim.sessionKey}`) !== claim.previousLastEventAtMs)) return 'cursor-moved'
+    this.#receipts.add(waitReceipt)
+    this.#addActivity(directoryId, memberKey, activity.waitSlots)
+    for (const claim of activity.claims) this.sessionCursors.set(`${partition}|${claim.sessionKey}`, claim.lastEventAtMs)
+    return 'recorded'
+  }
+
+  /**
+   * Adds activity rows to the stored totals.
+   *
+   * @param directoryId - Workspace ID.
+   * @param memberKey - Member that sent the export.
+   * @param slots - Row slots; an empty slot adds nothing.
+   */
+  #addActivity(directoryId: string, memberKey: string, slots: readonly (AgentActivityRow | undefined)[]): void {
+    for (const row of slots) {
       if (!row) continue
       const key = `${agentActivityPartition(directoryId, memberKey)}|${agentActivityRowKey(row)}`
       const saved = this.activity.get(key)
@@ -80,7 +104,6 @@ export class InMemoryAgentRunUsageStore implements AgentRunUsageStore {
         ? { ...saved, count: saved.count + row.count, durationMs: saved.durationMs + row.durationMs, failureCount: saved.failureCount + row.failureCount }
         : { ...row })
     }
-    return 'recorded'
   }
 
   /** @inheritdoc */
@@ -113,21 +136,12 @@ export class InMemoryAgentRunUsageStore implements AgentRunUsageStore {
   }
 
   /** @inheritdoc */
-  async claimSessionCursors(directoryId: string, memberKey: string, claims: readonly AgentSessionCursorClaim[]): Promise<boolean> {
+  async advanceSessionCursors(directoryId: string, memberKey: string, cursors: readonly AgentSessionCursor[]): Promise<void> {
     const partition = agentSessionCursorPartition(directoryId, memberKey)
-    if (claims.some((claim) => this.sessionCursors.get(`${partition}|${claim.sessionKey}`) !== claim.previousLastEventAtMs)) return false
-    for (const claim of claims) this.sessionCursors.set(`${partition}|${claim.sessionKey}`, claim.lastEventAtMs)
-    return true
-  }
-
-  /** @inheritdoc */
-  async releaseSessionCursors(directoryId: string, memberKey: string, claims: readonly AgentSessionCursorClaim[]): Promise<void> {
-    const partition = agentSessionCursorPartition(directoryId, memberKey)
-    for (const claim of claims) {
-      const key = `${partition}|${claim.sessionKey}`
-      if (this.sessionCursors.get(key) !== claim.lastEventAtMs) continue
-      if (claim.previousLastEventAtMs === undefined) this.sessionCursors.delete(key)
-      else this.sessionCursors.set(key, claim.previousLastEventAtMs)
+    for (const cursor of cursors) {
+      const key = `${partition}|${cursor.sessionKey}`
+      const saved = this.sessionCursors.get(key)
+      if (saved === undefined || saved < cursor.lastEventAtMs) this.sessionCursors.set(key, cursor.lastEventAtMs)
     }
   }
 }

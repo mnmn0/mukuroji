@@ -1,6 +1,7 @@
 import {
   AGENT_USAGE_BUCKET_SECONDS,
   AgentTelemetryFormatError,
+  AGENT_ACTIVITY_MAX_WAIT_ITEMS,
   agentSessionKey,
   createAgentUsageUnavailableError,
   deriveAgentActivityBatchId,
@@ -19,7 +20,7 @@ import { workItemDependencies } from '../shared/app-dependencies'
 import { resolveDeveloperCredentialPrincipal } from '../shared/developer-platform-access'
 import { requireWorkspaceBusinessRead } from '../shared/project-access'
 
-/** Cursor reads and claims of one export before it fails for the exporter to resend. */
+/** Times one export measures its waits again after another export moved a cursor, before it fails for a resend. */
 const cursorClaimAttempts = 3
 
 /**
@@ -97,21 +98,22 @@ async function recordActivity(
   for (let attempt = 0; attempt < cursorClaimAttempts; attempt += 1) {
     const cursors = sessionKeys.length === 0 ? new Map<string, number>() : await store.readSessionCursors(directoryId, memberKey, sessionKeys)
     const layout = layoutAgentActivityRows(parsed.wellFormedActivityEvents, parsed.activityEvents, cursors, AGENT_USAGE_BUCKET_SECONDS)
-    const claims = layout.cursors.map((cursor) => {
-      const previous = cursors.get(cursor.sessionKey)
-      return previous === undefined ? cursor : { ...cursor, previousLastEventAtMs: previous }
-    })
-    // Cursors move before the waits are saved, and only from the values the waits were measured from,
-    // so an overlapping export of the same session measures again instead of counting the same wait.
-    if (claims.length > 0 && !await store.claimSessionCursors(directoryId, memberKey, claims, receivedAt)) continue
-    try {
-      return layout.slots.some((slot) => slot !== undefined)
-        ? await store.recordActivityBatch(directoryId, memberKey, batchId, layout.slots, receivedAt)
-        : undefined
-    } catch (error) {
-      if (claims.length > 0) await store.releaseSessionCursors(directoryId, memberKey, claims)
-      throw error
-    }
+    const waitSlots = layout.slots.slice(layout.toolSlotCount)
+    // Both counts come from the export alone, so a resent export makes the same choice.
+    const measurable = waitSlots.length + layout.sessionCount <= AGENT_ACTIVITY_MAX_WAIT_ITEMS
+    const claims = measurable
+      ? layout.cursors.map((cursor) => {
+          const previous = cursors.get(cursor.sessionKey)
+          return previous === undefined ? cursor : { ...cursor, previousLastEventAtMs: previous }
+        })
+      : []
+    const activity = { toolSlots: layout.slots.slice(0, layout.toolSlotCount), waitSlots: measurable ? waitSlots : [], claims }
+    const empty = [...activity.toolSlots, ...activity.waitSlots].every((slot) => slot === undefined) && claims.length === 0
+    const result = empty ? undefined : await store.recordActivityBatch(directoryId, memberKey, batchId, activity, receivedAt)
+    // Another export of the same session moved a cursor first: measure the waits again from it.
+    if (result === 'cursor-moved') continue
+    if (!measurable && layout.cursors.length > 0) await store.advanceSessionCursors(directoryId, memberKey, layout.cursors, receivedAt)
+    return result
   }
   throw createAgentUsageUnavailableError()
 }

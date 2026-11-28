@@ -49,7 +49,7 @@ custom field がある。費用は「なるべく安く」が方針。
   `BatchGetItem` で読み、event を時刻（同じ時刻は `event.sequence`）順に並べて、`user_prompt` と人が判断した
   `tool_decision` に「同じ session の直前の event からの間隔」を待ち時間として足す。直前の event は同じ export の前の
   event、なければ cursor。間隔が 2 時間を超えるものは席を外していたとみなし、待ちにも作業にも数えない。最初の prompt
-  など直前の event がないものも数えない。activity を保存する前に、cursor を「読んだ値のままのときだけ」の条件付き `UpdateItem` で進める（同じ session の export が重なったとき、同じ待ちを二重に数えないため）。条件が外れたら読み直して測り直し、3 回外れたら再送を求める。activity の保存に失敗したら cursor を読んだ値へ戻す。
+  など直前の event がないものも数えない。tool の行を先に書き、待ちの行と cursor の更新は最後の 1 つの transaction（受領行 `activity#<ID>#wait` 付き）にまとめる。cursor は「読んだ値のままのときだけ」進む条件付きで、同じ session の export が重なっても同じ待ちを二重に数えず、途中で落ちても cursor は動かないので再送で同じ値を測り直せる。条件が外れたら読み直して測り直し、3 回外れたら再送を求める。待ちの行と session 数の合計が 99 を超える export は（export の中身だけで決まるので再送でも同じく）待ちを数えず、cursor だけを「今より新しいときだけ」進める。
   `api_request` と `tool_result` の時刻は完了時と見なす（公式資料は start か completion かを書いていないため、#454 の
   実機で確かめる）。
 - **見せ方**：Run 一覧 API が Run ごとの `activity`（tool の回数・時間・失敗、tool 別の上位 30 件、承認待ち、指示待ち）と

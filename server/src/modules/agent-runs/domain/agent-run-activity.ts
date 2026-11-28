@@ -76,6 +76,12 @@ export type AgentSessionCursor = {
   lastEventAtMs: number
 }
 
+/**
+ * Wait rows and cursor moves one export may save in its single wait transaction, next to its receipt;
+ * DynamoDB allows 100 items. An export with more saves no waits (ADR 0117).
+ */
+export const AGENT_ACTIVITY_MAX_WAIT_ITEMS = 99
+
 /** A cursor move that holds only while the cursor still has the value the waits were measured from. */
 export type AgentSessionCursorClaim = AgentSessionCursor & {
   /** Cursor value read before measuring; absent when the session had no cursor. */
@@ -229,10 +235,15 @@ function waitKindOf(event: AgentActivityEvent): AgentWaitKind | undefined {
 /** Activity rows of one export and the session cursors to move forward after they are saved. */
 export type AgentActivityLayout = {
   /**
-   * One slot per row the export's well-formed events could add to, in key order: the accepted row,
-   * or undefined. The slots depend only on the export, so a retry keeps its chunk layout.
+   * One slot per row the export's well-formed events could add to, tool rows first and then wait rows,
+   * each in key order: the accepted row, or undefined. The slots depend only on the export, so a retry
+   * keeps its chunk layout.
    */
   slots: (AgentActivityRow | undefined)[]
+  /** Number of leading tool slots; the rest are wait slots. */
+  toolSlotCount: number
+  /** Sessions among the well-formed events; independent of the cursors, like the slots. */
+  sessionCount: number
   /** Newest event time per session among the accepted events. */
   cursors: AgentSessionCursor[]
 }
@@ -308,8 +319,14 @@ export function layoutAgentActivityRows(
     }
     if (previous !== undefined && (stored === undefined || previous > stored)) cursors.push({ sessionKey, lastEventAtMs: previous })
   }
-  const slots = [...slotKeys.keys()].sort().map((key) => rows.get(key))
-  return { slots, cursors }
+  const keys = [...slotKeys.entries()].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+  const toolKeys = keys.filter(([, identity]) => identity.kind !== 'wait').map(([key]) => key)
+  const waitKeys = keys.filter(([, identity]) => identity.kind === 'wait').map(([key]) => key)
+  const sessionCount = new Set(wellFormedEvents.flatMap((event) => {
+    const key = agentSessionKey(event)
+    return key === undefined ? [] : [key]
+  })).size
+  return { slots: [...toolKeys, ...waitKeys].map((key) => rows.get(key)), toolSlotCount: toolKeys.length, sessionCount, cursors }
 }
 
 /**

@@ -200,13 +200,14 @@ describe('Factory comparison', () => {
 })
 
 describe('DynamoDB activity store', () => {
-  test('writes activity with its own receipts, and claims cursors only from the value read', async () => {
+  test('writes tool rows first, then the waits and cursor moves in one transaction', async () => {
     const sent: { name: string; input: unknown }[] = []
+    let cancel: string[] | undefined
     const client: AgentRunUsageDocumentClient = {
       async send(command) {
         sent.push({ name: command.constructor.name, input: command.input })
-        if (command.constructor.name === 'UpdateCommand' && sent.filter((entry) => entry.name === 'UpdateCommand').length === 2) {
-          throw Object.assign(new Error('stale'), { name: 'ConditionalCheckFailedException' })
+        if (command.constructor.name === 'TransactWriteCommand' && cancel !== undefined && JSON.stringify(command.input).includes('activity#batch#wait')) {
+          throw Object.assign(new Error('cancelled'), { name: 'TransactionCanceledException', CancellationReasons: cancel.map((Code) => ({ Code })) })
         }
         if (command.constructor.name === 'BatchGetCommand') {
           return { Responses: { runs: [{ recordKey: 'laptop#s1', lastEventAtMs: 5 }] } }
@@ -216,10 +217,14 @@ describe('DynamoDB activity store', () => {
     }
     const store = new DynamoDbAgentRunUsageStore(client, 'runs')
     const now = new Date('2026-11-22T18:00:00.000Z')
-    expect(await store.recordActivityBatch('ws', 'member', 'batch', [
-      undefined,
-      { bucketStart: '2026-11-22T17:05:00Z', instanceIdHash: 'laptop', kind: 'tool', name: 'builtin:Bash', count: 1, durationMs: 3, failureCount: 0 },
-    ], now)).toBe('recorded')
+    const tool: AgentActivityRow = { bucketStart: '2026-11-22T17:05:00Z', instanceIdHash: 'laptop', kind: 'tool', name: 'builtin:Bash', count: 1, durationMs: 3, failureCount: 0 }
+    const wait: AgentActivityRow = { bucketStart: '2026-11-22T17:05:00Z', instanceIdHash: 'laptop', kind: 'wait', name: 'prompt', count: 1, durationMs: 4, failureCount: 0 }
+    const activity = {
+      toolSlots: [undefined, tool],
+      waitSlots: [wait],
+      claims: [{ sessionKey: 'laptop#s1', lastEventAtMs: 9, previousLastEventAtMs: 5 }, { sessionKey: 'laptop#s2', lastEventAtMs: 1 }],
+    }
+    expect(await store.recordActivityBatch('ws', 'member', 'batch', activity, now)).toBe('recorded')
     expect(sent[0]?.input).toMatchObject({
       TransactItems: [
         { Put: { Item: { directoryTeamId: 'ws#agent-usage-batch#member#member', recordKey: 'activity#batch#0' } } },
@@ -231,37 +236,42 @@ describe('DynamoDB activity store', () => {
         },
       ],
     })
+    expect(sent[1]?.input).toMatchObject({
+      TransactItems: [
+        { Put: { Item: { recordKey: 'activity#batch#wait' }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
+        { Update: { Key: { recordKey: '2026-11-22T17:05:00Z#laptop#wait#prompt' }, ExpressionAttributeValues: { ':durationMs': 4 } } },
+        {
+          Update: {
+            Key: { directoryTeamId: 'ws#agent-session#member#member', recordKey: 'laptop#s1' },
+            ConditionExpression: '#lastEventAtMs = :previous',
+            ExpressionAttributeValues: { ':lastEventAtMs': 9, ':previous': 5 },
+          },
+        },
+        { Update: { Key: { recordKey: 'laptop#s2' }, ConditionExpression: 'attribute_not_exists(#lastEventAtMs)' } },
+      ],
+    })
     expect(await store.readSessionCursors('ws', 'member', ['laptop#s1', 'laptop#s1'])).toEqual(new Map([['laptop#s1', 5]]))
-    // The second claim finds its cursor moved by another export: the first claim is put back.
-    expect(await store.claimSessionCursors('ws', 'member', [
-      { sessionKey: 'laptop#s1', lastEventAtMs: 9, previousLastEventAtMs: 5 },
-      { sessionKey: 'laptop#s2', lastEventAtMs: 1 },
-    ], now)).toBe(false)
-    const updates = sent.filter((entry) => entry.name === 'UpdateCommand').map((entry) => entry.input)
-    expect(updates).toHaveLength(3)
-    expect(updates[0]).toMatchObject({
-      Key: { directoryTeamId: 'ws#agent-session#member#member', recordKey: 'laptop#s1' },
-      ConditionExpression: '#lastEventAtMs = :previous',
-      ExpressionAttributeValues: { ':lastEventAtMs': 9, ':previous': 5 },
-    })
-    expect(updates[1]).toMatchObject({ Key: { recordKey: 'laptop#s2' }, ConditionExpression: 'attribute_not_exists(#lastEventAtMs)' })
-    expect(updates[2]).toMatchObject({
-      Key: { recordKey: 'laptop#s1' },
-      UpdateExpression: 'SET #lastEventAtMs = :previous',
-      ConditionExpression: '#lastEventAtMs = :claimed',
-      ExpressionAttributeValues: { ':claimed': 9, ':previous': 5 },
-    })
+
+    // A moved cursor asks for the waits to be measured again; a saved wait receipt is a duplicate.
+    sent.length = 0
+    cancel = ['None', 'None', 'ConditionalCheckFailed', 'None']
+    expect(await store.recordActivityBatch('ws', 'member', 'batch', activity, now)).toBe('cursor-moved')
+    sent.length = 0
+    cancel = ['ConditionalCheckFailed', 'None', 'ConditionalCheckFailed', 'None']
+    expect(await store.recordActivityBatch('ws', 'member', 'batch', { ...activity, toolSlots: [] }, now)).toBe('duplicate')
   })
 
   test('an overlapping export of the same session measures its wait again instead of counting it twice', async () => {
     const store = new InMemoryAgentRunUsageStore()
-    expect(await store.claimSessionCursors('ws', 'member', [{ sessionKey: 'laptop#s1', lastEventAtMs: 0 }])).toBe(true)
-    // Both exports read 0; the one that claims first wins and the other must read again.
-    expect(await store.claimSessionCursors('ws', 'member', [{ sessionKey: 'laptop#s1', lastEventAtMs: 10_000, previousLastEventAtMs: 0 }])).toBe(true)
-    expect(await store.claimSessionCursors('ws', 'member', [{ sessionKey: 'laptop#s1', lastEventAtMs: 20_000, previousLastEventAtMs: 0 }])).toBe(false)
-    expect(await store.readSessionCursors('ws', 'member', ['laptop#s1'])).toEqual(new Map([['laptop#s1', 10_000]]))
-    await store.releaseSessionCursors('ws', 'member', [{ sessionKey: 'laptop#s1', lastEventAtMs: 10_000, previousLastEventAtMs: 0 }])
-    expect(await store.readSessionCursors('ws', 'member', ['laptop#s1'])).toEqual(new Map([['laptop#s1', 0]]))
+    const prompt = (durationMs: number): AgentActivityRow => ({ bucketStart: 'b', instanceIdHash: 'laptop', kind: 'wait', name: 'prompt', count: 1, durationMs, failureCount: 0 })
+    await store.advanceSessionCursors('ws', 'member', [{ sessionKey: 'laptop#s1', lastEventAtMs: 0 }])
+    // Both exports read the cursor at 0; the first saves its wait and moves the cursor.
+    expect(await store.recordActivityBatch('ws', 'member', 'a', { toolSlots: [], waitSlots: [prompt(10_000)], claims: [{ sessionKey: 'laptop#s1', lastEventAtMs: 10_000, previousLastEventAtMs: 0 }] })).toBe('recorded')
+    expect(await store.recordActivityBatch('ws', 'member', 'b', { toolSlots: [], waitSlots: [prompt(20_000)], claims: [{ sessionKey: 'laptop#s1', lastEventAtMs: 20_000, previousLastEventAtMs: 0 }] })).toBe('cursor-moved')
+    // Measured again from 10 s, the second export adds 10 s.
+    expect(await store.recordActivityBatch('ws', 'member', 'b', { toolSlots: [], waitSlots: [prompt(10_000)], claims: [{ sessionKey: 'laptop#s1', lastEventAtMs: 20_000, previousLastEventAtMs: 10_000 }] })).toBe('recorded')
+    const page = await store.listMemberActivity('ws', 'member', 'laptop', 'a', undefined, 10)
+    expect(page.rows.map((row) => row.durationMs)).toEqual([20_000])
   })
 
   test('reads unprocessed cursor keys again and fails the export when they stay unread', async () => {

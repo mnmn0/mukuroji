@@ -136,6 +136,7 @@ export {
   classifyAgentTool,
   combineAgentRunActivity,
   deriveAgentActivityBatchId,
+  AGENT_ACTIVITY_MAX_WAIT_ITEMS,
   layoutAgentActivityRows,
   summarizeAgentActivity,
   type AgentActivityEvent,
