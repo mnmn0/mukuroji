@@ -68,6 +68,12 @@ test('asks for a GitHub login and explains a missing App', () => {
   expect(renderInbox({ inbox: { ...toReviewInboxFixture, items: [] } })).toContain('レビューを頼まれている pull request はありません')
 })
 
+test('warns that an empty inbox may be partial when the listing stopped early', () => {
+  const html = renderInbox({ inbox: { ...toReviewInboxFixture, items: [], incomplete: true } })
+  expect(html).toContain('件数が多いため、一部の pull request を表示していません。')
+  expect(html).toContain('レビューを頼まれている pull request はありません')
+})
+
 test('reads the inbox and rejects a pull request link outside GitHub', async () => {
   const requests: string[] = []
   let body: unknown = toReviewInboxFixture

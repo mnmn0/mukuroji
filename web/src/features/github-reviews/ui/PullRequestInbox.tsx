@@ -164,14 +164,20 @@ function InboxBody({
       </div>
     )
   }
+  const incompleteWarning = inbox.incomplete ? (
+    <p className="text-sm font-medium text-[var(--workbench-warning)]" role="status">{t('githubReviews.incomplete')}</p>
+  ) : null
   if (inbox.items.length === 0) {
-    return <p className="workbench-panel px-5 py-4 text-sm font-medium text-[var(--workbench-muted)]">{t(`githubReviews.empty.${view}`)}</p>
+    return (
+      <>
+        {incompleteWarning}
+        <p className="workbench-panel px-5 py-4 text-sm font-medium text-[var(--workbench-muted)]">{t(`githubReviews.empty.${view}`)}</p>
+      </>
+    )
   }
   return (
     <>
-      {inbox.incomplete ? (
-        <p className="text-sm font-medium text-[var(--workbench-warning)]" role="status">{t('githubReviews.incomplete')}</p>
-      ) : null}
+      {incompleteWarning}
       {GITHUB_PULL_REQUEST_SECTIONS.map((section) => {
         const items = inbox.items.filter((item) => item.section === section)
         if (items.length === 0) return null
