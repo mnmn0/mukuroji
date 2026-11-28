@@ -36,6 +36,7 @@ deploy する人（Shinji）が1回だけ行います。
    値は 5 分以内にすべての Lambda に反映されます。足りない項目や RSA でない鍵を入れると、各 runtime は
    `GitHubAppCredentialsInvalid` で失敗します（placeholder に戻せば「未設定」に戻ります）。
 6. **届くか確かめる**：App の Advanced → Recent Deliveries の `ping` が `200` なら受け口は動いています。
+   あわせて App の Install App 画面で、install 先がこの Workspace の組織だけであることを確かめます。
 7. **repository を Team に link する**：Workspace 管理者が **設定** → **Workspace 管理** → **GitHub リポジトリ** で
    Team を選びます（API は `PUT /api/workspace/github/repositories/:repositoryId`、body `{"teamId": "..."}`）。
    link した repository の open な pull request はすぐに読み込まれます。
@@ -58,7 +59,9 @@ deploy する人（Shinji）が1回だけ行います。
   GitHub は失敗した delivery を自動では再送しません。`503`（や初期設定中に失敗した `ping`）は、App の Advanced →
   Recent Deliveries で該当する delivery を選び **Redeliver** で送り直します。毎時の reconcile は snapshot を直し、
   保存済みの pull request の変化（CI 失敗・conflict・レビュー依頼の追加）も通知しますが、初めて読む pull request の
-  レビュー依頼は通知しません。取りこぼした新しい pull request の通知は再送でだけ戻ります。
+  レビュー依頼は通知しません。取りこぼした新しい pull request の通知は再送でだけ戻りますが、再送より先に reconcile が
+  その pull request を保存していると、同じレビュー依頼は変化にならず通知されません。その場合は GitHub で確かめて
+  reviewer に直接知らせてください。
 - job は ID だけを持ちます。worker（`GitHubSyncFunction`）は link と installation が一致するときだけ、
   GraphQL で今の状態を読み直し、`syncedAt` が新しいときだけ snapshot を上書きします。
   - pull request 系の event：その番号を読む
