@@ -268,8 +268,11 @@ export interface GitHubIntegrationStore<AuditContext = unknown> {
    * @param workspaceId - Workspace.
    * @param repositoryId - Repository ID.
    * @param number - Pull request number.
+   * @param expectedSyncedAt - When given, deletes only the snapshot read at this time, so a newer
+   *   snapshot a concurrent sync wrote is kept.
+   * @returns `deleted`, or `stale` when a newer snapshot was kept.
    */
-  deletePullRequestSnapshot(workspaceId: string, repositoryId: string, number: number): Promise<void>
+  deletePullRequestSnapshot(workspaceId: string, repositoryId: string, number: number, expectedSyncedAt?: string): Promise<'deleted' | 'stale'>
 }
 
 /** Queue of sync jobs. */

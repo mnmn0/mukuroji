@@ -56,7 +56,7 @@ deploy する人（Shinji）が1回だけ行います。
   - `mergeable` が未計算なら 30 秒×回数だけ遅らせて、最大 4 回読み直す
 - `GitHubReconcileFunction` が 1 時間ごとに、link 済み repository の open な pull request と古い snapshot を読み直し、
   link を外した repository の snapshot と閉じて 30 日たった snapshot を消します。
-- 5 回失敗した job と、再試行を使い切った reconcile は `GitHubSyncDlq` に入り、alarm が鳴ります。
+- 5 回失敗した job、job として読めない message、再試行を使い切った reconcile は `GitHubSyncDlq` に入り、alarm が鳴ります。
   queue の最古の job が 15 分を超えたときも alarm が鳴ります。
 
 ## 受信箱の通知

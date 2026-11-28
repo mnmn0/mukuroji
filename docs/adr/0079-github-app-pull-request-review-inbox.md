@@ -29,7 +29,9 @@ CI の失敗・conflict・レビュー依頼を受信箱に届けることを求
   - `GITHUB_PULL_REQUEST#<repositoryId>#<番号>`：pull request の snapshot（`syncedAt` が新しいときだけ上書き）
   link と login の変更は audit event を同じ transaction で書く。
 - **取りこぼしは毎時の reconcile で直す**：EventBridge が 1 時間ごとに、link 済み repository の open な pull request と、
-  保存済みで open のまま古い snapshot を読み直す。link を外した repository の snapshot と、閉じて 30 日たった snapshot は消す。
+  保存済みで open のまま古い snapshot を読み直す。open な一覧は 1 repository につき 500 件まで pagination で読み、一覧に
+  出なかった保存済みの open は番号で読み直す。link を外した repository の snapshot と、閉じて 30 日たった snapshot は消す。
+  消すときは読んだ版と同じ `syncedAt` の行だけを消し、その間に同期が書いた新しい行は残す。
 - **見せる範囲**：repository は Workspace 管理者が Team に link したものだけを扱う。Reviews の一覧は、閲覧者が読める
   Team に link された repository の pull request だけを返す。GitHub 側の閲覧権限ではなく mukuroji の Team の権限で絞る。
 - **CDK は任意 module**：context `mukuroji:githubApp=true` のときだけ secret・queue・DLQ・worker・reconcile・alarm を作る。

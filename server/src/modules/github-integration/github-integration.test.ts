@@ -297,6 +297,33 @@ test('reconciles open pull requests and removes unlinked and expired snapshots',
   expect(stored.map((item) => [item.number, item.state]).sort()).toEqual([[1, 'merged'], [4, 'open']])
 })
 
+test('rereads stored open pull requests a partial open list leaves out', async () => {
+  const store = new InMemoryGitHubIntegrationStore()
+  await store.saveRepositoryLink({ workspaceId: WORKSPACE_ID, record: link })
+  await store.putPullRequestSnapshot(WORKSPACE_ID, snapshot({ number: 1 }, '2026-11-01T00:00:00.000Z'))
+  const closed = snapshot({ number: 1, state: 'CLOSED', closedAt: '2026-11-27T00:00:00Z' }, '2026-11-28T05:00:00.000Z')
+  const { gateway, calls } = fakeGateway([snapshot({ number: 4 }, '2026-11-28T05:00:00.000Z')], new Map([[1, closed]]))
+  const partial: GitHubAppGateway = {
+    ...gateway,
+    async readOpenPullRequests(reference, options, syncedAt) {
+      return { ...await gateway.readOpenPullRequests(reference, options, syncedAt), incomplete: true }
+    },
+  }
+  await reconcileGitHubPullRequests({ store, gateway: partial, queue: new InMemoryGitHubSyncQueue(), notifications: new InMemoryGitHubNotificationSink() }, WORKSPACE_ID, new Date('2026-11-28T05:00:00Z'), () => undefined)
+  expect(calls).toEqual(['name', 'open:*', 'numbers:1'])
+  expect((await store.getPullRequestSnapshot(WORKSPACE_ID, '42', 1))?.state).toBe('closed')
+})
+
+test('keeps a snapshot written after the one a cleanup read', async () => {
+  const store = new InMemoryGitHubIntegrationStore()
+  await store.putPullRequestSnapshot(WORKSPACE_ID, snapshot({ number: 1 }, '2026-11-01T00:00:00.000Z'))
+  await store.putPullRequestSnapshot(WORKSPACE_ID, snapshot({ number: 1 }, '2026-11-02T00:00:00.000Z'))
+  expect(await store.deletePullRequestSnapshot(WORKSPACE_ID, '42', 1, '2026-11-01T00:00:00.000Z')).toBe('stale')
+  expect(await store.getPullRequestSnapshot(WORKSPACE_ID, '42', 1)).not.toBeNull()
+  expect(await store.deletePullRequestSnapshot(WORKSPACE_ID, '42', 1, '2026-11-02T00:00:00.000Z')).toBe('deleted')
+  expect(await store.getPullRequestSnapshot(WORKSPACE_ID, '42', 1)).toBeNull()
+})
+
 test('lists the inbox for the caller\'s registered login', async () => {
   const store = new InMemoryGitHubIntegrationStore()
   await store.saveRepositoryLink({ workspaceId: WORKSPACE_ID, record: link })
@@ -337,7 +364,7 @@ test('links only repositories the App can read to an existing Team', async () =>
     .toMatchObject({ revision: 2 })
 })
 
-test('reports retryable job failures to SQS and drops malformed messages', async () => {
+test('reports retryable job failures and malformed messages to SQS', async () => {
   const store = new InMemoryGitHubIntegrationStore()
   await store.saveRepositoryLink({ workspaceId: WORKSPACE_ID, record: link })
   const failing: GitHubAppGateway = {
@@ -358,8 +385,9 @@ test('reports retryable job failures to SQS and drops malformed messages', async
   })
   const job = { installationId: '7', repositoryId: '42', repository: 'acme/app', attempt: 0, kind: 'pull-requests', numbers: [5] }
   const response = await handler({ Records: [{ messageId: 'm1', body: JSON.stringify(job) }, { messageId: 'm2', body: 'not json' }] })
-  expect(response).toEqual({ batchItemFailures: [{ itemIdentifier: 'm1' }] })
-  expect(logs).toEqual(['GitHub sync job failed.', 'GitHub sync worker dropped a malformed message.'])
+  // A malformed message goes back to SQS so it reaches the DLQ instead of being lost.
+  expect(response).toEqual({ batchItemFailures: [{ itemIdentifier: 'm1' }, { itemIdentifier: 'm2' }] })
+  expect(logs).toEqual(['GitHub sync job failed.', 'GitHub sync worker received a malformed message.'])
 })
 
 test('notifies new reviewers and the author of new CI failures and conflicts, once', () => {

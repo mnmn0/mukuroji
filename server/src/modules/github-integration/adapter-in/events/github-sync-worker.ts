@@ -43,8 +43,9 @@ export type GitHubSyncWorkerDependencies = GitHubSyncDependencies & {
 /**
  * Creates the SQS handler of the GitHub sync queue (ADR 0079).
  *
- * A malformed message or a failure GitHub will not fix by retrying (an unexpected response) is
- * logged and dropped, so it does not cycle until the DLQ. Every retryable failure is reported for
+ * A malformed message is reported as failed, so SQS moves it to the DLQ, whose alarm keeps it for
+ * the operator. A failure GitHub will not fix by retrying (an unexpected response) is logged and
+ * dropped. Every retryable failure is reported for
  * SQS to deliver again; after five receives SQS moves it to the DLQ, whose alarm tells the operator.
  *
  * @param dependencies - Store, gateway, queue, Workspace, clock, and logger.
@@ -60,7 +61,8 @@ export function createGitHubSyncQueueHandler(
       try {
         job = parseGitHubSyncJob(JSON.parse(record.body))
       } catch {
-        dependencies.log('GitHub sync worker dropped a malformed message.', { messageId: record.messageId })
+        dependencies.log('GitHub sync worker received a malformed message.', { messageId: record.messageId })
+        failures.push({ itemIdentifier: record.messageId })
         continue
       }
       try {

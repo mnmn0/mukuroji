@@ -35,6 +35,9 @@ const PAGE_SIZE = 100
 /** Open pull requests one read returns. */
 const OPEN_PULL_REQUESTS_PAGE_SIZE = 50
 
+/** Most pages of open pull requests one read follows; 500 pull requests in all. */
+const OPEN_PULL_REQUESTS_PAGES_MAX = 10
+
 /** Repository ID: a positive decimal integer. */
 const NUMERIC_ID_PATTERN = /^[1-9][0-9]{0,19}$/u
 
@@ -245,21 +248,30 @@ export class GitHubAppHttpGateway implements GitHubAppGateway {
     options: { baseRef?: string },
     syncedAt: string,
   ): Promise<GitHubOpenPullRequestReadResult> {
-    const data = await this.graphql(
-      reference,
-      `query($owner: String!, $name: String!, $base: String) { repository(owner: $owner, name: $name) {
-        pullRequests(states: OPEN, first: ${OPEN_PULL_REQUESTS_PAGE_SIZE}, baseRefName: $base, orderBy: { field: UPDATED_AT, direction: DESC }) {
-          totalCount nodes { ...PullRequestSnapshot }
-        }
-      } }${PULL_REQUEST_FRAGMENT}`,
-      { ...splitRepository(reference.repository), base: options.baseRef ?? null },
-      false,
-    )
-    const repository = requireRecord(data.repository, 'repository')
-    const connection = requireRecord(repository.pullRequests, 'pull requests')
-    const snapshots = readNodes(connection).map((node) => parseNode(node, reference, syncedAt))
-    const total = typeof connection.totalCount === 'number' ? connection.totalCount : snapshots.length
-    return { snapshots, incomplete: total > snapshots.length }
+    const snapshots: GitHubPullRequestSnapshot[] = []
+    let after: string | null = null
+    for (let page = 1; page <= OPEN_PULL_REQUESTS_PAGES_MAX; page += 1) {
+      const data = await this.graphql(
+        reference,
+        `query($owner: String!, $name: String!, $base: String, $after: String) { repository(owner: $owner, name: $name) {
+          pullRequests(states: OPEN, first: ${OPEN_PULL_REQUESTS_PAGE_SIZE}, after: $after, baseRefName: $base, orderBy: { field: UPDATED_AT, direction: DESC }) {
+            pageInfo { hasNextPage endCursor } nodes { ...PullRequestSnapshot }
+          }
+        } }${PULL_REQUEST_FRAGMENT}`,
+        { ...splitRepository(reference.repository), base: options.baseRef ?? null, after },
+        false,
+      )
+      const repository = requireRecord(data.repository, 'repository')
+      const connection = requireRecord(repository.pullRequests, 'pull requests')
+      snapshots.push(...readNodes(connection).map((node) => parseNode(node, reference, syncedAt)))
+      const pageInfo = isRecord(connection.pageInfo) ? connection.pageInfo : {}
+      if (pageInfo.hasNextPage !== true) return { snapshots, incomplete: false }
+      if (typeof pageInfo.endCursor !== 'string' || pageInfo.endCursor === '') {
+        throw unexpected('pull request page cursor')
+      }
+      after = pageInfo.endCursor
+    }
+    return { snapshots, incomplete: true }
   }
 
   /**

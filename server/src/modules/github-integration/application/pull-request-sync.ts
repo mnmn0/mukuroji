@@ -214,8 +214,10 @@ export async function reconcileGitHubPullRequests(
   const storedOpen = new Map<string, number[]>()
   for (const snapshot of stored.snapshots) {
     if (!linked.has(snapshot.repositoryId) || isExpiredPullRequestSnapshot(snapshot, now)) {
-      await dependencies.store.deletePullRequestSnapshot(workspaceId, snapshot.repositoryId, snapshot.number)
-      deleted += 1
+      // A sync that wrote a newer snapshot since it was listed keeps it.
+      if (await dependencies.store.deletePullRequestSnapshot(workspaceId, snapshot.repositoryId, snapshot.number, snapshot.syncedAt) === 'deleted') {
+        deleted += 1
+      }
     } else if (snapshot.state === 'open') {
       storedOpen.set(snapshot.repositoryId, [...storedOpen.get(snapshot.repositoryId) ?? [], snapshot.number])
     }
@@ -238,8 +240,9 @@ export async function reconcileGitHubPullRequests(
       const openNumbers = new Set(open.snapshots.map((snapshot) => snapshot.number))
       const result = await storeSnapshots(dependencies, workspaceId, link, open.snapshots, [], false)
       written += result.written
-      // Without the complete open list, a stored open pull request may still be open.
-      const stale = open.incomplete ? [] : (storedOpen.get(link.repositoryId) ?? []).filter((number) => !openNumbers.has(number))
+      // A stored open pull request missing from the list is read by number, which tells whether it
+      // is still open even when the list stopped at its page limit.
+      const stale = (storedOpen.get(link.repositoryId) ?? []).filter((number) => !openNumbers.has(number))
       for (let index = 0; index < stale.length; index += GITHUB_SYNC_JOB_MAX_NUMBERS) {
         const read = await dependencies.gateway.readPullRequests(
           reference,

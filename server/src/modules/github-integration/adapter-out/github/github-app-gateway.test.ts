@@ -171,3 +171,49 @@ test('reads only this repository\'s pull requests among those associated with a 
   const snapshots = await gateway.readCommitPullRequests({ installationId: '7', repositoryId: '42', repository: 'acme/app' }, sha, 'now')
   expect(snapshots.map((snapshot) => snapshot.number)).toEqual([5])
 })
+
+test('follows the pages of open pull requests', async () => {
+  /**
+   * Builds an open pull request node.
+   *
+   * @param number - Pull request number.
+   * @returns The node.
+   */
+  const pullRequest = (number: number) => ({
+    number,
+    title: 'Title',
+    url: `https://github.com/acme/app/pull/${number}`,
+    state: 'OPEN',
+    isDraft: false,
+    createdAt: '2026-11-27T00:00:00Z',
+    updatedAt: '2026-11-28T00:00:00Z',
+    headRefName: 'feature',
+    baseRefName: 'main',
+    headRefOid: 'c'.repeat(40),
+    mergeable: 'MERGEABLE',
+    reviewDecision: null,
+    baseRepository: { databaseId: 42, nameWithOwner: 'acme/app' },
+    author: { login: 'alice' },
+    reviewRequests: { nodes: [] },
+    latestOpinionatedReviews: { nodes: [] },
+    commits: { nodes: [] },
+  })
+  const cursors: unknown[] = []
+  const fetchImplementation: GitHubFetch = async (url, init) => {
+    if (url.endsWith('/access_tokens')) return json(201, { token: 'ghs_installation', expires_at: '2026-11-28T02:00:00Z' })
+    const body: unknown = JSON.parse(typeof init.body === 'string' ? init.body : '{}')
+    const after = typeof body === 'object' && body !== null && 'variables' in body &&
+      typeof body.variables === 'object' && body.variables !== null && 'after' in body.variables ? body.variables.after : undefined
+    cursors.push(after)
+    const first = after === null
+    return json(200, { data: { repository: { pullRequests: {
+      pageInfo: { hasNextPage: first, endCursor: first ? 'page-2' : null },
+      nodes: [pullRequest(first ? 7 : 3)],
+    } } } })
+  }
+  const gateway = new GitHubAppHttpGateway(new CachedGitHubAppCredentialSource(async () => secret), fetchImplementation, () => Date.parse('2026-11-28T01:00:00Z'))
+  const result = await gateway.readOpenPullRequests({ installationId: '7', repositoryId: '42', repository: 'acme/app' }, {}, 'now')
+  expect(cursors).toEqual([null, 'page-2'])
+  expect(result.snapshots.map((snapshot) => snapshot.number)).toEqual([7, 3])
+  expect(result.incomplete).toBe(false)
+})

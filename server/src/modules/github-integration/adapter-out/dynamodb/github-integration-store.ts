@@ -429,12 +429,30 @@ export class DynamoDbGitHubIntegrationStore implements GitHubIntegrationStore<Mu
    * @param workspaceId - Workspace.
    * @param repositoryId - Repository ID.
    * @param number - Pull request number.
+   * @param expectedSyncedAt - When given, deletes only the snapshot read at this time.
+   * @returns `deleted`, or `stale` when a newer snapshot was kept.
    */
-  async deletePullRequestSnapshot(workspaceId: string, repositoryId: string, number: number): Promise<void> {
-    await this.client.send(new DeleteCommand({
-      TableName: this.tableName,
-      Key: { workspaceId, recordKey: pullRequestKey(repositoryId, number) },
-    })).catch((error: unknown) => storageFailure(error))
+  async deletePullRequestSnapshot(
+    workspaceId: string,
+    repositoryId: string,
+    number: number,
+    expectedSyncedAt?: string,
+  ): Promise<'deleted' | 'stale'> {
+    try {
+      await this.client.send(new DeleteCommand({
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: pullRequestKey(repositoryId, number) },
+        ...(expectedSyncedAt === undefined ? {} : {
+          ConditionExpression: 'attribute_not_exists(recordKey) OR #syncedAt = :syncedAt',
+          ExpressionAttributeNames: { '#syncedAt': 'syncedAt' },
+          ExpressionAttributeValues: { ':syncedAt': expectedSyncedAt },
+        }),
+      }))
+      return 'deleted'
+    } catch (error) {
+      if (isConditionalCheckFailure(error)) return 'stale'
+      return storageFailure(error)
+    }
   }
 
   /**
@@ -680,9 +698,20 @@ export class InMemoryGitHubIntegrationStore implements GitHubIntegrationStore<un
    * @param workspaceId - Workspace.
    * @param repositoryId - Repository ID.
    * @param number - Number.
+   * @param expectedSyncedAt - When given, deletes only the snapshot read at this time.
+   * @returns `deleted`, or `stale` when a newer snapshot was kept.
    */
-  async deletePullRequestSnapshot(workspaceId: string, repositoryId: string, number: number): Promise<void> {
-    this.snapshots.delete(`${workspaceId}\0${pullRequestKey(repositoryId, number)}`)
+  async deletePullRequestSnapshot(
+    workspaceId: string,
+    repositoryId: string,
+    number: number,
+    expectedSyncedAt?: string,
+  ): Promise<'deleted' | 'stale'> {
+    const key = `${workspaceId}\0${pullRequestKey(repositoryId, number)}`
+    const current = this.snapshots.get(key)
+    if (expectedSyncedAt !== undefined && current && current.syncedAt !== expectedSyncedAt) return 'stale'
+    this.snapshots.delete(key)
+    return 'deleted'
   }
 }
 
