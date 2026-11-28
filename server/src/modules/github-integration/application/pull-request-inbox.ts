@@ -233,6 +233,12 @@ export async function saveGitHubRepositoryLink<AuditContext>(
     throw new GitHubIntegrationError('not-found', 'GitHubRepositoryNotFound', 'The GitHub App cannot read this repository.')
   }
   const current = await dependencies.store.getRepositoryLink(workspaceId, repositoryId)
+  if (current && current.teamId === request.teamId && current.revision === (request.expectedRevision ?? 0) + 1) {
+    // A retry of a save whose link was written but whose first sync job was not queued: queue it
+    // again instead of failing on the revision the first attempt already advanced.
+    await dependencies.queue.send({ ...repository, attempt: 0, kind: 'repository' })
+    return toLinkView(current)
+  }
   if (current?.revision !== request.expectedRevision) throw linkConflict()
   const record = {
     ...repository,

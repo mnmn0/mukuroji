@@ -360,7 +360,13 @@ test('links only repositories the App can read to an existing Team', async () =>
   expect(await saveGitHubRepositoryLink(dependencies, WORKSPACE_ID, '42', { teamId: 'core-team' }, context))
     .toMatchObject({ repositoryId: '42', teamId: 'core-team', revision: 1 })
   expect(queue.sent.map((sent) => sent.job.kind)).toEqual(['repository'])
-  await expect(saveGitHubRepositoryLink(dependencies, WORKSPACE_ID, '42', { teamId: 'core-team' }, context))
+  // Retrying the same save, as after a queue failure, queues the first sync again without a conflict.
+  expect(await saveGitHubRepositoryLink(dependencies, WORKSPACE_ID, '42', { teamId: 'core-team' }, context))
+    .toMatchObject({ revision: 1 })
+  expect(queue.sent.map((sent) => sent.job.kind)).toEqual(['repository', 'repository'])
+  // A save made from an older revision for another Team still conflicts.
+  const contextWithSecond = { ...context, teamExists: async (teamId: string) => teamId === 'core-team' || teamId === 'web-team' }
+  await expect(saveGitHubRepositoryLink(dependencies, WORKSPACE_ID, '42', { teamId: 'web-team' }, contextWithSecond))
     .rejects.toMatchObject({ code: 'GitHubRepositoryLinkConflict' })
   expect(await saveGitHubRepositoryLink(dependencies, WORKSPACE_ID, '42', { teamId: 'core-team', expectedRevision: 1 }, context))
     .toMatchObject({ revision: 2 })

@@ -31,6 +31,7 @@ const meta = {
 
 export default meta
 
+/** Story type for the pull request review inbox. */
 type Story = StoryObj<typeof meta>
 
 /** Pull requests waiting for the member's review, grouped by section. */

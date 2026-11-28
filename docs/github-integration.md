@@ -97,6 +97,8 @@ collaboration projection がそれを受信箱の通知にし、届ける時点�
   承認済みかレビュー不要のものです。
 - GitHub login は 1 つの login を 1 人だけが登録できます（大文字・小文字は区別しません）。他人が登録済みなら `409`。
 - App が未設定のとき、inbox は `configured: false` を返し、link の変更は `409` です。
+- link の保存で最初の同期 job を queue に積めなかったときは `503` です。同じ request をもう一度送ると、link はそのままで job だけを積み直します。
+- Enterprise の Team 単位の role で Team を読める member にも、その Team に link された repository の pull request が出ます。
 
 ## 保存する行
 

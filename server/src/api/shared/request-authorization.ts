@@ -1861,6 +1861,8 @@ function shouldEvaluateEnterpriseProjectScopes(
     return /^\/api\/collections\/(?:candidates|[^/]+\/items)(?:\/|$)/u.test(path)
   }
   if (/^\/api\/(?:workload|time-tracking\/my-timesheet)(?:\/|$)/u.test(path)) return true
+  // The review inbox lists pull requests of every Team the caller can read, Enterprise grants included.
+  if (path === '/api/me/pull-requests') return true
   return /^\/api\/(?:analytics|approvals|bulk-operations|document-backlinks|documents|focus|notifications|planning|projects|realtime\/tickets|task-views|teams|work-item-configuration|work-items)(?:\/|$)/u
     .test(path)
 }

@@ -21,6 +21,7 @@ const meta = {
 
 export default meta
 
+/** Story type for the GitHub settings panels. */
 type Story = StoryObj<typeof meta>
 
 /** A registered login. */
