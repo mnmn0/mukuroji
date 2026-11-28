@@ -55,7 +55,13 @@ export type SaveTimeBudgetInput = {
   expectedUpdatedAt?: string
 }
 
-const groupByValues = new Set<string>(['day', 'week', 'user', 'project', 'work-item', 'category'])
+/** Every grouping the API returns. */
+const groupings = ['day', 'week', 'user', 'project', 'work-item', 'category', 'phase'] as const satisfies readonly TimeTrackingGroupBy[]
+
+/** Fails to compile when a grouping of the contract is missing from {@link groupings}. */
+const groupingsAreComplete: Exclude<TimeTrackingGroupBy, typeof groupings[number]> extends never ? true : never = true
+
+const groupByValues: ReadonlySet<string> = new Set(groupingsAreComplete ? groupings : [])
 
 /**
  * Builds the query string shared by the summary and the CSV export.
@@ -178,19 +184,10 @@ function readTimeBudgetPeriods(value: unknown): TimeBudget[] | undefined {
  * Narrows a checked grouping name to the contract type.
  *
  * @param value - Grouping already checked against the known values.
- * @returns The same grouping, typed.
+ * @returns The same grouping, typed; `day` for anything else.
  */
 function readGroupBy(value: string): TimeTrackingGroupBy {
-  switch (value) {
-    case 'week':
-    case 'user':
-    case 'project':
-    case 'work-item':
-    case 'category':
-      return value
-    default:
-      return 'day'
-  }
+  return groupings.find((grouping) => grouping === value) ?? 'day'
 }
 
 /**
