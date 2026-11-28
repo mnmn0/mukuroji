@@ -977,14 +977,15 @@ export class DynamoDbSlackIngestStore implements SlackIngestStore<MutationAuditC
       const expiresAt = messageExpiresAt(message.ts, retentionDays)
       if (message.expiresAt <= expiresAt) continue
       // The message and its key rows change together, and only while the row is still this
-      // version of a live message, so a concurrent edit or deletion is never shortened.
+      // version of a live message whose expiry is still later, so a concurrent edit, deletion or
+      // shorter sweep is never overwritten with a longer expiry.
       const shorten = (recordKey: string, versioned: boolean): TransactItem => ({
         Update: {
           TableName: this.tableName,
           Key: { workspaceId, recordKey },
           UpdateExpression: 'SET expiresAt = :expiresAt',
           ConditionExpression: versioned
-            ? 'attribute_exists(recordKey) AND #version = :version AND attribute_not_exists(deleted)'
+            ? 'attribute_exists(recordKey) AND #version = :version AND attribute_not_exists(deleted) AND expiresAt > :expiresAt'
             : 'attribute_exists(recordKey)',
           ...(versioned ? { ExpressionAttributeNames: { '#version': 'version' } } : {}),
           ExpressionAttributeValues: { ':expiresAt': expiresAt, ...(versioned ? { ':version': message.version } : {}) },

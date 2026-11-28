@@ -169,7 +169,7 @@ test('a shorter retention lowers the TTL of a kept message and its key rows only
     'slack-ingest#key#MK-2#1700000000.000100#C012345678',
   ])
   expect(updates[0]).toMatchObject({
-    ConditionExpression: 'attribute_exists(recordKey) AND #version = :version AND attribute_not_exists(deleted)',
+    ConditionExpression: 'attribute_exists(recordKey) AND #version = :version AND attribute_not_exists(deleted) AND expiresAt > :expiresAt',
     ExpressionAttributeValues: expect.objectContaining({ ':expiresAt': 1700000000 + 7 * 86_400 }),
   })
   expect(updates[1]).toMatchObject({ ConditionExpression: 'attribute_exists(recordKey)' })
