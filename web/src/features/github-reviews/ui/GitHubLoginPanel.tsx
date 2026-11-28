@@ -71,7 +71,8 @@ export function GitHubLoginPanel({
     }
     setShowInvalid(false)
     void onSave(login).then((saved) => {
-      if (saved) setDraft(undefined)
+      // An edit typed while the save ran is kept.
+      if (saved) setDraft((current) => (current === undefined || current.trim() === login ? undefined : current))
     })
   }
 

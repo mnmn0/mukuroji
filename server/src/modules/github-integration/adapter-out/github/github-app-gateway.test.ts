@@ -131,6 +131,29 @@ test('fails a GraphQL error other than a missing pull request', async () => {
     .rejects.toMatchObject({ code: 'GitHubGraphQLFailed', retryable: true })
 })
 
+test('retries a rate limited 403 but treats a plain 403 as a repository the installation cannot read', async () => {
+  let answer: Response = json(403, { message: 'Resource not accessible by integration' })
+  const fetchImplementation: GitHubFetch = async (url) => url.endsWith('/access_tokens')
+    ? json(201, { token: 'ghs_installation', expires_at: '2026-11-28T02:00:00Z' })
+    : answer
+  const gateway = new GitHubAppHttpGateway(new CachedGitHubAppCredentialSource(async () => secret), fetchImplementation, () => Date.parse('2026-11-28T01:00:00Z'))
+  const reference = { installationId: '7', repositoryId: '42', repository: 'acme/app' }
+  expect(await gateway.readRepositoryName(reference)).toBeNull()
+  answer = new Response('{}', { status: 403, headers: { 'x-ratelimit-remaining': '0' } })
+  await expect(gateway.readRepositoryName(reference)).rejects.toMatchObject({ code: 'GitHubRateLimited', retryable: true })
+  answer = new Response('{}', { status: 403, headers: { 'retry-after': '60' } })
+  await expect(gateway.readRepositoryName(reference)).rejects.toMatchObject({ code: 'GitHubRateLimited', retryable: true })
+})
+
+test('classifies a response body that fails while it is read', async () => {
+  const fetchImplementation: GitHubFetch = async (url) => url.endsWith('/access_tokens')
+    ? json(201, { token: 'ghs_installation', expires_at: '2026-11-28T02:00:00Z' })
+    : new Response(new ReadableStream({ pull(controller) { controller.error(new TypeError('socket closed')) } }), { status: 200 })
+  const gateway = new GitHubAppHttpGateway(new CachedGitHubAppCredentialSource(async () => secret), fetchImplementation, () => Date.parse('2026-11-28T01:00:00Z'))
+  await expect(gateway.readRepositoryName({ installationId: '7', repositoryId: '42', repository: 'acme/app' }))
+    .rejects.toMatchObject({ code: 'GitHubRequestFailed', retryable: true })
+})
+
 test('refuses to call GitHub without a configured App', async () => {
   const gateway = new GitHubAppHttpGateway(new CachedGitHubAppCredentialSource(async () => undefined), async () => json(200, {}))
   await expect(gateway.listRepositories()).rejects.toMatchObject({ code: 'GitHubAppNotConfigured' })

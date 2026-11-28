@@ -9,6 +9,10 @@ GitHub App を作って secret を入れるまでは何も動きません。webh
 
 deploy する人（Shinji）が1回だけ行います。
 
+1 つの deploy は 1 つの Workspace（`MUKUROJI_WORKSPACE_DIRECTORY_ID`）だけを扱い、App もその Workspace 専用に作ります
+（ADR 0079）。Workspace 管理者は App のすべての installation の repository を一覧し、link できるので、同じ App の秘密鍵を
+別の Workspace の deploy と共有しないでください。App は、その Workspace の組織にだけ install します。
+
 1. **stack に module を足す**：`-c mukuroji:githubApp=true` を付けて deploy します（`cdk.json` の context に書いても同じ）。
    出力 `GitHubAppWebhookUrl`（`https://<アプリの origin>/api/integrations/github/webhook`）と `GitHubAppSecretArn` を控えます。
 2. **GitHub App を作る**：GitHub の Settings → Developer settings → GitHub Apps → New GitHub App。
@@ -40,14 +44,21 @@ deploy する人（Shinji）が1回だけ行います。
 
 ### webhook secret を入れ替える
 
-新しい secret を `webhookSecret` に、古い secret を `previousWebhookSecret` に入れてから GitHub App の Webhook secret を
-変えます。届く webhook がすべて新しい secret になったら `previousWebhookSecret` を消します。
+1. 新しい secret を `webhookSecret` に、古い secret を `previousWebhookSecret` に入れます。
+2. Secrets Manager を更新してから 5 分以上待ちます（受け口は読んだ secret を 5 分キャッシュし、署名の不一致では読み直さないため、
+   待たずに切り替えると古い secret だけを持つ Lambda が新しい署名を `401` で拒みます）。
+3. GitHub App の Webhook secret を新しい値に変えます。
+4. 新しい secret の webhook が `2xx` で届くのを Recent Deliveries で確かめてから `previousWebhookSecret` を消します。
 
 ## 受け口と同期
 
 - `POST /api/integrations/github/webhook`：`X-Hub-Signature-256` を body の解析前に照合します（body は 5 MiB まで）。
   未設定は `404`、署名の不一致は `401`、壊れた body は `400`、大きすぎる body は `413`、`ping` は `200`、
-  扱わない event は `202`（何もしない）、job を積めたら `202`、queue に積めなければ `503`（GitHub が再送します）。
+  扱わない event は `202`（何もしない）、job を積めたら `202`、queue に積めなければ `503`。
+  GitHub は失敗した delivery を自動では再送しません。`503`（や初期設定中に失敗した `ping`）は、App の Advanced →
+  Recent Deliveries で該当する delivery を選び **Redeliver** で送り直します。毎時の reconcile は snapshot を直し、
+  保存済みの pull request の変化（CI 失敗・conflict・レビュー依頼の追加）も通知しますが、初めて読む pull request の
+  レビュー依頼は通知しません。取りこぼした新しい pull request の通知は再送でだけ戻ります。
 - job は ID だけを持ちます。worker（`GitHubSyncFunction`）は link と installation が一致するときだけ、
   GraphQL で今の状態を読み直し、`syncedAt` が新しいときだけ snapshot を上書きします。
   - pull request 系の event：その番号を読む
@@ -116,4 +127,4 @@ Planning table の Workspace の pk の下に置きます（新しい table は�
 | `GITHUB_PULL_REQUEST#<repositoryId>#<番号>` | pull request の snapshot |
 
 link と login の変更は audit event（`workspace.github_repository_linked` / `_unlinked`、`member.github_login_saved` / `_removed`）を
-同じ transaction で書きます。
+同じ transaction で書きます。login の event は login そのものを書かず、member の audit pseudonym だけで対象を示します。

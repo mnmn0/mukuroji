@@ -142,7 +142,8 @@ export function GitHubRepositoryLinksPanel({
                           className="workbench-button-secondary min-h-10 px-4"
                           disabled={busy}
                           onClick={() => {
-                            setSelected((current) => ({ ...current, [repository.repositoryId]: '' }))
+                            // Forget the pending choice so the row shows the stored Team until the unlink succeeds.
+                            setSelected((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== repository.repositoryId)))
                             onUnlink(repository)
                           }}
                           type="button"

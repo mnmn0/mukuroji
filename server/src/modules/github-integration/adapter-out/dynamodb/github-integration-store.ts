@@ -308,12 +308,14 @@ export class DynamoDbGitHubIntegrationStore implements GitHubIntegrationStore<Mu
    * @param input - Member, login, previous login, and audit context.
    */
   async saveMemberLogin(input: SaveMemberLoginInput<MutationAuditContext>): Promise<void> {
+    const memberAuditId = this.auditEntityId(input.workspaceId, input.memberKey)
     const audit = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
       directoryId: input.workspaceId,
       eventType: 'member.github_login_saved',
       entityType: 'member',
-      entityId: this.auditEntityId(input.workspaceId, input.memberKey),
-      target: { type: MEMBER_LOGIN_TYPE, id: input.login.toLowerCase() },
+      entityId: memberAuditId,
+      // The login identifies a person, so the audit log names only the member's pseudonym.
+      target: { type: MEMBER_LOGIN_TYPE, id: memberAuditId },
       action: 'github_login_saved',
       occurredAt: input.now,
       changes: [],
@@ -380,12 +382,14 @@ export class DynamoDbGitHubIntegrationStore implements GitHubIntegrationStore<Mu
    * @param input - Member, login, and audit context.
    */
   async deleteMemberLogin(input: DeleteMemberLoginInput<MutationAuditContext>): Promise<void> {
+    const memberAuditId = this.auditEntityId(input.workspaceId, input.memberKey)
     const audit = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
       directoryId: input.workspaceId,
       eventType: 'member.github_login_removed',
       entityType: 'member',
-      entityId: this.auditEntityId(input.workspaceId, input.memberKey),
-      target: { type: MEMBER_LOGIN_TYPE, id: input.login.toLowerCase() },
+      entityId: memberAuditId,
+      // The login identifies a person, so the audit log names only the member's pseudonym.
+      target: { type: MEMBER_LOGIN_TYPE, id: memberAuditId },
       action: 'github_login_removed',
       occurredAt: input.now,
       changes: [],

@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from 'bun:test'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import { classifyGitHubPullRequestSection, type GitHubPullRequestSectionInput } from '@mukuroji/contracts'
+import { classifyGitHubPullRequestSection, isGitHubLogin, type GitHubPullRequestSectionInput } from '@mukuroji/contracts'
 import { GitHubIntegrationError } from './domain/github-integration-error'
 import { selectPullRequestInboxItems } from './domain/pull-request-inbox'
 import { parseGitHubPullRequestNode, type GitHubPullRequestSnapshot } from './domain/pull-request-snapshot'
@@ -150,6 +150,13 @@ function fakeGateway(open: GitHubPullRequestSnapshot[], byNumber: Map<number, Gi
   }
   return { gateway, calls }
 }
+
+test('accepts ordinary and Enterprise Managed Users logins and rejects malformed ones', () => {
+  for (const login of ['a', 'demo-user', 'Octo42', 'mona-cat_octo', 'a'.repeat(39)]) expect(isGitHubLogin(login)).toBe(true)
+  for (const login of ['', '-alice', 'alice-', 'al--ice', 'a'.repeat(40), 'alice_', '_octo', 'mona_cat_octo', 'mona cat', 'mona@octo']) {
+    expect(isGitHubLogin(login)).toBe(false)
+  }
+})
 
 test('verifies the webhook signature with the current or the previous secret only', () => {
   const body = new TextEncoder().encode('{"zen":"Keep it simple."}')

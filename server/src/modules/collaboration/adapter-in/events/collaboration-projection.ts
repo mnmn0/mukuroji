@@ -660,8 +660,9 @@ const workloadEventTypePrefix = 'workload.'
 
 /**
  * Checks whether an event is readable through any one scope that it covers rather than the one
- * scope it carries: a delivered Analytics report, or a Team workload event that the workload API
- * shows through any visible Project of the Team.
+ * scope it carries: a delivered Analytics report, a Team workload event that the workload API
+ * shows through any visible Project of the Team, or a GitHub pull request notification of a linked
+ * Team, which the Reviews page shows the same way.
  *
  * @param event - Projected event.
  * @returns Whether any covered scope admits the recipient.
@@ -669,7 +670,9 @@ const workloadEventTypePrefix = 'workload.'
 function isReadableThroughAnyCoveredScope(event: Pick<AuditProjectionEvent, 'eventType' | 'projectId' | 'teamId'>): boolean {
   if (event.projectId !== undefined) return false
   return event.eventType === analyticsReportDeliveredEventType ||
-    event.eventType.startsWith(workloadEventTypePrefix) && event.teamId !== undefined
+    event.eventType.startsWith(workloadEventTypePrefix) && event.teamId !== undefined ||
+    // The Reviews page shows a linked Team's pull requests to anyone who can read one of its Projects.
+    event.eventType.startsWith(GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX) && event.teamId !== undefined
 }
 /** Scheduled Work Item events that are revalidated against the current Work Item row. */
 const scheduledWorkItemNotificationReasons = new Map([
@@ -2978,6 +2981,8 @@ async function isEligibleRecipient(
       event.eventType.startsWith(workloadEventTypePrefix) ||
       // A budget alert follows the Enterprise role that manages the Project, not a stale member row.
       event.eventType === BUDGET_THRESHOLD_REACHED_EVENT_TYPE ||
+      // A GitHub pull request notification goes to whoever can read the linked Team, as the Reviews page does.
+      event.eventType.startsWith(GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX) ||
       enforceContentAuthorization
     ) &&
     (event.projectId !== undefined || event.teamId !== undefined || enforceContentAuthorization)

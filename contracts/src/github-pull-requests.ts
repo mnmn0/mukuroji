@@ -200,8 +200,11 @@ export type SaveGitHubRepositoryLinkRequest = {
   expectedRevision?: number
 }
 
-/** GitHub login: 1 to 39 letters, digits, or single hyphens, not starting or ending with a hyphen. */
-export const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/u
+/**
+ * GitHub login: 1 to 39 letters, digits, or single hyphens, not starting or ending with a hyphen,
+ * optionally followed by `_` and an Enterprise Managed Users short code (`mona-cat_octo`).
+ */
+export const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}(?:_[A-Za-z0-9]{1,39})?$/u
 
 /** GitHub repository ID: a positive decimal integer of up to 20 digits. */
 export const GITHUB_REPOSITORY_ID_PATTERN = /^[1-9][0-9]{0,19}$/u

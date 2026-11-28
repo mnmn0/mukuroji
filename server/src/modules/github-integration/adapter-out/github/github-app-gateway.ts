@@ -346,6 +346,11 @@ export class GitHubAppHttpGateway implements GitHubAppGateway {
     }
     const text = await readBoundedText(response)
     if (response.status === 401 && auth.kind === 'installation') this.tokens.delete(auth.installationId)
+    if (isRateLimited(response)) {
+      throw new GitHubIntegrationError('unavailable', 'GitHubRateLimited', `GitHub rate limited the request (${response.status}).`, {
+        retryable: true,
+      })
+    }
     if (!response.ok && !allowedStatuses.includes(response.status)) {
       throw new GitHubIntegrationError('unavailable', 'GitHubRequestRejected', `GitHub answered ${response.status}.`, {
         retryable: response.status === 429 || response.status >= 500 || response.status === 401,
@@ -424,6 +429,20 @@ function base64Url(text: string): string {
 }
 
 /**
+ * Tells whether GitHub refused a request for its primary or secondary rate limit.
+ *
+ * GitHub answers either limit with 403 or 429 and marks it with `retry-after` or
+ * `x-ratelimit-remaining: 0`; a plain 403 is a permission refusal instead.
+ *
+ * @param response - Response.
+ * @returns Whether the response is a rate limit refusal.
+ */
+function isRateLimited(response: Response): boolean {
+  if (response.status !== 403 && response.status !== 429) return false
+  return response.headers.has('retry-after') || response.headers.get('x-ratelimit-remaining') === '0'
+}
+
+/**
  * Reads a response body up to {@link RESPONSE_MAX_BYTES}.
  *
  * @param response - Response.
@@ -435,7 +454,13 @@ async function readBoundedText(response: Response): Promise<string> {
   const chunks: Uint8Array[] = []
   let size = 0
   for (;;) {
-    const { done, value } = await reader.read()
+    let chunk: Awaited<ReturnType<typeof reader.read>>
+    try {
+      chunk = await reader.read()
+    } catch (error) {
+      throw new GitHubIntegrationError('unavailable', 'GitHubRequestFailed', 'The GitHub response could not be read.', { cause: error })
+    }
+    const { done, value } = chunk
     if (done) break
     size += value.byteLength
     if (size > RESPONSE_MAX_BYTES) {

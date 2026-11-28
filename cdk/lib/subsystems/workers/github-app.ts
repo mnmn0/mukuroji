@@ -117,7 +117,8 @@ export function buildGitHubAppWorkers(
     tracing: lambda.Tracing.ACTIVE,
     depsLockFilePath,
     projectRoot,
-    timeout: cdk.Duration.minutes(1),
+    // A repository job reads up to 10 pages of 10 seconds each; two of them fit with margin.
+    timeout: cdk.Duration.minutes(5),
     memorySize: 512,
     description: 'Reads GitHub pull requests named by App webhooks and stores their review inbox snapshots.',
     logGroup: syncLogGroup,
@@ -126,7 +127,7 @@ export function buildGitHubAppWorkers(
   });
   bindRuntimeControls(input.runtimeControls, gitHubSyncFunction, 'connector-sync');
   gitHubSyncFunction.addEventSource(new lambdaEventSources.SqsEventSource(gitHubSyncQueue, {
-    batchSize: 5,
+    batchSize: 2,
     reportBatchItemFailures: true,
   }));
 
