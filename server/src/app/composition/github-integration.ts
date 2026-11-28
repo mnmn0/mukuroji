@@ -4,6 +4,7 @@ import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-man
 import { createSqsClient } from '../../infrastructure/aws/sqs-client'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { getConfiguredAuditTableName, type MutationAuditContext } from '../../modules/audit'
+import { DynamoDbTenantAdministrationClient, TenantAdministrationError } from '../../modules/tenant-administration'
 import {
   CachedGitHubAppCredentialSource,
   createGitHubReconcileHandler,
@@ -102,6 +103,31 @@ function createProductionNotificationSink(): GitHubPullRequestNotificationSink {
 }
 
 /**
+ * Creates the tenant lifecycle check of the workers: a closing or closed tenant is not synchronized.
+ * A deployed worker must name the tenant table; a local run without one treats the tenant as active.
+ *
+ * @returns The check.
+ */
+function createProductionTenantActivityCheck(): (workspaceId: string) => Promise<boolean> {
+  const environment = loadServerConfig().environment
+  const tableName = environment.TENANT_ADMINISTRATION_TABLE_NAME?.trim()
+  if (!tableName) {
+    if (environment.AWS_LAMBDA_FUNCTION_NAME?.trim()) throw new Error('GitHub sync worker requires TENANT_ADMINISTRATION_TABLE_NAME.')
+    return async () => true
+  }
+  const tenant = new DynamoDbTenantAdministrationClient(tableName, createDynamoDbDocumentClient())
+  return async (workspaceId) => {
+    try {
+      await tenant.assertActive(workspaceId)
+      return true
+    } catch (error) {
+      if (error instanceof TenantAdministrationError && (error.code === 'TenantClosing' || error.code === 'TenantClosed')) return false
+      throw error
+    }
+  }
+}
+
+/**
  * Creates the GitHub sync worker entrypoints.
  *
  * @param dependencies - Adapters.
@@ -111,6 +137,7 @@ function createProductionNotificationSink(): GitHubPullRequestNotificationSink {
 export function createGitHubSyncWorkerHandlers(
   dependencies: GitHubIntegrationDependencies = createProductionGitHubIntegrationDependencies(),
   notifications: GitHubPullRequestNotificationSink = createProductionNotificationSink(),
+  isTenantActive: (workspaceId: string) => Promise<boolean> = createProductionTenantActivityCheck(),
 ) {
   const workspaceId = dependencies.workspaceId
   if (!workspaceId) throw new Error('GitHub sync worker requires MUKUROJI_WORKSPACE_DIRECTORY_ID.')
@@ -122,6 +149,7 @@ export function createGitHubSyncWorkerHandlers(
     workspaceId,
     now: () => new Date(),
     log: (message: string, details: Record<string, unknown>) => console.info(JSON.stringify({ message, ...details })),
+    isTenantActive,
   }
   return {
     queueHandler: createGitHubSyncQueueHandler(worker),

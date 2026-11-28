@@ -144,6 +144,9 @@ export function createGitHubNotificationAuditEvent(
       teamId: delivery.teamId,
       // A notification read before a newer stored snapshot is dropped by the projection.
       githubPullRequestSyncedAt: pullRequest.syncedAt,
+      // A newer snapshot keeps the notification while it still shows the same change.
+      githubRecipientLogin: delivery.login,
+      githubHeadSha: pullRequest.headSha,
       deepLink: '/reviews',
       notificationCandidates: [{ memberKey: delivery.memberKey, reason: NOTIFICATION_REASONS[delivery.kind] }],
     },

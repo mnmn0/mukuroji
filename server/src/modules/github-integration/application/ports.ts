@@ -194,6 +194,15 @@ export interface GitHubIntegrationStore<AuditContext = unknown> {
    */
   getRepositoryLink(workspaceId: string, repositoryId: string): Promise<GitHubRepositoryLinkRecord | null>
   /**
+   * Reads the last revision a repository's link reached, kept after the link is removed, so a link
+   * made again continues the revisions and a stale request from the old link cannot change it.
+   *
+   * @param workspaceId - Workspace.
+   * @param repositoryId - Repository ID.
+   * @returns The last revision, or `0` when the repository was never linked.
+   */
+  getLastRepositoryLinkRevision(workspaceId: string, repositoryId: string): Promise<number>
+  /**
    * Creates or replaces a link when the expected revision is still current.
    *
    * @param input - Link, expected revision, and audit context.

@@ -56,6 +56,7 @@ deploy する人（Shinji）が1回だけ行います。
   - `mergeable` が未計算なら 30 秒×回数だけ遅らせて、最大 4 回読み直す
 - `GitHubReconcileFunction` が 1 時間ごとに、link 済み repository の open な pull request と古い snapshot を読み直し、
   link を外した repository の snapshot と閉じて 30 日たった snapshot を消します。
+- Workspace が閉鎖中・閉鎖済みのとき、worker と reconcile は何も書きません（queue の job は捨てます）。
 - 5 回失敗した job（再試行で直らない失敗も含む）、job として読めない message、再試行を使い切った reconcile は `GitHubSyncDlq` に入り、alarm が鳴ります。
   queue の最古の job が 15 分を超えたときも alarm が鳴ります。
 
@@ -78,7 +79,7 @@ collaboration projection がそれを受信箱の通知にし、届ける時点�
 - 通知の deep link は `/reviews` です。
 - 受信箱に入れるときと、メール・Slack・push で送る直前に、repository が今も同じ Team に link されているかを確かめます。
   link を外したり別の Team に移したりした後は、前の Team の人には届きません。
-- 受信箱に入れるとき、その通知を見つけた読み取りより新しい snapshot が保存済みなら、通知は捨てます（重なった同期の古い読み取りが、もう解消した失敗やコンフリクトを知らせないようにするため）。
+- 受信箱に入れるとき、その通知を見つけた読み取りより新しい snapshot が保存済みで、その snapshot がもう同じ変化（レビュー依頼・同じ commit の CI 失敗・同じ commit の conflict）を示していなければ、通知は捨てます（重なった同期の古い読み取りが、もう解消した失敗やコンフリクトを知らせないようにするため）。
 
 ## API
 
@@ -108,6 +109,7 @@ Planning table の Workspace の pk の下に置きます（新しい table は�
 | sort key | 内容 |
 | --- | --- |
 | `GITHUB_REPOSITORY#<repositoryId>` | repository と Team の link、installation、revision |
+| `GITHUB_REPOSITORY_GENERATION#<repositoryId>` | link を外したときの最後の revision（もう一度 link すると続きの番号になり、古い画面からの変更を受け付けない） |
 | `GITHUB_LOGIN#<小文字の login>` | login の持ち主（重複登録の防止） |
 | `GITHUB_MEMBER#<member>` | member の login |
 | `GITHUB_PULL_REQUEST#<repositoryId>#<番号>` | pull request の snapshot |

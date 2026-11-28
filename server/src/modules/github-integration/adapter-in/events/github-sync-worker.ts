@@ -38,6 +38,11 @@ export type GitHubSyncWorkerDependencies = GitHubSyncDependencies & {
   now: () => Date
   /** Logger. */
   log: GitHubSyncLogger
+  /**
+   * Whether the Workspace may still be synchronized; a closing or closed tenant is not, so no
+   * snapshot or notification is written after the closure's quiescence barrier.
+   */
+  isTenantActive: (workspaceId: string) => Promise<boolean>
 }
 
 /**
@@ -56,6 +61,11 @@ export function createGitHubSyncQueueHandler(
 ): (event: GitHubSyncSqsEvent) => Promise<GitHubSyncBatchResponse> {
   return async (event) => {
     const failures: { itemIdentifier: string }[] = []
+    if (!await dependencies.isTenantActive(dependencies.workspaceId)) {
+      // The tenant is closing: its queued jobs are dropped rather than written after the barrier.
+      dependencies.log('GitHub sync skipped a closing Workspace.', { records: event.Records?.length ?? 0 })
+      return { batchItemFailures: failures }
+    }
     for (const record of event.Records ?? []) {
       let job
       try {
@@ -103,6 +113,10 @@ export function createGitHubReconcileHandler(
 ): () => Promise<GitHubReconcileResult | { skipped: true }> {
   return async () => {
     if (!await isConfigured()) return { skipped: true }
+    if (!await dependencies.isTenantActive(dependencies.workspaceId)) {
+      dependencies.log('GitHub reconcile skipped a closing Workspace.', {})
+      return { skipped: true }
+    }
     const result = await reconcileGitHubPullRequests(dependencies, dependencies.workspaceId, dependencies.now(), (link, error) => {
       dependencies.log('GitHub reconcile failed for a repository.', {
         repositoryId: link.repositoryId,

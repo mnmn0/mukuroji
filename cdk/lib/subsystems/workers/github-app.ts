@@ -64,7 +64,7 @@ export function buildGitHubAppWorkers(
   scope: cdk.Stack,
   input: GitHubAppWorkerInput,
 ): GitHubAppResources {
-  const { auditEventsTable, planningTable } = input.dataStores;
+  const { auditEventsTable, planningTable, tenantAdministrationTable } = input.dataStores;
   const { depsLockFilePath, projectRoot } = input.lambdaBuildPaths;
 
   const gitHubAppSecret = new secretsmanager.Secret(scope, 'GitHubAppSecret', {
@@ -101,6 +101,8 @@ export function buildGitHubAppWorkers(
     GITHUB_SYNC_QUEUE_URL: gitHubSyncQueue.queueUrl,
     MUKUROJI_WORKSPACE_DIRECTORY_ID: input.parameters.workspaceDirectoryId.valueAsString,
     PLANNING_TABLE_NAME: planningTable.tableName,
+    // A closing or closed tenant is not synchronized.
+    TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
   };
   const bundling = { bundleAwsSDK: true, minify: true, sourceMap: true, target: 'node22' };
 
@@ -169,6 +171,10 @@ export function buildGitHubAppWorkers(
     worker.addToRolePolicy(new iam.PolicyStatement({
       actions: ['dynamodb:PutItem'],
       resources: [auditEventsTable.tableArn],
+    }));
+    worker.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem'],
+      resources: [tenantAdministrationTable.tableArn],
     }));
   }
   gitHubSyncQueue.grants.consumeMessages(gitHubSyncFunction);

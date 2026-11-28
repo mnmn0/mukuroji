@@ -207,6 +207,10 @@ export type AuditProjectionEvent = {
   accessExpiresAt?: string
   /** Read time of the pull request snapshot a GitHub notification was found in (ADR 0079). */
   githubPullRequestSyncedAt?: string
+  /** GitHub login a GitHub notification is addressed to. */
+  githubRecipientLogin?: string
+  /** Head commit of the pull request a GitHub notification describes. */
+  githubHeadSha?: string
   /** notification/realtime consumer へ配送する event かどうかです。 */
   outboxStatus: 'pending' | 'suppressed'
 }
@@ -2026,6 +2030,32 @@ export async function readMemberAccessExpiryNoticeFence(
 }
 
 /**
+ * Reports whether a stored pull request snapshot still shows the change a GitHub notification
+ * describes, so a newer read that confirms it keeps the notification.
+ *
+ * @param event - GitHub notification event.
+ * @param stored - Stored snapshot row.
+ * @returns Whether the snapshot shows the same review request, CI failure, or conflict.
+ */
+function isGitHubNotificationStillShown(event: AuditProjectionEvent, stored: Record<string, unknown>): boolean {
+  if (stored.state !== 'open') return false
+  const kind = event.eventType.slice(GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX.length)
+  if (kind === 'review_requested') {
+    const login = event.githubRecipientLogin?.toLowerCase()
+    return login !== undefined && Array.isArray(stored.requestedReviewerLogins) &&
+      stored.requestedReviewerLogins.some((reviewer) => typeof reviewer === 'string' && reviewer.toLowerCase() === login)
+  }
+  if (event.githubHeadSha === undefined || stored.headSha !== event.githubHeadSha) return false
+  if (kind === 'checks_failed') {
+    return typeof stored.checks === 'object' && stored.checks !== null && 'state' in stored.checks && stored.checks.state === 'failure'
+  }
+  if (kind === 'conflict') {
+    return stored.mergeable === 'conflicting' || (stored.mergeable === 'unknown' && stored.lastKnownMergeable === 'conflicting')
+  }
+  return false
+}
+
+/**
  * Revalidates a GitHub pull request notification against its repository's current link (ADR 0079).
  *
  * The notification is authorized against the Team the repository was linked to when it was
@@ -2035,8 +2065,8 @@ export async function readMemberAccessExpiryNoticeFence(
  * notification, so a link change that lands before the save cancels it.
  *
  * When projecting, the notification is also dropped if a snapshot read after the one it was found
- * in is already stored, so an overlapping sync of an older read does not report a state GitHub has
- * since left. A missing snapshot does not drop it: the notification is written before its snapshot.
+ * in is already stored and no longer shows the same change, so an overlapping sync of an older
+ * read does not report a state GitHub has since left, while a newer read that confirms it keeps it. A missing snapshot does not drop it: the notification is written before its snapshot.
  *
  * @param event - Parsed audit event.
  * @param options - Whether to compare with the stored snapshot; delivery checks only the link.
@@ -2064,7 +2094,7 @@ export async function readGitHubPullRequestNotificationFence(
       ConsistentRead: true,
     }))).Item
     const storedAt = readTimestamp(stored?.syncedAt)
-    if (storedAt && storedAt > readAt) return { current: false }
+    if (stored && storedAt && storedAt > readAt && !isGitHubNotificationStillShown(event, stored)) return { current: false }
   }
   return {
     current: true,
@@ -3584,6 +3614,8 @@ export function parseAuditProjectionEvent(
     ...(readTimestamp(metadata.githubPullRequestSyncedAt)
       ? { githubPullRequestSyncedAt: readTimestamp(metadata.githubPullRequestSyncedAt) }
       : {}),
+    ...(readString(metadata.githubRecipientLogin) ? { githubRecipientLogin: readString(metadata.githubRecipientLogin) } : {}),
+    ...(readString(metadata.githubHeadSha) ? { githubHeadSha: readString(metadata.githubHeadSha) } : {}),
     outboxStatus: value.outboxStatus === 'suppressed' ? 'suppressed' : 'pending',
   }
 }

@@ -52,6 +52,9 @@ const SCHEMA_VERSION = 1
 const LINK_PREFIX = createGitHubRepositoryLinkRecordKey('')
 const LOGIN_PREFIX = 'GITHUB_LOGIN#'
 const MEMBER_LOGIN_PREFIX = 'GITHUB_MEMBER#'
+/** Row that keeps the last link revision of a repository after its link is removed. */
+const LINK_GENERATION_PREFIX = 'GITHUB_REPOSITORY_GENERATION#'
+const LINK_GENERATION_TYPE = 'github-repository-link-generation'
 const PULL_REQUEST_PREFIX = 'GITHUB_PULL_REQUEST#'
 
 /** Query pages read when listing snapshots; each page is at most 1 MB. */
@@ -151,6 +154,23 @@ export class DynamoDbGitHubIntegrationStore implements GitHubIntegrationStore<Mu
   }
 
   /**
+   * Reads the last revision a repository's link reached.
+   *
+   * @param workspaceId - Workspace.
+   * @param repositoryId - Repository ID.
+   * @returns The revision, or `0`.
+   */
+  async getLastRepositoryLinkRevision(workspaceId: string, repositoryId: string): Promise<number> {
+    const [link, generation] = await Promise.all([
+      this.getRepositoryLink(workspaceId, repositoryId),
+      this.readItem(workspaceId, `${LINK_GENERATION_PREFIX}${repositoryId}`),
+    ])
+    if (generation && (generation.entryType !== LINK_GENERATION_TYPE || !Number.isSafeInteger(generation.lastRevision))) throw corrupt()
+    const kept = typeof generation?.lastRevision === 'number' ? generation.lastRevision : 0
+    return Math.max(kept, link?.revision ?? 0)
+  }
+
+  /**
    * Creates or replaces a link.
    *
    * @param input - Link, expected revision, and audit context.
@@ -188,6 +208,17 @@ export class DynamoDbGitHubIntegrationStore implements GitHubIntegrationStore<Mu
             }),
         },
       },
+      // A new link must continue past the revision its removed predecessor reached.
+      ...(input.expectedRevision === undefined
+        ? [{
+          ConditionCheck: {
+            TableName: this.tableName,
+            Key: { workspaceId: input.workspaceId, recordKey: `${LINK_GENERATION_PREFIX}${record.repositoryId}` },
+            ConditionExpression: 'attribute_not_exists(recordKey) OR lastRevision < :revision',
+            ExpressionAttributeValues: { ':revision': record.revision },
+          },
+        }]
+        : []),
       ...(audit ? [audit] : []),
     ]
     await this.transact(items)
@@ -219,6 +250,19 @@ export class DynamoDbGitHubIntegrationStore implements GitHubIntegrationStore<Mu
           ConditionExpression: '#revision = :revision',
           ExpressionAttributeNames: { '#revision': 'revision' },
           ExpressionAttributeValues: { ':revision': record.revision },
+        },
+      },
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: {
+            workspaceId: input.workspaceId,
+            recordKey: `${LINK_GENERATION_PREFIX}${record.repositoryId}`,
+            entryType: LINK_GENERATION_TYPE,
+            schemaVersion: SCHEMA_VERSION,
+            repositoryId: record.repositoryId,
+            lastRevision: record.revision,
+          },
         },
       },
       ...(audit ? [audit] : []),
@@ -556,6 +600,9 @@ export class InMemoryGitHubIntegrationStore implements GitHubIntegrationStore<un
   /** Member keys by Workspace and lowercase login. */
   readonly loginHolders = new Map<string, string>()
 
+  /** Last link revision of each removed link, by Workspace and repository. */
+  private readonly lastLinkRevisions = new Map<string, number>()
+
   /** Snapshots by Workspace, repository ID, and number. */
   readonly snapshots = new Map<string, GitHubPullRequestSnapshot>()
 
@@ -589,7 +636,20 @@ export class InMemoryGitHubIntegrationStore implements GitHubIntegrationStore<un
   async saveRepositoryLink(input: SaveRepositoryLinkInput<unknown>): Promise<void> {
     const key = `${input.workspaceId}\0${input.record.repositoryId}`
     if (this.links.get(key)?.revision !== input.expectedRevision) throw conflict()
+    if (input.expectedRevision === undefined && (this.lastLinkRevisions.get(key) ?? 0) >= input.record.revision) throw conflict()
     this.links.set(key, { ...input.record })
+  }
+
+  /**
+   * Reads the last revision a repository's link reached.
+   *
+   * @param workspaceId - Workspace.
+   * @param repositoryId - Repository ID.
+   * @returns The revision, or `0`.
+   */
+  async getLastRepositoryLinkRevision(workspaceId: string, repositoryId: string): Promise<number> {
+    const key = `${workspaceId}\0${repositoryId}`
+    return Math.max(this.lastLinkRevisions.get(key) ?? 0, this.links.get(key)?.revision ?? 0)
   }
 
   /**
@@ -601,6 +661,7 @@ export class InMemoryGitHubIntegrationStore implements GitHubIntegrationStore<un
     const key = `${input.workspaceId}\0${input.record.repositoryId}`
     if (this.links.get(key)?.revision !== input.record.revision) throw conflict()
     this.links.delete(key)
+    this.lastLinkRevisions.set(key, input.record.revision)
   }
 
   /**

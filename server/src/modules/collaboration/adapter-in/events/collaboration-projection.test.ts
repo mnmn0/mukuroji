@@ -3451,12 +3451,15 @@ describe('collaboration projection pure helpers', () => {
     process.env.PLANNING_TABLE_NAME = 'PLANNING_TABLE_NAME'
     let link: Record<string, unknown> | undefined = { entryType: 'github-repository-link', repositoryId: '42', teamId: 'core' }
     let snapshotSyncedAt: string | undefined = '2026-11-28T00:00:00.000Z'
+    let requestedReviewers = ['someone-else']
     const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
       if (command instanceof GetCommand && command.input.TableName === 'PLANNING_TABLE_NAME') {
         expect(command.input.ConsistentRead).toBe(true)
         if (command.input.Key?.recordKey === 'GITHUB_REPOSITORY#42') return link ? { Item: link, $metadata: {} } : { $metadata: {} }
         if (command.input.Key?.recordKey === 'GITHUB_PULL_REQUEST#42#0000000007') {
-          return snapshotSyncedAt ? { Item: { syncedAt: snapshotSyncedAt }, $metadata: {} } : { $metadata: {} }
+          return snapshotSyncedAt
+            ? { Item: { syncedAt: snapshotSyncedAt, state: 'open', requestedReviewerLogins: requestedReviewers }, $metadata: {} }
+            : { $metadata: {} }
         }
       }
       throw new Error('Unexpected command.')
@@ -3466,7 +3469,7 @@ describe('collaboration projection pure helpers', () => {
         eventId: 'github', eventType: 'github.pull_request_review_requested', workspaceId: 'workspace-1',
         entityType: 'github-pull-request', entityId: '42#7', occurredAt: '2026-11-28T00:00:00.000Z', outboxStatus: 'pending',
         metadata: {
-          teamId: 'core', githubPullRequestSyncedAt: '2026-11-28T00:00:00.000Z',
+          teamId: 'core', githubPullRequestSyncedAt: '2026-11-28T00:00:00.000Z', githubRecipientLogin: 'bob',
           notificationCandidates: [{ memberKey: 'bob@example.com', reason: 'review-requested' }],
         },
       })
@@ -3480,6 +3483,10 @@ describe('collaboration projection pure helpers', () => {
       // A later read is already stored: the notification describes a state GitHub has left.
       snapshotSyncedAt = '2026-11-28T01:00:00.000Z'
       expect((await readGitHubPullRequestNotificationFence(event)).current).toBe(false)
+      // A later read that still requests Bob's review confirms the notification.
+      requestedReviewers = ['Bob']
+      expect((await readGitHubPullRequestNotificationFence(event)).current).toBe(true)
+      requestedReviewers = ['someone-else']
       // Delivery checks only the link, since later reads are expected by then.
       expect((await readGitHubPullRequestNotificationFence(event, { checkSnapshot: false })).current).toBe(true)
       snapshotSyncedAt = '2026-11-28T00:00:00.000Z'

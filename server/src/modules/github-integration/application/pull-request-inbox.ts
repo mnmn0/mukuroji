@@ -238,9 +238,13 @@ export async function saveGitHubRepositoryLink<AuditContext>(
     throw new GitHubIntegrationError('not-found', 'GitHubRepositoryNotFound', 'The GitHub App cannot read this repository.')
   }
   const current = await dependencies.store.getRepositoryLink(workspaceId, repositoryId)
-  if (current && current.teamId === request.teamId && current.revision === (request.expectedRevision ?? 0) + 1) {
+  // A removed link keeps its last revision, so a link made again continues past it.
+  const base = current?.revision ?? await dependencies.store.getLastRepositoryLinkRevision(workspaceId, repositoryId)
+  const retried = request.expectedRevision === undefined || current?.revision === request.expectedRevision + 1
+  if (current && current.teamId === request.teamId && retried) {
     // A retry of a save whose link was written but whose first sync job was not queued: queue it
-    // again instead of failing on the revision the first attempt already advanced.
+    // again instead of failing on the revision the first attempt already advanced. The link
+    // already says what the request asks, so nothing is written.
     await dependencies.queue.send({ ...repository, attempt: 0, kind: 'repository' })
     return toLinkView(current)
   }
@@ -248,7 +252,7 @@ export async function saveGitHubRepositoryLink<AuditContext>(
   const record = {
     ...repository,
     teamId: request.teamId,
-    revision: (current?.revision ?? 0) + 1,
+    revision: base + 1,
     linkedAt: context.now,
   }
   await dependencies.store.saveRepositoryLink({

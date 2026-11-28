@@ -13,6 +13,7 @@ import {
 } from './application/pull-request-sync'
 import {
   deleteGitHubLoginHolder,
+  deleteGitHubRepositoryLink,
   readGitHubPullRequestInbox,
   saveGitHubLogin,
   saveGitHubRepositoryLink,
@@ -23,7 +24,7 @@ import { DynamoDbGitHubIntegrationStore, InMemoryGitHubIntegrationStore } from '
 import { InMemoryGitHubSyncQueue } from './adapter-out/sqs/github-sync-queue'
 import { createGitHubNotificationAuditEvent, InMemoryGitHubNotificationSink } from './adapter-out/dynamodb/github-notification-sink'
 import { carryLastKnownMergeable, detectPullRequestNotifications } from './domain/pull-request-notifications'
-import { createGitHubSyncQueueHandler } from './adapter-in/events/github-sync-worker'
+import { createGitHubReconcileHandler, createGitHubSyncQueueHandler } from './adapter-in/events/github-sync-worker'
 
 /** Workspace of the tests. */
 const WORKSPACE_ID = 'workspace-1'
@@ -404,6 +405,14 @@ test('links only repositories the App can read to an existing Team', async () =>
     .rejects.toMatchObject({ code: 'GitHubRepositoryLinkConflict' })
   expect(await saveGitHubRepositoryLink(dependencies, WORKSPACE_ID, '42', { teamId: 'core-team', expectedRevision: 1 }, context))
     .toMatchObject({ revision: 2 })
+  // Linking again after removal continues the revisions, so a tab still holding revision 1 or 2
+  // cannot change the new link.
+  await deleteGitHubRepositoryLink(store, WORKSPACE_ID, '42', 2, { now: 'now' })
+  expect(await saveGitHubRepositoryLink(dependencies, WORKSPACE_ID, '42', { teamId: 'web-team' }, contextWithSecond))
+    .toMatchObject({ teamId: 'web-team', revision: 3 })
+  await expect(deleteGitHubRepositoryLink(store, WORKSPACE_ID, '42', 1, { now: 'now' })).rejects.toMatchObject({ code: 'GitHubRepositoryLinkConflict' })
+  await expect(saveGitHubRepositoryLink(dependencies, WORKSPACE_ID, '42', { teamId: 'core-team', expectedRevision: 1 }, context))
+    .rejects.toMatchObject({ code: 'GitHubRepositoryLinkConflict' })
 })
 
 test('reports every job failure and malformed message to SQS', async () => {
@@ -427,6 +436,7 @@ test('reports every job failure and malformed message to SQS', async () => {
     workspaceId: WORKSPACE_ID,
     now: () => new Date(),
     log: (message) => logs.push(message),
+    isTenantActive: async () => true,
   })
   const job = { installationId: '7', repositoryId: '42', repository: 'acme/app', attempt: 0, kind: 'pull-requests', numbers: [5] }
   const response = await handler({ Records: [
@@ -518,4 +528,28 @@ test('fails instead of treating an unreadable stored snapshot as absent', async 
   } finally {
     send.mockRestore()
   }
+})
+
+test('skips queued jobs and the reconcile of a closing Workspace', async () => {
+  const store = new InMemoryGitHubIntegrationStore()
+  await store.saveRepositoryLink({ workspaceId: WORKSPACE_ID, record: link })
+  const { gateway, calls } = fakeGateway([snapshot({ number: 4 })])
+  const logs: string[] = []
+  const dependencies = {
+    store,
+    gateway,
+    queue: new InMemoryGitHubSyncQueue(),
+    notifications: new InMemoryGitHubNotificationSink(),
+    workspaceId: WORKSPACE_ID,
+    now: () => new Date('2026-11-28T05:00:00Z'),
+    log: (message: string) => logs.push(message),
+    isTenantActive: async () => false,
+  }
+  const job = { installationId: '7', repositoryId: '42', repository: 'acme/app', attempt: 0, kind: 'repository' }
+  expect(await createGitHubSyncQueueHandler(dependencies)({ Records: [{ messageId: 'm1', body: JSON.stringify(job) }] }))
+    .toEqual({ batchItemFailures: [] })
+  expect(await createGitHubReconcileHandler(dependencies, async () => true)()).toEqual({ skipped: true })
+  expect(calls).toEqual([])
+  expect((await store.listPullRequestSnapshots(WORKSPACE_ID)).snapshots).toEqual([])
+  expect(logs).toEqual(['GitHub sync skipped a closing Workspace.', 'GitHub reconcile skipped a closing Workspace.'])
 })
