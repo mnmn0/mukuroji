@@ -645,23 +645,58 @@ function splitLongParagraph(text: string): string[] {
 const LIST_ITEM_START = /^(?:[*+-]|\d{1,9}[.)])[ \t]/u
 
 /**
- * Joins sections that are items of one list, so a split never makes two lists that number or
- * space their items differently from the one written.
+ * Joins a section that starts with a list item to the section before it when that one ends inside
+ * a list, so a split never makes two lists that number or space their items differently from the
+ * one written. The list before may start in the middle of its section, after other text.
  *
  * @param sections - Sections split at blank lines.
  * @returns Sections with each list in one piece.
  */
 function joinListSections(sections: readonly string[]): string[] {
   const joined: string[] = []
-  let previousIsList = false
+  let previousEndsInList = false
   for (const section of sections) {
-    const isList = LIST_ITEM_START.test(section)
     const previous = joined.at(-1)
-    if (isList && previousIsList && previous !== undefined) joined[joined.length - 1] = `${previous}\n\n${section}`
-    else joined.push(section)
-    previousIsList = isList
+    if (LIST_ITEM_START.test(section) && previousEndsInList && previous !== undefined) {
+      joined[joined.length - 1] = `${previous}\n\n${section}`
+    } else {
+      joined.push(section)
+    }
+    previousEndsInList = endsInList(section)
   }
   return joined
+}
+
+/** Unindented line that starts a block other than a list item or paragraph text. */
+const OTHER_BLOCK_START = /^(?:#{1,6}(?:[ \t]|$)|>|<|(?:[*_-][ \t]*){3,}$|\|)/u
+
+/**
+ * Tells whether a section, which holds no blank line outside fenced code, ends inside a list: its
+ * last unindented block is a list item, followed only by indented or lazy continuation lines.
+ *
+ * @param section - One section of paragraph Markdown.
+ * @returns Whether a list item is open at the end of the section.
+ */
+function endsInList(section: string): boolean {
+  let inList = false
+  let fence: string | undefined
+  for (const line of section.split('\n')) {
+    if (fence !== undefined) {
+      if (closesFence(line, fence)) fence = undefined
+      continue
+    }
+    if (/^[ \t]/u.test(line)) continue
+    const open = readFenceOpening(line)
+    if (open !== undefined) {
+      fence = open
+      inList = false
+    } else if (OTHER_BLOCK_START.test(line) || isBlockBoundary(line)) {
+      inList = false
+    } else if (LIST_ITEM_START.test(line)) {
+      inList = true
+    }
+  }
+  return inList
 }
 
 /**
