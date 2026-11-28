@@ -1,3 +1,4 @@
+import type { WorkspaceAgentCostSettings } from './workspace-agent-cost'
 import type { WorkspaceFileTypeSettings } from './file-types'
 import type { PlanningUpdateTemplateSettings } from './planning-update-template'
 import type { WorkspaceTimeEntryCategorySettings } from './time-entry-categories'
@@ -51,6 +52,11 @@ export type TenantProfile = {
    * chooses one, which means `DEFAULT_WORKSPACE_CURRENCY` (JPY).
    */
   defaultCurrency?: string
+  /**
+   * Whether Project budgets show coding agent cost in US dollars (ADR 0119); absent until an
+   * administrator chooses, which means they do not.
+   */
+  agentCost?: WorkspaceAgentCostSettings
   /** Whether normal tenant access remains enabled. */
   status: 'active' | 'closing' | 'closed'
   /** Timestamp at which a verified closure sealed the tenant. */
@@ -267,6 +273,8 @@ export type UpdateTenantProfileInput = {
   fileTypes?: WorkspaceFileTypeSettings
   /** ISO 4217 currency for time costs and budgets; omitted keeps the stored currency. */
   defaultCurrency?: string
+  /** Coding agent cost in Project budgets; omitted keeps the stored settings. */
+  agentCost?: WorkspaceAgentCostSettings
   /** Revision read before editing the profile. */
   expectedRevision: number
 }

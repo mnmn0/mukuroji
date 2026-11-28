@@ -145,6 +145,116 @@ describe('loadProjectBudgetReport', () => {
   })
 })
 
+describe('loadProjectBudgetReport Agent Run cost (ADR 0119)', () => {
+  /** USD 1,000.00 budget over the report dates; `currency` changes it in a test. */
+  const budget = {
+    schemaVersion: 1 as const,
+    workspaceId: 'w',
+    teamId: 't',
+    scopeType: 'project' as const,
+    scopeId: 'p',
+    amountMinor: 100_000,
+    currency: 'USD',
+    revision: 1,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  }
+
+  /**
+   * Builds ports with a budget and a recorder of Agent Run cost reads.
+   *
+   * @param settings - Workspace agent cost settings.
+   * @param reads - Receives each Agent Run cost read.
+   * @param currency - Currency of the budget and of the time cost.
+   * @returns The ports.
+   */
+  function agentPorts(
+    settings: { includeInProjectBudgets: boolean } | undefined,
+    reads: unknown[],
+    currency = 'USD',
+  ): ProjectBudgetReportPorts {
+    const base = ports([{
+        issues: [
+          { id: 'a', statusCategory: 'started', schedule: {}, assignedProjectId: 'p' },
+          { id: 'moved', statusCategory: 'started', schedule: {}, assignedProjectId: 'other' },
+        ],
+      }])
+    return {
+      ...base,
+      getBudget: async () => ({ ...budget, currency }),
+      listEntries: async (input) => (await base.listEntries(input)).map((timeEntry) => ({ ...timeEntry, currency })),
+      readAgentCostSettings: async () => settings,
+      listAgentRunCosts: async (input) => {
+        const { countsFinishedAt, ...rest } = input
+        // The padded instant range holds runs of the day before and after; the local date test
+        // drops them before they count toward the run limit.
+        const counts = ['2026-01-04T14:59:59.999Z', '2026-01-04T15:00:00.000Z', '2026-01-06T14:59:59.999Z', '2026-01-06T15:00:00.000Z']
+          .map((instant) => countsFinishedAt?.(instant))
+        reads.push({ ...rest, workItemIds: [...input.workItemIds], counts })
+        // 2026-01-05T16:00Z is 2026-01-06 in Tokyo; $1.50 is 150 cents.
+        return { runs: [{ finishedAt: '2026-01-05T16:00:00.000Z', costMicroUsd: 1_500_000 }], truncated: false }
+      },
+    }
+  }
+
+  test('adds the cost of runs on the Project Work Items to the actual cost and EVM of a USD budget', async () => {
+    const reads: unknown[] = []
+    const report = await loadProjectBudgetReport(request, agentPorts({ includeInProjectBudgets: true }, reads), 100)
+
+    expect(reads).toEqual([{
+      workspaceId: 'w',
+      teamId: 't',
+      workItemIds: ['a'],
+      since: '2026-01-04T15:00:00.000Z',
+      until: '2026-01-06T14:59:59.999Z',
+      maxRuns: 1_000,
+      counts: [false, true, true, false],
+    }])
+    expect(report.agentCost).toEqual({
+      status: 'included',
+      estimatedCostMicroUsd: 1_500_000,
+      amountMinor: 150,
+      runCount: 1,
+      truncated: false,
+    })
+    // Time cost 6,000 plus 150 cents of agent cost.
+    expect(report.earnedValue?.money?.actualCostMinor).toBe(6_150)
+    expect(report.budgetConsumedPercent).toBe(6.2)
+    expect(report.points.map((point) => point.actualCostMinor)).toEqual([6_000, 6_150])
+  })
+
+  test('shows the cost in US dollars without adding it to a budget in another currency', async () => {
+    const reads: unknown[] = []
+    const report = await loadProjectBudgetReport(request, agentPorts({ includeInProjectBudgets: true }, reads, 'JPY'), 100)
+
+    expect(reads).toHaveLength(1)
+    expect(report.agentCost).toEqual({ status: 'separate-currency', estimatedCostMicroUsd: 1_500_000, runCount: 1, truncated: false })
+    expect(report.earnedValue?.money?.actualCostMinor).toBe(6_000)
+    expect(report.points.map((point) => point.actualCostMinor)).toEqual([6_000, 6_000])
+  })
+
+  test('reads no Agent Runs for a report period after today', async () => {
+    const reads: unknown[] = []
+    const report = await loadProjectBudgetReport(
+      { ...request, from: '2026-02-01', to: '2026-02-10' },
+      agentPorts({ includeInProjectBudgets: true }, reads),
+      100,
+    )
+
+    expect(reads).toEqual([])
+    expect(report.agentCost).toMatchObject({ status: 'included', amountMinor: 0, runCount: 0 })
+  })
+
+  test('reads no Agent Runs when the Workspace does not count them', async () => {
+    const reads: unknown[] = []
+    const report = await loadProjectBudgetReport(request, agentPorts({ includeInProjectBudgets: false }, reads), 100)
+
+    expect(reads).toEqual([])
+    expect(report.agentCost).toBeUndefined()
+    expect(report.earnedValue?.money?.actualCostMinor).toBe(6_000)
+  })
+})
+
 describe('loadProjectEarnedValue', () => {
   test('counts every minute recorded on the Project through the as-of date without rounding', async () => {
     const calls: string[] = []

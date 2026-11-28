@@ -14,11 +14,13 @@ import type {
   WorkspaceCalendarSettingsResponse,
   WorkspaceFileTypeSettings,
   WorkspaceTimeEntryCategorySettings,
+  WorkspaceAgentCostSettings,
 } from '@mukuroji/contracts'
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   isKnownCurrencyCode,
+  readWorkspaceAgentCostSettings,
   readPlanningUpdateTemplateSettings,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
@@ -386,6 +388,7 @@ function readTenantProfileInput(value: unknown): UpdateTenantProfileInput {
       ? {}
       : { fileTypes: readTenantFileTypeInput(body.fileTypes) }),
     ...(body.defaultCurrency === undefined ? {} : { defaultCurrency: readTenantDefaultCurrencyInput(body.defaultCurrency) }),
+    ...(body.agentCost === undefined ? {} : { agentCost: readTenantAgentCostInput(body.agentCost) }),
     expectedRevision: validateTenantInteger(body.expectedRevision, 1_000_000, 'InvalidTenantRevision'),
   }
 }
@@ -501,6 +504,26 @@ function readTenantDefaultCurrencyInput(value: unknown): string {
     throw new TenantAdministrationError(400, 'InvalidTenantDefaultCurrency', 'Default currency must be an ISO 4217 code such as JPY.')
   }
   return value
+}
+
+/**
+ * Validates the coding agent cost settings of a profile update (ADR 0119).
+ *
+ * @param value - Untrusted `agentCost` field of the request body.
+ * @returns The validated settings.
+ * @throws TenantAdministrationError When the settings are not an object with a boolean
+ *   `includeInProjectBudgets`.
+ */
+function readTenantAgentCostInput(value: unknown): WorkspaceAgentCostSettings {
+  const settings = readWorkspaceAgentCostSettings(value)
+  if (!settings) {
+    throw new TenantAdministrationError(
+      400,
+      'InvalidTenantAgentCostSettings',
+      'Agent cost settings need a boolean includeInProjectBudgets.',
+    )
+  }
+  return settings
 }
 
 function readTenantGovernanceInput(value: unknown): UpdateTenantGovernanceInput {

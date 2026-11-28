@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import type { EnterpriseIdentitySnapshot, EnterpriseRoleAssignment, TimeBudget } from '@mukuroji/contracts'
+import { BudgetThresholdPartialReadError } from '../../modules/notifications'
 import { createBudgetThresholdReader, type BudgetThresholdReaderSources } from './budget-threshold-alerts'
 
 /** Budget of the test Project, half used by its approved expense. */
@@ -119,4 +120,51 @@ test('leaves out managers whose Workspace access ended, so an expired owner does
   })).listProjectBudgetStatuses('w', now)
   expect(status?.ownerMemberKey).toBeUndefined()
   expect(status?.managerMemberKeys).toEqual(['lead@example.com'])
+})
+
+test('counts Agent Run cost of a USD budget when the Workspace profile includes it (ADR 0119)', async () => {
+  const now = new Date('2026-01-10T00:00:00.000Z')
+  const base = sources()
+  /**
+   * Builds sources whose Workspace profile counts Agent Run cost or not, with a budget and expense in a currency.
+   *
+   * @param includeInProjectBudgets - Workspace agent cost setting.
+   * @param currency - Currency of the budget and the expense.
+   * @returns The test sources.
+   */
+  const withAgentCost = (includeInProjectBudgets: boolean, currency: string) => sources({
+    readProfile: async () => ({ status: 'active', agentCost: { includeInProjectBudgets } }),
+    getBudget: async () => ({ ...budget, currency }),
+    listExpenses: async (...args) => (await base.listExpenses(...args)).map((expense) => ({ ...expense, currency })),
+    listWorkItems: async () => ({ issues: [{ id: 'a', assignedProjectId: 'p' }] }),
+    // $25 is 2,500 cents on top of the $50 expense of a $100 budget.
+    listAgentRunCosts: async () => ({ runs: [{ finishedAt: '2026-01-06T00:00:00.000Z', costMicroUsd: 25_000_000 }], truncated: false }),
+  })
+  const [included] = await createBudgetThresholdReader(withAgentCost(true, 'USD')).listProjectBudgetStatuses('w', now)
+  expect(included).toMatchObject({ actualCostMinor: 7_500, consumedPercent: 75 })
+  const [excluded] = await createBudgetThresholdReader(withAgentCost(false, 'USD')).listProjectBudgetStatuses('w', now)
+  expect(excluded).toMatchObject({ actualCostMinor: 5_000, consumedPercent: 50 })
+  // The cost is not converted, so a yen budget leaves it out.
+  const [yen] = await createBudgetThresholdReader(withAgentCost(true, 'JPY')).listProjectBudgetStatuses('w', now)
+  expect(yen).toMatchObject({ actualCostMinor: 5_000, consumedPercent: 50 })
+})
+
+test('reads the other Projects when one cannot be read, then fails with their statuses (ADR 0119)', async () => {
+  const now = new Date('2026-01-10T00:00:00.000Z')
+  const reader = createBudgetThresholdReader(sources({
+    readProjects: async () => [
+      { teamId: 't', projectId: 'broken', managerMemberKeys: ['lead@example.com'] },
+      { teamId: 't', projectId: 'p', ownerMemberKey: 'owner@example.com', managerMemberKeys: ['lead@example.com'] },
+    ],
+    getBudget: async (_workspaceId, _teamId, projectId) => {
+      if (projectId === 'broken') throw new RangeError('Too many Work Item pages.')
+      return budget
+    },
+  }))
+
+  const failure = await reader.listProjectBudgetStatuses('w', now).then(() => undefined, (error: unknown) => error)
+  expect(failure).toBeInstanceOf(BudgetThresholdPartialReadError)
+  if (!(failure instanceof BudgetThresholdPartialReadError)) return
+  expect(failure.statuses.map((status) => status.projectId)).toEqual(['p'])
+  expect(failure.firstFailure).toBeInstanceOf(RangeError)
 })

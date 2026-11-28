@@ -166,6 +166,9 @@ test('exports the series as CSV', async () => {
   expect(response.headers.get('content-type')).toContain('text/csv')
   const lines = (await response.text()).trimEnd().split('\n')
   expect(lines[0]).toStartWith('From,To,Time zone,As of,Budget,Currency')
+  expect(lines[0]).toEndWith('Agent cost,Agent cost USD micros,Agent cost lower bound')
+  // The Workspace does not count Agent Run cost here, so its columns are blank.
+  expect(lines[1]).toEndWith(',,,')
   expect(lines[3]).toBe('Period start,Period end,Planned value minutes,Actual minutes,Planned value,Actual cost,Currency')
   expect(lines[4]).toBe('2026-01-05,2026-01-05,300,600,30000,60000,JPY')
 })

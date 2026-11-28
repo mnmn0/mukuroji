@@ -17,6 +17,9 @@ import { createTimesheetReader } from './timesheet-reminders'
 import { createBudgetThresholdReader } from './budget-threshold-alerts'
 import { DynamoDbProjectExpenseStore } from '../../modules/project-budget'
 import { DynamoDbEnterpriseIdentityReadClient } from '../../modules/enterprise-identity'
+import { DynamoDbAgentRunStore, DynamoDbAgentRunUsageStore, readFinishedAgentRunCosts } from '../../modules/agent-runs'
+import { DynamoDbTeamIssuesClient } from '../../modules/work-items'
+import { isSoftwareFactoryDeployed } from '../../infrastructure/config/software-factory'
 import {
   createDynamoDbClient,
   createDynamoDbDocumentClient,
@@ -122,6 +125,12 @@ export function createProductionNotificationScheduleHandler() {
   const enterpriseIdentity = enterpriseIdentityTableName
     ? new DynamoDbEnterpriseIdentityReadClient(enterpriseIdentityTableName, documentClient)
     : undefined
+  // Read-only: a budget threshold alert may count Agent Run cost (ADR 0119). Agent Runs exist only
+  // where the Software factory is deployed.
+  const agentRunsTableName = isSoftwareFactoryDeployed() ? environment.AGENT_RUNS_TABLE_NAME?.trim() : undefined
+  const agentRuns = agentRunsTableName ? new DynamoDbAgentRunStore(documentClient, agentRunsTableName) : undefined
+  const agentRunUsage = agentRunsTableName ? new DynamoDbAgentRunUsageStore(documentClient, agentRunsTableName) : undefined
+  const teamIssues = new DynamoDbTeamIssuesClient(workItemsTableName, undefined, documentClient, undefined, false)
   const notificationHandler = createNotificationScheduleHandler(
     documentClient,
     createDynamoDbScheduledWorkItemSource({
@@ -171,6 +180,28 @@ export function createProductionNotificationScheduleHandler() {
       listExpenses: async (workspaceId, teamId, projectId) =>
         await projectExpenses.list({ workspaceId, teamId, projectId }),
       listWorkspaceMembers: async (workspaceId) => await workspaceAccess.listMembers(workspaceId),
+      ...(agentRuns && agentRunUsage
+        ? {
+            listWorkItems: async (workspaceId: string, teamId: string, startAfterIssueId: string | undefined) =>
+              await teamIssues.getTeamIssues(workspaceId, teamId, {
+                limit: 100,
+                includeArchived: true,
+                limitEvaluatedRows: true,
+                // Evaluated-row pages read the base table, which needs a strongly consistent read.
+                consistentRead: true,
+                ...(startAfterIssueId ? { startAfterIssueId } : {}),
+              }),
+            listAgentRunCosts: async (input: Parameters<typeof readFinishedAgentRunCosts>[1]) =>
+              await readFinishedAgentRunCosts(
+                {
+                  listFinishedRunsByTime: (...args) => agentRuns.listFinishedRunsByTime(...args),
+                  getRun: (...args) => agentRuns.getRun(...args),
+                  listMemberBuckets: (...args) => agentRunUsage.listMemberBuckets(...args),
+                },
+                input,
+              ),
+          }
+        : {}),
       ...(enterpriseIdentity
         ? { readEnterpriseSnapshot: async (workspaceId: string) => await enterpriseIdentity.getSnapshot(workspaceId) }
         : {}),

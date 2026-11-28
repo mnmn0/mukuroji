@@ -24,6 +24,31 @@ export type ScheduledProjectBudgetStatus = {
   managerMemberKeys: readonly string[]
 }
 
+/**
+ * Failure of a budget use read in which some Projects could not be read. It carries the statuses
+ * of the Projects that were read, so their alerts still go out while the run fails (ADR 0119).
+ */
+export class BudgetThresholdPartialReadError extends Error {
+  /** Statuses of the Projects that were read. */
+  readonly statuses: readonly ScheduledProjectBudgetStatus[]
+  /** First failure among the Projects that could not be read. */
+  readonly firstFailure: unknown
+
+  /**
+   * Creates the error.
+   *
+   * @param statuses - Statuses of the Projects that were read.
+   * @param failedProjects - Number of Projects that could not be read.
+   * @param firstFailure - First failure.
+   */
+  constructor(statuses: readonly ScheduledProjectBudgetStatus[], failedProjects: number, firstFailure: unknown) {
+    super(`Budget use of ${failedProjects} Project(s) could not be read.`)
+    this.name = 'BudgetThresholdPartialReadError'
+    this.statuses = statuses
+    this.firstFailure = firstFailure
+  }
+}
+
 /** Reads the budget use of a Workspace's active Projects. */
 export type ScheduledBudgetThresholdReader = {
   /**
@@ -32,6 +57,8 @@ export type ScheduledBudgetThresholdReader = {
    * @param workspaceId - Workspace to read.
    * @param now - Schedule execution instant.
    * @returns One status per Project with a budget, ordered by Team and Project.
+   * @throws BudgetThresholdPartialReadError When some Projects could not be read; it holds the
+   *   statuses of the others.
    */
   listProjectBudgetStatuses(workspaceId: string, now: Date): Promise<ScheduledProjectBudgetStatus[]>
 }
