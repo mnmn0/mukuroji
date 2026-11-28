@@ -2347,6 +2347,29 @@ describe('Web Agent Run routes', () => {
     expect(older.hasMore).toBe(false)
   })
 
+  test('continues after the last question it returned when newer reports arrive between lists', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'viewer' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    /** Stores one blocker report of the held run. */
+    const addBlocker = (sequence: number) => store.state.reports.set(`${workspaceId}|core-team|${held.runId}|${sequence}`, {
+      schemaVersion: 1, runId: held.runId, directoryId: workspaceId, teamId: 'core-team', workItemId: 'task-1', sequence,
+      kind: 'blocker', commentId: `cmt_${sequence}`, verifications: [], artifacts: [],
+      createdAt: new Date(Date.UTC(2026, 9, 22, 0, 0, sequence)).toISOString(), createdBy: 'demo@example.com',
+    })
+    for (let sequence = 1; sequence <= 21; sequence += 1) addBlocker(sequence)
+    const { listWorkItemQuestions } = createCanonicalPublicAgentRunService()
+    if (!listWorkItemQuestions) throw new Error('The Public API service must list questions.')
+    const first = await runWithTestAppDependencies(() => listWorkItemQuestions(credential, 'core-team', 'task-1', undefined, 20))
+    expect(first.items.map((item) => item.sequence)).toEqual(Array.from({ length: 20 }, (_, index) => 21 - index))
+    // A newer report would shift an offset into the newest page by one.
+    addBlocker(22)
+    const from = first.nextContinuation
+    const second = await runWithTestAppDependencies(() => listWorkItemQuestions(credential, 'core-team', 'task-1', from, 20))
+    expect(second.items.map((item) => item.sequence)).toEqual([1])
+    expect(second.hasMore).toBe(false)
+  })
+
   test('stops a report page at its byte budget so the response stays within the Lambda limit', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'viewer' })
     const held = createHeldRun('task-1')

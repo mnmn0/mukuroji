@@ -308,7 +308,7 @@ export function createConnectorPullRequestStatusReader(
         (await connectors.listConnectors(workspaceId)).filter((installation) => installation.provider === 'github' &&
           (installation.status === 'connected' || installation.status === 'degraded')),
         reference.repository,
-        (size, window) => refresh === undefined ? pickStart(size) : (refresh - 1) * window,
+        (size, window) => refresh === undefined ? pickStart(size) : refreshStart(refresh, size, window),
       )
       installations = candidates.slice(0, maximumInstallationsPerRead)
       untried = candidates.length > installations.length
@@ -374,6 +374,22 @@ function orderInstallationsForRepository(
   const picked = Math.trunc(pickStart(others.length, window))
   const start = Number.isFinite(picked) ? ((picked % others.length) + others.length) % others.length : 0
   return [...owners, ...others.slice(start), ...others.slice(0, start)]
+}
+
+/**
+ * Chooses where among the other accounts a refresh starts. Each refresh continues after the window
+ * the one before tried, and each full pass over the accounts starts one position later, so every
+ * account is eventually the first one tried and a slow account cannot keep the accounts behind it
+ * out of every refresh's time budget.
+ *
+ * @param refresh - Work Item refresh sequence, from 1.
+ * @param size - Number of other accounts.
+ * @param window - Accounts one read tries after the owners.
+ * @returns Start position, reduced modulo `size` by the caller.
+ */
+function refreshStart(refresh: number, size: number, window: number): number {
+  const advanced = (refresh - 1) * window
+  return advanced + Math.floor(advanced / size)
 }
 
 /**

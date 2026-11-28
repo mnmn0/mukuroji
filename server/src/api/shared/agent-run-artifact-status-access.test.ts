@@ -349,6 +349,30 @@ test('a viewed Work Item reaches every account in turn when refreshes come at th
   expect(tried.slice(10, 15)).toEqual(['account-11', 'account-12', 'account-13', 'account-14', 'account-15'])
 })
 
+test('each full pass over the accounts starts one later, so every account is eventually tried first', async () => {
+  const reference = { url: 'https://github.com/org/repo/pull/1', provider: 'github' as const, repository: 'org/repo', number: 1 }
+  const accounts = Array.from({ length: 20 }, (_, index) => installation(`account-${index + 1}`))
+  const firsts: string[] = []
+  let first = true
+  const reader = createConnectorPullRequestStatusReader({
+    listConnectors: async () => accounts,
+    getEngine: async () => ({
+      readPullRequest: async (_workspaceId, installationId) => {
+        if (first) firsts.push(installationId)
+        first = false
+        throw new ConnectorRuntimeError('ConnectorExternalResourceMissing', 'Missing.')
+      },
+    }),
+  })
+  for (let refresh = 1; refresh <= 40; refresh += 1) {
+    first = true
+    await reader('workspace', reference, refresh)
+  }
+  // A slow account at a window's start would otherwise use every refresh's time budget.
+  expect(firsts.slice(0, 4)).toEqual(['account-1', 'account-11', 'account-2', 'account-12'])
+  expect(new Set(firsts).size).toBe(20)
+})
+
 test('does not keep an earlier verified status when the check history grew too long to judge', async () => {
   let tooLong = false
   const reader = createConnectorPullRequestStatusReader({

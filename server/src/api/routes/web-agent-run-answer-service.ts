@@ -305,28 +305,43 @@ export async function listWorkItemAgentRunQuestions(
   let bytes = 0
   let { cursor, skip } = decodeQuestionContinuation(continuation)
   /**
-   * Ends the list before a report of the current page.
+   * Ends the list before a report of the current page. A page after a store cursor starts at a fixed
+   * report, so an offset into it stays put. The newest page has no such start, and reports that
+   * arrive later would shift an offset, so the list is anchored after the last report it went
+   * through: the store cursor after that report, read again here and checked against it.
    *
    * @param pageCursor - Store cursor of the current page.
    * @param position - Position of the first report left for the next list.
+   * @param pageReports - Reports of the current page.
    * @returns The page with its continuation.
    */
-  const stopAt = (pageCursor: string | undefined, position: number): AgentRunQuestionPage => ({
-    items,
-    hasMore: true,
-    nextContinuation: encodeQuestionContinuation(pageCursor === undefined ? { skip: position } : { cursor: pageCursor, skip: position }),
-  })
+  const stopAt = async (
+    pageCursor: string | undefined,
+    position: number,
+    pageReports: readonly StoredAgentRunReport[],
+  ): Promise<AgentRunQuestionPage> => {
+    let next: QuestionContinuation = pageCursor === undefined ? { skip: position } : { cursor: pageCursor, skip: position }
+    const last = pageReports[position - 1]
+    if (pageCursor === undefined && last !== undefined) {
+      const head = await workItemDependencies.agentRuns.listWorkItemReports(principal.directoryId, teamId, workItemId, undefined, position)
+      const anchor = head.reports.at(-1)
+      if (head.nextCursor !== undefined && anchor?.runId === last.runId && anchor.sequence === last.sequence) {
+        next = { cursor: head.nextCursor, skip: 0 }
+      }
+    }
+    return { items, hasMore: true, nextContinuation: encodeQuestionContinuation(next) }
+  }
   for (let page = 0; page < maximumReportPages; page += 1) {
     const result = await workItemDependencies.agentRuns.listWorkItemReports(principal.directoryId, teamId, workItemId, cursor, reportPageSize)
     for (const [position, report] of result.reports.entries()) {
       if (position < skip) continue
       if (report.workItemId !== workItemId) throw createAgentRunIntegrityError()
       if (!isAgentRunQuestionReport(report)) continue
-      if (items.length === maximumItems) return stopAt(cursor, position)
+      if (items.length === maximumItems) return await stopAt(cursor, position, result.reports)
       const item = toAgentRunReport(await withCurrentAnswer(principal.directoryId, report))
       const itemBytes = Buffer.byteLength(JSON.stringify(item))
       // The first question of a list is always returned; later ones stop at the byte budget.
-      if (items.length > 0 && bytes + itemBytes > questionsResponseByteBudget) return stopAt(cursor, position)
+      if (items.length > 0 && bytes + itemBytes > questionsResponseByteBudget) return await stopAt(cursor, position, result.reports)
       bytes += itemBytes
       items.push(item)
     }
@@ -335,5 +350,5 @@ export async function listWorkItemAgentRunQuestions(
     if (cursor === undefined) return { items, hasMore: false }
   }
   // The read budget ran out; the next list starts at the next report page.
-  return stopAt(cursor, 0)
+  return await stopAt(cursor, 0, [])
 }

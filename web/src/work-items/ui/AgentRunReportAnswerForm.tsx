@@ -1,5 +1,5 @@
 import { AGENT_RUN_REPORT_ANSWER_MAX_LENGTH } from '@mukuroji/contracts'
-import { useEffect, useId, useState, type FormEvent } from 'react'
+import { useId, useState, type FormEvent } from 'react'
 import type { AgentRunReportAnswerResult } from '../mutations/useAnswerAgentRunReport'
 import type { AgentRunReportAnswerLabels } from './agentRunReportLabels'
 
@@ -35,11 +35,19 @@ export type AgentRunReportAnswerFormProps = {
 export function AgentRunReportAnswerForm({ draft, labels, onAnswer, onDraftChange }: AgentRunReportAnswerFormProps) {
   const fieldId = useId()
   const errorId = useId()
-  const [open, setOpen] = useState(draft?.open ?? false)
-  const [body, setBody] = useState(draft?.body ?? '')
-  useEffect(() => {
-    onDraftChange?.(open || body !== '' ? { open, body } : undefined)
-  }, [body, onDraftChange, open])
+  const [open, setOpenState] = useState(draft?.open ?? false)
+  const [body, setBodyState] = useState(draft?.body ?? '')
+  /**
+   * Changes the form and hands the result to the parent in the same event, so the kept draft never
+   * lags behind what the form shows.
+   *
+   * @param next - Open state and text after the change.
+   */
+  const update = (next: AgentRunReportAnswerDraft) => {
+    setOpenState(next.open)
+    setBodyState(next.body)
+    onDraftChange?.(next.open || next.body !== '' ? next : undefined)
+  }
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string>()
   const trimmed = body.trim()
@@ -48,7 +56,7 @@ export function AgentRunReportAnswerForm({ draft, labels, onAnswer, onDraftChang
 
   if (!open) {
     return (
-      <button className="workbench-button-secondary h-7 px-2 text-xs" onClick={() => setOpen(true)} type="button">
+      <button className="workbench-button-secondary h-7 px-2 text-xs" onClick={() => update({ open: true, body })} type="button">
         {labels.open}
       </button>
     )
@@ -67,8 +75,7 @@ export function AgentRunReportAnswerForm({ draft, labels, onAnswer, onDraftChang
     const result = await onAnswer(trimmed).catch((): AgentRunReportAnswerResult => 'failed')
     setSending(false)
     if (result === 'saved') {
-      setBody('')
-      setOpen(false)
+      update({ open: false, body: '' })
       return
     }
     setError(result === 'conflict' ? labels.conflict : labels.failed)
@@ -88,7 +95,7 @@ export function AgentRunReportAnswerForm({ draft, labels, onAnswer, onDraftChang
         className="workbench-input min-h-20 w-full p-2 text-sm"
         disabled={sending}
         id={fieldId}
-        onChange={(event) => setBody(event.target.value)}
+        onChange={(event) => update({ open, body: event.target.value })}
         placeholder={labels.placeholder}
         value={body}
       />
@@ -101,7 +108,7 @@ export function AgentRunReportAnswerForm({ draft, labels, onAnswer, onDraftChang
           className="workbench-button-secondary h-8 px-3"
           disabled={sending}
           onClick={() => {
-            setOpen(false)
+            update({ open: false, body })
             setError(undefined)
           }}
           type="button"

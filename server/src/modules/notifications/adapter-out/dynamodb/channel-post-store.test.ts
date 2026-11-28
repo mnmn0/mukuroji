@@ -128,3 +128,25 @@ test('delivers a valid post on the next run after unreadable candidates filled t
   expect(second.posts.map((queued) => queued.eventId)).toEqual([valid])
   expect(second.truncated).not.toBe(true)
 })
+
+test('skips a retired webhook version that another run deferred after the due index was read', async () => {
+  const key = { recipientKey: 'workspace-1#!channel-secret-cleanup', notificationKey: 'SECRET#team#core#00000000-0000-4000-8000-000000000001' }
+  const row = {
+    ...key, itemType: 'channel-secret-cleanup', workspaceId: 'workspace-1', scope: 'team', teamId: 'core',
+    secretVersion: '00000000-0000-4000-8000-000000000001', attempts: 1,
+    slackQueueShard: 'channel-secret-cleanup', slackNextAttemptAt: new Date(now.getTime() + 60_000).toISOString(),
+  }
+  const client = {
+    async send(command: unknown): Promise<Record<string, unknown>> {
+      // The index still lists the row as due; the table row was already deferred.
+      if (command instanceof QueryCommand) return { Items: [key] }
+      if (command instanceof GetCommand) return { Item: row }
+      throw new Error('Unexpected command')
+    },
+  }
+  const store = new DynamoDbChannelPostStore(client, 'NotificationsTable')
+  await expect(store.listDueRetiredSecrets(now, 20)).resolves.toEqual({ secrets: [], invalidCount: 0 })
+  await expect(store.listDueRetiredSecrets(new Date(now.getTime() + 60_000), 20)).resolves.toMatchObject({
+    secrets: [{ workspaceId: 'workspace-1', secretVersion: row.secretVersion, attempts: 1 }],
+  })
+})

@@ -276,8 +276,13 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
       }
       const key = { recipientKey: candidate.recipientKey, notificationKey: candidate.notificationKey }
       const response = await this.#client.send(new GetCommand({ TableName: this.#tableName, ConsistentRead: true, Key: key }))
-      // A row deleted or deferred since the index was read is no longer due.
-      if (!response.Item || response.Item.slackQueueShard !== RETIRED_CHANNEL_SECRET_SHARD) continue
+      // A row deleted, deferred, or moved aside since the index was read is no longer due.
+      if (
+        !response.Item ||
+        response.Item.slackQueueShard !== RETIRED_CHANNEL_SECRET_SHARD ||
+        typeof response.Item.slackNextAttemptAt !== 'string' ||
+        response.Item.slackNextAttemptAt > now.toISOString()
+      ) continue
       const secret = parseRetiredSecretRow(response.Item)
       if (secret) {
         secrets.push(secret)
