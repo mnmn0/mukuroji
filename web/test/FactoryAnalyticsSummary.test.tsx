@@ -192,4 +192,25 @@ describe('Factory analytics time breakdown and comparison', () => {
     expect(html).toContain('タスク ・ポイントなし: 3 件')
     expect(html).toContain(`タスク ・${createFactoryAnalyticsLabels('ja').sizeBands.none}: 2 件`)
   })
+
+  test('says why the axis selector is missing when the custom fields could not be read, and reads them again', () => {
+    const html = renderToStaticMarkup(
+      <FactoryAnalyticsSummary
+        analytics={factoryAnalyticsWithUsageFixture}
+        comparisonFields={[]}
+        formatNumber={(value) => String(value)}
+        isLoading={false}
+        labels={createFactoryAnalyticsLabels('ja')}
+        onCompareFieldChange={() => undefined}
+        onPeriodDaysChange={() => undefined}
+        onRetry={() => undefined}
+        onRetryComparisonFields={() => undefined}
+        periodDays={30}
+        workItemTypeNames={{ task: 'タスク' }}
+      />,
+    )
+    expect(html).toContain('比べる軸に使う custom field を読み込めませんでした。')
+    expect(html).toContain('role="alert"')
+    expect(html).not.toContain('比べる軸</label>')
+  })
 })

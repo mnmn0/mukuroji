@@ -118,6 +118,7 @@ export const factoryBoardMessages = {
   'factoryBoard.analytics.comparisonHint': 'Groups tasks by type and size and lists the ones that took at least twice the group median in time or tokens. Groups need at least 3 tasks.',
   'factoryBoard.analytics.comparisonAxis': 'Compare by',
   'factoryBoard.analytics.comparisonAxisSize': 'Estimate size',
+  'factoryBoard.analytics.comparisonFieldsError': 'Could not load the custom fields to compare by.',
   'factoryBoard.analytics.comparisonGroups': 'Groups',
   'factoryBoard.analytics.comparisonOutliers': 'Tasks far above their group',
   'factoryBoard.analytics.comparisonNoOutliers': 'No task is far above its group.',

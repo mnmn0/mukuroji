@@ -118,6 +118,7 @@ export const factoryBoardMessages = {
   'factoryBoard.analytics.comparisonHint': 'タスクを種類と規模で分け、時間かトークンがグループの中央値の 2 倍以上だったタスクを挙げます。比べるのは 3 件以上のグループだけです。',
   'factoryBoard.analytics.comparisonAxis': '比べる軸',
   'factoryBoard.analytics.comparisonAxisSize': '見積もりの規模',
+  'factoryBoard.analytics.comparisonFieldsError': '比べる軸に使う custom field を読み込めませんでした。',
   'factoryBoard.analytics.comparisonGroups': 'グループ',
   'factoryBoard.analytics.comparisonOutliers': 'グループより大きく外れたタスク',
   'factoryBoard.analytics.comparisonNoOutliers': '大きく外れたタスクはありません。',

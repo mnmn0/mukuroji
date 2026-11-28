@@ -41,6 +41,8 @@ export type FactoryAnalyticsSummaryProps = {
   compareFieldId?: string
   /** Selects another comparison axis. */
   onCompareFieldChange?: (fieldId: string | undefined) => void
+  /** Reads the custom fields again; given only when reading them failed, and then shown instead of the selector. */
+  onRetryComparisonFields?: () => void
   /** Work Item type names by ID; an unknown ID shows as the ID. */
   workItemTypeNames?: Readonly<Record<string, string>>
 }
@@ -228,6 +230,8 @@ type ComparisonSummaryProps = {
   compareFieldId?: string
   /** Selects another axis. */
   onCompareFieldChange?: (fieldId: string | undefined) => void
+  /** Reads the custom fields again after a failed read. */
+  onRetryFields?: () => void
   /** Work Item type names by ID. */
   workItemTypeNames: Readonly<Record<string, string>>
 }
@@ -238,7 +242,7 @@ type ComparisonSummaryProps = {
  * @param props - Comparison, text, axis, and names.
  * @returns Comparison part.
  */
-function ComparisonSummary({ comparison, labels, formatNumber, fields, compareFieldId, onCompareFieldChange, workItemTypeNames }: ComparisonSummaryProps) {
+function ComparisonSummary({ comparison, labels, formatNumber, fields, compareFieldId, onCompareFieldChange, onRetryFields, workItemTypeNames }: ComparisonSummaryProps) {
   const axisId = useId()
   const field = comparison.axis.kind === 'custom-field' ? fields.find((candidate) => candidate.id === comparison.axis.customFieldId) : undefined
   /**
@@ -268,7 +272,12 @@ function ComparisonSummary({ comparison, labels, formatNumber, fields, compareFi
           <h3 className="text-sm font-semibold text-[var(--workbench-text)]">{labels.comparisonHeading}</h3>
           <p className="text-xs text-[var(--workbench-muted)]">{labels.comparisonHint}</p>
         </div>
-        {fields.length > 0 && onCompareFieldChange ? (
+        {onRetryFields ? (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--workbench-muted)]" role="alert">
+            <span>{labels.comparisonFieldsError}</span>
+            <button className="workbench-button-secondary min-h-[44px] px-3" onClick={onRetryFields} type="button">{labels.retry}</button>
+          </div>
+        ) : fields.length > 0 && onCompareFieldChange ? (
           <label className="flex flex-col gap-1 text-xs font-semibold text-[var(--workbench-muted)]" htmlFor={axisId}>
             {labels.comparisonAxis}
             <select
@@ -392,6 +401,7 @@ export function FactoryAnalyticsSummary({
   comparisonFields = [],
   compareFieldId,
   onCompareFieldChange,
+  onRetryComparisonFields,
   workItemTypeNames = {},
 }: FactoryAnalyticsSummaryProps) {
   const headingId = useId()
@@ -532,6 +542,7 @@ export function FactoryAnalyticsSummary({
                   formatNumber={formatNumber}
                   labels={labels}
                   onCompareFieldChange={onCompareFieldChange}
+                  onRetryFields={onRetryComparisonFields}
                   workItemTypeNames={workItemTypeNames}
                 />
               ) : null}

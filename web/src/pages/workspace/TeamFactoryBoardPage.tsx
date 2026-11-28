@@ -118,6 +118,8 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
           comparisonFields={comparisonFields}
           compareFieldId={compareFieldId}
           onCompareFieldChange={setCompareFieldId}
+          // A failed read of the custom fields shows why the selector is missing and lets the viewer read them again.
+          onRetryComparisonFields={configuration.error ? () => { void configuration.mutate() } : undefined}
           workItemTypeNames={workItemTypeNames}
         />
         <FactoryBoard

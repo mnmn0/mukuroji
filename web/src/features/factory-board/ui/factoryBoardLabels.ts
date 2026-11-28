@@ -344,6 +344,8 @@ export type FactoryAnalyticsLabels = {
   comparisonAxis: string
   /** Option of the size axis. */
   comparisonAxisSize: string
+  /** Shown in place of the axis selector when the custom fields could not be read. */
+  comparisonFieldsError: string
   /** Heading of the comparison groups. */
   comparisonGroups: string
   /** Heading of the outliers. */
@@ -445,6 +447,7 @@ export function createFactoryAnalyticsLabels(locale: Locale): FactoryAnalyticsLa
     comparisonHint: t('factoryBoard.analytics.comparisonHint'),
     comparisonAxis: t('factoryBoard.analytics.comparisonAxis'),
     comparisonAxisSize: t('factoryBoard.analytics.comparisonAxisSize'),
+    comparisonFieldsError: t('factoryBoard.analytics.comparisonFieldsError'),
     comparisonGroups: t('factoryBoard.analytics.comparisonGroups'),
     comparisonOutliers: t('factoryBoard.analytics.comparisonOutliers'),
     comparisonNoOutliers: t('factoryBoard.analytics.comparisonNoOutliers'),
