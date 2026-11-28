@@ -161,21 +161,46 @@ export async function processGitHubSyncJob(
   }
   // Linking a repository reads every open pull request; only a webhook announces a new one.
   const result = await storeSnapshots(dependencies, workspaceId, link, snapshots, missing, job.kind !== 'repository')
-  const unknown = snapshots
+  const requeued = await queueMergeableRetries(dependencies, reference, unresolvedNumbers(snapshots), job.attempt + 1)
+  return { skipped: false, ...result, requeued }
+}
+
+/**
+ * Lists the open pull requests whose merge conflict state GitHub is still computing.
+ *
+ * @param snapshots - Snapshots just read.
+ * @returns Their numbers.
+ */
+function unresolvedNumbers(snapshots: readonly GitHubPullRequestSnapshot[]): number[] {
+  return snapshots
     .filter((snapshot) => snapshot.state === 'open' && snapshot.mergeable === 'unknown')
     .map((snapshot) => snapshot.number)
-  const nextAttempt = job.attempt + 1
-  const requeued = unknown.length > 0 && nextAttempt < GITHUB_SYNC_JOB_MAX_ATTEMPTS
-  if (requeued) {
-    // A job carries a bounded number of pull requests, so the unresolved ones are split.
-    for (let index = 0; index < unknown.length; index += GITHUB_SYNC_JOB_MAX_NUMBERS) {
-      await dependencies.queue.send(
-        { ...reference, attempt: nextAttempt, kind: 'pull-requests', numbers: unknown.slice(index, index + GITHUB_SYNC_JOB_MAX_NUMBERS) },
-        MERGEABLE_RETRY_DELAY_SECONDS * nextAttempt,
-      )
-    }
+}
+
+/**
+ * Queues delayed rereads of pull requests whose merge conflict state is unresolved, split into
+ * jobs of at most `GITHUB_SYNC_JOB_MAX_NUMBERS` numbers. Nothing is queued past the last attempt.
+ *
+ * @param dependencies - Queue.
+ * @param reference - Repository the pull requests belong to.
+ * @param numbers - Unresolved pull request numbers.
+ * @param attempt - Attempt number of the retry jobs.
+ * @returns Whether any retry was queued.
+ */
+async function queueMergeableRetries(
+  dependencies: GitHubSyncDependencies,
+  reference: GitHubRepositoryReference,
+  numbers: readonly number[],
+  attempt: number,
+): Promise<boolean> {
+  if (numbers.length === 0 || attempt >= GITHUB_SYNC_JOB_MAX_ATTEMPTS) return false
+  for (let index = 0; index < numbers.length; index += GITHUB_SYNC_JOB_MAX_NUMBERS) {
+    await dependencies.queue.send(
+      { ...reference, attempt, kind: 'pull-requests', numbers: numbers.slice(index, index + GITHUB_SYNC_JOB_MAX_NUMBERS) },
+      MERGEABLE_RETRY_DELAY_SECONDS * attempt,
+    )
   }
-  return { skipped: false, ...result, requeued }
+  return true
 }
 
 /** Outcome of one reconcile run. */
@@ -243,6 +268,7 @@ export async function reconcileGitHubPullRequests(
       const openNumbers = new Set(open.snapshots.map((snapshot) => snapshot.number))
       const result = await storeSnapshots(dependencies, workspaceId, link, open.snapshots, [], false)
       written += result.written
+      const unresolved = unresolvedNumbers(open.snapshots)
       // A stored open pull request missing from the list is read by number, which tells whether it
       // is still open even when the list stopped at its page limit.
       const stale = (storedOpen.get(link.repositoryId) ?? []).filter((number) => !openNumbers.has(number))
@@ -255,7 +281,10 @@ export async function reconcileGitHubPullRequests(
         const chunk = await storeSnapshots(dependencies, workspaceId, link, read.snapshots, read.missing, false)
         written += chunk.written
         deleted += chunk.deleted
+        unresolved.push(...unresolvedNumbers(read.snapshots))
       }
+      // A conflict state GitHub is still computing is reread shortly, as a webhook sync does.
+      await queueMergeableRetries(dependencies, reference, unresolved, 1)
     } catch (error) {
       failedRepositories += 1
       onRepositoryError(link, error)

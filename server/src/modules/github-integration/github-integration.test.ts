@@ -351,6 +351,22 @@ test('rereads stored open pull requests a partial open list leaves out', async (
   expect((await store.getPullRequestSnapshot(WORKSPACE_ID, '42', 1))?.state).toBe('closed')
 })
 
+test('retries unresolved conflict states that a reconcile reads', async () => {
+  const store = new InMemoryGitHubIntegrationStore()
+  const queue = new InMemoryGitHubSyncQueue()
+  await store.saveRepositoryLink({ workspaceId: WORKSPACE_ID, record: link })
+  await store.putPullRequestSnapshot(WORKSPACE_ID, snapshot({ number: 1 }, '2026-11-01T00:00:00.000Z'))
+  const reread = snapshot({ number: 1, mergeable: 'UNKNOWN' }, '2026-11-28T05:00:00.000Z')
+  const { gateway } = fakeGateway(
+    [snapshot({ number: 4, mergeable: 'UNKNOWN' }, '2026-11-28T05:00:00.000Z'), snapshot({ number: 5 }, '2026-11-28T05:00:00.000Z')],
+    new Map([[1, reread]]),
+  )
+  await reconcileGitHubPullRequests({ store, gateway, queue, notifications: new InMemoryGitHubNotificationSink() }, WORKSPACE_ID, new Date('2026-11-28T05:00:00Z'), () => undefined)
+  expect(queue.sent).toEqual([
+    { job: { installationId: '7', repositoryId: '42', repository: 'acme/app', attempt: 1, kind: 'pull-requests', numbers: [4, 1] }, delaySeconds: 30 },
+  ])
+})
+
 test('keeps a snapshot written after the one a cleanup read', async () => {
   const store = new InMemoryGitHubIntegrationStore()
   await store.putPullRequestSnapshot(WORKSPACE_ID, snapshot({ number: 1 }, '2026-11-01T00:00:00.000Z'))
