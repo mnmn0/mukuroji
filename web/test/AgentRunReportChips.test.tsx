@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { answerAgentRunReport, listWorkItemAgentRunReports, listWorkItemArtifactStatuses } from '../src/work-items/api/agentRuns'
 import { agentRunHandoffReportFixture, agentRunReportFixture } from '../src/work-items/agentRunFixtures'
 import {
+  agentRunReportAnswerDraftKey,
   indexAgentRunReportsByComment,
   isAgentRunReportAwaitingDecision,
   readAgentRunArtifactText,
@@ -172,6 +173,24 @@ describe('Agent Run report answers', () => {
     const progress = renderToStaticMarkup(<AgentRunReportChips labels={labels} onAnswer={onAnswer} report={agentRunReportFixture} />)
     expect(progress).not.toContain(`>${labels.answer.open}</button>`)
     expect(createAgentRunReportChipsLabels('ja').answer.open).toBe('回答する')
+  })
+
+  test('restores an unsent answer when the form mounts again', () => {
+    const onAnswer = async () => 'saved' as const
+    const restored = renderToStaticMarkup(
+      <AgentRunReportChips
+        answerDraft={{ open: true, body: 'Use the staging bucket.' }}
+        labels={labels}
+        onAnswer={onAnswer}
+        report={agentRunHandoffReportFixture}
+      />,
+    )
+    expect(restored).toContain('data-testid="agent-run-report-answer-form"')
+    expect(restored).toContain('>Use the staging bucket.</textarea>')
+    // Drafts are kept per Work Item and report, so one report's text never appears under another.
+    const key = agentRunReportAnswerDraftKey('task-1', agentRunHandoffReportFixture)
+    expect(agentRunReportAnswerDraftKey('task-1', { ...agentRunHandoffReportFixture, sequence: agentRunHandoffReportFixture.sequence + 1 })).not.toBe(key)
+    expect(agentRunReportAnswerDraftKey('task-2', agentRunHandoffReportFixture)).not.toBe(key)
   })
 })
 

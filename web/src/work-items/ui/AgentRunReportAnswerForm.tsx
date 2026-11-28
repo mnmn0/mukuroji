@@ -1,7 +1,15 @@
 import { AGENT_RUN_REPORT_ANSWER_MAX_LENGTH } from '@mukuroji/contracts'
-import { useId, useState, type FormEvent } from 'react'
+import { useEffect, useId, useState, type FormEvent } from 'react'
 import type { AgentRunReportAnswerResult } from '../mutations/useAnswerAgentRunReport'
 import type { AgentRunReportAnswerLabels } from './agentRunReportLabels'
+
+/** Unsent state of an answer form, kept outside the form so it survives the form unmounting. */
+export type AgentRunReportAnswerDraft = {
+  /** Whether the form was open. */
+  open: boolean
+  /** Text typed and not yet saved. */
+  body: string
+}
 
 /** Props of the answer form under a blocker or hand-off. */
 export type AgentRunReportAnswerFormProps = {
@@ -9,21 +17,29 @@ export type AgentRunReportAnswerFormProps = {
   labels: AgentRunReportAnswerLabels
   /** Sends the answer and tells how it ended. */
   onAnswer: (body: string) => Promise<AgentRunReportAnswerResult>
+  /** Draft kept from an earlier mount of the form, restored when it mounts again. */
+  draft?: AgentRunReportAnswerDraft
+  /** Receives the draft as it changes, or undefined once nothing is left to keep. */
+  onDraftChange?: (draft: AgentRunReportAnswerDraft | undefined) => void
 }
 
 /**
  * Lets a member answer a blocker or hand-off that an agent reported. The form stays closed behind a
  * button so the conversation keeps its layout, keeps the text after a failure so it can be sent again,
- * and closes once the answer is saved.
+ * and closes once the answer is saved. The unsent text is handed to `onDraftChange`, so a form that
+ * unmounts, such as while the reports cannot be read, gets it back from `draft` when it returns.
  *
- * @param props - Text and send action.
+ * @param props - Text, send action, and draft.
  * @returns Answer button or form.
  */
-export function AgentRunReportAnswerForm({ labels, onAnswer }: AgentRunReportAnswerFormProps) {
+export function AgentRunReportAnswerForm({ draft, labels, onAnswer, onDraftChange }: AgentRunReportAnswerFormProps) {
   const fieldId = useId()
   const errorId = useId()
-  const [open, setOpen] = useState(false)
-  const [body, setBody] = useState('')
+  const [open, setOpen] = useState(draft?.open ?? false)
+  const [body, setBody] = useState(draft?.body ?? '')
+  useEffect(() => {
+    onDraftChange?.(open || body !== '' ? { open, body } : undefined)
+  }, [body, onDraftChange, open])
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string>()
   const trimmed = body.trim()

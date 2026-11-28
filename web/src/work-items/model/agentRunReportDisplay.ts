@@ -94,3 +94,14 @@ export function selectAgentRunReportLoadFailure(state: {
   if (state.statusesIncomplete) return 'artifact-statuses-incomplete'
   return undefined
 }
+
+/**
+ * Identifies a report's answer draft, so drafts of different Work Items and reports never mix.
+ *
+ * @param workItemId - Work Item shown.
+ * @param report - Report the draft answers.
+ * @returns Draft key.
+ */
+export function agentRunReportAnswerDraftKey(workItemId: string, report: Pick<AgentRunReport, 'runId' | 'sequence'>): string {
+  return JSON.stringify([workItemId, report.runId, report.sequence])
+}
