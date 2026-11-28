@@ -62,6 +62,12 @@ const SHARED_TABLE_SCAN_PAGE_SIZE = 1_000
 const DELETE_BATCH_SIZE = 25
 const IDENTITY_PAGE_SIZE = 10
 const TENANT_CLOSURE_QUIESCENCE_SECONDS = 16 * 60
+/**
+ * Quiescence of a deployment with the agent analytics store (ADR 0118). Firehose buffers up to 900
+ * seconds, may deliver up to 1.5 times later, and retries dynamic partitioning for 300 seconds, so
+ * records accepted before closure reach S3 within 27.5 minutes.
+ */
+const AGENT_ANALYTICS_CLOSURE_QUIESCENCE_SECONDS = 30 * 60
 const TENANT_CURSOR_IV_BYTES = 12
 const TENANT_CURSOR_AUTH_TAG_BYTES = 16
 
@@ -77,6 +83,8 @@ export type TenantOperationResourceOwnerConfig = {
   workItemImportBucketName: string
   /** Bucket containing asynchronous audit export jobs and NDJSON parts. */
   auditExportBucketName: string
+  /** Agent telemetry analytics bucket (ADR 0118), when the deployment has it. */
+  agentAnalyticsBucketName?: string
   /** Cognito user pool whose tenant sessions are revoked. */
   cognitoUserPoolId: string
   /** Canonical Work Item table. */
@@ -600,6 +608,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         // request fingerprint and the index markers are bookkeeping, so neither is exported.
         exportsObject: isAuditExportPartKey,
       },
+      ...agentAnalyticsNamespaces(this.config.agentAnalyticsBucketName, workspaceId),
     ]
   }
 
@@ -744,8 +753,10 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         'Tenant closure quiescence timestamp is invalid.',
       )
     }
-    const remainingMilliseconds = requestedAt +
-      TENANT_CLOSURE_QUIESCENCE_SECONDS * 1_000 - now
+    const quiescenceSeconds = this.config.agentAnalyticsBucketName === undefined
+      ? TENANT_CLOSURE_QUIESCENCE_SECONDS
+      : AGENT_ANALYTICS_CLOSURE_QUIESCENCE_SECONDS
+    const remainingMilliseconds = requestedAt + quiescenceSeconds * 1_000 - now
     if (remainingMilliseconds <= 0) return undefined
     return Math.min(900, Math.max(1, Math.ceil(remainingMilliseconds / 1_000)))
   }
@@ -2476,4 +2487,47 @@ function isAwsNamedError(error: unknown, name: string): boolean {
 /** Returns true for a non-array object. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Tables of the agent telemetry analytics store, each under its own prefix (ADR 0118). */
+const AGENT_ANALYTICS_TABLE_PREFIXES = ['events', 'runs', 'work-items'] as const
+
+/**
+ * Lists a Workspace's namespaces in the agent telemetry analytics bucket: one prefix per table,
+ * partitioned by the SHA-256 of the Workspace ID, and the shared prefixes of failed deliveries and
+ * Athena query results, which closure deletes but never exports.
+ *
+ * @param bucketName - Analytics bucket, when the deployment has it.
+ * @param workspaceId - Workspace ID.
+ * @returns Namespaces, or none without the bucket.
+ */
+function agentAnalyticsNamespaces(bucketName: string | undefined, workspaceId: string): TenantFileNamespace[] {
+  if (bucketName === undefined) return []
+  const workspaceKey = createHash('sha256').update(workspaceId).digest('hex')
+  return [
+    ...AGENT_ANALYTICS_TABLE_PREFIXES.map((table) => ({
+      id: `agent-analytics-${table}`,
+      bucketName,
+      prefix: `agent-analytics/${table}/workspace_key=${workspaceKey}/`,
+      exportDirectory: `agent-analytics/${table}`,
+    })),
+    {
+      // Firehose writes records it could not convert here without a Workspace partition, so the
+      // objects can hold any Workspace's rows. Closure deletes them all and never exports them.
+      id: 'agent-analytics-errors',
+      bucketName,
+      prefix: 'agent-analytics-errors/',
+      exportDirectory: 'agent-analytics-errors',
+      exportsObject: () => false,
+    },
+    {
+      // Athena writes each query's result under one shared prefix, so a result can copy any
+      // Workspace's rows. Closure deletes them all and never exports them.
+      id: 'agent-analytics-query-results',
+      bucketName,
+      prefix: 'athena-results/',
+      exportDirectory: 'agent-analytics-query-results',
+      exportsObject: () => false,
+    },
+  ]
 }

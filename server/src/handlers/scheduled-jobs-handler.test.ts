@@ -17,6 +17,7 @@ test('keeps the cadence and retry policy each scheduled worker had as its own La
       { name: 'member-access-expiry', everyMinutes: 60, attempts: 3 },
       { name: 'inbox-digest', everyMinutes: 15, attempts: 1 },
       { name: 'japanese-public-holiday-sync', everyMinutes: 360, attempts: 2 },
+      { name: 'agent-analytics-export', everyMinutes: 1_440, attempts: 2 },
     ])
 })
 
@@ -25,6 +26,7 @@ test('runs each job through its runtime-control guarded entrypoint', async () =>
     .replace(/\s+/gu, ' ')
 
   for (const entrypoint of [
+    'agent-analytics-export-handler',
     'agent-run-triage-handler',
     'analytics-schedule-handler',
     'automation-schedule-handler',
@@ -43,7 +45,7 @@ test('runs each job through its runtime-control guarded entrypoint', async () =>
   }
 })
 
-test('leaves the Agent Run triage job out when Software factory is not deployed', () => {
+test('leaves the Agent Run triage and analytics export jobs out when Software factory is not deployed', () => {
   expect(selectDeployedScheduledJobs(scheduledJobs, true)).toBe(scheduledJobs)
   expect(selectDeployedScheduledJobs(scheduledJobs, false).map(({ name }) => name)).toEqual([
     'automation-schedule',

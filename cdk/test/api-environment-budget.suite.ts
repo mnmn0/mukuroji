@@ -279,6 +279,9 @@ const expectedWorkflowConfiguration = {
   NOTIFICATIONS_TABLE_NAME: base64(ref('NotificationsTable76DCFC6C')),
   PUSH_SUBSCRIPTIONS_TABLE_NAME: base64(ref('PushSubscriptionsTable14F60E9C')),
   AGENT_RUNS_TABLE_NAME: base64(ref('AgentRunsTableB0DA56A7')),
+  AGENT_ANALYTICS_EVENTS_STREAM_NAME: base64(ref('AgentAnalyticsEventsStream')),
+  AGENT_ANALYTICS_RUNS_STREAM_NAME: base64(ref('AgentAnalyticsRunsStream')),
+  AGENT_ANALYTICS_WORK_ITEMS_STREAM_NAME: base64(ref('AgentAnalyticsWorkItemsStream')),
   WEB_APP_ORIGINS: base64(
     join('', ['https://', getAtt('WebDistribution59C46482', 'DomainName')]),
   ),
@@ -451,6 +454,9 @@ function resolveMaximumString(
         return 'X'.repeat(55);
       case 'AWS::Cognito::UserPoolClient':
         return 'X'.repeat(128);
+      // Firehose stream names are at most 64 characters.
+      case 'AWS::KinesisFirehose::DeliveryStream':
+        return 'X'.repeat(64);
       default:
         throw new Error(
           `Unsupported Ref resource type ${String(resource.Type)} for ${logicalId}.`,

@@ -3,8 +3,10 @@ import {
   AgentTelemetryFormatError,
   AGENT_ACTIVITY_MAX_WAIT_ITEMS,
   agentSessionKey,
+  buildAgentAnalyticsEventRows,
   createAgentUsageUnavailableError,
   deriveAgentActivityBatchId,
+  deriveAgentAnalyticsBatchId,
   deriveAgentTelemetryBatchId,
   layoutAgentActivityRows,
   layoutAgentUsageBuckets,
@@ -63,10 +65,10 @@ export function createCanonicalPublicAgentTelemetryService(now: () => Date = () 
           )
       const activityResult = await recordActivity(principal.directoryId, principal.userKey, parsed, receivedAt)
       const results = [usageResult, activityResult].filter((result) => result !== undefined)
-      return {
-        rejectedRecords: parsed.rejectedRecords,
-        duplicate: results.length > 0 && results.every((result) => result === 'duplicate'),
-      }
+      const duplicate = results.length > 0 && results.every((result) => result === 'duplicate')
+      // A retried export whose totals were all saved before was written to the analytics store then.
+      if (!duplicate) await writeAnalyticsEvents(principal.directoryId, principal.userKey, parsed, receivedAt)
+      return { rejectedRecords: parsed.rejectedRecords, duplicate }
     },
   }
 }
@@ -116,4 +118,38 @@ async function recordActivity(
     return result
   }
   throw createAgentUsageUnavailableError()
+}
+
+/**
+ * Writes the export's allowlisted events to the S3 analytics store (ADR 0118). The write comes after
+ * the DynamoDB totals and does not fail the export: the screens read the totals, and a client retry
+ * would only add the same events again. A failure is logged.
+ *
+ * @param directoryId - Workspace ID.
+ * @param memberKey - Member that sent the export.
+ * @param parsed - Parsed export.
+ * @param receivedAt - Receive time.
+ */
+async function writeAnalyticsEvents(
+  directoryId: string,
+  memberKey: string,
+  parsed: ParsedAgentTelemetry,
+  receivedAt: Date,
+): Promise<void> {
+  const sink = workItemDependencies.agentTelemetryAnalytics
+  if (!sink.enabled || parsed.analyticsEvents.length === 0) return
+  const memberPseudonym = sink.memberPseudonym(directoryId, memberKey)
+  if (memberPseudonym === undefined) return
+  try {
+    await sink.putEvents(buildAgentAnalyticsEventRows({
+      workspaceId: directoryId,
+      memberKey: memberPseudonym,
+      // The same export gives the same event IDs, so Athena can drop a retried export's copies.
+      batchId: deriveAgentAnalyticsBatchId(memberKey, parsed.analyticsEvents),
+      receivedAt,
+      events: parsed.analyticsEvents,
+    }))
+  } catch (error) {
+    console.error('Agent telemetry analytics events could not be written.', error instanceof Error ? error.name : 'UnknownError')
+  }
 }

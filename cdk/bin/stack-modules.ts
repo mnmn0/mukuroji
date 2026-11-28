@@ -25,6 +25,9 @@ export const TENANT_LIFECYCLE_CONTEXT_KEY = 'mukuroji:tenantLifecycle';
 /** Context key that turns on Software factory: Agent Runs, Agent settings, and agent credentials. */
 export const SOFTWARE_FACTORY_CONTEXT_KEY = 'mukuroji:softwareFactory';
 
+/** Context key that keeps agent telemetry in S3 for Athena; needs Software factory (ADR 0118). */
+export const AGENT_ANALYTICS_CONTEXT_KEY = 'mukuroji:agentAnalytics';
+
 /** Optional-module switches the stack receives through its Props. */
 type StackModuleProps = Pick<
   MukurojiStackProps,
@@ -33,6 +36,7 @@ type StackModuleProps = Pick<
   | 'requestEmailEnabled'
   | 'tenantLifecycleEnabled'
   | 'softwareFactoryEnabled'
+  | 'agentAnalyticsEnabled'
   | 'demoDataEnabled'
 >;
 
@@ -43,6 +47,7 @@ export const ALL_STACK_MODULE_PROPS: StackModuleProps = {
   requestEmailEnabled: true,
   tenantLifecycleEnabled: true,
   softwareFactoryEnabled: true,
+  agentAnalyticsEnabled: true,
   demoDataEnabled: true,
 };
 
@@ -73,6 +78,7 @@ export function readStackModuleProps(app: Construct): StackModuleProps {
     requestEmailEnabled: readBooleanContext(app, REQUEST_EMAIL_CONTEXT_KEY),
     tenantLifecycleEnabled: readBooleanContext(app, TENANT_LIFECYCLE_CONTEXT_KEY),
     softwareFactoryEnabled: readBooleanContext(app, SOFTWARE_FACTORY_CONTEXT_KEY),
+    agentAnalyticsEnabled: readBooleanContext(app, AGENT_ANALYTICS_CONTEXT_KEY),
     demoDataEnabled: readBooleanContext(app, DEMO_DATA_CONTEXT_KEY),
   };
 }

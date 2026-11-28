@@ -6,6 +6,7 @@ import { createCanonicalPublicAgentRunService, createCanonicalPublicWorkItemServ
 import {
   InMemoryAgentRunStore,
   InMemoryAgentRunUsageStore,
+  InMemoryAgentTelemetryAnalyticsSink,
   InMemoryTransactionCanceledError,
   createActiveAgentRun,
   createAgentRunCommitConflictError,
@@ -195,6 +196,9 @@ describe('public Agent Run service', () => {
         },
       },
     })
+    const analytics = new InMemoryAgentTelemetryAnalyticsSink()
+    const usage = new InMemoryAgentRunUsageStore()
+    setTestAppDependencies({ agentTelemetryAnalytics: analytics, agentRunUsage: usage })
     const service = createCanonicalPublicAgentRunService()
     const started = await runWithTestAppDependencies(() => service.start(
       credential, 'core-team', 'task-1',
@@ -210,6 +214,13 @@ describe('public Agent Run service', () => {
     expect(started.workItem).toMatchObject({ id: 'task-1' })
     expect(observed[0]?.length).toBeGreaterThanOrEqual(2)
     expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)?.runId).toBe(started.run.runId)
+    // The analytics store gets the start snapshot under a member pseudonym, and the daily export a note.
+    expect(analytics.runs).toEqual([expect.objectContaining({
+      run_id: started.run.runId, record_kind: 'started', team_id: 'core-team', work_item_id: 'task-1',
+      runtime: 'claude-code', size_band: expect.any(String), member_key: expect.stringMatching(/^[0-9a-f]{32}$/u),
+    })])
+    expect(JSON.stringify(analytics.runs)).not.toContain('demo@example.com')
+    expect([...usage.analyticsWatches.values()].flat()).toEqual([{ directoryId: workspaceId, teamId: 'core-team', runId: started.run.runId }])
     // A replay must return the 201 start response, not the bare Work Item.
     expect(receipts).toHaveLength(1)
     expect(receipts[0]).toMatchObject({ status: 201, body: { run: started.run, workItem: { id: 'task-1', revision: 2 } } })
@@ -3579,7 +3590,8 @@ describe('Agent telemetry usage', () => {
     const held = createHeldRun('task-1', 'laptop')
     store.seed(held)
     const usage = new InMemoryAgentRunUsageStore()
-    setTestAppDependencies({ agentRunUsage: usage })
+    const analytics = new InMemoryAgentTelemetryAnalyticsSink()
+    setTestAppDependencies({ agentRunUsage: usage, agentTelemetryAnalytics: analytics })
     const telemetry = createCanonicalPublicAgentTelemetryService()
     // The run started just now, so the session runs ahead of it within the accepted clock skew.
     const start = Date.now() + 10_000
@@ -3646,6 +3658,17 @@ describe('Agent telemetry usage', () => {
     })
     expect(JSON.stringify([...usage.activity.values(), ...usage.sessionCursors.keys()])).not.toContain('secret')
     expect(JSON.stringify([...usage.sessionCursors.keys()])).not.toContain('session-1')
+    // The analytics store keeps each event once, with allowlisted values only (ADR 0118).
+    expect(analytics.events.map((row) => row.event_name)).toEqual(['api_request', 'tool_decision', 'tool_result', 'tool_result', 'user_prompt'])
+    expect(analytics.events[0]).toMatchObject({
+      model: 'claude-sonnet-5-5', input_tokens: 10, duration_ms: 4_000, instance_hash: held.instanceIdHash,
+      session_hash: expect.stringMatching(/^[0-9a-f]{32}$/u), member_key: expect.stringMatching(/^[0-9a-f]{32}$/u),
+    })
+    expect(analytics.events[1]).toMatchObject({ decided_by_person: true })
+    expect(analytics.events[3]).toMatchObject({ tool_kind: 'mcp', tool_name: 'github/get_issue', success: false, duration_ms: 500 })
+    expect(new Set(analytics.events.map((row) => row.event_id)).size).toBe(5)
+    const stored = JSON.stringify(analytics.events)
+    for (const forbidden of ['secret', 'session-1', 'demo@example.com', workspaceId]) expect(stored).not.toContain(forbidden)
 
     // A run with more tools than one run lists still adds every tool to the Work Item total.
     const many = exportOf(Array.from({ length: 31 }, (_, index) =>

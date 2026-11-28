@@ -5,6 +5,8 @@ import {
   agentSessionCursorPartition,
   type AgentActivityRowPage,
   type AgentActivityWrite,
+  type AgentAnalyticsWatch,
+  type AgentAnalyticsWatchPage,
   agentUsagePartition,
   agentUsageRecordKey,
   AGENT_USAGE_MAX_SCANNED_BUCKETS_FACTOR,
@@ -20,6 +22,8 @@ export class InMemoryAgentRunUsageStore implements AgentRunUsageStore {
   readonly activity = new Map<string, AgentActivityRow>()
   /** Session cursors by partition and session key. */
   readonly sessionCursors = new Map<string, number>()
+  /** Runs noted for the daily analytics export, by UTC start day. */
+  readonly analyticsWatches = new Map<string, AgentAnalyticsWatch[]>()
   /** Export receipts by partition and record key. */
   readonly #receipts = new Set<string>()
 
@@ -144,4 +148,30 @@ export class InMemoryAgentRunUsageStore implements AgentRunUsageStore {
       if (saved === undefined || saved < cursor.lastEventAtMs) this.sessionCursors.set(key, cursor.lastEventAtMs)
     }
   }
+
+  /** @inheritdoc */
+  async watchRunForAnalytics(watch: AgentAnalyticsWatch, startedAt: Date): Promise<void> {
+    const day = startedAt.toISOString().slice(0, 10)
+    const watches = (this.analyticsWatches.get(day) ?? []).filter((saved) => watchKey(saved) !== watchKey(watch))
+    this.analyticsWatches.set(day, [...watches, { ...watch }].sort((left, right) => watchKey(left) < watchKey(right) ? -1 : 1))
+  }
+
+  /** @inheritdoc */
+  async listAnalyticsWatches(day: string, cursor: string | undefined, limit: number): Promise<AgentAnalyticsWatchPage> {
+    const remaining = (this.analyticsWatches.get(day) ?? []).filter((watch) => cursor === undefined || watchKey(watch) > cursor)
+    const watches = remaining.slice(0, limit)
+    const last = watches.at(-1)
+    return { watches, ...(remaining.length > limit && last ? { nextCursor: watchKey(last) } : {}) }
+  }
+
+}
+
+/**
+ * Builds the record key of a watch.
+ *
+ * @param watch - Watch.
+ * @returns Key such as `<workspace>#<team>#<run>`.
+ */
+function watchKey(watch: AgentAnalyticsWatch): string {
+  return `${watch.directoryId}#${watch.teamId}#${watch.runId}`
 }

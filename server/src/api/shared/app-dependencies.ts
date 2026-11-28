@@ -112,6 +112,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get agentRunUsage() {
     return requireAppDependencies().workItems.agentRunUsage
   },
+  get agentTelemetryAnalytics() {
+    return requireAppDependencies().workItems.agentTelemetryAnalytics
+  },
   get agentRunArtifactStatuses() {
     return requireAppDependencies().workItems.agentRunArtifactStatuses
   },

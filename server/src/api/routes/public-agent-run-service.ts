@@ -3,11 +3,13 @@ import {
   DEFAULT_WORK_ITEM_TYPE_ID,
   hasWorkItemAcceptanceCriteria,
   type AgentRun,
+  type CustomFieldDefinition,
   type ReportAgentRunResponse,
   type ResumeAgentRunResponse,
 } from '@mukuroji/contracts'
 import {
   AgentRunError,
+  buildAgentAnalyticsRunStartRow,
   calculateLeaseExpiry,
   createActiveAgentRun,
   createAgentRunCommitConflictError,
@@ -26,6 +28,7 @@ import {
   selectAgentRunReportNotification,
   toAgentRun,
   toAgentRunReport,
+  type AgentAnalyticsWorkItem,
   type ResolvedAgentSettings,
   type StoredAgentRun,
   type StoredAgentRunReport,
@@ -409,6 +412,39 @@ async function readAssignedProjectId(
 }
 
 /**
+ * Records the start snapshot of a run in the S3 analytics store and notes the run for the daily
+ * export (ADR 0118). Neither write fails the start, which has already committed; a failure is logged
+ * and the run is then missing from the analytics store.
+ *
+ * @param run - Started run.
+ * @param workItem - Work Item as the start read it.
+ * @param customFields - Custom field definitions of the Work Item's configuration; read from the
+ *   Team's configuration when the caller has not read them.
+ * @param now - Start time.
+ */
+async function recordAnalyticsRunStart(
+  run: StoredAgentRun,
+  workItem: AgentAnalyticsWorkItem,
+  customFields: readonly CustomFieldDefinition[] | undefined,
+  now: Date,
+): Promise<void> {
+  const sink = workItemDependencies.agentTelemetryAnalytics
+  if (!sink.enabled) return
+  const memberKey = sink.memberPseudonym(run.directoryId, run.assigneeUserId)
+  if (memberKey === undefined) return
+  try {
+    const definitions = customFields ??
+      (await workItemDependencies.workItemConfigurations.getTeamConfiguration(run.directoryId, run.teamId)).configuration.customFields
+    await Promise.all([
+      sink.putRuns([buildAgentAnalyticsRunStartRow(run, workItem, definitions, memberKey, now)]),
+      workItemDependencies.agentRunUsage.watchRunForAnalytics({ directoryId: run.directoryId, teamId: run.teamId, runId: run.runId }, now),
+    ])
+  } catch (error) {
+    console.error('Agent Run analytics snapshot could not be written.', error instanceof Error ? error.name : 'UnknownError')
+  }
+}
+
+/**
  * Creates the Public API Agent Run service backed by canonical Work Items and the Agent Run store.
  *
  * @returns Agent Run service.
@@ -425,6 +461,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
     async start(credential, teamId, workItemId, input, context, idempotency) {
       let started: StoredAgentRun | undefined
       let startedAt = new Date()
+      let snapshot: { workItem: AgentAnalyticsWorkItem; customFields: readonly CustomFieldDefinition[] } | undefined
       const { issue } = await updateCanonicalPublicWorkItem(
         credential,
         teamId,
@@ -506,6 +543,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
               const run = { ...created, startedAt: resumeStartedAt(previous, now) }
               started = run
               startedAt = now
+              snapshot = { workItem: current, customFields: resolvedConfiguration.configuration.customFields }
               // The Work Item update in this transaction fences the Project that was read.
               const auditPut = createAgentRunAuditPut(
                 auditContext, run, 'started', 'Agent Run started.', { projectId: current.assignedProjectId },
@@ -542,6 +580,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         },
       )
       if (!started) throw new Error('The Agent Run start transaction committed without a run.')
+      if (snapshot) await recordAnalyticsRunStart(started, snapshot.workItem, snapshot.customFields, startedAt)
       return { run: toAgentRun(started, startedAt), workItem: projectPublicWorkItem(issue) }
     },
 
@@ -932,6 +971,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         if (await hasAuthorizationChanged(current, authorizationSnapshot)) throw createWorkItemAuthorizationChangedError()
         throw error
       }
+      await recordAnalyticsRunStart(successor, detail.issue, undefined, now)
       return response
     },
 
@@ -1061,6 +1101,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         if (await hasAuthorizationChanged(current, authorizationSnapshot)) throw createWorkItemAuthorizationChangedError()
         throw error
       }
+      await recordAnalyticsRunStart(run, detail.issue, undefined, now)
       return response
     },
 

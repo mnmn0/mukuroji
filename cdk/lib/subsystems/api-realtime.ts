@@ -72,6 +72,8 @@ export interface ApiTransportsAndRealtimeInput {
    * these origins are accepted even when `ApiAllowedOrigins` lists only local origins.
    */
   readonly webBrowserOrigins: string;
+  /** Agent analytics stream names (ADR 0118), when the deployment has the analytics store. */
+  readonly agentAnalyticsStreamEnvironment?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -406,6 +408,13 @@ function bindApiRuntimeConfiguration(
       ENTERPRISE_SSO_STATE_SECRET: enterpriseSsoStateSecret.valueAsString,
       REQUEST_TOKEN_HASH_SECRET: requestTokenHashSecret.valueAsString,
       MUKUROJI_EDGE_ORIGIN_SECRET: edgeOriginSecret.valueAsString,
+      // Blank without the analytics store: the API then writes no analytics rows (ADR 0118).
+      AGENT_ANALYTICS_EVENTS_STREAM_NAME:
+        input.agentAnalyticsStreamEnvironment?.AGENT_ANALYTICS_EVENTS_STREAM_NAME ?? '',
+      AGENT_ANALYTICS_RUNS_STREAM_NAME:
+        input.agentAnalyticsStreamEnvironment?.AGENT_ANALYTICS_RUNS_STREAM_NAME ?? '',
+      AGENT_ANALYTICS_WORK_ITEMS_STREAM_NAME:
+        input.agentAnalyticsStreamEnvironment?.AGENT_ANALYTICS_WORK_ITEMS_STREAM_NAME ?? '',
     },
     {
       DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET:

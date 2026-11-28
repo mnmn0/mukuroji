@@ -17,6 +17,7 @@ import {
   type AgentActivityEvent,
   type AgentActivityEventKind,
 } from './agent-run-activity'
+import { agentAnalyticsEventFromActivity, type AgentAnalyticsEvent } from './agent-telemetry-analytics'
 
 /** Length of one usage bucket. Usage is attributed to runs at this resolution. */
 export const AGENT_USAGE_BUCKET_SECONDS = 10
@@ -98,6 +99,8 @@ export type ParsedAgentTelemetry = {
   activityEvents: AgentActivityEvent[]
   /** Well-formed activity events, inside the time window or not. */
   wellFormedActivityEvents: AgentActivityEvent[]
+  /** Accepted events with the allowlisted values the analytics store keeps, in export order (ADR 0118). */
+  analyticsEvents: AgentAnalyticsEvent[]
 }
 
 /** Usage added together for one member, agent instance, model, and bucket. */
@@ -340,6 +343,7 @@ export function parseAgentTelemetryLogs(body: unknown, now: Date): ParsedAgentTe
   const wellFormedEvents: AgentUsageEvent[] = []
   const activityEvents: AgentActivityEvent[] = []
   const wellFormedActivityEvents: AgentActivityEvent[] = []
+  const analyticsEvents: AgentAnalyticsEvent[] = []
   let rejectedRecords = 0
   let recordCount = 0
   const oldest = now.getTime() - AGENT_TELEMETRY_MAX_EVENT_AGE_DAYS * 86_400_000
@@ -383,6 +387,7 @@ export function parseAgentTelemetryLogs(body: unknown, now: Date): ParsedAgentTe
             continue
           }
           activityEvents.push(activity)
+          analyticsEvents.push(agentAnalyticsEventFromActivity(activity))
           continue
         }
         const occurredAtMs = readRecordTime(record, attributes.get('event.timestamp'))
@@ -426,10 +431,19 @@ export function parseAgentTelemetryLogs(body: unknown, now: Date): ParsedAgentTe
         }
         events.push(event)
         activityEvents.push(timelinePoint)
+        analyticsEvents.push({
+          ...agentAnalyticsEventFromActivity({ ...timelinePoint, durationMs: event.durationMs }),
+          model: event.model,
+          inputTokens: event.inputTokens,
+          outputTokens: event.outputTokens,
+          cacheReadTokens: event.cacheReadTokens,
+          cacheCreationTokens: event.cacheCreationTokens,
+          costMicroUsd: event.costMicroUsd,
+        })
       }
     }
   }
-  return { events, wellFormedEvents, rejectedRecords, activityEvents, wellFormedActivityEvents }
+  return { events, wellFormedEvents, rejectedRecords, activityEvents, wellFormedActivityEvents, analyticsEvents }
 }
 
 /** Longest runtime session ID the receiver hashes; longer IDs are treated as absent. */

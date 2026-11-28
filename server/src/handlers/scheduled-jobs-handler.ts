@@ -3,6 +3,7 @@ import {
   type ScheduledJob,
 } from '../app/composition/scheduled-jobs'
 import { isSoftwareFactoryDeployed } from '../infrastructure/config/software-factory'
+import { handler as agentAnalyticsExportHandler } from './agent-analytics-export-handler'
 import { handler as agentRunTriageHandler } from './agent-run-triage-handler'
 import { handler as analyticsScheduleHandler } from './analytics-schedule-handler'
 import { handler as automationScheduleHandler } from './automation-schedule-handler'
@@ -47,10 +48,13 @@ export const scheduledJobs: readonly ScheduledJob[] = Object.freeze([
     attempts: 2,
     run: () => japanesePublicHolidaySyncHandler(),
   },
+  // Writes run state and Work Item values to the analytics store once a day, at UTC midnight
+  // (ADR 0118). A missed day is covered by the next one, which reads the same 30 days of runs.
+  { name: 'agent-analytics-export', everyMinutes: 1_440, attempts: 2, run: () => agentAnalyticsExportHandler() },
 ])
 
 /** Jobs that belong to the Software factory module and stop when it is not deployed. */
-const SOFTWARE_FACTORY_JOB_NAMES: ReadonlySet<string> = new Set(['agent-run-triage'])
+const SOFTWARE_FACTORY_JOB_NAMES: ReadonlySet<string> = new Set(['agent-run-triage', 'agent-analytics-export'])
 
 /**
  * Lists the jobs this deployment runs.
