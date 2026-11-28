@@ -1,5 +1,5 @@
 import { type AgentUsageBucket } from '../../domain/agent-run-usage'
-import { agentActivityRowKey, type AgentActivityRow, type AgentSessionCursor } from '../../domain/agent-run-activity'
+import { agentActivityRowKey, type AgentActivityRow, type AgentSessionCursorClaim } from '../../domain/agent-run-activity'
 import {
   agentActivityPartition,
   agentSessionCursorPartition,
@@ -113,12 +113,21 @@ export class InMemoryAgentRunUsageStore implements AgentRunUsageStore {
   }
 
   /** @inheritdoc */
-  async advanceSessionCursors(directoryId: string, memberKey: string, cursors: readonly AgentSessionCursor[]): Promise<void> {
+  async claimSessionCursors(directoryId: string, memberKey: string, claims: readonly AgentSessionCursorClaim[]): Promise<boolean> {
     const partition = agentSessionCursorPartition(directoryId, memberKey)
-    for (const cursor of cursors) {
-      const key = `${partition}|${cursor.sessionKey}`
-      const saved = this.sessionCursors.get(key)
-      if (saved === undefined || saved < cursor.lastEventAtMs) this.sessionCursors.set(key, cursor.lastEventAtMs)
+    if (claims.some((claim) => this.sessionCursors.get(`${partition}|${claim.sessionKey}`) !== claim.previousLastEventAtMs)) return false
+    for (const claim of claims) this.sessionCursors.set(`${partition}|${claim.sessionKey}`, claim.lastEventAtMs)
+    return true
+  }
+
+  /** @inheritdoc */
+  async releaseSessionCursors(directoryId: string, memberKey: string, claims: readonly AgentSessionCursorClaim[]): Promise<void> {
+    const partition = agentSessionCursorPartition(directoryId, memberKey)
+    for (const claim of claims) {
+      const key = `${partition}|${claim.sessionKey}`
+      if (this.sessionCursors.get(key) !== claim.lastEventAtMs) continue
+      if (claim.previousLastEventAtMs === undefined) this.sessionCursors.delete(key)
+      else this.sessionCursors.set(key, claim.previousLastEventAtMs)
     }
   }
 }

@@ -6,6 +6,7 @@ export {
   createAgentRunTakeoverDisabledError,
   createAgentRunIntegrityError,
   createAgentRunNotActiveError,
+  createAgentUsageUnavailableError,
   type AgentRunErrorCategory,
 } from './domain/agent-run-error'
 export {

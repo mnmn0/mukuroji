@@ -6,7 +6,7 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import { type AgentUsageBucket } from '../../domain/agent-run-usage'
-import { agentActivityRowKey, type AgentActivityRow, type AgentSessionCursor } from '../../domain/agent-run-activity'
+import { agentActivityRowKey, type AgentActivityRow, type AgentSessionCursorClaim } from '../../domain/agent-run-activity'
 import { createAgentRunIntegrityError, createAgentUsageUnavailableError } from '../../domain/agent-run-error'
 
 /** Days a usage bucket is kept before DynamoDB TTL removes it. */
@@ -130,14 +130,26 @@ export interface AgentRunUsageStore {
    */
   readSessionCursors(directoryId: string, memberKey: string, sessionKeys: readonly string[]): Promise<Map<string, number>>
   /**
-   * Moves session cursors forward. A cursor that is already newer stays.
+   * Moves session cursors forward only where each still has the value the waits were measured from,
+   * so two overlapping exports of one session cannot both count the same wait. When one cursor
+   * changed, the ones already moved are put back.
    *
    * @param directoryId - Workspace ID.
    * @param memberKey - Member that owns the sessions.
-   * @param cursors - New last event times.
+   * @param claims - New last event times with the values they were measured from.
    * @param now - Receive time.
+   * @returns Whether every cursor moved; false means another export moved one first.
    */
-  advanceSessionCursors(directoryId: string, memberKey: string, cursors: readonly AgentSessionCursor[], now: Date): Promise<void>
+  claimSessionCursors(directoryId: string, memberKey: string, claims: readonly AgentSessionCursorClaim[], now: Date): Promise<boolean>
+  /**
+   * Puts claimed cursors back where they still hold the claimed value, after the activity write failed,
+   * so the resent export measures its waits again.
+   *
+   * @param directoryId - Workspace ID.
+   * @param memberKey - Member that owns the sessions.
+   * @param claims - Claims to undo.
+   */
+  releaseSessionCursors(directoryId: string, memberKey: string, claims: readonly AgentSessionCursorClaim[]): Promise<void>
 }
 
 /** Rows of other instances one usage read may pass over, as a multiple of its bucket limit. */
@@ -622,6 +634,8 @@ export class DynamoDbAgentRunUsageStore implements AgentRunUsageStore {
           const result = await this.#client.send(new BatchGetCommand({ RequestItems: { [this.#tableName]: { Keys: keys } } }))
           for (const item of result.Responses?.[this.#tableName] ?? []) {
             const { recordKey, lastEventAtMs } = item
+            // A released cursor of a session that had none before keeps its row without a time.
+            if (typeof recordKey === 'string' && lastEventAtMs === undefined) continue
             if (typeof recordKey !== 'string' || typeof lastEventAtMs !== 'number' || !Number.isSafeInteger(lastEventAtMs)) {
               throw createAgentRunIntegrityError()
             }
@@ -638,14 +652,16 @@ export class DynamoDbAgentRunUsageStore implements AgentRunUsageStore {
   }
 
   /** @inheritdoc */
-  async advanceSessionCursors(directoryId: string, memberKey: string, cursors: readonly AgentSessionCursor[], now: Date): Promise<void> {
-    for (const cursor of cursors) {
+  async claimSessionCursors(directoryId: string, memberKey: string, claims: readonly AgentSessionCursorClaim[], now: Date): Promise<boolean> {
+    const claimed: AgentSessionCursorClaim[] = []
+    for (const claim of claims) {
+      const previous = claim.previousLastEventAtMs
       try {
         await this.#client.send(new UpdateCommand({
           TableName: this.#tableName,
-          Key: { directoryTeamId: agentSessionCursorPartition(directoryId, memberKey), recordKey: cursor.sessionKey },
+          Key: { directoryTeamId: agentSessionCursorPartition(directoryId, memberKey), recordKey: claim.sessionKey },
           UpdateExpression: 'SET #entityType = :entityType, #workspaceId = :workspaceId, #lastEventAtMs = :lastEventAtMs, #ttl = :ttl',
-          ConditionExpression: 'attribute_not_exists(#lastEventAtMs) OR #lastEventAtMs < :lastEventAtMs',
+          ConditionExpression: previous === undefined ? 'attribute_not_exists(#lastEventAtMs)' : '#lastEventAtMs = :previous',
           ExpressionAttributeNames: {
             '#entityType': 'entityType',
             '#workspaceId': 'workspaceId',
@@ -655,15 +671,39 @@ export class DynamoDbAgentRunUsageStore implements AgentRunUsageStore {
           ExpressionAttributeValues: {
             ':entityType': 'agent-session',
             ':workspaceId': directoryId,
-            ':lastEventAtMs': cursor.lastEventAtMs,
+            ':lastEventAtMs': claim.lastEventAtMs,
             ':ttl': expiresAfterDays(now, AGENT_SESSION_CURSOR_DAYS),
+            ...(previous === undefined ? {} : { ':previous': previous }),
           },
         }))
+        claimed.push(claim)
       } catch (error) {
-        // A newer cursor already saved stays; the cursor is a best-effort aid for the next export.
-        if (isRecord(error) && error.name === 'ConditionalCheckFailedException') continue
+        const conflict = isRecord(error) && error.name === 'ConditionalCheckFailedException'
+        if (claimed.length > 0) await this.releaseSessionCursors(directoryId, memberKey, claimed)
+        if (conflict) return false
         if (isTransientUsageWriteFailure(error)) throw createAgentUsageUnavailableError()
         throw error
+      }
+    }
+    return true
+  }
+
+  /** @inheritdoc */
+  async releaseSessionCursors(directoryId: string, memberKey: string, claims: readonly AgentSessionCursorClaim[]): Promise<void> {
+    for (const claim of claims) {
+      const previous = claim.previousLastEventAtMs
+      try {
+        await this.#client.send(new UpdateCommand({
+          TableName: this.#tableName,
+          Key: { directoryTeamId: agentSessionCursorPartition(directoryId, memberKey), recordKey: claim.sessionKey },
+          UpdateExpression: previous === undefined ? 'REMOVE #lastEventAtMs' : 'SET #lastEventAtMs = :previous',
+          ConditionExpression: '#lastEventAtMs = :claimed',
+          ExpressionAttributeNames: { '#lastEventAtMs': 'lastEventAtMs' },
+          ExpressionAttributeValues: { ':claimed': claim.lastEventAtMs, ...(previous === undefined ? {} : { ':previous': previous }) },
+        }))
+      } catch (error) {
+        // A cursor another export moved on stays; a failed put-back only means fewer waits are counted.
+        console.error('Agent session cursor release failed', isRecord(error) && typeof error.name === 'string' ? error.name : 'unknown')
       }
     }
   }

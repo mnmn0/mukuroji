@@ -2,6 +2,7 @@ import {
   AGENT_USAGE_BUCKET_SECONDS,
   AgentTelemetryFormatError,
   agentSessionKey,
+  createAgentUsageUnavailableError,
   deriveAgentActivityBatchId,
   deriveAgentTelemetryBatchId,
   layoutAgentActivityRows,
@@ -17,6 +18,9 @@ import {
 import { workItemDependencies } from '../shared/app-dependencies'
 import { resolveDeveloperCredentialPrincipal } from '../shared/developer-platform-access'
 import { requireWorkspaceBusinessRead } from '../shared/project-access'
+
+/** Cursor reads and claims of one export before it fails for the exporter to resend. */
+const cursorClaimAttempts = 3
 
 /**
  * Creates the receiver of coding agent OpenTelemetry logs. Usage is kept per credential owner,
@@ -89,17 +93,25 @@ async function recordActivity(
     const key = agentSessionKey(event)
     return key === undefined ? [] : [key]
   }))]
-  const cursors = sessionKeys.length === 0 ? new Map<string, number>() : await store.readSessionCursors(directoryId, memberKey, sessionKeys)
-  const layout = layoutAgentActivityRows(parsed.wellFormedActivityEvents, parsed.activityEvents, cursors, AGENT_USAGE_BUCKET_SECONDS)
-  const result = layout.slots.some((slot) => slot !== undefined)
-    ? await store.recordActivityBatch(
-        directoryId,
-        memberKey,
-        deriveAgentActivityBatchId(memberKey, parsed.wellFormedActivityEvents),
-        layout.slots,
-        receivedAt,
-      )
-    : undefined
-  if (layout.cursors.length > 0) await store.advanceSessionCursors(directoryId, memberKey, layout.cursors, receivedAt)
-  return result
+  const batchId = deriveAgentActivityBatchId(memberKey, parsed.wellFormedActivityEvents)
+  for (let attempt = 0; attempt < cursorClaimAttempts; attempt += 1) {
+    const cursors = sessionKeys.length === 0 ? new Map<string, number>() : await store.readSessionCursors(directoryId, memberKey, sessionKeys)
+    const layout = layoutAgentActivityRows(parsed.wellFormedActivityEvents, parsed.activityEvents, cursors, AGENT_USAGE_BUCKET_SECONDS)
+    const claims = layout.cursors.map((cursor) => {
+      const previous = cursors.get(cursor.sessionKey)
+      return previous === undefined ? cursor : { ...cursor, previousLastEventAtMs: previous }
+    })
+    // Cursors move before the waits are saved, and only from the values the waits were measured from,
+    // so an overlapping export of the same session measures again instead of counting the same wait.
+    if (claims.length > 0 && !await store.claimSessionCursors(directoryId, memberKey, claims, receivedAt)) continue
+    try {
+      return layout.slots.some((slot) => slot !== undefined)
+        ? await store.recordActivityBatch(directoryId, memberKey, batchId, layout.slots, receivedAt)
+        : undefined
+    } catch (error) {
+      if (claims.length > 0) await store.releaseSessionCursors(directoryId, memberKey, claims)
+      throw error
+    }
+  }
+  throw createAgentUsageUnavailableError()
 }

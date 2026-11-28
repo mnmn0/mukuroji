@@ -9,6 +9,7 @@ import {
 } from './domain/agent-run-activity'
 import { compareFactoryWorkItems, summarizeFactoryActivity, type AgentRunComparisonEntry } from './domain/agent-run-comparison'
 import { DynamoDbAgentRunUsageStore, type AgentRunUsageDocumentClient } from './adapter-out/dynamodb/agent-run-usage-store'
+import { InMemoryAgentRunUsageStore } from './adapter-out/in-memory/agent-run-usage-store'
 
 const base = Date.parse('2026-11-22T17:05:00.000Z')
 
@@ -199,7 +200,7 @@ describe('Factory comparison', () => {
 })
 
 describe('DynamoDB activity store', () => {
-  test('writes activity with its own receipts, and moves cursors forward only', async () => {
+  test('writes activity with its own receipts, and claims cursors only from the value read', async () => {
     const sent: { name: string; input: unknown }[] = []
     const client: AgentRunUsageDocumentClient = {
       async send(command) {
@@ -231,12 +232,36 @@ describe('DynamoDB activity store', () => {
       ],
     })
     expect(await store.readSessionCursors('ws', 'member', ['laptop#s1', 'laptop#s1'])).toEqual(new Map([['laptop#s1', 5]]))
-    await store.advanceSessionCursors('ws', 'member', [{ sessionKey: 'laptop#s1', lastEventAtMs: 9 }, { sessionKey: 'laptop#s2', lastEventAtMs: 1 }], now)
-    expect(sent.filter((entry) => entry.name === 'UpdateCommand')).toHaveLength(2)
-    expect(sent.find((entry) => entry.name === 'UpdateCommand')?.input).toMatchObject({
+    // The second claim finds its cursor moved by another export: the first claim is put back.
+    expect(await store.claimSessionCursors('ws', 'member', [
+      { sessionKey: 'laptop#s1', lastEventAtMs: 9, previousLastEventAtMs: 5 },
+      { sessionKey: 'laptop#s2', lastEventAtMs: 1 },
+    ], now)).toBe(false)
+    const updates = sent.filter((entry) => entry.name === 'UpdateCommand').map((entry) => entry.input)
+    expect(updates).toHaveLength(3)
+    expect(updates[0]).toMatchObject({
       Key: { directoryTeamId: 'ws#agent-session#member#member', recordKey: 'laptop#s1' },
-      ConditionExpression: 'attribute_not_exists(#lastEventAtMs) OR #lastEventAtMs < :lastEventAtMs',
+      ConditionExpression: '#lastEventAtMs = :previous',
+      ExpressionAttributeValues: { ':lastEventAtMs': 9, ':previous': 5 },
     })
+    expect(updates[1]).toMatchObject({ Key: { recordKey: 'laptop#s2' }, ConditionExpression: 'attribute_not_exists(#lastEventAtMs)' })
+    expect(updates[2]).toMatchObject({
+      Key: { recordKey: 'laptop#s1' },
+      UpdateExpression: 'SET #lastEventAtMs = :previous',
+      ConditionExpression: '#lastEventAtMs = :claimed',
+      ExpressionAttributeValues: { ':claimed': 9, ':previous': 5 },
+    })
+  })
+
+  test('an overlapping export of the same session measures its wait again instead of counting it twice', async () => {
+    const store = new InMemoryAgentRunUsageStore()
+    expect(await store.claimSessionCursors('ws', 'member', [{ sessionKey: 'laptop#s1', lastEventAtMs: 0 }])).toBe(true)
+    // Both exports read 0; the one that claims first wins and the other must read again.
+    expect(await store.claimSessionCursors('ws', 'member', [{ sessionKey: 'laptop#s1', lastEventAtMs: 10_000, previousLastEventAtMs: 0 }])).toBe(true)
+    expect(await store.claimSessionCursors('ws', 'member', [{ sessionKey: 'laptop#s1', lastEventAtMs: 20_000, previousLastEventAtMs: 0 }])).toBe(false)
+    expect(await store.readSessionCursors('ws', 'member', ['laptop#s1'])).toEqual(new Map([['laptop#s1', 10_000]]))
+    await store.releaseSessionCursors('ws', 'member', [{ sessionKey: 'laptop#s1', lastEventAtMs: 10_000, previousLastEventAtMs: 0 }])
+    expect(await store.readSessionCursors('ws', 'member', ['laptop#s1'])).toEqual(new Map([['laptop#s1', 0]]))
   })
 
   test('reads unprocessed cursor keys again and fails the export when they stay unread', async () => {

@@ -76,6 +76,12 @@ export type AgentSessionCursor = {
   lastEventAtMs: number
 }
 
+/** A cursor move that holds only while the cursor still has the value the waits were measured from. */
+export type AgentSessionCursorClaim = AgentSessionCursor & {
+  /** Cursor value read before measuring; absent when the session had no cursor. */
+  previousLastEventAtMs?: number
+}
+
 /**
  * Hashes a runtime session ID, so the raw ID is never stored.
  *
