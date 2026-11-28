@@ -33,6 +33,8 @@ export type TimeReportInput = {
   groupBy: TimeTrackingGroupBy
   /** Budget returned with the report, for members who may see it. */
   budgetScope?: TimeReportBudgetScope
+  /** Only time of this Project is reported (ADR 0116). */
+  filterProjectId?: string
 }
 
 /** Fields of a budget update. */
@@ -56,7 +58,7 @@ export type SaveTimeBudgetInput = {
 }
 
 /** Every grouping the API returns. */
-const groupings = ['day', 'week', 'user', 'project', 'work-item', 'category', 'phase'] as const satisfies readonly TimeTrackingGroupBy[]
+const groupings = ['day', 'week', 'user', 'project', 'work-item', 'category', 'phase', 'investment'] as const satisfies readonly TimeTrackingGroupBy[]
 
 /** Fails to compile when a grouping of the contract is missing from {@link groupings}. */
 const groupingsAreComplete: Exclude<TimeTrackingGroupBy, typeof groupings[number]> extends never ? true : never = true
@@ -75,6 +77,7 @@ export function createTimeReportQuery(input: TimeReportInput): string {
     query.set('budgetScope', input.budgetScope.scopeType)
     if (input.budgetScope.scopeType === 'project') query.set('projectId', input.budgetScope.projectId)
   }
+  if (input.filterProjectId) query.set('filterProjectId', input.filterProjectId)
   return query.toString()
 }
 
@@ -217,7 +220,7 @@ export async function getTimeTrackingSummary(
  *
  * @param accessToken - Bearer token of the signed-in member.
  * @param teamId - Team whose entries are exported.
- * @param input - Period, timezone, and grouping.
+ * @param input - Period, timezone, grouping, and Project filter.
  * @returns CSV body.
  */
 export async function downloadTimeTrackingCsv(
@@ -226,7 +229,13 @@ export async function downloadTimeTrackingCsv(
   input: TimeReportInput,
 ): Promise<Blob> {
   // The CSV carries no budget, so the budget scope is left out of the export query.
-  const reportInput: TimeReportInput = { from: input.from, to: input.to, timeZone: input.timeZone, groupBy: input.groupBy }
+  const reportInput: TimeReportInput = {
+    from: input.from,
+    to: input.to,
+    timeZone: input.timeZone,
+    groupBy: input.groupBy,
+    ...(input.filterProjectId ? { filterProjectId: input.filterProjectId } : {}),
+  }
   const url = createTeamTimeTrackingUrl(teamId, `/time-tracking/export?${createTimeReportQuery(reportInput)}`)
   let response: Response
   try {

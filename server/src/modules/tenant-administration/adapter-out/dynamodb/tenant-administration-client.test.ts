@@ -11,6 +11,7 @@ import type {
 import {
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS,
+  DEFAULT_WORKSPACE_INVESTMENT_CATEGORY_SETTINGS,
   type WorkspaceFileTypeSettings,
 } from '@mukuroji/contracts'
 import {
@@ -594,6 +595,47 @@ describe('DynamoDbTenantAdministrationClient', () => {
     expect((await client.getProfile('workspace-1'))?.workPhases).toEqual(retired)
     // A category mapped to a phase that is not listed fails the read instead of falling back.
     items.set('PROFILE', { ...items.get('PROFILE'), workPhases: { ...retired, categoryPhases: { meeting: 'unknown' } } })
+    await expect(client.getProfile('workspace-1')).rejects.toThrow()
+  })
+
+  test('retires investment categories but refuses to drop one already offered (ADR 0116)', async () => {
+    const items = createAggregateItems()
+    const client = new DynamoDbTenantAdministrationClient(
+      'TenantAdministrationTable',
+      createDocumentClient((command) => {
+        if (command.constructor.name === 'TransactWriteCommand') return {}
+        const recordKey = readRecordKey(command)
+        if (!recordKey) return {}
+        const value = items.get(recordKey)
+        return value ? { Item: createStateItem(recordKey, value) } : {}
+      }),
+      () => '2026-08-02T00:00:00.000Z',
+    )
+    const input = {
+      region: 'ap-northeast-1',
+      locale: 'ja',
+      defaultPolicy: { defaultMemberRole: 'member' },
+      expectedRevision: 0,
+    } satisfies import('@mukuroji/contracts').UpdateTenantProfileInput
+    const builtIns = DEFAULT_WORKSPACE_INVESTMENT_CATEGORY_SETTINGS.categories
+
+    await expect(client.updateProfile('workspace-1', 'system-admin-1', {
+      ...input,
+      investmentCategories: { categories: builtIns.filter((category) => category.key !== 'management'), personMonthHours: 160 },
+    })).rejects.toMatchObject({ code: 'InvestmentCategoryRemoved', status: 400 })
+
+    const retired = {
+      categories: [
+        ...builtIns.map((category) => category.key === 'management' ? { ...category, active: false } : category),
+        { key: 'custom-security', label: 'セキュリティ', group: 'opex' as const, active: true },
+      ],
+      personMonthHours: 140,
+    }
+    const saved = await client.updateProfile('workspace-1', 'system-admin-1', { ...input, investmentCategories: retired })
+    expect(saved.investmentCategories).toEqual(retired)
+    items.set('PROFILE', { ...items.get('PROFILE'), investmentCategories: retired })
+    expect((await client.getProfile('workspace-1'))?.investmentCategories).toEqual(retired)
+    items.set('PROFILE', { ...items.get('PROFILE'), investmentCategories: { ...retired, personMonthHours: 0 } })
     await expect(client.getProfile('workspace-1')).rejects.toThrow()
   })
 

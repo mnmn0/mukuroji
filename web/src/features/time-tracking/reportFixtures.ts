@@ -249,3 +249,14 @@ export const projectExpensesFixture: ProjectExpense[] = [
     updatedAt: '2026-11-06T01:00:00.000Z',
   },
 ]
+
+/** The same period grouped by investment category (ADR 0116), with unclassified time. */
+export const timeReportFixtureInvestmentSummary: TimeTrackingSummary = {
+  ...timeReportFixtureManagerSummary,
+  groupBy: 'investment',
+  groups: [
+    { key: 'new-development', label: 'new-development', minutes: 600, billableMinutes: 600, entryCount: 4, actualCostByCurrency: { JPY: 60_000 }, actualCostMinor: 60_000 },
+    { key: 'operations', label: 'operations', minutes: 480, billableMinutes: 0, entryCount: 3, actualCostByCurrency: { JPY: 40_000 }, actualCostMinor: 40_000 },
+    { key: 'unclassified', label: 'Unclassified', minutes: 90, billableMinutes: 0, entryCount: 1, actualCostByCurrency: { JPY: 10_000 }, actualCostMinor: 10_000 },
+  ],
+}

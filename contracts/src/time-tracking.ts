@@ -40,9 +40,10 @@ export const NO_WORK_ITEM_TIME_ENTRY_GROUP_KEY = 'no-work-item' as const
 
 /**
  * Grouping dimension supported by a time tracking report. `phase` groups by the work phase of each
- * entry's category (ADR 0115).
+ * entry's category (ADR 0115); `investment` by the investment category of its Work Item or
+ * Project (ADR 0116).
  */
-export type TimeTrackingGroupBy = 'day' | 'week' | 'user' | 'project' | 'work-item' | 'category' | 'phase'
+export type TimeTrackingGroupBy = 'day' | 'week' | 'user' | 'project' | 'work-item' | 'category' | 'phase' | 'investment'
 
 /** A recorded interval of work. */
 export type TimeEntry = {

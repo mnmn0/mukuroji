@@ -30,12 +30,15 @@ import type {
   WorkspaceTimeEntryCategorySettings,
   WorkspaceWorkPhaseSettings,
   WorkspaceAgentCostSettings,
+  WorkspaceInvestmentCategorySettings,
 } from '@mukuroji/contracts'
 import {
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS,
   findRemovedTimeEntryCategoryKeys,
   findRemovedWorkPhaseKeys,
+  findRemovedInvestmentCategoryKeys,
+  DEFAULT_WORKSPACE_INVESTMENT_CATEGORY_SETTINGS,
   isCurrencyCode,
   readWorkspaceAgentCostSettings,
   readPlanningUpdateTemplateSettings,
@@ -44,6 +47,7 @@ import {
   readWorkspaceFileTypeSettings,
   readWorkspaceTimeEntryCategorySettings,
   readWorkspaceWorkPhaseSettings,
+  readWorkspaceInvestmentCategorySettings,
 } from '@mukuroji/contracts'
 import { calculateAuditExpiresAt } from '../../../audit'
 import {
@@ -295,6 +299,9 @@ export class DynamoDbTenantAdministrationClient implements
     const workPhases = input.workPhases
       ? readChangedWorkPhases(current.workPhases, input.workPhases)
       : undefined
+    const investmentCategories = input.investmentCategories
+      ? readChangedInvestmentCategories(current.investmentCategories, input.investmentCategories)
+      : undefined
     const updated: TenantProfile = {
       ...current,
       region: validateTenantRegion(input.region),
@@ -309,6 +316,7 @@ export class DynamoDbTenantAdministrationClient implements
         : {}),
       ...(timeEntryCategories ? { timeEntryCategories } : {}),
       ...(workPhases ? { workPhases } : {}),
+      ...(investmentCategories ? { investmentCategories } : {}),
       ...(input.fileTypes ? { fileTypes: readStoredFileTypes(input.fileTypes) } : {}),
       ...(input.defaultCurrency ? { defaultCurrency: readStoredDefaultCurrency(input.defaultCurrency) } : {}),
       ...(input.agentCost ? { agentCost: readStoredAgentCost(input.agentCost) } : {}),
@@ -2034,6 +2042,9 @@ function readTenantProfile(value: unknown): TenantProfile {
     ...(value.workPhases === undefined
       ? {}
       : { workPhases: readStoredWorkPhases(value.workPhases) }),
+    ...(value.investmentCategories === undefined
+      ? {}
+      : { investmentCategories: readStoredInvestmentCategories(value.investmentCategories) }),
     ...(value.fileTypes === undefined
       ? {}
       : { fileTypes: readStoredFileTypes(value.fileTypes) }),
@@ -2122,6 +2133,44 @@ function readStoredTimeEntryCategories(value: unknown): WorkspaceTimeEntryCatego
 function readStoredWorkPhases(value: unknown): WorkspaceWorkPhaseSettings {
   const settings = readWorkspaceWorkPhaseSettings(value)
   if (!settings) throw new Error('invalid work phase settings')
+  return settings
+}
+
+/**
+ * Reads stored or already-validated Workspace investment category settings.
+ *
+ * @param value - Settings candidate.
+ * @returns The settings.
+ * @throws Error when the settings are invalid.
+ */
+function readStoredInvestmentCategories(value: unknown): WorkspaceInvestmentCategorySettings {
+  const settings = readWorkspaceInvestmentCategorySettings(value)
+  if (!settings) throw new Error('invalid investment category settings')
+  return settings
+}
+
+/**
+ * Validates an investment category change against the categories in effect, which are the
+ * defaults until the Workspace saves its own (ADR 0116).
+ *
+ * @param stored - Stored settings, if any.
+ * @param requested - Already-validated requested settings.
+ * @returns The settings to store.
+ * @throws TenantAdministrationError When the change drops a category instead of retiring it.
+ */
+function readChangedInvestmentCategories(
+  stored: WorkspaceInvestmentCategorySettings | undefined,
+  requested: WorkspaceInvestmentCategorySettings,
+): WorkspaceInvestmentCategorySettings {
+  const settings = readStoredInvestmentCategories(requested)
+  const removed = findRemovedInvestmentCategoryKeys(stored ?? DEFAULT_WORKSPACE_INVESTMENT_CATEGORY_SETTINGS, settings)
+  if (removed.length > 0) {
+    throw new TenantAdministrationError(
+      400,
+      'InvestmentCategoryRemoved',
+      `Investment categories cannot be removed, only retired: ${removed.join(', ')}.`,
+    )
+  }
   return settings
 }
 

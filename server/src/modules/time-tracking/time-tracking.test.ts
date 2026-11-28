@@ -747,6 +747,87 @@ describe('TimeTrackingService', () => {
     ])
   })
 
+  test('groups time by the investment category of its Work Item, then its Project', async () => {
+    let id = 0
+    let active = true
+    const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
+      now: () => new Date('2026-08-03T09:00:00.000Z'),
+      createId: () => `id-${++id}`,
+      categories: {
+        readCategories: async () => ({ categories: [{ key: 'implementation', active: true }] }),
+        readInvestmentCategories: async () => ({
+          categories: [
+            { key: 'new-development', label: '新規開発', group: 'capex', active: true },
+            { key: 'maintenance', group: 'capex', active },
+            { key: 'operations', group: 'opex', active: true },
+          ],
+          personMonthHours: 160,
+        }),
+      },
+    })
+    const base = {
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      userId: 'member-1',
+      billable: false,
+      currency: 'JPY',
+      source: 'manual' as const,
+    }
+    await service.createEntry({ ...base, projectId: 'alpha', workItemId: 'task-1', duration: { date: '2026-08-03', minutes: 90, timeZone: 'Asia/Tokyo' } }, false)
+    await service.createEntry({ ...base, projectId: 'alpha', workItemId: 'task-2', duration: { date: '2026-08-04', minutes: 30, timeZone: 'Asia/Tokyo' } }, false)
+    await service.createEntry({ ...base, projectId: 'beta', category: 'implementation', duration: { date: '2026-08-04', minutes: 45, timeZone: 'Asia/Tokyo' } }, false)
+    const saved = await service.saveInvestmentAssignments({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      assignments: { projects: { alpha: 'new-development' }, workItems: { 'task-2': 'maintenance' } },
+      expectedRevision: 0,
+      actorUserId: 'manager-1',
+    })
+    expect(saved).toMatchObject({ teamId: 'team-1', revision: 1 })
+    const report = {
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      from: '2026-08-03',
+      to: '2026-08-09',
+      timeZone: 'Asia/Tokyo',
+      groupBy: 'investment' as const,
+      includeCosts: false,
+    }
+    const summary = await service.createSummary(report)
+    expect(summary.groups.map(({ key, label, minutes }) => ({ key, label, minutes }))).toEqual([
+      // A built-in category without a Workspace name keeps its key.
+      { key: 'maintenance', label: 'maintenance', minutes: 30 },
+      { key: 'new-development', label: '新規開発', minutes: 90 },
+      { key: 'unclassified', label: 'Unclassified', minutes: 45 },
+    ])
+    const alpha = await service.createSummary({ ...report, filterProjectId: 'alpha' })
+    expect(alpha.totalMinutes).toBe(120)
+
+    // A retired category stays on the Work Item that has it but cannot be newly assigned.
+    active = false
+    await expect(service.saveInvestmentAssignments({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      assignments: { projects: { alpha: 'new-development', beta: 'maintenance' }, workItems: { 'task-2': 'maintenance' } },
+      expectedRevision: 1,
+      actorUserId: 'manager-1',
+    })).rejects.toMatchObject({ code: 'InvalidInvestmentCategory' })
+    await expect(service.saveInvestmentAssignments({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      assignments: { projects: { alpha: 'new-development', beta: 'operations' }, workItems: { 'task-2': 'maintenance' } },
+      expectedRevision: 1,
+      actorUserId: 'manager-1',
+    })).resolves.toMatchObject({ revision: 2, projects: { beta: 'operations' } })
+    await expect(service.saveInvestmentAssignments({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      assignments: { projects: {}, workItems: {} },
+      expectedRevision: 1,
+      actorUserId: 'manager-1',
+    })).rejects.toMatchObject({ code: 'InvestmentAssignmentsRevisionConflict' })
+  })
+
   test('keeps a category the Workspace retired after the entry was recorded', async () => {
     let active = true
     let id = 0

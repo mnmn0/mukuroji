@@ -13,6 +13,7 @@ import type {
   WorkspaceCalendarSettingsResponse,
   WorkspaceTimeEntryCategorySettings,
   WorkspaceWorkPhaseSettings,
+  WorkspaceInvestmentCategorySettings,
 } from '@mukuroji/contracts'
 import {
   isCurrencyCode,
@@ -24,6 +25,7 @@ import {
   readWorkspaceFileTypeSettings,
   readWorkspaceTimeEntryCategorySettings,
   readWorkspaceWorkPhaseSettings,
+  readWorkspaceInvestmentCategorySettings,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { WorkspaceAccessApiError } from './errors'
@@ -87,6 +89,26 @@ export async function getWorkspaceTimeEntryCategories(
 ): Promise<WorkspaceTimeEntryCategorySettings> {
   const body = await sendTenantRequest('/workspace/time-entry-categories', accessToken, { signal })
   const settings = readWorkspaceTimeEntryCategorySettings(body)
+  if (!settings) {
+    throw new WorkspaceAccessApiError(502, 'tenant.administration.invalidResponse')
+  }
+  return settings
+}
+
+/**
+ * Reads the Workspace investment categories and person-month hours (ADR 0116). Any member may read
+ * them.
+ *
+ * @param accessToken - Bearer token used for the read.
+ * @param signal - Abort signal of the read.
+ * @returns The categories in effect, which are the defaults until an administrator saves them.
+ */
+export async function getWorkspaceInvestmentCategories(
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<WorkspaceInvestmentCategorySettings> {
+  const body = await sendTenantRequest('/workspace/investment-categories', accessToken, { signal })
+  const settings = readWorkspaceInvestmentCategorySettings(body)
   if (!settings) {
     throw new WorkspaceAccessApiError(502, 'tenant.administration.invalidResponse')
   }
@@ -386,6 +408,8 @@ function isTenantProfile(value: unknown): value is TenantProfile {
     (value.timeEntryCategories === undefined ||
       readWorkspaceTimeEntryCategorySettings(value.timeEntryCategories) !== undefined) &&
     (value.workPhases === undefined || readWorkspaceWorkPhaseSettings(value.workPhases) !== undefined) &&
+    (value.investmentCategories === undefined ||
+      readWorkspaceInvestmentCategorySettings(value.investmentCategories) !== undefined) &&
     (value.fileTypes === undefined || readWorkspaceFileTypeSettings(value.fileTypes) !== undefined) &&
     (value.defaultCurrency === undefined || isCurrencyCode(value.defaultCurrency)) &&
     (value.agentCost === undefined || readWorkspaceAgentCostSettings(value.agentCost) !== undefined) &&
