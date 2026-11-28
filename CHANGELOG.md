@@ -128,6 +128,9 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Changed
 
+- server API: `POST /api/v1/agent-telemetry/v1/logs` は `api_request` の `duration_ms` に加えて `tool_result`・`tool_decision`・
+  `user_prompt`・`api_error` を読み、tool 別の時間と人の待ち時間（推定）を Run に割り当てます。MCP server 名と skill 名は
+  `OTEL_LOG_TOOL_DETAILS=1` のときだけ分かれ、tool の入力そのものは保存しません。応答の形と MCP は変わりません（ADR 0117、#834）。
 - server API: `GET /api/v1/agent-context` の `brief` は、Team に自分の brief がないとき Workspace の既定 brief を返します。
   Team が Agent settings を保存していないときの `requireAcceptanceCriteria` と、`GET /api/v1/agent-settings` の
   `leaseMinutes`・`allowTakeoverAfterLeaseExpiry` は Workspace の既定値です。MCP と応答の形は変わりません（#412）。

@@ -110,6 +110,7 @@ async function configure(
       cacheCreationTokens: 0,
       costMicroUsd: inputTokens * 100,
       requestCount: 1,
+      durationMs: 0,
     }])
   }
   await seed('onboarding-friction', '2026-07-10T00:00:00.000Z', 1_000)

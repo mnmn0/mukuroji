@@ -135,6 +135,11 @@ export type AgentRunView = AgentRun & {
    * arrived for the run's member and instance while it was active.
    */
   usage?: AgentRunUsage
+  /**
+   * Time the run spent in tools and waiting for a person, from agent telemetry. Absent when no tool,
+   * prompt, or decision telemetry arrived while the run was active.
+   */
+  activity?: AgentRunActivity
   /** Credential and agent instance that started the run; present only for Team managers. */
   startedBy?: AgentRunStartedBy
 }
@@ -181,7 +186,114 @@ export type AgentRunUsage = {
   estimatedCostMicroUsd?: number
   /** Models that served the requests, sorted. */
   models: string[]
+  /**
+   * Milliseconds the model requests took, as the runtime measured each request (`duration_ms`). 0
+   * when the runtime sent no request duration.
+   */
+  aiDurationMs: number
+  /**
+   * Totals per model, counted per model request rather than per run, because the main agent and its
+   * sub-agents can use different models within one run. Sorted by model name.
+   */
+  byModel: AgentModelUsage[]
   /** True when more usage existed than one read returns, so the totals are a lower bound. */
+  hasMore: boolean
+}
+
+/** Tokens, estimated cost, and request time of one model within an {@link AgentRunUsage}. */
+export type AgentModelUsage = {
+  /** Model that served the requests. */
+  model: string
+  /** Uncached input tokens. */
+  inputTokens: number
+  /** Output tokens. */
+  outputTokens: number
+  /** Input tokens read from the prompt cache. */
+  cacheReadTokens: number
+  /** Input tokens written to the prompt cache. */
+  cacheCreationTokens: number
+  /** Model requests the totals cover. */
+  requestCount: number
+  /** Milliseconds the model requests took. */
+  aiDurationMs: number
+  /** Estimated cost in millionths of US dollars; only Team managers receive it. */
+  estimatedCostMicroUsd?: number
+}
+
+/** Event name of the Claude Code OpenTelemetry log record of one finished tool call. */
+export const AGENT_TELEMETRY_TOOL_RESULT_EVENT = 'claude_code.tool_result'
+
+/** Event name of the Claude Code OpenTelemetry log record of one tool permission decision. */
+export const AGENT_TELEMETRY_TOOL_DECISION_EVENT = 'claude_code.tool_decision'
+
+/** Event name of the Claude Code OpenTelemetry log record of one prompt a person sent. */
+export const AGENT_TELEMETRY_USER_PROMPT_EVENT = 'claude_code.user_prompt'
+
+/** Kinds of tool an agent called: a runtime built-in tool, an MCP server tool, or a skill. */
+export const AGENT_TOOL_KINDS = ['builtin', 'mcp', 'skill'] as const
+
+/** Kind of tool an agent called. */
+export type AgentToolKind = (typeof AGENT_TOOL_KINDS)[number]
+
+/**
+ * Longest gap, in milliseconds, that counts as a person's wait. A longer gap before a prompt or an
+ * approval means the session was left alone, so it counts neither as waiting nor as agent work.
+ */
+export const AGENT_ACTIVITY_MAX_WAIT_MS = 2 * 60 * 60 * 1_000
+
+/** Largest number of tools one {@link AgentRunActivity} lists, longest total time first. */
+export const AGENT_RUN_ACTIVITY_MAX_TOOLS = 30
+
+/** Time spent in one tool within an {@link AgentRunActivity}. */
+export type AgentToolActivity = {
+  /** Kind of tool. */
+  kind: AgentToolKind
+  /**
+   * Tool name: the runtime tool name such as `Bash`, `<server>/<tool>` for an MCP tool, or the skill
+   * name. MCP server and skill names arrive only when the agent sends tool details.
+   */
+  name: string
+  /** Finished calls. */
+  count: number
+  /** Milliseconds the calls ran, without the time spent waiting for permission. */
+  durationMs: number
+  /** Calls that finished with an error. */
+  failureCount: number
+}
+
+/** Estimated time a person kept the agent waiting, of one kind. */
+export type AgentWaitActivity = {
+  /** Waits counted. */
+  count: number
+  /** Milliseconds the waits lasted, each at most {@link AGENT_ACTIVITY_MAX_WAIT_MS}. */
+  durationMs: number
+}
+
+/**
+ * Where the time of an Agent Run went, from the same telemetry as {@link AgentRunUsage} (ADR 0117):
+ * time in tools, and the estimated time a person kept the agent waiting. Model request time is in
+ * {@link AgentRunUsage.aiDurationMs}.
+ */
+export type AgentRunActivity = {
+  /** Finished tool calls. */
+  toolCount: number
+  /** Milliseconds all tool calls ran. */
+  toolDurationMs: number
+  /** Tool calls that finished with an error. */
+  toolFailureCount: number
+  /** Tools, longest total time first, at most {@link AGENT_RUN_ACTIVITY_MAX_TOOLS}. */
+  tools: AgentToolActivity[]
+  /**
+   * Waits for a person to approve or reject a tool call: from the agent's previous event to the
+   * decision, for decisions a person made.
+   */
+  approvalWait: AgentWaitActivity
+  /**
+   * Waits for a person's next prompt: from the agent's last event to the prompt that followed it in
+   * the same session.
+   */
+  promptWait: AgentWaitActivity
+  /** True when more activity existed than one read returns, so the totals are a lower bound. */
   hasMore: boolean
 }
 
@@ -674,6 +786,8 @@ export type WorkItemAgentRunsResponse = {
   hasMore: boolean
   /** Usage of the returned runs added together; absent when none of them has usage. */
   usageTotal?: AgentRunUsage
+  /** Activity of the returned runs added together; absent when none of them has activity. */
+  activityTotal?: AgentRunActivity
 }
 
 /** Hours a run that finished as `completed` stays in the Factory board's completed lane. */
@@ -982,6 +1096,181 @@ export type TeamFactoryAnalyticsResponse = FactoryAnalyticsRunSummary & {
   historyHasMore: boolean
   /** Telemetry usage of the period's runs; absent when none of them has usage. */
   usage?: FactoryAnalyticsUsage
+  /** Where the period's run time went; absent when none of the runs has usage or activity. */
+  activity?: FactoryAnalyticsActivity
+  /** Work Items compared with others of the same type and size; absent when no run has usage or activity. */
+  comparison?: FactoryAnalyticsComparison
+}
+
+/** Number of tools with the longest total time that Factory analytics lists. */
+export const FACTORY_ANALYTICS_ACTIVITY_TOP_TOOLS = 10
+
+/**
+ * Time of the runs that finished in the period, on Work Items the viewer can see: model requests,
+ * tools, and the estimated waits for a person (ADR 0117).
+ */
+export type FactoryAnalyticsActivity = {
+  /** Milliseconds the model requests took. */
+  aiDurationMs: number
+  /** Tool and wait totals of every evaluated run. */
+  total: AgentRunActivity
+  /** The {@link FACTORY_ANALYTICS_ACTIVITY_TOP_TOOLS} tools with the longest total time. */
+  topTools: AgentToolActivity[]
+  /**
+   * Percentage of the agent's working time (model requests and tools) among working time and the
+   * waits for a person; null when neither was measured.
+   */
+  agentWorkShare: number | null
+  /** Whether finished runs beyond {@link FACTORY_ANALYTICS_MAX_USAGE_RUNS} were left out. */
+  runsHasMore: boolean
+}
+
+/**
+ * Size bands of a Work Item's effort estimate (`schedule.plannedEffortMinutes`), used to compare
+ * Work Items of the same size: up to 2 hours, up to 1 day (8 hours), up to 3 days, longer, and no
+ * estimate.
+ */
+export const WORK_ITEM_SIZE_BANDS = ['up-to-2h', 'up-to-1d', 'up-to-3d', 'over-3d', 'none'] as const
+
+/** Size band of a Work Item's effort estimate. */
+export type WorkItemSizeBand = (typeof WORK_ITEM_SIZE_BANDS)[number]
+
+/**
+ * Returns the size band of an effort estimate.
+ *
+ * @param plannedEffortMinutes - Effort estimate in minutes, when the Work Item has one.
+ * @returns The band; `none` without an estimate.
+ */
+export function workItemSizeBand(plannedEffortMinutes: number | undefined): WorkItemSizeBand {
+  if (plannedEffortMinutes === undefined || !Number.isFinite(plannedEffortMinutes) || plannedEffortMinutes <= 0) return 'none'
+  if (plannedEffortMinutes <= 120) return 'up-to-2h'
+  if (plannedEffortMinutes <= 480) return 'up-to-1d'
+  if (plannedEffortMinutes <= 1_440) return 'up-to-3d'
+  return 'over-3d'
+}
+
+/**
+ * How many times a group's median a Work Item's agent time or tokens must reach to be listed as an
+ * outlier.
+ */
+export const FACTORY_ANALYTICS_OUTLIER_RATIO = 2
+
+/** Fewest Work Items a group needs before its outliers are listed. */
+export const FACTORY_ANALYTICS_OUTLIER_MIN_GROUP_SIZE = 3
+
+/** Largest number of outliers one Factory analytics response lists, largest ratio first. */
+export const FACTORY_ANALYTICS_MAX_OUTLIERS = 20
+
+/** Largest number of comparison groups one Factory analytics response lists, most Work Items first. */
+export const FACTORY_ANALYTICS_MAX_COMPARISON_GROUPS = 30
+
+/**
+ * Axis that splits Work Items of one type into comparable groups: the size band of the effort
+ * estimate, or the value of a custom field such as story points or difficulty.
+ */
+export type FactoryAnalyticsComparisonAxis =
+  | {
+      /** Size band of `schedule.plannedEffortMinutes`. */
+      kind: 'size'
+      /** No custom field. */
+      customFieldId?: never
+    }
+  | {
+      /** Value of one custom field. */
+      kind: 'custom-field'
+      /** Custom field definition ID. */
+      customFieldId: string
+    }
+
+/** One model's share of a comparison group. */
+export type FactoryAnalyticsComparisonModel = {
+  /** Model. */
+  model: string
+  /** Work Items of the group that used the model. */
+  workItemCount: number
+  /** Median tokens the model used per Work Item that used it. */
+  medianTokens: number
+  /** Median milliseconds of the model's requests per Work Item that used it. */
+  medianAiDurationMs: number
+}
+
+/** Work Items of one type and one size band or custom field value. */
+export type FactoryAnalyticsComparisonGroup = {
+  /** Work Item type; absent for Work Items without one. */
+  workItemTypeId?: string
+  /**
+   * Group value: a {@link WorkItemSizeBand} for the `size` axis, or the custom field value for the
+   * `custom-field` axis, with `none` for Work Items without a value.
+   */
+  value: string
+  /**
+   * `true` for the group of Work Items without a value (no estimate, or the custom field unset), so a
+   * select option whose ID is `none` stays apart from it.
+   */
+  missingValue?: true
+  /** Work Items in the group. */
+  workItemCount: number
+  /** Median minutes the agent runs of a Work Item lasted, from start to finish. */
+  medianRunMinutes: number
+  /** Median tokens of a Work Item. */
+  medianTokens: number
+  /** Median estimated cost of a Work Item, in millionths of US dollars; only Team managers receive it. */
+  medianCostMicroUsd?: number
+  /** Models the group's Work Items used, most Work Items first. */
+  models: FactoryAnalyticsComparisonModel[]
+}
+
+/** A Work Item whose agent time or tokens are far above the median of its group. */
+export type FactoryAnalyticsComparisonOutlier = {
+  /** Work Item ID. */
+  workItemId: string
+  /** Work Item title. */
+  title: string
+  /** Project of the Work Item, when it has one. */
+  projectId?: string
+  /** Work Item type; absent for Work Items without one. */
+  workItemTypeId?: string
+  /** Group value, as in {@link FactoryAnalyticsComparisonGroup.value}. */
+  value: string
+  /** Minutes the agent runs of the Work Item lasted, from start to finish. */
+  runMinutes: number
+  /** Milliseconds of model requests. */
+  aiDurationMs: number
+  /** Milliseconds of tool calls. */
+  toolDurationMs: number
+  /** Milliseconds of estimated waits for a person. */
+  waitDurationMs: number
+  /** Tokens of the Work Item. */
+  tokens: number
+  /** Estimated cost in millionths of US dollars; only Team managers receive it. */
+  estimatedCostMicroUsd?: number
+  /** The larger of run minutes and tokens divided by the group's median. */
+  ratio: number
+  /** Models the runs used, sorted. */
+  models: string[]
+  /** Runtimes of the runs, in {@link AGENT_RUN_RUNTIMES} order. */
+  runtimes: AgentRunRuntime[]
+  /** Member responsible for the Work Item when the newest counted run started. */
+  assigneeUserId: string
+  /** Runs counted. */
+  runCount: number
+  /** Counted runs that started after a `failed` or `completed` run of the same Work Item. */
+  reworkRuns: number
+}
+
+/**
+ * Work Items whose runs finished in the period, compared with others of the same type and size
+ * (ADR 0117). Only Work Items with usage or activity are counted.
+ */
+export type FactoryAnalyticsComparison = {
+  /** Axis that split the Work Items of one type. */
+  axis: FactoryAnalyticsComparisonAxis
+  /** Groups, most Work Items first, at most {@link FACTORY_ANALYTICS_MAX_COMPARISON_GROUPS}. */
+  groups: FactoryAnalyticsComparisonGroup[]
+  /** Outliers, largest ratio first, at most {@link FACTORY_ANALYTICS_MAX_OUTLIERS}. */
+  outliers: FactoryAnalyticsComparisonOutlier[]
+  /** Work Items counted without a size band or custom field value. */
+  unsizedWorkItems: number
 }
 
 /** Outcomes a finished Agent Run can have, for filtering the Run history. */

@@ -153,6 +153,11 @@ export async function readAuthorizedAnalyticsAgentUsage(
       tokens: usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheCreationTokens,
       ...(usage.estimatedCostMicroUsd === undefined ? {} : { estimatedCostMicroUsd: usage.estimatedCostMicroUsd }),
       hasMore: usage.hasMore,
+      byModel: usage.byModel.map((model) => ({
+        model: model.model,
+        tokens: model.inputTokens + model.outputTokens + model.cacheReadTokens + model.cacheCreationTokens,
+        ...(model.estimatedCostMicroUsd === undefined ? {} : { estimatedCostMicroUsd: model.estimatedCostMicroUsd }),
+      })),
     }
     return { key: `${teamId}\0${run.workItemId}`, usageRun }
   })

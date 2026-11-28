@@ -54,6 +54,7 @@ function bucket(bucketStart: string, instanceIdHash: string, costMicroUsd: numbe
     cacheCreationTokens: 0,
     costMicroUsd,
     requestCount: 1,
+    durationMs: 0,
   }
 }
 

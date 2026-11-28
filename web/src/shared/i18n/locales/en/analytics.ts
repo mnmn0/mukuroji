@@ -141,6 +141,7 @@ export const analyticsMessages = {
   'analytics.group.priority': 'Priority',
   'analytics.group.cycle': 'Cycle',
   'analytics.group.milestone': 'Milestone',
+  'analytics.group.model': 'Model',
   'analytics.group.customField': 'Custom field',
   'analytics.group.unset': 'Unassigned',
   'analytics.deliveries.label': 'Delivered to me',

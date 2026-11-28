@@ -260,6 +260,10 @@ evidence、定期配信の hash に含まれます。
 hash は変わりません。Software factory を deploy していない環境と定期配信の runner は usage を読まず、widget は
 warning だけを返します（hash にも Team を加えません）。
 
+この 2 つの widget だけが `groupBy: { "dimension": "model" }` を受け付けます（[ADR 0117](adr/0117-agent-run-time-breakdown-and-peer-comparison.md)）。
+Run のトークン・推定費用を request の model ごとに分け、model ごとの group にします。1 つの Run が複数の model を
+使った場合は、それぞれの group に 1 Run として数えます。他の metric で `model` を指定すると `AnalyticsGroupByInvalid` です。
+
 ### SPI / CPI / EAC（EVM）
 
 [ADR 0110](adr/0110-analytics-earned-value-metrics.md)。値は Project の予算レポート

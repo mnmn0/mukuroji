@@ -425,6 +425,16 @@ function isEarnedValueMetric(metric: AnalyticsMetricKey) {
 }
 
 /**
+ * Checks whether a metric adds up Agent Run telemetry, the only metrics that group by model.
+ *
+ * @param metric - Metric key.
+ * @returns Whether the metric is Agent tokens or Agent estimated cost.
+ */
+function isAgentUsageMetric(metric: AnalyticsMetricKey) {
+  return metric === 'agent-tokens' || metric === 'agent-cost'
+}
+
+/**
  * Keeps a widget's group-by valid for an earned value metric: Team or Project, and a chart always
  * groups by one of them.
  *
@@ -2134,7 +2144,9 @@ function AnalyticsWidgetEditor({
           onChange={(event) => {
             const metric = event.target.value as AnalyticsMetricKey
             // Only throughput, velocity, and remaining scope accept effort weighting, so other metrics drop it.
-            const next = isEffortWeightableMetric(metric) ? { ...widget, metric } : { ...withoutWidgetWeighting(widget), metric }
+            const weighted = isEffortWeightableMetric(metric) ? { ...widget, metric } : { ...withoutWidgetWeighting(widget), metric }
+            // Only Agent usage metrics split by model.
+            const next = weighted.groupBy?.dimension === 'model' && !isAgentUsageMetric(metric) ? { ...weighted, groupBy: undefined } : weighted
             // A Milestone trend groups by Milestone, so it keeps only a calendar bucket.
             onChange(metric === 'milestone-trend' && !isCalendarGroup(next.groupBy)
               ? { ...next, groupBy: next.type === 'chart' ? { dimension: 'week' } : undefined }
@@ -2179,6 +2191,7 @@ function AnalyticsWidgetEditor({
               'priority',
               'cycle',
               'milestone',
+              ...(isAgentUsageMetric(widget.metric) ? ['model'] : []),
               'custom-field',
             ]).map((dimension) => (
               <option key={dimension} value={dimension}>

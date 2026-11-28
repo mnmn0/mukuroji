@@ -1,4 +1,4 @@
-import type { AgentRunUsage, AgentRunView } from '@mukuroji/contracts'
+import type { AgentRunActivity, AgentRunUsage, AgentRunView } from '@mukuroji/contracts'
 import { useMemo, useState } from 'react'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { Locale } from '../../shared/i18n/i18n'
@@ -21,6 +21,8 @@ export type WorkItemAgentRunsPanelProps = {
   hasMore?: boolean
   /** Token usage of the listed runs added together. */
   usageTotal?: AgentRunUsage
+  /** Tool time and waits of the listed runs added together. */
+  activityTotal?: AgentRunActivity
   /** Locale-aware text. */
   labels: WorkItemAgentRunsLabels
   /** Whether the first page is loading. */
@@ -101,6 +103,7 @@ export function WorkItemAgentRunsPanelContainer({
       }}
       runs={data?.items ?? []}
       usageTotal={data?.usageTotal}
+      activityTotal={data?.activityTotal}
     />
   )
 }
@@ -121,6 +124,7 @@ export function WorkItemAgentRunsPanel({
   onRetry,
   runs,
   usageTotal,
+  activityTotal,
 }: WorkItemAgentRunsPanelProps) {
   const [releasingRunId, setReleasingRunId] = useState<string>()
   const [releaseFailed, setReleaseFailed] = useState(false)
@@ -167,6 +171,9 @@ export function WorkItemAgentRunsPanel({
       ) : null}
 
       {usageTotal ? <AgentRunUsageSummary labels={labels} usage={usageTotal} /> : null}
+      {activityTotal || (usageTotal && usageTotal.aiDurationMs > 0)
+        ? <AgentRunActivitySummary activity={activityTotal} labels={labels} usage={usageTotal} />
+        : null}
 
       {releaseFailed ? (
         <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
@@ -210,6 +217,9 @@ export function WorkItemAgentRunsPanel({
           {active.usage ? (
             <p className="text-xs font-medium text-[var(--workbench-muted)]" data-testid="agent-run-usage">{labels.formatUsageCompact(active.usage)}</p>
           ) : null}
+          {active.activity || (active.usage?.aiDurationMs ?? 0) > 0 ? (
+            <p className="text-xs font-medium text-[var(--workbench-muted)]" data-testid="agent-run-activity">{labels.formatActivityCompact(active.usage, active.activity)}</p>
+          ) : null}
           {active.stalled ? (
             <p className="text-xs font-semibold text-[var(--workbench-muted)]">{labels.stalledHint}</p>
           ) : null}
@@ -231,6 +241,7 @@ export function WorkItemAgentRunsPanel({
                   {run.finishedAt ? ` – ${formatDateTime(run.finishedAt)}` : ''}
                 </span>
                 {run.usage ? <span className="whitespace-nowrap" data-testid="agent-run-usage">{labels.formatUsageCompact(run.usage)}</span> : null}
+                {run.activity || (run.usage?.aiDurationMs ?? 0) > 0 ? <span className="min-w-0 [overflow-wrap:anywhere]" data-testid="agent-run-activity">{labels.formatActivityCompact(run.usage, run.activity)}</span> : null}
                 {run.startedBy ? (
                   <span className="min-w-0 [overflow-wrap:anywhere]" data-testid="agent-run-started-by" title={run.startedBy.instanceIdHash}>
                     {`${labels.startedByCredential}: ${formatAgentRunCredential(run.startedBy)} · ${labels.startedByInstance}: ${shortenAgentInstanceHash(run.startedBy.instanceIdHash)}`}
@@ -268,10 +279,52 @@ function AgentRunUsageSummary({ labels, usage }: {
         <span className="text-xs font-semibold text-[var(--workbench-text)]">{labels.formatUsageDetail(usage)}</span>
       </div>
       <p className="text-xs font-medium leading-5 text-[var(--workbench-text)]">{labels.formatUsageTokens(usage)}</p>
-      {usage.models.length > 0 ? (
+      {usage.byModel.length > 1 ? (
+        <div className="grid min-w-0 gap-0.5" data-testid="work-item-agent-run-models">
+          <h5 className="text-xs font-semibold text-[var(--workbench-muted)]">{labels.modelsTitle}</h5>
+          <ul className="grid min-w-0 gap-0.5">
+            {usage.byModel.map((model) => (
+              <li className="min-w-0 text-xs font-medium text-[var(--workbench-text)] [overflow-wrap:anywhere]" key={model.model}>{labels.formatModel(model)}</li>
+            ))}
+          </ul>
+        </div>
+      ) : usage.models.length > 0 ? (
         <p className="truncate text-xs font-medium text-[var(--workbench-muted)]">{usage.models.join(', ')}</p>
       ) : null}
       {usage.hasMore ? <p className="text-xs font-medium text-[var(--workbench-muted)]">{labels.usagePartial}</p> : null}
+    </div>
+  )
+}
+
+/** Number of tools the time breakdown lists. */
+const activityToolsShown = 5
+
+/**
+ * Shows where the time of a Work Item's listed runs went: model requests, tools, and waits.
+ *
+ * @param props - Usage, activity, and text.
+ * @returns Summary block.
+ */
+function AgentRunActivitySummary({ activity, labels, usage }: {
+  /** Tool time and waits added together over the listed runs. */
+  activity?: AgentRunActivity
+  /** Panel text. */
+  labels: WorkItemAgentRunsLabels
+  /** Usage with the model request time. */
+  usage?: AgentRunUsage
+}) {
+  return (
+    <div className="grid min-w-0 gap-1 rounded-md border border-[var(--workbench-border)] px-3 py-2" data-testid="work-item-agent-run-activity">
+      <h4 className="workbench-eyebrow text-[var(--workbench-muted)]" title={labels.activityHint}>{labels.activityTitle}</h4>
+      <p className="text-xs font-medium leading-5 text-[var(--workbench-text)]">{labels.formatActivityBreakdown(usage?.aiDurationMs ?? 0, activity)}</p>
+      {activity && activity.tools.length > 0 ? (
+        <ul className="grid min-w-0 gap-0.5">
+          {activity.tools.slice(0, activityToolsShown).map((tool) => (
+            <li className="min-w-0 text-xs font-medium text-[var(--workbench-muted)] [overflow-wrap:anywhere]" key={`${tool.kind}:${tool.name}`}>{labels.formatTool(tool)}</li>
+          ))}
+        </ul>
+      ) : null}
+      {activity?.hasMore ? <p className="text-xs font-medium text-[var(--workbench-muted)]">{labels.activityPartial}</p> : null}
     </div>
   )
 }
