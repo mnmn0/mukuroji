@@ -491,6 +491,12 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         readQuestionsForTask(id),
         readAttachmentsForTask(id),
       ])
+      // The details are read by ID, so the Work Item may have been deleted and created again under
+      // the same ID while they were read. The same key afterwards means they belong to the task read.
+      const after = await api.taskKey(id)
+      if (after?.key !== found?.key || after?.createdAt !== found?.createdAt) {
+        throw new AgentTaskError('conflict', 'The task was replaced while it was read. Read it again.', true)
+      }
       // The task may have moved to another Project while its linked Documents, questions, and files were read.
       if (scope.assignedProjectId !== undefined && ((relatedDocuments?.items.length ?? 0) > 0 || (questions?.items.length ?? 0) > 0 || (attachments?.length ?? 0) > 0)) {
         inScope(await api.get(id))
