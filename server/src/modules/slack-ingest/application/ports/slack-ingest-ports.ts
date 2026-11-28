@@ -152,7 +152,7 @@ export type SlackIngestAuditInput<AuditContext> = {
 }
 
 /** Outcome of a conditional message write. */
-export type SlackMessageWriteOutcome = 'written' | 'stale' | 'unmapped'
+export type SlackMessageWriteOutcome = 'written' | 'stale' | 'unmapped' | 'retention-changed'
 
 /** Persistence of the Slack ingest rows. */
 export interface SlackIngestStore<AuditContext = unknown> {
@@ -262,9 +262,16 @@ export interface SlackIngestStore<AuditContext = unknown> {
    * @param workspaceId - Workspace ID.
    * @param message - Message to store.
    * @param mappingRevision - Channel mapping revision the job read.
-   * @returns `stale` when a newer version or a deletion won, `unmapped` when the mapping changed.
+   * @param settingsRevision - Settings revision whose retention set the message's expiry.
+   * @returns `stale` when a newer version or a deletion won, `unmapped` when the mapping changed,
+   * `retention-changed` when the settings changed since they were read.
    */
-  putMessage(workspaceId: string, message: StoredSlackMessage, mappingRevision: number): Promise<SlackMessageWriteOutcome>
+  putMessage(
+    workspaceId: string,
+    message: StoredSlackMessage,
+    mappingRevision: number,
+    settingsRevision: number,
+  ): Promise<SlackMessageWriteOutcome>
   /**
    * Replaces a message with a short-lived tombstone and deletes its key rows.
    *

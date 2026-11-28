@@ -692,7 +692,12 @@ export class DynamoDbSlackIngestStore implements SlackIngestStore<MutationAuditC
    * @param message - Message.
    * @returns Whether it was written.
    */
-  async putMessage(workspaceId: string, message: StoredSlackMessage, mappingRevision: number): Promise<SlackMessageWriteOutcome> {
+  async putMessage(
+    workspaceId: string,
+    message: StoredSlackMessage,
+    mappingRevision: number,
+    settingsRevision: number,
+  ): Promise<SlackMessageWriteOutcome> {
     for (let attempt = 1; ; attempt += 1) {
       const existing = await this.getMessageRow(workspaceId, message)
       if (existing && (!existing.message || existing.version >= message.version)) return 'stale'
@@ -705,6 +710,22 @@ export class DynamoDbSlackIngestStore implements SlackIngestStore<MutationAuditC
             ConditionExpression: 'mappingRevision = :revision AND attribute_exists(#target)',
             ExpressionAttributeNames: { '#target': 'target' },
             ExpressionAttributeValues: { ':revision': mappingRevision },
+          },
+        },
+        {
+          // A retention change after the job read the settings would leave this expiry too long.
+          ConditionCheck: {
+            TableName: this.tableName,
+            Key: { workspaceId, recordKey: SETTINGS_KEY },
+            ConditionExpression: settingsRevision === 0
+              ? 'attribute_not_exists(recordKey)'
+              : '#revision = :settingsRevision',
+            ...(settingsRevision === 0
+              ? {}
+              : {
+                  ExpressionAttributeNames: { '#revision': 'revision' },
+                  ExpressionAttributeValues: { ':settingsRevision': settingsRevision },
+                }),
           },
         },
         {
@@ -727,6 +748,7 @@ export class DynamoDbSlackIngestStore implements SlackIngestStore<MutationAuditC
         return 'written'
       } catch (error) {
         if (isConditionFailureAt(error, 0)) return 'unmapped'
+        if (isConditionFailureAt(error, 1)) return 'retention-changed'
         if (!isConditionFailure(error) || attempt >= MESSAGE_WRITE_ATTEMPTS) throw error
       }
     }
@@ -954,18 +976,30 @@ export class DynamoDbSlackIngestStore implements SlackIngestStore<MutationAuditC
       if (!message) continue
       const expiresAt = messageExpiresAt(message.ts, retentionDays)
       if (message.expiresAt <= expiresAt) continue
-      for (const recordKey of [messageKey(message), ...parsed.keys.map((key) => keyIndexKey(key, message))]) {
-        try {
-          await this.client.send(new UpdateCommand({
-            TableName: this.tableName,
-            Key: { workspaceId, recordKey },
-            UpdateExpression: 'SET expiresAt = :expiresAt',
-            ConditionExpression: 'attribute_exists(recordKey) AND expiresAt > :expiresAt',
-            ExpressionAttributeValues: { ':expiresAt': expiresAt },
-          }))
-        } catch (error) {
-          if (!isConditionFailure(error)) throw error
-        }
+      // The message and its key rows change together, and only while the row is still this
+      // version of a live message, so a concurrent edit or deletion is never shortened.
+      const shorten = (recordKey: string, versioned: boolean): TransactItem => ({
+        Update: {
+          TableName: this.tableName,
+          Key: { workspaceId, recordKey },
+          UpdateExpression: 'SET expiresAt = :expiresAt',
+          ConditionExpression: versioned
+            ? 'attribute_exists(recordKey) AND #version = :version AND attribute_not_exists(deleted)'
+            : 'attribute_exists(recordKey)',
+          ...(versioned ? { ExpressionAttributeNames: { '#version': 'version' } } : {}),
+          ExpressionAttributeValues: { ':expiresAt': expiresAt, ...(versioned ? { ':version': message.version } : {}) },
+        },
+      })
+      try {
+        await this.client.send(new TransactWriteCommand({
+          TransactItems: [
+            shorten(messageKey(message), true),
+            ...parsed.keys.map((key) => shorten(keyIndexKey(key, message), false)),
+          ],
+        }))
+      } catch (error) {
+        // The message changed since it was read; its new write carries its own expiry.
+        if (!isConditionFailure(error)) throw error
       }
     }
     return response.LastEvaluatedKey && last ? { next: last } : {}

@@ -350,7 +350,7 @@ test('a message write after an unmap is fenced out, and cleanup runs without the
     channelId: CHANNEL, ts: RECENT_TS, userId: AUTHOR, text: 'MK-1', version: RECENT_TS,
     keys: ['MK-1'], permalink: 'https://example.slack.com/x', expiresAt: 9_999_999_999,
   }
-  expect(await store.putMessage(WS, message, 1)).toBe('unmapped')
+  expect(await store.putMessage(WS, message, 1, 0)).toBe('unmapped')
   expect(store.messages.size).toBe(0)
   const purge = queued.find((entry) => entry.job.kind === 'prune')
   if (!purge) throw new Error('purge was not queued')
@@ -410,6 +410,25 @@ test('retrying a saved change that could not queue its job queues it instead of 
   expect(queued.map((entry) => entry.job.kind)).toEqual(['backfill'])
   await expect(updateSlackChannelTarget(WS, CHANNEL, { kind: 'team', teamId: 'team-b' }, admin, audit))
     .rejects.toMatchObject({ code: 'SlackChannelMappingConflict' })
+})
+
+test('a message write that finds the retention changed is written with the new expiry', async () => {
+  const { store, ports } = createWorld()
+  const admin = { config: ports.config, store, queue: ports.queue }
+  await store.recordMembership(WS, { channelId: CHANNEL, isPrivate: false, membership: 'joined', now: NOW.toISOString() })
+  await updateSlackChannelTarget(WS, CHANNEL, { kind: 'team', teamId: 'team-a' }, admin, audit)
+  const putMessage = store.putMessage.bind(store)
+  let changed = false
+  store.putMessage = async (workspaceId, message, mappingRevision, settingsRevision) => {
+    if (!changed) {
+      changed = true
+      await updateSlackIngestSettings(WS, { retentionDays: 7, expectedRevision: 0 }, admin, audit)
+    }
+    return await putMessage(workspaceId, message, mappingRevision, settingsRevision)
+  }
+  expect(await runSlackIngestJob(posted(RECENT_TS, 'MK-1'), ports)).toBe('stored')
+  const [stored] = await store.getMessages(WS, [{ channelId: CHANNEL, ts: RECENT_TS }])
+  expect(stored?.expiresAt).toBe(Math.floor(Number(RECENT_TS)) + 7 * 86_400)
 })
 
 test('a superseded backfill stops, and jobs for another Workspace end', async () => {
@@ -475,7 +494,7 @@ test('a Work Item lists only messages in channels the caller can read, newest fi
   for (const [channelId, ts] of [[visible, older], [visible, RECENT_TS], [hidden, RECENT_TS]] as const) {
     await store.putMessage(WS, {
       channelId, ts, userId: AUTHOR, text: 'MK-9', version: ts, keys: ['MK-9'], permalink: 'https://example.slack.com/x', expiresAt: 9_999_999_999,
-    }, 1)
+    }, 1, 0)
   }
   const result = await listWorkItemSlackMessages(WS, 'MK-9', {
     store,

@@ -14,8 +14,8 @@ const meta = {
     teams: slackIngestTeamsFixture,
     t: createTranslator('ja'),
     onReload: fn(),
-    onSaveRetention: fn(),
-    onSetTarget: fn(),
+    onSaveRetention: fn(async () => true),
+    onSetTarget: fn(async () => true),
   },
 } satisfies Meta<typeof SlackIngestPanel>
 

@@ -65,7 +65,7 @@ test('a message write is conditional on the version read and replaces its key ro
     channelId: 'C012345678', ts: '1700000000.000100', userId: 'U012345678', text: 'MK-2 MK-3',
     version: '1700000100.000000', editedTs: '1700000100.000000', keys: ['MK-2', 'MK-3'],
     permalink: messageRow.permalink, expiresAt: 1800000000,
-  }, 2)
+  }, 2, 3)
   expect(outcome).toBe('written')
   const transaction = sent.find((command) => command.name === 'TransactWriteCommand')
   const items = transaction?.input.TransactItems
@@ -75,6 +75,13 @@ test('a message write is conditional on the version read and replaces its key ro
         Key: { workspaceId: 'w', recordKey: 'slack-ingest#channel#C012345678' },
         ConditionExpression: 'mappingRevision = :revision AND attribute_exists(#target)',
         ExpressionAttributeValues: { ':revision': 2 },
+      }),
+    },
+    {
+      ConditionCheck: expect.objectContaining({
+        Key: { workspaceId: 'w', recordKey: 'slack-ingest#settings' },
+        ConditionExpression: '#revision = :settingsRevision',
+        ExpressionAttributeValues: { ':settingsRevision': 3 },
       }),
     },
     {
@@ -99,8 +106,8 @@ test('an older version or a tombstone is not written', async () => {
   })
   const store = new DynamoDbSlackIngestStore('dev-platform', client)
   const base = { userId: 'U012345678', text: 'x', keys: [], permalink: 'https://example.slack.com/x', expiresAt: 1800000000, channelId: 'C012345678' }
-  expect(await store.putMessage('w', { ...base, ts: '1700000000.000100', version: '1700000100.000000' }, 1)).toBe('stale')
-  expect(await store.putMessage('w', { ...base, ts: '1700000001.000100', version: '1700000002.000000' }, 1)).toBe('stale')
+  expect(await store.putMessage('w', { ...base, ts: '1700000000.000100', version: '1700000100.000000' }, 1, 0)).toBe('stale')
+  expect(await store.putMessage('w', { ...base, ts: '1700000001.000100', version: '1700000002.000000' }, 1, 0)).toBe('stale')
   expect(sent.some((command) => command.name === 'TransactWriteCommand')).toBe(false)
 })
 
@@ -114,7 +121,7 @@ test('a message write fenced out by a mapping change reports unmapped', async ()
   expect(await store.putMessage('w', {
     channelId: 'C012345678', ts: '1700000000.000100', userId: 'U012345678', text: 'MK-1',
     version: '1700000000.000100', keys: ['MK-1'], permalink: messageRow.permalink, expiresAt: 1800000000,
-  }, 1)).toBe('unmapped')
+  }, 1, 0)).toBe('unmapped')
 })
 
 test('channel cleanup reads consistently and fences every delete on the mapping revision', async () => {
@@ -154,16 +161,18 @@ test('a shorter retention lowers the TTL of a kept message and its key rows only
   } as unknown as DynamoDBDocumentClient
   const store = new DynamoDbSlackIngestStore('dev-platform', client)
   expect(await store.shortenChannelExpiry('w', 'C012345678', undefined, 7, 1000)).toEqual({})
-  const updates = sent.filter((command) => command.name === 'UpdateCommand').map((command) => command.input)
+  const transaction = sent.find((command) => command.name === 'TransactWriteCommand')?.input.TransactItems
+  const updates = (Array.isArray(transaction) ? transaction : []).map((item: unknown) => Reflect.get(item as object, 'Update') as Record<string, unknown>)
   expect(updates.map((input) => Reflect.get(Reflect.get(input, 'Key') as object, 'recordKey'))).toEqual([
     messageRow.recordKey,
     'slack-ingest#key#MK-1#1700000000.000100#C012345678',
     'slack-ingest#key#MK-2#1700000000.000100#C012345678',
   ])
   expect(updates[0]).toMatchObject({
-    ConditionExpression: 'attribute_exists(recordKey) AND expiresAt > :expiresAt',
-    ExpressionAttributeValues: { ':expiresAt': 1700000000 + 7 * 86_400 },
+    ConditionExpression: 'attribute_exists(recordKey) AND #version = :version AND attribute_not_exists(deleted)',
+    ExpressionAttributeValues: expect.objectContaining({ ':expiresAt': 1700000000 + 7 * 86_400 }),
   })
+  expect(updates[1]).toMatchObject({ ConditionExpression: 'attribute_exists(recordKey)' })
 })
 
 test('a malformed stored row fails closed', async () => {

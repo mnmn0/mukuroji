@@ -17,6 +17,7 @@ import type {
   SlackIngestJob,
   SlackIngestQueue,
   SlackIngestStore,
+  SlackIngestSettings,
   SlackInstallation,
   SlackMessageWriteOutcome,
   SlackWebApi,
@@ -85,6 +86,23 @@ type JobContext = {
   now: Date
   /** Lazily checked installation. */
   installation?: SlackInstallation
+  /** Settings read for this job, reread when a write finds them changed. */
+  settings?: SlackIngestSettings
+}
+
+/** Attempts of one message write when the retention changes underneath it. */
+const RETENTION_RETRY_ATTEMPTS = 3
+
+/**
+ * Reads the Workspace settings once per job.
+ *
+ * @param context - Job context.
+ * @param refresh - Whether to read them again.
+ * @returns The settings.
+ */
+async function readSettings(context: JobContext, refresh = false): Promise<SlackIngestSettings> {
+  if (!context.settings || refresh) context.settings = await context.ports.store.getSettings(context.workspaceId)
+  return context.settings
 }
 
 /**
@@ -169,28 +187,30 @@ async function readAuthorName(context: JobContext, userId: string): Promise<stri
  *
  * @param context - Job context.
  * @param message - Normalized message.
- * @param retentionDays - Days messages are kept.
  * @param mappingRevision - Channel mapping revision the job read.
  * @returns The write outcome, or `expired` for a message past the retention.
  */
 async function storeMessage(
   context: JobContext,
   message: SlackMessageContent,
-  retentionDays: number,
   mappingRevision: number,
 ): Promise<SlackMessageWriteOutcome | 'expired'> {
   const nowSeconds = Math.floor(context.now.getTime() / 1000)
-  if (message.ts < retentionCutoffTs(nowSeconds, retentionDays)) return 'expired'
-  const installation = await readInstallation(context)
-  const authorName = await readAuthorName(context, message.userId)
-  const outcome = await context.ports.store.putMessage(context.workspaceId, {
-    ...message,
-    ...(authorName ? { authorName } : {}),
-    keys: extractWorkItemKeys(message.text),
-    permalink: buildSlackPermalink(installation.teamOrigin, message.channelId, message.ts, message.threadTs),
-    expiresAt: messageExpiresAt(message.ts, retentionDays),
-  }, mappingRevision)
-  return outcome
+  for (let attempt = 1; ; attempt += 1) {
+    const settings = await readSettings(context, attempt > 1)
+    if (message.ts < retentionCutoffTs(nowSeconds, settings.retentionDays)) return 'expired'
+    const installation = await readInstallation(context)
+    const authorName = await readAuthorName(context, message.userId)
+    // The write is fenced on the settings revision, so its expiry follows the current retention.
+    const outcome = await context.ports.store.putMessage(context.workspaceId, {
+      ...message,
+      ...(authorName ? { authorName } : {}),
+      keys: extractWorkItemKeys(message.text),
+      permalink: buildSlackPermalink(installation.teamOrigin, message.channelId, message.ts, message.threadTs),
+      expiresAt: messageExpiresAt(message.ts, settings.retentionDays),
+    }, mappingRevision, settings.revision)
+    if (outcome !== 'retention-changed' || attempt >= RETENTION_RETRY_ATTEMPTS) return outcome
+  }
 }
 
 /**
@@ -274,8 +294,7 @@ async function applyEvent(context: JobContext, job: Extract<SlackIngestJob, { ki
     )
     return 'deleted'
   }
-  const settings = await store.getSettings(context.workspaceId)
-  const outcome = await storeMessage(context, event.message, settings.retentionDays, channel.mappingRevision)
+  const outcome = await storeMessage(context, event.message, channel.mappingRevision)
   return outcome === 'written' ? 'stored' : 'skipped'
 }
 
@@ -298,7 +317,7 @@ async function runBackfillPage(context: JobContext, job: Extract<SlackIngestJob,
     }, nowIso)
     return 'not-member'
   }
-  const settings = await store.getSettings(context.workspaceId)
+  const settings = await readSettings(context)
   const oldest = retentionCutoffTs(Math.floor(context.now.getTime() / 1000), settings.retentionDays)
   const previous = channel.backfill?.importedCount ?? 0
   let imported = 0
@@ -312,7 +331,7 @@ async function runBackfillPage(context: JobContext, job: Extract<SlackIngestJob,
       if (rawTs && job.resumeBeforeTs && rawTs >= job.resumeBeforeTs) continue
       const message = readSlackMessageContent(job.channelId, raw)
       if (message) {
-        const outcome = await storeMessage(context, message, settings.retentionDays, job.mappingRevision)
+        const outcome = await storeMessage(context, message, job.mappingRevision)
         if (outcome === 'unmapped') return 'superseded'
         if (outcome === 'written') imported += 1
       }
@@ -325,7 +344,7 @@ async function runBackfillPage(context: JobContext, job: Extract<SlackIngestJob,
           const reply = readSlackMessageContent(job.channelId, rawReply)
           if (!reply?.threadTs) continue
           threadCount += 1
-          const outcome = await storeMessage(context, reply, settings.retentionDays, job.mappingRevision)
+          const outcome = await storeMessage(context, reply, job.mappingRevision)
           if (outcome === 'unmapped') return 'superseded'
           if (outcome === 'written') imported += 1
         }

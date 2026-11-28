@@ -41,10 +41,10 @@ export type SlackIngestPanelProps = {
   t: (key: MessageKey) => string
   /** Loads the status again. */
   onReload: () => void
-  /** Saves the retention. */
-  onSaveRetention: (retentionDays: number) => void
-  /** Maps or unmaps a channel. */
-  onSetTarget: (channel: SlackChannelSummary, target: SlackChannelTarget | null) => void
+  /** Saves the retention, resolving to whether the change succeeded. */
+  onSaveRetention: (retentionDays: number) => Promise<boolean>
+  /** Maps or unmaps a channel, resolving to whether the change succeeded. */
+  onSetTarget: (channel: SlackChannelSummary, target: SlackChannelTarget | null) => Promise<boolean>
 }
 
 /** Separator of the parts of a target select value. */
@@ -163,8 +163,9 @@ export function SlackIngestPanel({
               onSubmit={(event) => {
                 event.preventDefault()
                 if (isSlackIngestRetentionDays(retentionValue)) {
-                  onSaveRetention(retentionValue)
-                  setRetentionDraft(undefined)
+                  void onSaveRetention(retentionValue).then((succeeded) => {
+                    if (succeeded) setRetentionDraft(undefined)
+                  })
                 }
               }}
             >
@@ -238,8 +239,11 @@ export function SlackIngestPanel({
                             // After a failed change, saving the same target again retries the load or delete.
                             disabled={busy || (draft === current && !hasOperationError)}
                             onClick={() => {
-                              onSetTarget(channel, decodeTarget(draft))
-                              setTargetDrafts((drafts) => Object.fromEntries(Object.entries(drafts).filter(([id]) => id !== channel.channelId)))
+                              // Keep the draft until the change succeeds so a failure can be retried.
+                              void onSetTarget(channel, decodeTarget(draft)).then((succeeded) => {
+                                if (!succeeded) return
+                                setTargetDrafts((drafts) => Object.fromEntries(Object.entries(drafts).filter(([id]) => id !== channel.channelId)))
+                              })
                             }}
                             type="button"
                           >
