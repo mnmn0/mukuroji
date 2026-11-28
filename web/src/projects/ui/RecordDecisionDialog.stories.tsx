@@ -65,6 +65,8 @@ export const ChooseProject: Story = {
     const canvas = within(canvasElement)
     await expect(canvas.getByTestId('record-decision-dialog')).toBeVisible()
     await expect(canvas.getByTestId('record-decision-form-title')).toHaveValue('認証基盤は Cognito を使う')
+    // The required content is filled first, so the submission reaches the Project check.
+    await userEvent.type(canvas.getByTestId('record-decision-form-content'), 'Cognito のユーザープールに寄せる。')
     await userEvent.click(canvas.getByRole('button', { name: '保存' }))
     await expect(canvas.getByText('記録する Project を選んでください。')).toBeVisible()
   },
