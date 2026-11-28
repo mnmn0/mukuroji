@@ -16,6 +16,7 @@ import type {
 } from '@mukuroji/contracts'
 import {
   isCurrencyCode,
+  readWorkspaceAgentCostSettings,
   readPlanningUpdateTemplateSettings,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
@@ -387,6 +388,7 @@ function isTenantProfile(value: unknown): value is TenantProfile {
     (value.workPhases === undefined || readWorkspaceWorkPhaseSettings(value.workPhases) !== undefined) &&
     (value.fileTypes === undefined || readWorkspaceFileTypeSettings(value.fileTypes) !== undefined) &&
     (value.defaultCurrency === undefined || isCurrencyCode(value.defaultCurrency)) &&
+    (value.agentCost === undefined || readWorkspaceAgentCostSettings(value.agentCost) !== undefined) &&
     (value.status === 'active' || value.status === 'closing' || value.status === 'closed') &&
     (value.closedAt === undefined || typeof value.closedAt === 'string') &&
     (value.closedByOperationId === undefined || typeof value.closedByOperationId === 'string') &&

@@ -29,6 +29,7 @@ import type {
   WorkspaceFileTypeSettings,
   WorkspaceTimeEntryCategorySettings,
   WorkspaceWorkPhaseSettings,
+  WorkspaceAgentCostSettings,
 } from '@mukuroji/contracts'
 import {
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
@@ -36,6 +37,7 @@ import {
   findRemovedTimeEntryCategoryKeys,
   findRemovedWorkPhaseKeys,
   isCurrencyCode,
+  readWorkspaceAgentCostSettings,
   readPlanningUpdateTemplateSettings,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
@@ -309,6 +311,7 @@ export class DynamoDbTenantAdministrationClient implements
       ...(workPhases ? { workPhases } : {}),
       ...(input.fileTypes ? { fileTypes: readStoredFileTypes(input.fileTypes) } : {}),
       ...(input.defaultCurrency ? { defaultCurrency: readStoredDefaultCurrency(input.defaultCurrency) } : {}),
+      ...(input.agentCost ? { agentCost: readStoredAgentCost(input.agentCost) } : {}),
       revision: current.revision + 1,
       updatedAt: this.now(),
     }
@@ -2035,6 +2038,7 @@ function readTenantProfile(value: unknown): TenantProfile {
       ? {}
       : { fileTypes: readStoredFileTypes(value.fileTypes) }),
     ...(value.defaultCurrency === undefined ? {} : { defaultCurrency: readStoredDefaultCurrency(value.defaultCurrency) }),
+    ...(value.agentCost === undefined ? {} : { agentCost: readStoredAgentCost(value.agentCost) }),
     status,
     ...(closedAt ? { closedAt } : {}),
     ...(closedByOperationId ? { closedByOperationId } : {}),
@@ -2054,6 +2058,19 @@ function readTenantProfile(value: unknown): TenantProfile {
 function readStoredDefaultCurrency(value: unknown): string {
   if (!isCurrencyCode(value)) throw new Error('invalid tenant default currency')
   return value
+}
+
+/**
+ * Reads stored or already validated Workspace agent cost settings (ADR 0119).
+ *
+ * @param value - Settings candidate.
+ * @returns The settings.
+ * @throws Error when the settings are invalid.
+ */
+function readStoredAgentCost(value: unknown): WorkspaceAgentCostSettings {
+  const settings = readWorkspaceAgentCostSettings(value)
+  if (!settings) throw new Error('invalid tenant agent cost settings')
+  return settings
 }
 
 /**

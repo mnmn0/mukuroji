@@ -98,6 +98,7 @@ export function useTenantAdministrationMutations({
           ...(profile.workPhases ? { workPhases: profile.workPhases } : {}),
           ...(profile.fileTypes ? { fileTypes: profile.fileTypes } : {}),
           ...(profile.defaultCurrency ? { defaultCurrency: profile.defaultCurrency } : {}),
+          ...(profile.agentCost ? { agentCost: profile.agentCost } : {}),
           expectedRevision: profile.revision,
         }, context)
         // The saved categories reach the timesheets as soon as the server accepts them, even if
