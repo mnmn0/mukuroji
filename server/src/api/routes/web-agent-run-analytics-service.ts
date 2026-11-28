@@ -54,8 +54,8 @@ export type FactoryAnalyticsPeriod = {
   comparisonAxis: FactoryAnalyticsComparisonAxis
 }
 
-/** Custom field definition IDs accepted for the comparison axis: the stored ID shape, bounded in length. */
-const customFieldIdPattern = /^[A-Za-z0-9_-]{1,128}$/u
+/** Custom field definition IDs accepted for the comparison axis: the stored configuration ID shape (dots allowed). */
+const customFieldIdPattern = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu
 
 /**
  * Reads one period bound from a query parameter.
@@ -275,12 +275,15 @@ export async function getWebTeamFactoryAnalytics(
  *
  * @param workItem - Visible Work Item.
  * @param axis - Comparison axis.
- * @returns The size band or custom field value, or `none`.
+ * @returns The size band or custom field value, or undefined when the Work Item has none.
  */
-function comparisonValue(workItem: VisibleWorkItem, axis: FactoryAnalyticsComparisonAxis): string {
-  if (axis.kind === 'size') return workItemSizeBand(workItem.plannedEffortMinutes)
+function comparisonValue(workItem: VisibleWorkItem, axis: FactoryAnalyticsComparisonAxis): string | undefined {
+  if (axis.kind === 'size') {
+    const band = workItemSizeBand(workItem.plannedEffortMinutes)
+    return band === 'none' ? undefined : band
+  }
   const value = workItem.customFieldValues[axis.customFieldId]
-  if (value === undefined || value === '' || (Array.isArray(value) && value.length === 0)) return 'none'
+  if (value === undefined || value === '' || (Array.isArray(value) && value.length === 0)) return undefined
   return Array.isArray(value) ? [...value].sort().join(', ') : String(value)
 }
 
@@ -316,7 +319,8 @@ async function readPeriodUsage(
   const reads = await mapInOrderWithConcurrency(evaluated, analyticsReadConcurrency, async ({ run }) => {
     const [usage, activity] = await Promise.all([
       readAgentRunUsage(principal.directoryId, run, includeCost),
-      readAgentRunActivity(principal.directoryId, run),
+      // Every tool of each run, so the period's top tools are cut only after the runs are added together.
+      readAgentRunActivity(principal.directoryId, run, Number.MAX_SAFE_INTEGER),
     ])
     return { usage, activity }
   })
@@ -332,12 +336,13 @@ async function readPeriodUsage(
   const entries = new Map<string, AgentRunComparisonEntry>()
   evaluated.forEach(({ run, workItemId, workItem, rework }, index) => {
     if (run.finishedAt === undefined) return
+    const value = comparisonValue(workItem, period.comparisonAxis)
     const entry = entries.get(workItemId) ?? {
       workItemId,
       title: workItem.title,
       ...(workItem.projectId === undefined ? {} : { projectId: workItem.projectId }),
       ...(workItem.workItemTypeId === undefined ? {} : { workItemTypeId: workItem.workItemTypeId }),
-      value: comparisonValue(workItem, period.comparisonAxis),
+      ...(value === undefined ? {} : { value }),
       runs: [],
     }
     const read = reads[index]

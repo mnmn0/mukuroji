@@ -385,9 +385,14 @@ function byDurationThenName(left: AgentToolActivity, right: AgentToolActivity): 
  *
  * @param rows - Rows of one run.
  * @param hasMore - Whether more rows existed than were read.
+ * @param maxTools - Largest number of tools to list; a caller that adds runs together passes no limit and cuts afterwards.
  * @returns The activity, or undefined when nothing was found and nothing was left unread.
  */
-export function summarizeAgentActivity(rows: readonly AgentActivityRow[], hasMore: boolean): AgentRunActivity | undefined {
+export function summarizeAgentActivity(
+  rows: readonly AgentActivityRow[],
+  hasMore: boolean,
+  maxTools: number = AGENT_RUN_ACTIVITY_MAX_TOOLS,
+): AgentRunActivity | undefined {
   if (rows.length === 0 && !hasMore) return undefined
   const tools = new Map<string, AgentToolActivity>()
   const activity: AgentRunActivity = {
@@ -419,7 +424,7 @@ export function summarizeAgentActivity(rows: readonly AgentActivityRow[], hasMor
     activity.toolDurationMs += row.durationMs
     activity.toolFailureCount += row.failureCount
   }
-  activity.tools = [...tools.values()].sort(byDurationThenName).slice(0, AGENT_RUN_ACTIVITY_MAX_TOOLS)
+  activity.tools = [...tools.values()].sort(byDurationThenName).slice(0, maxTools)
   return activity
 }
 

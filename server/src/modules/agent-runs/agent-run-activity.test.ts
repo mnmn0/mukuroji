@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'bun:test'
-import { AGENT_ACTIVITY_MAX_WAIT_MS, workItemSizeBand } from '@mukuroji/contracts'
+import { AGENT_ACTIVITY_MAX_WAIT_MS, workItemSizeBand, type FactoryAnalyticsComparisonAxis } from '@mukuroji/contracts'
 import {
   classifyAgentTool,
   layoutAgentActivityRows,
   summarizeAgentActivity,
   type AgentActivityEvent,
+  type AgentActivityRow,
 } from './domain/agent-run-activity'
 import { compareFactoryWorkItems, summarizeFactoryActivity, type AgentRunComparisonEntry } from './domain/agent-run-comparison'
 import { DynamoDbAgentRunUsageStore, type AgentRunUsageDocumentClient } from './adapter-out/dynamodb/agent-run-usage-store'
@@ -112,14 +113,14 @@ describe('Factory comparison', () => {
    * @param id - Work Item ID.
    * @param minutes - Run minutes.
    * @param tokens - Input tokens.
-   * @param value - Axis value.
+   * @param value - Axis value; null for a Work Item without one.
    * @returns Comparison entry.
    */
-  const entry = (id: string, minutes: number, tokens: number, value = 'up-to-1d'): AgentRunComparisonEntry => ({
+  const entry = (id: string, minutes: number, tokens: number, value: string | null = 'up-to-1d'): AgentRunComparisonEntry => ({
     workItemId: id,
     title: `Title ${id}`,
     workItemTypeId: 'task',
-    value,
+    ...(value === null ? {} : { value }),
     runs: [{
       runtime: 'claude-code',
       assigneeUserId: 'member',
@@ -140,7 +141,7 @@ describe('Factory comparison', () => {
       entry('a', 60, 1_000),
       entry('b', 60, 1_100),
       entry('slow', 200, 1_000),
-      entry('loose', 600, 90_000, 'none'),
+      entry('loose', 600, 90_000, null),
       entry('only', 600, 90_000, 'up-to-3d'),
       { ...entry('no-telemetry', 999, 0), runs: [{ ...entry('x', 999, 0).runs[0]!, usage: undefined }] },
     ], false)
@@ -158,6 +159,28 @@ describe('Factory comparison', () => {
     expect(JSON.stringify(comparison)).not.toContain('estimatedCostMicroUsd')
     expect(comparison?.unsizedWorkItems).toBe(1)
     expect(compareFactoryWorkItems({ kind: 'size' }, [], true)).toBeUndefined()
+  })
+
+  test('keeps a select option named none apart from Work Items without a value', () => {
+    const axis: FactoryAnalyticsComparisonAxis = { kind: 'custom-field', customFieldId: 'story.points' }
+    const comparison = compareFactoryWorkItems(axis, [
+      entry('a', 60, 1_000, 'none'),
+      entry('b', 60, 1_000, 'none'),
+      entry('slow', 200, 1_000, 'none'),
+      entry('unset', 60, 1_000, null),
+    ], false)
+    expect(comparison?.groups.map((group) => [group.value, group.missingValue, group.workItemCount]))
+      .toEqual([['none', undefined, 3], ['none', true, 1]])
+    expect(comparison?.outliers.map((outlier) => outlier.workItemId)).toEqual(['slow'])
+    expect(comparison?.unsizedWorkItems).toBe(1)
+  })
+
+  test('lists more than the per-run tool limit when asked, so period totals add every tool', () => {
+    const rows = Array.from({ length: 40 }, (_, index): AgentActivityRow => ({
+      bucketStart: '2026-11-22T17:05:00Z', instanceIdHash: 'laptop', kind: 'tool', name: `builtin:T${index}`, count: 1, durationMs: index, failureCount: 0,
+    }))
+    expect(summarizeAgentActivity(rows, false)?.tools).toHaveLength(30)
+    expect(summarizeAgentActivity(rows, false, Number.MAX_SAFE_INTEGER)?.tools).toHaveLength(40)
   })
 
   test('size bands follow the effort estimate', () => {
@@ -214,5 +237,30 @@ describe('DynamoDB activity store', () => {
       Key: { directoryTeamId: 'ws#agent-session#member#member', recordKey: 'laptop#s1' },
       ConditionExpression: 'attribute_not_exists(#lastEventAtMs) OR #lastEventAtMs < :lastEventAtMs',
     })
+  })
+
+  test('reads unprocessed cursor keys again and fails the export when they stay unread', async () => {
+    let reads = 0
+    const store = new DynamoDbAgentRunUsageStore({
+      async send() {
+        reads += 1
+        if (reads === 1) {
+          return {
+            Responses: { runs: [{ recordKey: 'laptop#s1', lastEventAtMs: 5 }] },
+            UnprocessedKeys: { runs: { Keys: [{ directoryTeamId: 'ws#agent-session#member#member', recordKey: 'laptop#s2' }] } },
+          }
+        }
+        return { Responses: { runs: [{ recordKey: 'laptop#s2', lastEventAtMs: 7 }] } }
+      },
+    }, 'runs')
+    expect(await store.readSessionCursors('ws', 'member', ['laptop#s1', 'laptop#s2'])).toEqual(new Map([['laptop#s1', 5], ['laptop#s2', 7]]))
+    expect(reads).toBe(2)
+
+    const stuck = new DynamoDbAgentRunUsageStore({
+      async send() {
+        return { UnprocessedKeys: { runs: { Keys: [{ directoryTeamId: 'ws#agent-session#member#member', recordKey: 'laptop#s1' }] } } }
+      },
+    }, 'runs')
+    await expect(stuck.readSessionCursors('ws', 'member', ['laptop#s1'])).rejects.toMatchObject({ category: 'temporarily_unavailable' })
   })
 })

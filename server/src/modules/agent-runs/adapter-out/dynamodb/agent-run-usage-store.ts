@@ -30,6 +30,12 @@ export const AGENT_SESSION_CURSOR_DAYS = 8
 /** Keys one BatchGetItem call reads; DynamoDB allows 100. */
 const cursorsPerBatchGet = 100
 
+/** Batch reads of one cursor chunk before the export fails for the exporter to resend. */
+const cursorReadAttempts = 3
+
+/** First wait before reading unprocessed cursor keys again; it doubles on each attempt. */
+const cursorReadBackoffMs = 50
+
 /** Minimal DynamoDB command boundary used by the usage store. */
 export type AgentRunUsageDocumentClient = {
   /** Sends one query, transaction, batch read, or update. */
@@ -220,6 +226,24 @@ export function agentUsageRecordKey(bucket: Pick<AgentUsageBucket, 'bucketStart'
  */
 function expiresAfterDays(now: Date, days: number): number {
   return Math.floor(now.getTime() / 1_000) + days * 86_400
+}
+
+/**
+ * Reads the record keys DynamoDB left unprocessed in a cursor batch read.
+ *
+ * @param unprocessed - `UnprocessedKeys` of the response.
+ * @param tableName - Agent Runs table name.
+ * @returns Record keys to read again; empty when everything was read.
+ * @throws When the keys are not in the shape the read sent.
+ */
+function readUnprocessedRecordKeys(unprocessed: Record<string, unknown> | undefined, tableName: string): string[] {
+  const table = unprocessed?.[tableName]
+  if (table === undefined) return []
+  if (!isRecord(table) || !Array.isArray(table.Keys)) throw createAgentRunIntegrityError()
+  return table.Keys.map((key: unknown) => {
+    if (!isRecord(key) || typeof key.recordKey !== 'string') throw createAgentRunIntegrityError()
+    return key.recordKey
+  })
 }
 
 /**
@@ -588,20 +612,26 @@ export class DynamoDbAgentRunUsageStore implements AgentRunUsageStore {
     const partition = agentSessionCursorPartition(directoryId, memberKey)
     const unique = [...new Set(sessionKeys)]
     for (let start = 0; start < unique.length; start += cursorsPerBatchGet) {
-      const keys = unique.slice(start, start + cursorsPerBatchGet).map((recordKey) => ({ directoryTeamId: partition, recordKey }))
-      try {
-        const result = await this.#client.send(new BatchGetCommand({ RequestItems: { [this.#tableName]: { Keys: keys } } }))
-        for (const item of result.Responses?.[this.#tableName] ?? []) {
-          const { recordKey, lastEventAtMs } = item
-          if (typeof recordKey !== 'string' || typeof lastEventAtMs !== 'number' || !Number.isSafeInteger(lastEventAtMs)) {
-            throw createAgentRunIntegrityError()
+      let pending = unique.slice(start, start + cursorsPerBatchGet)
+      for (let attempt = 0; pending.length > 0; attempt += 1) {
+        // A session left unread would lose its cross-export wait, so a partial read fails the export for a retry.
+        if (attempt >= cursorReadAttempts) throw createAgentUsageUnavailableError()
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, cursorReadBackoffMs * 2 ** (attempt - 1)))
+        const keys = pending.map((recordKey) => ({ directoryTeamId: partition, recordKey }))
+        try {
+          const result = await this.#client.send(new BatchGetCommand({ RequestItems: { [this.#tableName]: { Keys: keys } } }))
+          for (const item of result.Responses?.[this.#tableName] ?? []) {
+            const { recordKey, lastEventAtMs } = item
+            if (typeof recordKey !== 'string' || typeof lastEventAtMs !== 'number' || !Number.isSafeInteger(lastEventAtMs)) {
+              throw createAgentRunIntegrityError()
+            }
+            cursors.set(recordKey, lastEventAtMs)
           }
-          cursors.set(recordKey, lastEventAtMs)
+          pending = readUnprocessedRecordKeys(result.UnprocessedKeys, this.#tableName)
+        } catch (error) {
+          if (isTransientUsageWriteFailure(error)) throw createAgentUsageUnavailableError()
+          throw error
         }
-        // Unprocessed keys read as no cursor: the waits of those sessions in this export are not counted.
-      } catch (error) {
-        if (isTransientUsageWriteFailure(error)) throw createAgentUsageUnavailableError()
-        throw error
       }
     }
     return cursors

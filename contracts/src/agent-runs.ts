@@ -1203,6 +1203,11 @@ export type FactoryAnalyticsComparisonGroup = {
    * `custom-field` axis, with `none` for Work Items without a value.
    */
   value: string
+  /**
+   * `true` for the group of Work Items without a value (no estimate, or the custom field unset), so a
+   * select option whose ID is `none` stays apart from it.
+   */
+  missingValue?: true
   /** Work Items in the group. */
   workItemCount: number
   /** Median minutes the agent runs of a Work Item lasted, from start to finish. */

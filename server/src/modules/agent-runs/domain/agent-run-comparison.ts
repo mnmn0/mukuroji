@@ -46,8 +46,8 @@ export type AgentRunComparisonEntry = {
   projectId?: string
   /** Work Item type, when it has one. */
   workItemTypeId?: string
-  /** Value on the comparison axis; `none` when the Work Item has no value. */
-  value: string
+  /** Value on the comparison axis; absent when the Work Item has no estimate or no value in the custom field. */
+  value?: string
   /** Counted runs, oldest start first. */
   runs: AgentRunComparisonRun[]
 }
@@ -164,7 +164,8 @@ export function compareFactoryWorkItems(
   if (totals.length === 0) return undefined
   const groups = new Map<string, WorkItemTotals[]>()
   for (const item of totals) {
-    const key = `${item.entry.workItemTypeId ?? ''}\u0000${item.entry.value}`
+    // A missing value keys apart from every real value, including an option whose ID is `none`.
+    const key = `${item.entry.workItemTypeId ?? ''}\u0000${item.entry.value === undefined ? '\u0000' : `=${item.entry.value}`}`
     const list = groups.get(key) ?? []
     list.push(item)
     groups.set(key, list)
@@ -178,14 +179,16 @@ export function compareFactoryWorkItems(
     const medianTokens = median(items.map((item) => item.tokens))
     groupResults.push({
       ...(first.entry.workItemTypeId === undefined ? {} : { workItemTypeId: first.entry.workItemTypeId }),
-      value: first.entry.value,
+      value: first.entry.value ?? 'none',
+      ...(first.entry.value === undefined ? { missingValue: true } : {}),
       workItemCount: items.length,
       medianRunMinutes: round1(medianRunMinutes),
       medianTokens: Math.round(medianTokens),
       ...(includeCost ? { medianCostMicroUsd: Math.round(median(items.map((item) => item.usage?.estimatedCostMicroUsd ?? 0))) } : {}),
       models: groupModels(items),
     })
-    if (first.entry.value === 'none' || items.length < FACTORY_ANALYTICS_OUTLIER_MIN_GROUP_SIZE) continue
+    const groupValue = first.entry.value
+    if (groupValue === undefined || items.length < FACTORY_ANALYTICS_OUTLIER_MIN_GROUP_SIZE) continue
     for (const item of items) {
       const minutesRatio = medianRunMinutes > 0 ? item.runMinutes / medianRunMinutes : 0
       const tokensRatio = medianTokens > 0 ? item.tokens / medianTokens : 0
@@ -198,7 +201,7 @@ export function compareFactoryWorkItems(
         title: item.entry.title,
         ...(item.entry.projectId === undefined ? {} : { projectId: item.entry.projectId }),
         ...(item.entry.workItemTypeId === undefined ? {} : { workItemTypeId: item.entry.workItemTypeId }),
-        value: item.entry.value,
+        value: groupValue,
         runMinutes: round1(item.runMinutes),
         aiDurationMs: item.usage?.aiDurationMs ?? 0,
         toolDurationMs: item.activity?.toolDurationMs ?? 0,
@@ -225,7 +228,7 @@ export function compareFactoryWorkItems(
     outliers: outliers
       .sort((left, right) => right.ratio - left.ratio || left.workItemId.localeCompare(right.workItemId))
       .slice(0, FACTORY_ANALYTICS_MAX_OUTLIERS),
-    unsizedWorkItems: totals.filter((item) => item.entry.value === 'none').length,
+    unsizedWorkItems: totals.filter((item) => item.entry.value === undefined).length,
   }
 }
 

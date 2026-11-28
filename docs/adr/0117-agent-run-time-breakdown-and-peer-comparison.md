@@ -60,7 +60,7 @@ custom field がある。費用は「なるべく安く」が方針。
   見積もりなし）、query の `compareFieldId` で custom field の値に替えられる。group ごとに Run の所要分（開始〜終了の合計）・
   トークン・推定費用（manager のみ）の中央値と、model ごとの中央値を返す。3 件以上の group で、所要分かトークンが中央値の
   2 倍以上の Work Item を外れ値として、比率・model・runtime・担当・Run 数・手戻り回数・tool と待ちの時間付きで最大 20 件
-  返す。値のない Work Item は `none` の group として件数だけ数える。
+  返す。値のない Work Item は `none` の group（`missingValue: true` を付け、ID が `none` の選択肢とは分ける）として件数だけ数える。
 - **Analytics の model 軸**：`AnalyticsGroupBy` に `model` を足す。`agent-tokens` と `agent-cost` だけが受け付け、Run の
   トークン・費用を request の model ごとに分けて group にする。他の metric では validation error。新しい metric は足さない。
 

@@ -197,9 +197,9 @@ function readComparisonModel(value: unknown): FactoryAnalyticsComparisonModel | 
 function readComparisonGroup(value: unknown): FactoryAnalyticsComparisonGroup | undefined {
   if (!isRecord(value)) return undefined
   const models = readList(value.models, readComparisonModel)
-  const { workItemTypeId, workItemCount, medianRunMinutes, medianTokens, medianCostMicroUsd } = value
+  const { workItemTypeId, workItemCount, medianRunMinutes, medianTokens, medianCostMicroUsd, missingValue } = value
   if (
-    !models || typeof value.value !== 'string' || (workItemTypeId !== undefined && typeof workItemTypeId !== 'string') ||
+    !models || typeof value.value !== 'string' || (missingValue !== undefined && missingValue !== true) || (workItemTypeId !== undefined && typeof workItemTypeId !== 'string') ||
     !isNonnegativeSafeInteger(workItemCount) || !isNonNegativeNumber(medianRunMinutes) || !isNonnegativeSafeInteger(medianTokens) ||
     (medianCostMicroUsd !== undefined && !isNonnegativeSafeInteger(medianCostMicroUsd))
   ) {
@@ -208,6 +208,7 @@ function readComparisonGroup(value: unknown): FactoryAnalyticsComparisonGroup | 
   return {
     ...(workItemTypeId === undefined ? {} : { workItemTypeId }),
     value: value.value,
+    ...(missingValue === true ? { missingValue } : {}),
     workItemCount,
     medianRunMinutes,
     medianTokens,

@@ -3304,6 +3304,7 @@ describe('Factory board route', () => {
     expect(tooLong.status).toBe(400)
     expect(await tooLong.json()).toMatchObject({ code: 'validation_failed' })
     expect((await app.request(`${path}${period}&compareFieldId=field-size`, { headers })).status).toBe(200)
+    expect((await app.request(`${path}${period}&compareFieldId=story.points`, { headers })).status).toBe(200)
     const badField = await app.request(`${path}${period}&compareFieldId=${encodeURIComponent('a#b')}`, { headers })
     expect(badField.status).toBe(400)
     expect(await badField.json()).toMatchObject({ code: 'validation_failed' })

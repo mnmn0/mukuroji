@@ -163,4 +163,33 @@ describe('Factory analytics time breakdown and comparison', () => {
     expect(html).toContain('見積もりや値がないタスク 4 件は比べていません。')
     expect(html).toContain('Story points')
   })
+  test('names an option whose ID is none apart from the group without a value', () => {
+    const group = factoryAnalyticsWithUsageFixture.comparison?.groups[0]
+    if (!group || !factoryAnalyticsWithUsageFixture.comparison) throw new Error('fixture has no group')
+    const analytics = {
+      ...factoryAnalyticsWithUsageFixture,
+      comparison: {
+        ...factoryAnalyticsWithUsageFixture.comparison,
+        axis: { kind: 'custom-field' as const, customFieldId: 'points' },
+        groups: [{ ...group, value: 'none', workItemCount: 3 }, { ...group, value: 'none', missingValue: true as const, workItemCount: 2 }],
+        outliers: [],
+      },
+    }
+    const html = renderToStaticMarkup(
+      <FactoryAnalyticsSummary
+        analytics={analytics}
+        comparisonFields={[{ id: 'points', name: 'Story points', optionNames: { none: 'ポイントなし' } }]}
+        formatNumber={(value) => String(value)}
+        isLoading={false}
+        labels={createFactoryAnalyticsLabels('ja')}
+        onCompareFieldChange={() => undefined}
+        onPeriodDaysChange={() => undefined}
+        onRetry={() => undefined}
+        periodDays={30}
+        workItemTypeNames={{ task: 'タスク' }}
+      />,
+    )
+    expect(html).toContain('タスク ・ポイントなし: 3 件')
+    expect(html).toContain(`タスク ・${createFactoryAnalyticsLabels('ja').sizeBands.none}: 2 件`)
+  })
 })

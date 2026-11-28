@@ -38,9 +38,14 @@ export async function readAgentRunUsage(directoryId: string, run: StoredAgentRun
  *
  * @param directoryId - Workspace ID.
  * @param run - Run.
+ * @param maxTools - Largest number of tools to list; Factory analytics passes no limit so period totals stay whole.
  * @returns The run's activity, or undefined when none arrived.
  */
-export async function readAgentRunActivity(directoryId: string, run: StoredAgentRun): Promise<AgentRunActivity | undefined> {
+export async function readAgentRunActivity(
+  directoryId: string,
+  run: StoredAgentRun,
+  maxTools?: number,
+): Promise<AgentRunActivity | undefined> {
   const range = agentUsageRunBucketRange(run)
   const page = await workItemDependencies.agentRunUsage.listMemberActivity(
     directoryId,
@@ -50,5 +55,5 @@ export async function readAgentRunActivity(directoryId: string, run: StoredAgent
     range.until,
     AGENT_RUN_USAGE_MAX_BUCKETS_PER_RUN,
   )
-  return summarizeAgentActivity(page.rows.filter((row) => isAgentUsageBucketInRun(row, run)), page.hasMore)
+  return summarizeAgentActivity(page.rows.filter((row) => isAgentUsageBucketInRun(row, run)), page.hasMore, maxTools)
 }

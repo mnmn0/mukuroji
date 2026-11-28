@@ -244,14 +244,15 @@ function ComparisonSummary({ comparison, labels, formatNumber, fields, compareFi
   /**
    * Names a group value on the current axis.
    * @param value - Size band or custom field value.
+   * @param missing - Whether the group holds Work Items without a value.
    * @returns Display text.
    */
-  const valueName = (value: string) => {
+  const valueName = (value: string, missing = false) => {
+    if (missing) return labels.sizeBands.none
     if (comparison.axis.kind === 'size') {
       const band = WORK_ITEM_SIZE_BANDS.find((candidate) => candidate === value)
       return band === undefined ? value : labels.sizeBands[band]
     }
-    if (value === 'none') return labels.sizeBands.none
     return value.split(', ').map((part) => field?.optionNames?.[part] ?? part).join(', ')
   }
   /**
@@ -287,10 +288,10 @@ function ComparisonSummary({ comparison, labels, formatNumber, fields, compareFi
           <h4 className="text-xs font-semibold text-[var(--workbench-muted)]">{labels.comparisonGroups}</h4>
           <ul className="flex flex-col gap-1">
             {comparison.groups.map((group) => (
-              <li className="min-w-0 text-sm text-[var(--workbench-text)] [overflow-wrap:anywhere]" key={`${group.workItemTypeId ?? ''}:${group.value}`}>
+              <li className="min-w-0 text-sm text-[var(--workbench-text)] [overflow-wrap:anywhere]" key={`${group.workItemTypeId ?? ''}:${group.missingValue ? '' : '='}${group.value}`}>
                 {labels.comparisonGroupLine
                   .replace('{type}', typeName(group.workItemTypeId))
-                  .replace('{value}', valueName(group.value))
+                  .replace('{value}', valueName(group.value, group.missingValue))
                   .replace('{count}', formatNumber(group.workItemCount))
                   .replace('{minutes}', formatNumber(group.medianRunMinutes))
                   .replace('{tokens}', formatNumber(group.medianTokens))}
