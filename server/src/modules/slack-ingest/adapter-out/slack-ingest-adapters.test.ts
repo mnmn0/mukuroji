@@ -76,9 +76,9 @@ test('a message write is conditional on the version read and replaces its key ro
         ExpressionAttributeValues: { ':previousVersion': '1700000000.000100' },
       }),
     },
-    { Delete: { TableName: 'dev-platform', Key: { workspaceId: 'w', recordKey: 'slack-ingest#key#MK-1#C012345678#1700000000.000100' } } },
-    { Put: expect.objectContaining({ Item: expect.objectContaining({ recordKey: 'slack-ingest#key#MK-2#C012345678#1700000000.000100', expiresAt: 1800000000 }) }) },
-    { Put: expect.objectContaining({ Item: expect.objectContaining({ recordKey: 'slack-ingest#key#MK-3#C012345678#1700000000.000100' }) }) },
+    { Delete: { TableName: 'dev-platform', Key: { workspaceId: 'w', recordKey: 'slack-ingest#key#MK-1#1700000000.000100#C012345678' } } },
+    { Put: expect.objectContaining({ Item: expect.objectContaining({ recordKey: 'slack-ingest#key#MK-2#1700000000.000100#C012345678', expiresAt: 1800000000 }) }) },
+    { Put: expect.objectContaining({ Item: expect.objectContaining({ recordKey: 'slack-ingest#key#MK-3#1700000000.000100#C012345678' }) }) },
   ])
 })
 

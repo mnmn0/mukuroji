@@ -261,7 +261,7 @@ export class InMemorySlackIngestStore implements SlackIngestStore {
     const refs = [...this.messages.entries()]
       .filter(([entryKey, entry]) => entryKey.startsWith(`${workspaceId}#`) && entry.message?.keys.includes(key))
       .flatMap(([, entry]) => entry.message ? [{ channelId: entry.message.channelId, ts: entry.message.ts }] : [])
-      .sort((left, right) => refKey(left).localeCompare(refKey(right)))
+      .sort((left, right) => right.ts.localeCompare(left.ts) || right.channelId.localeCompare(left.channelId))
     return { refs: refs.slice(0, limit), truncated: refs.length > limit }
   }
 

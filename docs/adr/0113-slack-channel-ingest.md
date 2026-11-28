@@ -54,7 +54,7 @@ Workspace の export と削除は既存の developer-platform の対象に入る
 | 接続 | `slack-ingest#installation` | Slack team の URL、bot user ID、確認時刻 |
 | channel | `slack-ingest#channel#<channelId>` | 名前、private か、bot が参加中か、対応先、対応の revision、過去分読み込みの状態 |
 | 発言 | `slack-ingest#message#<channelId>#<ts>` | thread の `ts`、発言者 ID と表示名、本文（最大 8,000 文字）、Work Item key、permalink、版、`expiresAt` |
-| key 索引 | `slack-ingest#key#<Work Item key>#<channelId>#<ts>` | 発言を Work Item key から引く。`expiresAt` は発言と同じ |
+| key 索引 | `slack-ingest#key#<Work Item key>#<ts>#<channelId>` | 発言を Work Item key から新しい順に引く。`expiresAt` は発言と同じ |
 | 発言者 | `slack-ingest#user#<userId>` | 表示名の cache（7 日で TTL） |
 
 - 編集は版（`edited.ts`、なければ `ts`）が新しいときだけ上書きする条件付き書き込みにし、順不同に届いても戻らない。

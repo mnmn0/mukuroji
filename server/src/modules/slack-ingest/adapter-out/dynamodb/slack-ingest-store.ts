@@ -91,14 +91,15 @@ function keyIndexPrefix(key: string): string {
 }
 
 /**
- * Builds a key index row key.
+ * Builds a key index row key. The time comes first so a descending query reads the newest
+ * messages first.
  *
  * @param key - Canonical Work Item key.
  * @param ref - Message.
  * @returns The record key.
  */
 function keyIndexKey(key: string, ref: SlackMessageRef): string {
-  return `${keyIndexPrefix(key)}${ref.channelId}#${ref.ts}`
+  return `${keyIndexPrefix(key)}${ref.ts}#${ref.channelId}`
 }
 
 /**
@@ -789,6 +790,7 @@ export class DynamoDbSlackIngestStore implements SlackIngestStore<MutationAuditC
         TableName: this.tableName,
         KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
         ExpressionAttributeValues: { ':workspaceId': workspaceId, ':prefix': keyIndexPrefix(key) },
+        ScanIndexForward: false,
         Limit: limit + 1 - refs.length,
         ...(startKey ? { ExclusiveStartKey: startKey } : {}),
       }))

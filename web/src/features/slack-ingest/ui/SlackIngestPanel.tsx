@@ -230,7 +230,8 @@ export function SlackIngestPanel({
                           </select>
                           <button
                             className="workbench-button-primary min-h-10 px-4"
-                            disabled={busy || draft === current}
+                            // After a failed change, saving the same target again retries the load or delete.
+                            disabled={busy || (draft === current && !hasOperationError)}
                             onClick={() => {
                               onSetTarget(channel, decodeTarget(draft))
                               setTargetDrafts((drafts) => Object.fromEntries(Object.entries(drafts).filter(([id]) => id !== channel.channelId)))
