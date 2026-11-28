@@ -6,6 +6,7 @@ import {
   buildAgentAnalyticsEventRows,
   createAgentUsageUnavailableError,
   deriveAgentActivityBatchId,
+  deriveAgentAnalyticsBatchId,
   deriveAgentTelemetryBatchId,
   layoutAgentActivityRows,
   layoutAgentUsageBuckets,
@@ -144,7 +145,7 @@ async function writeAnalyticsEvents(
       workspaceId: directoryId,
       memberKey: memberPseudonym,
       // The same export gives the same event IDs, so Athena can drop a retried export's copies.
-      batchId: deriveAgentActivityBatchId(memberKey, parsed.wellFormedActivityEvents),
+      batchId: deriveAgentAnalyticsBatchId(memberKey, parsed.analyticsEvents),
       receivedAt,
       events: parsed.analyticsEvents,
     }))

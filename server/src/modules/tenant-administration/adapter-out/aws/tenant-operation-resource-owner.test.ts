@@ -866,9 +866,11 @@ describe('AwsTenantOperationResourceOwner', () => {
     }
   })
 
-  test('deletes the shared analytics delivery-error prefix on closure', async () => {
+  test.each([
+    [24, 'agent-analytics-errors/', 'agent-analytics-errors/events/processing-failed/dt=2026-08-01/part-1'],
+    [25, 'athena-results/', 'athena-results/query-1.csv'],
+  ])('deletes the shared analytics prefix at index %i on closure', async (targetIndex, prefix, errorObjectKey) => {
     const workspaceId = 'workspace-1'
-    const errorObjectKey = 'agent-analytics-errors/events/processing-failed/dt=2026-08-01/part-1'
     const listedPrefixes: string[] = []
     const deletionBodies: string[] = []
     const s3Client = new S3Client({
@@ -914,9 +916,9 @@ describe('AwsTenantOperationResourceOwner', () => {
 
     try {
       // Regular files start at index 17; the three analytics tables follow the audit exports
-      // (17-20 and 21-23), so the delivery-error prefix is index 24.
-      await owner.execute(createDataJob(24, workspaceId), createOperation(workspaceId))
-      expect(listedPrefixes).toEqual(['agent-analytics-errors/'])
+      // (17-20 and 21-23), then the delivery errors (24) and the Athena query results (25).
+      await owner.execute(createDataJob(targetIndex, workspaceId), createOperation(workspaceId))
+      expect(listedPrefixes).toEqual([prefix])
       expect(deletionBodies).toHaveLength(1)
       expect(deletionBodies[0]).toContain(errorObjectKey)
     } finally {

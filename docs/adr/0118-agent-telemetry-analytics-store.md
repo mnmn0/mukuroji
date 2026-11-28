@@ -51,7 +51,7 @@ ADR 0117 で、tool・待ち時間・model ごとの時間を DynamoDB に足し
 - **書き込み**：
   - 受け口は usage・activity の保存（ADR 0061・0117）が終わってから、重複でない export だけを送る。1 回の export の行を
     改行区切りの JSON 1 record（最大 900 KiB、500 行まで。de-aggregation の上限）にまとめ、Firehose の record de-aggregation で行に戻す。Firehose は record ごとに
-    5 KB 単位で課金するので、行ごとに送るより安い。`event_id` は export の ID と順番から作り、再送された export を Athena で
+    5 KB 単位で課金するので、行ごとに送るより安い。`event_id` は export の ID（保存する全項目の hash。model や token 数だけが違う export は別の ID になる）と順番から作り、再送された export を Athena で
     除ける。
   - 送信の失敗は log に残して捨て、API の応答は変えない（best-effort）。Firehose が断った record は 2 回まで送り直す。
   - Run の開始時は、その Run の ID を Agent Runs table の global partition `agent-analytics-watch#<UTC 日付>` に置く
@@ -63,7 +63,8 @@ ADR 0117 で、tool・待ち時間・model ごとの時間を DynamoDB に足し
   `workspace_key=<hash>/`）加え、エクスポートでは読み、閉鎖では消し、検証では残っていないことを確かめる。
   Firehose が変換できなかった record は Workspace で分けられない共有の `agent-analytics-errors/` に入り、どの Workspace の行も
   含みうるので、閉鎖ではこの prefix を全部消し、エクスポートには入れない（失敗 object は 30 日で消える調査用の写しで、失っても
-  data は欠けない）。analytics bucket がある環境では、閉鎖の最初のエクスポートを要求から 30 分待つ。Firehose は最大 900 秒
+  data は欠けない）。Athena の query 結果（`athena-results/`、7 日で消える）も同じ理由で、閉鎖では全部消し、エクスポートに
+  入れない。analytics bucket がある環境では、閉鎖の最初のエクスポートを要求から 30 分待つ。Firehose は最大 900 秒
   buffer し、その 1.5 倍まで遅れて届け、dynamic partitioning を 300 秒送り直すので、閉鎖前に受けた record は 27.5 分以内に S3 に
   届く。
 

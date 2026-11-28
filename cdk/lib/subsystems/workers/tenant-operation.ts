@@ -701,7 +701,8 @@ function grantTenantResourceOwner(
  *
  * @param target Resource-owner Lambda.
  * @param bucket Analytics bucket, when the deployment has it.
- * @param objectActions Object actions on `agent-analytics/*` and `agent-analytics-errors/*`; none for verification.
+ * @param objectActions Object actions on `agent-analytics/*`, `agent-analytics-errors/*`, and
+ *   `athena-results/*`; none for verification.
  */
 function grantAgentAnalyticsAccess(
   target: lambdaNodejs.NodejsFunction,
@@ -712,12 +713,16 @@ function grantAgentAnalyticsAccess(
   target.addToRolePolicy(new iam.PolicyStatement({
     actions: ['s3:ListBucket', 's3:ListBucketVersions'],
     resources: [bucket.bucketArn],
-    conditions: { StringLike: { 's3:prefix': ['agent-analytics/*', 'agent-analytics-errors/*'] } },
+    conditions: { StringLike: { 's3:prefix': ['agent-analytics/*', 'agent-analytics-errors/*', 'athena-results/*'] } },
   }));
   if (objectActions.length === 0) return;
   target.addToRolePolicy(new iam.PolicyStatement({
     actions: [...objectActions],
-    resources: [bucket.arnForObjects('agent-analytics/*'), bucket.arnForObjects('agent-analytics-errors/*')],
+    resources: [
+      bucket.arnForObjects('agent-analytics/*'),
+      bucket.arnForObjects('agent-analytics-errors/*'),
+      bucket.arnForObjects('athena-results/*'),
+    ],
   }));
 }
 

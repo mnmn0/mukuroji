@@ -2494,8 +2494,8 @@ const AGENT_ANALYTICS_TABLE_PREFIXES = ['events', 'runs', 'work-items'] as const
 
 /**
  * Lists a Workspace's namespaces in the agent telemetry analytics bucket: one prefix per table,
- * partitioned by the SHA-256 of the Workspace ID, and the shared prefix of failed deliveries, which
- * closure deletes but never exports.
+ * partitioned by the SHA-256 of the Workspace ID, and the shared prefixes of failed deliveries and
+ * Athena query results, which closure deletes but never exports.
  *
  * @param bucketName - Analytics bucket, when the deployment has it.
  * @param workspaceId - Workspace ID.
@@ -2518,6 +2518,15 @@ function agentAnalyticsNamespaces(bucketName: string | undefined, workspaceId: s
       bucketName,
       prefix: 'agent-analytics-errors/',
       exportDirectory: 'agent-analytics-errors',
+      exportsObject: () => false,
+    },
+    {
+      // Athena writes each query's result under one shared prefix, so a result can copy any
+      // Workspace's rows. Closure deletes them all and never exports them.
+      id: 'agent-analytics-query-results',
+      bucketName,
+      prefix: 'athena-results/',
+      exportDirectory: 'agent-analytics-query-results',
       exportsObject: () => false,
     },
   ]

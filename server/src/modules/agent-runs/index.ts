@@ -169,6 +169,7 @@ export {
 export {
   agentAnalyticsWorkspaceKey,
   buildAgentAnalyticsEventRows,
+  deriveAgentAnalyticsBatchId,
   buildAgentAnalyticsRunStartRow,
   buildAgentAnalyticsRunStateRow,
   buildAgentAnalyticsWorkItemRow,

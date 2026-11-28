@@ -272,6 +272,41 @@ export function agentAnalyticsMemberKey(pseudonymKey: string, workspaceId: strin
 }
 
 /**
+ * Derives a stable ID for the analytics events of one export from every stored field, so a retried
+ * export gets the same event IDs while exports that differ in any value, such as the model or a
+ * token count, never share one.
+ *
+ * @param memberKey - Member that sent the export.
+ * @param events - Accepted events in export order.
+ * @returns Lowercase hexadecimal SHA-256 digest.
+ */
+export function deriveAgentAnalyticsBatchId(memberKey: string, events: readonly AgentAnalyticsEvent[]): string {
+  const hash = createHash('sha256').update(`agent-analytics-batch\u0000${memberKey}`)
+  for (const event of events) {
+    hash.update([
+      '',
+      event.name,
+      event.instanceIdHash,
+      String(event.occurredAtMs),
+      String(event.sequence ?? ''),
+      event.sessionHash ?? '',
+      event.model ?? '',
+      String(event.inputTokens ?? ''),
+      String(event.outputTokens ?? ''),
+      String(event.cacheReadTokens ?? ''),
+      String(event.cacheCreationTokens ?? ''),
+      String(event.costMicroUsd ?? ''),
+      String(event.durationMs ?? ''),
+      event.toolKind ?? '',
+      event.toolName ?? '',
+      event.success === undefined ? '' : event.success ? '1' : '0',
+      event.decidedByPerson === undefined ? '' : event.decidedByPerson ? '1' : '0',
+    ].join('\u0000'))
+  }
+  return hash.digest('hex')
+}
+
+/**
  * Builds the rows of one export's events.
  *
  * @param input - Export values.

@@ -8,6 +8,7 @@ import {
   batchAgentAnalyticsRecords,
   buildAgentAnalyticsRunStartRow,
   buildAgentAnalyticsRunStateRow,
+  deriveAgentAnalyticsBatchId,
   packAgentAnalyticsRecords,
   readAgentAnalyticsCompareFields,
 } from './domain/agent-telemetry-analytics'
@@ -47,6 +48,23 @@ function run(runId: string, workItemId = 'task-1') {
 }
 
 describe('analytics rows', () => {
+  test('give exports that differ only in usage values different batch IDs', () => {
+    const request = {
+      name: 'api_request' as const,
+      instanceIdHash: 'instance',
+      occurredAtMs: 1_000,
+      sessionHash: 'session',
+      model: 'model-a',
+      inputTokens: 10,
+      outputTokens: 5,
+    }
+    const batchId = deriveAgentAnalyticsBatchId('member', [request])
+    expect(deriveAgentAnalyticsBatchId('member', [{ ...request }])).toBe(batchId)
+    expect(deriveAgentAnalyticsBatchId('member', [{ ...request, model: 'model-b' }])).not.toBe(batchId)
+    expect(deriveAgentAnalyticsBatchId('member', [{ ...request, outputTokens: 6 }])).not.toBe(batchId)
+    expect(deriveAgentAnalyticsBatchId('member', [{ ...request, costMicroUsd: 1 }])).not.toBe(batchId)
+  })
+
   test('keep level-like custom fields only, and name the Workspace and member by keys', () => {
     const definitions = [
       { id: 'size', type: 'select' as const },
