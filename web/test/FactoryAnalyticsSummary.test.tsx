@@ -127,3 +127,40 @@ describe('Factory analytics summary', () => {
     expect(render({ ...factoryAnalyticsWithUsageFixture, usage: { ...usage, runsHasMore: true } })).toContain('読み込み上限に達したため')
   })
 })
+
+describe('Factory analytics time breakdown and comparison', () => {
+  test('reads them from the response and sends the comparison field', async () => {
+    const urls = respondWith(factoryAnalyticsWithUsageFixture)
+    const analytics = await getTeamFactoryAnalytics('token', 'core', { from: '2026-10-01T00:00:00.000Z', to: '2026-10-31T00:00:00.000Z', compareFieldId: 'points' })
+    expect(analytics.activity).toEqual(factoryAnalyticsWithUsageFixture.activity)
+    expect(analytics.comparison).toEqual(factoryAnalyticsWithUsageFixture.comparison)
+    expect(urls[0]).toContain('compareFieldId=points')
+    respondWith({ ...factoryAnalyticsWithUsageFixture, comparison: { axis: { kind: 'other' }, groups: [], outliers: [], unsizedWorkItems: 0 } })
+    await expect(getTeamFactoryAnalytics('token', 'core', { from: '2026-10-01T00:00:00.000Z', to: '2026-10-31T00:00:00.000Z' })).rejects.toMatchObject({ status: 502 })
+  })
+
+  test('shows the longest tools, the working share, the groups, and the outliers', () => {
+    const html = renderToStaticMarkup(
+      <FactoryAnalyticsSummary
+        analytics={factoryAnalyticsWithUsageFixture}
+        comparisonFields={[{ id: 'points', name: 'Story points' }]}
+        formatNumber={(value) => String(value)}
+        isLoading={false}
+        labels={createFactoryAnalyticsLabels('ja')}
+        onCompareFieldChange={() => undefined}
+        onPeriodDaysChange={() => undefined}
+        onRetry={() => undefined}
+        periodDays={30}
+        workItemTypeNames={{ task: 'タスク' }}
+      />,
+    )
+    expect(html).toContain('data-testid="factory-analytics-activity"')
+    expect(html).toContain('エージェントが作業していた割合 76.5%')
+    expect(html).toContain('MCP github/get_pull_request')
+    expect(html).toContain('Skill mukuroji-review')
+    expect(html).toContain('タスク ・1 日以下: 9 件 ・中央値 42 分 ・310000 トークン')
+    expect(html).toContain('中央値の 4.6 倍')
+    expect(html).toContain('見積もりや値がないタスク 4 件は比べていません。')
+    expect(html).toContain('Story points')
+  })
+})

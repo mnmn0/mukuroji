@@ -180,15 +180,57 @@ export const factoryAnalyticsFixture: TeamFactoryAnalyticsResponse = {
 export const factoryAnalyticsWithUsageFixture: TeamFactoryAnalyticsResponse = {
   ...factoryAnalyticsFixture,
   usage: {
-    total: { inputTokens: 182_000, outputTokens: 64_500, cacheReadTokens: 2_410_000, cacheCreationTokens: 120_000, requestCount: 386, estimatedCostMicroUsd: 18_420_000, models: ['claude-opus-4-8', 'claude-sonnet-4-6'], hasMore: false },
+    total: { inputTokens: 182_000, outputTokens: 64_500, cacheReadTokens: 2_410_000, cacheCreationTokens: 120_000, requestCount: 386, estimatedCostMicroUsd: 18_420_000, models: ['claude-opus-4-8', 'claude-sonnet-4-6'], aiDurationMs: 0, byModel: [], hasMore: false },
     projects: [
-      { projectId: 'refero', usage: { inputTokens: 140_000, outputTokens: 50_000, cacheReadTokens: 1_900_000, cacheCreationTokens: 90_000, requestCount: 290, estimatedCostMicroUsd: 14_100_000, models: ['claude-opus-4-8'], hasMore: false } },
-      { usage: { inputTokens: 42_000, outputTokens: 14_500, cacheReadTokens: 510_000, cacheCreationTokens: 30_000, requestCount: 96, estimatedCostMicroUsd: 4_320_000, models: ['claude-sonnet-4-6'], hasMore: false } },
+      { projectId: 'refero', usage: { inputTokens: 140_000, outputTokens: 50_000, cacheReadTokens: 1_900_000, cacheCreationTokens: 90_000, requestCount: 290, estimatedCostMicroUsd: 14_100_000, models: ['claude-opus-4-8'], aiDurationMs: 0, byModel: [], hasMore: false } },
+      { usage: { inputTokens: 42_000, outputTokens: 14_500, cacheReadTokens: 510_000, cacheCreationTokens: 30_000, requestCount: 96, estimatedCostMicroUsd: 4_320_000, models: ['claude-sonnet-4-6'], aiDurationMs: 0, byModel: [], hasMore: false } },
     ],
     workItems: [
-      { workItemId: 'auth-flow', title: 'API の認証フローを整理する', projectId: 'refero', usage: { inputTokens: 96_000, outputTokens: 31_000, cacheReadTokens: 1_250_000, cacheCreationTokens: 60_000, requestCount: 180, estimatedCostMicroUsd: 9_300_000, models: ['claude-opus-4-8'], hasMore: false } },
-      { workItemId: 'release-notes', title: 'リリースノートを書く', usage: { inputTokens: 42_000, outputTokens: 14_500, cacheReadTokens: 510_000, cacheCreationTokens: 30_000, requestCount: 96, estimatedCostMicroUsd: 4_320_000, models: ['claude-sonnet-4-6'], hasMore: false } },
+      { workItemId: 'auth-flow', title: 'API の認証フローを整理する', projectId: 'refero', usage: { inputTokens: 96_000, outputTokens: 31_000, cacheReadTokens: 1_250_000, cacheCreationTokens: 60_000, requestCount: 180, estimatedCostMicroUsd: 9_300_000, models: ['claude-opus-4-8'], aiDurationMs: 0, byModel: [], hasMore: false } },
+      { workItemId: 'release-notes', title: 'リリースノートを書く', usage: { inputTokens: 42_000, outputTokens: 14_500, cacheReadTokens: 510_000, cacheCreationTokens: 30_000, requestCount: 96, estimatedCostMicroUsd: 4_320_000, models: ['claude-sonnet-4-6'], aiDurationMs: 0, byModel: [], hasMore: false } },
     ],
     runsHasMore: false,
+  },
+  activity: {
+    aiDurationMs: 5_520_000,
+    total: {
+      toolCount: 1_204,
+      toolDurationMs: 7_380_000,
+      toolFailureCount: 37,
+      tools: [],
+      approvalWait: { count: 42, durationMs: 1_260_000 },
+      promptWait: { count: 18, durationMs: 2_700_000 },
+      hasMore: false,
+    },
+    topTools: [
+      { kind: 'builtin', name: 'Bash', count: 410, durationMs: 4_200_000, failureCount: 21 },
+      { kind: 'mcp', name: 'github/get_pull_request', count: 96, durationMs: 1_020_000, failureCount: 3 },
+      { kind: 'skill', name: 'mukuroji-review', count: 12, durationMs: 960_000, failureCount: 0 },
+      { kind: 'builtin', name: 'Edit', count: 380, durationMs: 610_000, failureCount: 8 },
+    ],
+    agentWorkShare: 76.5,
+    runsHasMore: false,
+  },
+  comparison: {
+    axis: { kind: 'size' },
+    groups: [
+      {
+        workItemTypeId: 'task', value: 'up-to-1d', workItemCount: 9, medianRunMinutes: 42, medianTokens: 310_000, medianCostMicroUsd: 1_200_000,
+        models: [
+          { model: 'claude-opus-4-8', workItemCount: 6, medianTokens: 340_000, medianAiDurationMs: 600_000 },
+          { model: 'claude-sonnet-4-6', workItemCount: 4, medianTokens: 150_000, medianAiDurationMs: 300_000 },
+        ],
+      },
+      { workItemTypeId: 'bug', value: 'up-to-2h', workItemCount: 5, medianRunMinutes: 18, medianTokens: 90_000, medianCostMicroUsd: 400_000, models: [] },
+    ],
+    outliers: [
+      {
+        workItemId: 'auth-flow', title: 'API の認証フローを整理する', projectId: 'refero', workItemTypeId: 'task', value: 'up-to-1d',
+        runMinutes: 128, aiDurationMs: 2_400_000, toolDurationMs: 3_100_000, waitDurationMs: 1_500_000, tokens: 1_437_000,
+        estimatedCostMicroUsd: 9_300_000, ratio: 4.6, models: ['claude-opus-4-8'], runtimes: ['claude-code'],
+        assigneeUserId: 'member', runCount: 3, reworkRuns: 2,
+      },
+    ],
+    unsizedWorkItems: 4,
   },
 }

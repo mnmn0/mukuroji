@@ -61,3 +61,30 @@ export function formatAgentRunCredential(startedBy: AgentRunStartedBy): string {
 export function shortenAgentInstanceHash(instanceIdHash: string): string {
   return instanceIdHash.slice(0, 12)
 }
+
+/** Units of an elapsed time, as the viewer's locale writes them. */
+export type AgentDurationUnits = {
+  /** Hours and minutes, such as `{h} h {m} min`. */
+  hours: string
+  /** Minutes and seconds, such as `{m} min {s} s`. */
+  minutes: string
+  /** Seconds, such as `{s} s`. */
+  seconds: string
+}
+
+/**
+ * Formats an elapsed time for the Agent Run time breakdown, rounded to the two largest units.
+ *
+ * @param milliseconds - Elapsed milliseconds.
+ * @param units - Locale text with `{h}`, `{m}`, and `{s}` placeholders.
+ * @returns Text such as `1 h 5 min`, `3 min 20 s`, or `45 s`.
+ */
+export function formatAgentDuration(milliseconds: number, units: AgentDurationUnits): string {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1_000))
+  const hours = Math.floor(totalSeconds / 3_600)
+  const minutes = Math.floor((totalSeconds % 3_600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) return units.hours.replace('{h}', String(hours)).replace('{m}', String(minutes))
+  if (minutes > 0) return units.minutes.replace('{m}', String(minutes)).replace('{s}', String(seconds))
+  return units.seconds.replace('{s}', String(seconds))
+}

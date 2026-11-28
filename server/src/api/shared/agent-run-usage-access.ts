@@ -1,6 +1,7 @@
-import { AGENT_RUN_USAGE_MAX_BUCKETS_PER_RUN, type AgentRunUsage } from '@mukuroji/contracts'
+import { AGENT_RUN_USAGE_MAX_BUCKETS_PER_RUN, type AgentRunActivity, type AgentRunUsage } from '@mukuroji/contracts'
 import {
   agentUsageRunBucketRange,
+  summarizeAgentActivity,
   isAgentUsageBucketInRun,
   summarizeAgentUsage,
   type StoredAgentRun,
@@ -28,4 +29,26 @@ export async function readAgentRunUsage(directoryId: string, run: StoredAgentRun
     AGENT_RUN_USAGE_MAX_BUCKETS_PER_RUN,
   )
   return summarizeAgentUsage(page.buckets.filter((bucket) => isAgentUsageBucketInRun(bucket, run)), includeCost, page.hasMore)
+}
+
+/**
+ * Reads the tool time and estimated waits attributed to a run, with the same member, instance, and
+ * bucket range as its usage (ADR 0117). The caller has already authorized the viewer for the run's
+ * Work Item.
+ *
+ * @param directoryId - Workspace ID.
+ * @param run - Run.
+ * @returns The run's activity, or undefined when none arrived.
+ */
+export async function readAgentRunActivity(directoryId: string, run: StoredAgentRun): Promise<AgentRunActivity | undefined> {
+  const range = agentUsageRunBucketRange(run)
+  const page = await workItemDependencies.agentRunUsage.listMemberActivity(
+    directoryId,
+    run.assigneeUserId,
+    run.instanceIdHash,
+    range.from,
+    range.until,
+    AGENT_RUN_USAGE_MAX_BUCKETS_PER_RUN,
+  )
+  return summarizeAgentActivity(page.rows.filter((row) => isAgentUsageBucketInRun(row, run)), page.hasMore)
 }

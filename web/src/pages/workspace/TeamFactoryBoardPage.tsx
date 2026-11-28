@@ -6,11 +6,12 @@ import {
 } from '../../features/factory-board/model/factoryAnalytics'
 import { useReleaseFactoryBoardRun } from '../../features/factory-board/mutations/useReleaseFactoryBoardRun'
 import { useFactoryAnalytics, useFactoryBoardReports, useTeamAgentRunBoardPages } from '../../features/factory-board/queries/useFactoryBoard'
-import { FactoryAnalyticsSummary } from '../../features/factory-board/ui/FactoryAnalyticsSummary'
+import { FactoryAnalyticsSummary, type ComparisonField } from '../../features/factory-board/ui/FactoryAnalyticsSummary'
 import { FactoryBoard, type FactoryBoardView } from '../../features/factory-board/ui/FactoryBoard'
 import { createFactoryAnalyticsLabels, createFactoryBoardLabels } from '../../features/factory-board/ui/factoryBoardLabels'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createProjectIssuesPath, createTeamIssuesPath, createTeamRunHistoryPath } from '../../shared/routing/paths'
+import { useWorkItemConfiguration } from '../../work-items/queries/useWorkItemConfigurations'
 import { SoftwareFactoryGate } from '../../workspace/ui/SoftwareFactoryGate'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
@@ -59,7 +60,21 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
   const board = useTeamAgentRunBoardPages(accessToken, teamId)
   const reports = useFactoryBoardReports(accessToken, teamId, selectedWorkItemId)
   const [analyticsDays, setAnalyticsDays] = useState<FactoryAnalyticsPeriodDays>(DEFAULT_FACTORY_ANALYTICS_PERIOD_DAYS)
-  const analytics = useFactoryAnalytics(accessToken, teamId, analyticsDays)
+  const [compareFieldId, setCompareFieldId] = useState<string>()
+  const analytics = useFactoryAnalytics(accessToken, teamId, analyticsDays, compareFieldId)
+  const configuration = useWorkItemConfiguration(accessToken, teamId, enabled)
+  // Fields whose values group well: options, numbers, and on/off values.
+  const comparisonFields = useMemo((): ComparisonField[] => (configuration.data?.configuration.customFields ?? [])
+    .filter((field) => field.type === 'select' || field.type === 'multi-select' || field.type === 'number' || field.type === 'boolean')
+    .map((field) => ({
+      id: field.id,
+      name: field.name,
+      ...(field.options === undefined ? {} : { optionNames: Object.fromEntries(field.options.map((option) => [option.id, option.name])) }),
+    })), [configuration.data])
+  const workItemTypeNames = useMemo(
+    () => Object.fromEntries((configuration.data?.configuration.workItemTypes ?? []).map((type) => [type.id, type.name])),
+    [configuration.data],
+  )
   const onRelease = useReleaseFactoryBoardRun(accessToken, teamId, async (released) => {
     // Show the committed release from the response, so a failed refresh cannot bring back the active run.
     await board.applyRelease(released)
@@ -100,6 +115,10 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
           onRetry={() => { void analytics.mutate() }}
           periodDays={analyticsDays}
           projectNames={projectNames}
+          comparisonFields={comparisonFields}
+          compareFieldId={compareFieldId}
+          onCompareFieldChange={setCompareFieldId}
+          workItemTypeNames={workItemTypeNames}
         />
         <FactoryBoard
           board={board.data}

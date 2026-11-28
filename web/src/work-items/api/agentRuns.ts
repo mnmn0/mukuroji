@@ -41,6 +41,12 @@ import {
 import { isNonnegativeSafeInteger, isPositiveSafeInteger, isRecord } from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { isWorkItemStatusCategory } from './contractValidation'
+import {
+  readAgentRunActivity,
+  readAgentUsageTiming,
+  readFactoryAnalyticsActivity,
+  readFactoryAnalyticsComparison,
+} from './agentRunActivity'
 import { WorkItemConfigurationApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
@@ -67,9 +73,11 @@ export async function listWorkItemAgentRuns(
   )
   const items = isRecord(data) && Array.isArray(data.items) ? data.items.map(readAgentRunView) : undefined
   const usageTotal = isRecord(data) && data.usageTotal !== undefined ? readAgentRunUsage(data.usageTotal) : undefined
+  const activityTotal = isRecord(data) && data.activityTotal !== undefined ? readAgentRunActivity(data.activityTotal) : undefined
   if (
     !isRecord(data) || !items || items.some((item) => item === undefined) || typeof data.hasMore !== 'boolean' ||
-    (data.usageTotal !== undefined && usageTotal === undefined)
+    (data.usageTotal !== undefined && usageTotal === undefined) ||
+    (data.activityTotal !== undefined && activityTotal === undefined)
   ) {
     throw new WorkItemConfigurationApiError(502, 'Agent Run history returned an unexpected response.')
   }
@@ -77,6 +85,7 @@ export async function listWorkItemAgentRuns(
     items: items.filter((item): item is AgentRunView => item !== undefined),
     hasMore: data.hasMore,
     ...(usageTotal === undefined ? {} : { usageTotal }),
+    ...(activityTotal === undefined ? {} : { activityTotal }),
   }
 }
 
@@ -98,6 +107,8 @@ function readAgentRunUsage(value: unknown): AgentRunUsage | undefined {
   ) {
     return undefined
   }
+  const timing = readAgentUsageTiming(value)
+  if (!timing) return undefined
   return {
     inputTokens,
     outputTokens,
@@ -106,6 +117,8 @@ function readAgentRunUsage(value: unknown): AgentRunUsage | undefined {
     requestCount,
     ...(estimatedCostMicroUsd === undefined ? {} : { estimatedCostMicroUsd }),
     models,
+    aiDurationMs: timing.aiDurationMs,
+    byModel: timing.byModel,
     hasMore,
   }
 }
@@ -262,9 +275,10 @@ export async function getTeamAgentRunBoard(
 export async function getTeamFactoryAnalytics(
   accessToken: string,
   teamId: string,
-  period: { from: string; to: string },
+  period: { from: string; to: string; compareFieldId?: string },
 ): Promise<TeamFactoryAnalyticsResponse> {
   const query = new URLSearchParams({ from: period.from, to: period.to })
+  if (period.compareFieldId !== undefined) query.set('compareFieldId', period.compareFieldId)
   const data = await requestJson(`${apiBaseUrl}/teams/${encodeURIComponent(teamId)}/agent-runs/analytics?${query}`, accessToken)
   const analytics = readTeamFactoryAnalytics(data)
   if (!analytics) throw new WorkItemConfigurationApiError(502, 'Factory analytics returned an unexpected response.')
@@ -454,6 +468,10 @@ function readTeamFactoryAnalytics(value: unknown): TeamFactoryAnalyticsResponse 
   if (validStages.length !== stageLeadTimes.length || validRuntimes.length !== runtimes.length) return undefined
   const usage = value.usage === undefined ? undefined : readFactoryAnalyticsUsage(value.usage)
   if (value.usage !== undefined && usage === undefined) return undefined
+  const activity = value.activity === undefined ? undefined : readFactoryAnalyticsActivity(value.activity)
+  if (value.activity !== undefined && activity === undefined) return undefined
+  const comparison = value.comparison === undefined ? undefined : readFactoryAnalyticsComparison(value.comparison)
+  if (value.comparison !== undefined && comparison === undefined) return undefined
   return {
     generatedAt,
     from,
@@ -465,6 +483,8 @@ function readTeamFactoryAnalytics(value: unknown): TeamFactoryAnalyticsResponse 
     workItemsHasMore,
     historyHasMore,
     ...(usage === undefined ? {} : { usage }),
+    ...(activity === undefined ? {} : { activity }),
+    ...(comparison === undefined ? {} : { comparison }),
   }
 }
 
@@ -726,6 +746,8 @@ function readAgentRunView(value: unknown): AgentRunView | undefined {
   const resumedFromRunId = value.resumedFromRunId === undefined ? undefined : text('resumedFromRunId')
   const usage = value.usage === undefined ? undefined : readAgentRunUsage(value.usage)
   if (value.usage !== undefined && usage === undefined) return undefined
+  const activity = value.activity === undefined ? undefined : readAgentRunActivity(value.activity)
+  if (value.activity !== undefined && activity === undefined) return undefined
   const startedBy = value.startedBy === undefined ? undefined : readAgentRunStartedBy(value.startedBy)
   if (value.startedBy !== undefined && startedBy === undefined) return undefined
   if (
@@ -761,6 +783,7 @@ function readAgentRunView(value: unknown): AgentRunView | undefined {
     canRelease: value.canRelease,
     ...(resumedFromRunId === undefined ? {} : { resumedFromRunId }),
     ...(usage === undefined ? {} : { usage }),
+    ...(activity === undefined ? {} : { activity }),
     ...(startedBy === undefined ? {} : { startedBy }),
   }
 }

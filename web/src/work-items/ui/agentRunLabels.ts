@@ -1,6 +1,6 @@
-import type { AgentRunRuntime, AgentRunUsage } from '@mukuroji/contracts'
+import type { AgentModelUsage, AgentRunActivity, AgentRunRuntime, AgentRunUsage, AgentToolActivity } from '@mukuroji/contracts'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
-import type { AgentRunDisplayState } from '../model/agentRunDisplay'
+import { formatAgentDuration, type AgentRunDisplayState } from '../model/agentRunDisplay'
 
 /** Locale-aware text of the Agent Run panel. */
 export type WorkItemAgentRunsLabels = {
@@ -68,6 +68,46 @@ export type WorkItemAgentRunsLabels = {
    * @returns Text such as "3 requests · Est. $0.12".
    */
   formatUsageDetail: (usage: AgentRunUsage) => string
+  /** Heading of the time breakdown. */
+  activityTitle: string
+  /** Explanation of how the time breakdown is measured. */
+  activityHint: string
+  /** Note shown when the activity read stopped at its limit. */
+  activityPartial: string
+  /** Heading of the per-model totals. */
+  modelsTitle: string
+  /**
+   * Describes model, tool, and wait time.
+   * @param aiDurationMs - Milliseconds of model requests.
+   * @param activity - Tool time and waits, when present.
+   * @returns Text such as "Model 2 min · tools 5 min · …".
+   */
+  formatActivityBreakdown: (aiDurationMs: number, activity: AgentRunActivity | undefined) => string
+  /**
+   * Describes model, tool, and wait time in a few words for one run.
+   * @param usage - Usage with the model request time, when present.
+   * @param activity - Tool time and waits, when present.
+   * @returns Text such as "model 2 min · tools 5 min · waiting 1 min".
+   */
+  formatActivityCompact: (usage: AgentRunUsage | undefined, activity: AgentRunActivity | undefined) => string
+  /**
+   * Describes one tool's time.
+   * @param tool - Tool.
+   * @returns Text such as "Bash: 3 min 2 s · 12 calls · 1 failed".
+   */
+  formatTool: (tool: AgentToolActivity) => string
+  /**
+   * Describes one model's totals.
+   * @param model - Model totals.
+   * @returns Text such as "claude-…: 1,200 tokens · 3 requests · 40 s".
+   */
+  formatModel: (model: AgentModelUsage) => string
+  /**
+   * Formats an elapsed time.
+   * @param milliseconds - Elapsed milliseconds.
+   * @returns Text such as "3 min 20 s".
+   */
+  formatDuration: (milliseconds: number) => string
   /** Display names of runtimes. */
   runtimes: Record<AgentRunRuntime, string>
   /** Display names of states. */
@@ -92,6 +132,25 @@ export function createWorkItemAgentRunsLabels(locale: Locale): WorkItemAgentRuns
   const cost = (usage: AgentRunUsage) => usage.estimatedCostMicroUsd === undefined
     ? undefined
     : t('workItems.agentRuns.usageCost').replace('{cost}', dollars.format(usage.estimatedCostMicroUsd / 1_000_000))
+  const units = {
+    hours: t('workItems.agentRuns.duration.hours'),
+    minutes: t('workItems.agentRuns.duration.minutes'),
+    seconds: t('workItems.agentRuns.duration.seconds'),
+  }
+  /**
+   * Formats an elapsed time in the locale's units.
+   * @param milliseconds - Elapsed milliseconds.
+   * @returns Duration text.
+   */
+  const duration = (milliseconds: number) => formatAgentDuration(milliseconds, units)
+  /**
+   * Formats a tool name with its kind.
+   * @param tool - Tool.
+   * @returns Name such as "MCP github/get_issue".
+   */
+  const toolName = (tool: AgentToolActivity) => tool.kind === 'builtin'
+    ? tool.name
+    : `${t(`workItems.agentRuns.activityToolKind.${tool.kind}`)} ${tool.name}`
   return {
     title: t('workItems.agentRuns.title'),
     description: t('workItems.agentRuns.description'),
@@ -132,6 +191,37 @@ export function createWorkItemAgentRunsLabels(locale: Locale): WorkItemAgentRuns
       t('workItems.agentRuns.usageRequests').replace('{count}', integer.format(usage.requestCount)),
       cost(usage),
     ].filter((part) => part !== undefined).join(' · '),
+    activityTitle: t('workItems.agentRuns.activityTitle'),
+    activityHint: t('workItems.agentRuns.activityHint'),
+    activityPartial: t('workItems.agentRuns.activityPartial'),
+    modelsTitle: t('workItems.agentRuns.modelsTitle'),
+    formatActivityBreakdown: (aiDurationMs, activity) => t('workItems.agentRuns.activityBreakdown')
+      .replace('{ai}', duration(aiDurationMs))
+      .replace('{tools}', duration(activity?.toolDurationMs ?? 0))
+      .replace('{approval}', duration(activity?.approvalWait.durationMs ?? 0))
+      .replace('{prompt}', duration(activity?.promptWait.durationMs ?? 0)),
+    formatActivityCompact: (usage, activity) => t('workItems.agentRuns.activityCompact')
+      .replace('{ai}', duration(usage?.aiDurationMs ?? 0))
+      .replace('{tools}', duration(activity?.toolDurationMs ?? 0))
+      .replace('{wait}', duration((activity?.approvalWait.durationMs ?? 0) + (activity?.promptWait.durationMs ?? 0))),
+    formatTool: (tool) => [
+      t('workItems.agentRuns.activityTool')
+        .replace('{name}', toolName(tool))
+        .replace('{duration}', duration(tool.durationMs))
+        .replace('{count}', integer.format(tool.count)),
+      tool.failureCount > 0 ? t('workItems.agentRuns.activityToolFailures').replace('{count}', integer.format(tool.failureCount)) : undefined,
+    ].filter((part) => part !== undefined).join(' · '),
+    formatModel: (model) => [
+      t('workItems.agentRuns.modelLine')
+        .replace('{model}', model.model)
+        .replace('{tokens}', integer.format(model.inputTokens + model.outputTokens + model.cacheReadTokens + model.cacheCreationTokens))
+        .replace('{count}', integer.format(model.requestCount))
+        .replace('{duration}', duration(model.aiDurationMs)),
+      model.estimatedCostMicroUsd === undefined
+        ? undefined
+        : t('workItems.agentRuns.usageCost').replace('{cost}', dollars.format(model.estimatedCostMicroUsd / 1_000_000)),
+    ].filter((part) => part !== undefined).join(' · '),
+    formatDuration: duration,
     // Product names stay untranslated.
     runtimes: { 'claude-code': 'Claude Code', codex: 'Codex', kiro: 'Kiro', other: t('workItems.agentRuns.runtime.other') },
     states: {

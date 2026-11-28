@@ -92,6 +92,7 @@ describe('agent telemetry parsing', () => {
       cacheReadTokens: 1000,
       cacheCreationTokens: 0,
       costMicroUsd: 12_500,
+      durationMs: 0,
     }])
     expect(JSON.stringify(parsed)).not.toContain('secret prompt text')
   })
@@ -193,7 +194,9 @@ describe('agent usage buckets and run attribution', () => {
     const withoutCost = summarizeAgentUsage(buckets, false, false)
     expect(withoutCost).toEqual({
       inputTokens: 360, outputTokens: 90, cacheReadTokens: 3000, cacheCreationTokens: 0, requestCount: 3,
-      models: ['claude-sonnet-5-5'], hasMore: false,
+      models: ['claude-sonnet-5-5'], aiDurationMs: 0,
+      byModel: [{ model: 'claude-sonnet-5-5', inputTokens: 360, outputTokens: 90, cacheReadTokens: 3000, cacheCreationTokens: 0, requestCount: 3, aiDurationMs: 0 }],
+      hasMore: false,
     })
     const withCost = summarizeAgentUsage(buckets, true, true)
     expect(withCost?.estimatedCostMicroUsd).toBe(37_500)
@@ -385,7 +388,7 @@ describe('period usage summary', () => {
    */
   const usage = (inputTokens: number) => ({
     inputTokens, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 1,
-    estimatedCostMicroUsd: inputTokens, models: ['m'], hasMore: false,
+    estimatedCostMicroUsd: inputTokens, models: ['m'], aiDurationMs: 0, byModel: [], hasMore: false,
   })
 
   test('ranks Projects and Work Items by tokens and keeps only the top Work Items', () => {

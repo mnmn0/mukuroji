@@ -1,5 +1,12 @@
-import { QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
+import {
+  BatchGetCommand,
+  QueryCommand,
+  TransactWriteCommand,
+  UpdateCommand,
+  type TransactWriteCommandInput,
+} from '@aws-sdk/lib-dynamodb'
 import { type AgentUsageBucket } from '../../domain/agent-run-usage'
+import { agentActivityRowKey, type AgentActivityRow, type AgentSessionCursor } from '../../domain/agent-run-activity'
 import { createAgentRunIntegrityError, createAgentUsageUnavailableError } from '../../domain/agent-run-error'
 
 /** Days a usage bucket is kept before DynamoDB TTL removes it. */
@@ -17,15 +24,33 @@ export const AGENT_USAGE_TTL_ATTRIBUTE = 'usageExpiresAt'
 /** Bucket updates one transaction carries next to its receipt; DynamoDB allows 100 items. */
 const bucketsPerTransaction = 99
 
+/** Days a session cursor is kept; a session idle for longer starts without a previous event. */
+export const AGENT_SESSION_CURSOR_DAYS = 8
+
+/** Keys one BatchGetItem call reads; DynamoDB allows 100. */
+const cursorsPerBatchGet = 100
+
 /** Minimal DynamoDB command boundary used by the usage store. */
 export type AgentRunUsageDocumentClient = {
-  /** Sends one query or transaction. */
-  send(command: QueryCommand | TransactWriteCommand): Promise<{
+  /** Sends one query, transaction, batch read, or update. */
+  send(command: QueryCommand | TransactWriteCommand | BatchGetCommand | UpdateCommand): Promise<{
     /** Query page. */
     Items?: Record<string, unknown>[]
     /** Key of the last evaluated item when more items remain. */
     LastEvaluatedKey?: Record<string, unknown>
+    /** Batch read items by table name. */
+    Responses?: Record<string, Record<string, unknown>[]>
+    /** Batch read keys DynamoDB did not process. */
+    UnprocessedKeys?: Record<string, unknown>
   }>
+}
+
+/** Activity rows read for one member and time range. */
+export type AgentActivityRowPage = {
+  /** Rows in key order. */
+  rows: AgentActivityRow[]
+  /** Whether more rows existed in the range than the limit allowed. */
+  hasMore: boolean
 }
 
 /** Buckets read for one member and time range. */
@@ -64,6 +89,49 @@ export interface AgentRunUsageStore {
    * @returns Buckets in start order.
    */
   listMemberBuckets(directoryId: string, memberKey: string, instanceIdHash: string, from: string, until: string | undefined, limit: number): Promise<AgentUsageBucketPage>
+  /**
+   * Adds one export's activity rows to the member's totals (ADR 0117). A retried export with the same
+   * batch ID adds nothing.
+   *
+   * @param directoryId - Workspace ID.
+   * @param memberKey - Member that sent the export.
+   * @param batchId - Stable ID of the export's activity.
+   * @param rows - Row slots in key order; an empty slot adds nothing.
+   * @param now - Receive time.
+   * @returns Whether the activity was added or was already added.
+   */
+  recordActivityBatch(directoryId: string, memberKey: string, batchId: string, rows: readonly (AgentActivityRow | undefined)[], now: Date): Promise<'recorded' | 'duplicate'>
+  /**
+   * Reads a member's activity rows of one agent instance whose bucket starts in a range, with the
+   * same bounds as {@link listMemberBuckets}.
+   *
+   * @param directoryId - Workspace ID.
+   * @param memberKey - Member whose activity is read.
+   * @param instanceIdHash - Agent instance whose rows are returned.
+   * @param from - First bucket start, inclusive.
+   * @param until - Bucket start where the range ends, exclusive; open when undefined.
+   * @param limit - Largest number of rows to return.
+   * @returns Rows in key order.
+   */
+  listMemberActivity(directoryId: string, memberKey: string, instanceIdHash: string, from: string, until: string | undefined, limit: number): Promise<AgentActivityRowPage>
+  /**
+   * Reads the last event time of runtime sessions.
+   *
+   * @param directoryId - Workspace ID.
+   * @param memberKey - Member that owns the sessions.
+   * @param sessionKeys - Session keys to read.
+   * @returns Last event time per session key that has a cursor.
+   */
+  readSessionCursors(directoryId: string, memberKey: string, sessionKeys: readonly string[]): Promise<Map<string, number>>
+  /**
+   * Moves session cursors forward. A cursor that is already newer stays.
+   *
+   * @param directoryId - Workspace ID.
+   * @param memberKey - Member that owns the sessions.
+   * @param cursors - New last event times.
+   * @param now - Receive time.
+   */
+  advanceSessionCursors(directoryId: string, memberKey: string, cursors: readonly AgentSessionCursor[], now: Date): Promise<void>
 }
 
 /** Rows of other instances one usage read may pass over, as a multiple of its bucket limit. */
@@ -91,8 +159,33 @@ function agentUsageBatchPartition(directoryId: string, memberKey: string): strin
   return `${directoryId}#agent-usage-batch#member#${memberKey}`
 }
 
-/** Partition markers of the usage rows and export receipts, between the Workspace ID and the member key. */
-const agentUsagePartitionMarkers = ['#agent-usage#member#', '#agent-usage-batch#member#'] as const
+/**
+ * Builds the partition of a member's activity rows (ADR 0117).
+ *
+ * @param directoryId - Workspace ID.
+ * @param memberKey - Member key.
+ * @returns Partition key value.
+ */
+export function agentActivityPartition(directoryId: string, memberKey: string): string {
+  return `${directoryId}#agent-activity#member#${memberKey}`
+}
+
+/**
+ * Builds the partition of a member's session cursors (ADR 0117).
+ *
+ * @param directoryId - Workspace ID.
+ * @param memberKey - Member key.
+ * @returns Partition key value.
+ */
+export function agentSessionCursorPartition(directoryId: string, memberKey: string): string {
+  return `${directoryId}#agent-session#member#${memberKey}`
+}
+
+/**
+ * Partition markers of the usage rows, export receipts, activity rows, and session cursors, between
+ * the Workspace ID and the member key.
+ */
+const agentUsagePartitionMarkers = ['#agent-usage#member#', '#agent-usage-batch#member#', '#agent-activity#member#', '#agent-session#member#'] as const
 
 /**
  * Checks whether a partition key holds usage rows or export receipts, so a scan of the Agent Runs
@@ -223,6 +316,35 @@ export function parseAgentUsageBucket(item: Record<string, unknown>): AgentUsage
     cacheCreationTokens: storedCounter(item, 'cacheCreationTokens'),
     costMicroUsd: storedCounter(item, 'costMicroUsd'),
     requestCount: storedCounter(item, 'requestCount'),
+    // Rows saved before ADR 0117 have no request duration.
+    durationMs: item.durationMs === undefined ? 0 : storedCounter(item, 'durationMs'),
+  }
+}
+
+/**
+ * Reads a stored activity row.
+ *
+ * @param item - Stored row.
+ * @returns The row.
+ * @throws AgentRunError when the row is malformed.
+ */
+export function parseAgentActivityRow(item: Record<string, unknown>): AgentActivityRow {
+  const { bucketStart, instanceIdHash, activityKind, name } = item
+  if (
+    typeof bucketStart !== 'string' || typeof instanceIdHash !== 'string' || typeof name !== 'string' ||
+    (activityKind !== 'tool' && activityKind !== 'wait')
+  ) {
+    throw createAgentRunIntegrityError()
+  }
+  if (item.recordKey !== agentActivityRowKey({ bucketStart, instanceIdHash, kind: activityKind, name })) throw createAgentRunIntegrityError()
+  return {
+    bucketStart,
+    instanceIdHash,
+    kind: activityKind,
+    name,
+    count: storedCounter(item, 'count'),
+    durationMs: storedCounter(item, 'durationMs'),
+    failureCount: storedCounter(item, 'failureCount'),
   }
 }
 
@@ -275,7 +397,8 @@ export class DynamoDbAgentRunUsageStore implements AgentRunUsageStore {
               'SET #entityType = :entityType, #workspaceId = :workspaceId, #memberKey = :memberKey,',
               '#bucketStart = :bucketStart, #instanceIdHash = :instanceIdHash, #model = :model, #ttl = :ttl',
               'ADD #inputTokens :inputTokens, #outputTokens :outputTokens, #cacheReadTokens :cacheReadTokens,',
-              '#cacheCreationTokens :cacheCreationTokens, #costMicroUsd :costMicroUsd, #requestCount :requestCount',
+              '#cacheCreationTokens :cacheCreationTokens, #costMicroUsd :costMicroUsd, #requestCount :requestCount,',
+              '#durationMs :durationMs',
             ].join(' '),
             ExpressionAttributeNames: {
               '#entityType': 'entityType',
@@ -291,6 +414,7 @@ export class DynamoDbAgentRunUsageStore implements AgentRunUsageStore {
               '#cacheCreationTokens': 'cacheCreationTokens',
               '#costMicroUsd': 'costMicroUsd',
               '#requestCount': 'requestCount',
+              '#durationMs': 'durationMs',
             },
             ExpressionAttributeValues: {
               ':entityType': 'agent-usage',
@@ -306,6 +430,7 @@ export class DynamoDbAgentRunUsageStore implements AgentRunUsageStore {
               ':cacheCreationTokens': bucket.cacheCreationTokens,
               ':costMicroUsd': bucket.costMicroUsd,
               ':requestCount': bucket.requestCount,
+              ':durationMs': bucket.durationMs,
             },
           },
         })),
@@ -352,5 +477,164 @@ export class DynamoDbAgentRunUsageStore implements AgentRunUsageStore {
       exclusiveStartKey = page.LastEvaluatedKey
     } while (exclusiveStartKey)
     return { buckets, hasMore: false }
+  }
+
+  /** @inheritdoc */
+  async recordActivityBatch(directoryId: string, memberKey: string, batchId: string, rows: readonly (AgentActivityRow | undefined)[], now: Date): Promise<'recorded' | 'duplicate'> {
+    let recorded = false
+    for (let start = 0, chunk = 0; start < rows.length; start += bucketsPerTransaction, chunk += 1) {
+      const chunkRows = rows.slice(start, start + bucketsPerTransaction)
+        .filter((row): row is AgentActivityRow => row !== undefined)
+      if (chunkRows.length === 0) continue
+      const items: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+        {
+          Put: {
+            TableName: this.#tableName,
+            Item: {
+              directoryTeamId: agentUsageBatchPartition(directoryId, memberKey),
+              // The activity receipts share the usage receipt partition under their own prefix.
+              recordKey: `activity#${batchId}#${chunk}`,
+              entityType: 'agent-usage-batch',
+              workspaceId: directoryId,
+              receivedAt: now.toISOString(),
+              [AGENT_USAGE_TTL_ATTRIBUTE]: expiresAfterDays(now, AGENT_USAGE_BATCH_RECEIPT_DAYS),
+            },
+            ConditionExpression: 'attribute_not_exists(recordKey)',
+          },
+        },
+        ...chunkRows.map((row) => ({
+          Update: {
+            TableName: this.#tableName,
+            Key: { directoryTeamId: agentActivityPartition(directoryId, memberKey), recordKey: agentActivityRowKey(row) },
+            UpdateExpression: [
+              'SET #entityType = :entityType, #workspaceId = :workspaceId, #memberKey = :memberKey,',
+              '#bucketStart = :bucketStart, #instanceIdHash = :instanceIdHash, #activityKind = :activityKind, #name = :name, #ttl = :ttl',
+              'ADD #count :count, #durationMs :durationMs, #failureCount :failureCount',
+            ].join(' '),
+            ExpressionAttributeNames: {
+              '#entityType': 'entityType',
+              '#workspaceId': 'workspaceId',
+              '#memberKey': 'memberKey',
+              '#bucketStart': 'bucketStart',
+              '#instanceIdHash': 'instanceIdHash',
+              '#activityKind': 'activityKind',
+              '#name': 'name',
+              '#ttl': AGENT_USAGE_TTL_ATTRIBUTE,
+              '#count': 'count',
+              '#durationMs': 'durationMs',
+              '#failureCount': 'failureCount',
+            },
+            ExpressionAttributeValues: {
+              ':entityType': 'agent-activity',
+              ':workspaceId': directoryId,
+              ':memberKey': memberKey,
+              ':bucketStart': row.bucketStart,
+              ':instanceIdHash': row.instanceIdHash,
+              ':activityKind': row.kind,
+              ':name': row.name,
+              ':ttl': expiresAfterDays(now, AGENT_USAGE_RETENTION_DAYS),
+              ':count': row.count,
+              ':durationMs': row.durationMs,
+              ':failureCount': row.failureCount,
+            },
+          },
+        })),
+      ]
+      try {
+        await this.#client.send(new TransactWriteCommand({ TransactItems: items }))
+        recorded = true
+      } catch (error) {
+        if (isTransientUsageWriteFailure(error)) throw createAgentUsageUnavailableError()
+        if (!isReceiptConflict(error)) throw error
+      }
+    }
+    return recorded ? 'recorded' : 'duplicate'
+  }
+
+  /** @inheritdoc */
+  async listMemberActivity(directoryId: string, memberKey: string, instanceIdHash: string, from: string, until: string | undefined, limit: number): Promise<AgentActivityRowPage> {
+    const rows: AgentActivityRow[] = []
+    const maxScanned = limit * AGENT_USAGE_MAX_SCANNED_BUCKETS_FACTOR
+    let scanned = 0
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    const upper = until ?? '~'
+    if (upper <= from) return { rows, hasMore: false }
+    do {
+      const page = await this.#client.send(new QueryCommand({
+        TableName: this.#tableName,
+        KeyConditionExpression: '#partition = :partition AND #recordKey BETWEEN :from AND :until',
+        ExpressionAttributeNames: { '#partition': 'directoryTeamId', '#recordKey': 'recordKey' },
+        ExpressionAttributeValues: { ':partition': agentActivityPartition(directoryId, memberKey), ':from': from, ':until': upper },
+        Limit: Math.min(1_000, maxScanned + 1 - scanned),
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }))
+      for (const item of page.Items ?? []) {
+        if (scanned === maxScanned) return { rows, hasMore: true }
+        scanned += 1
+        const row = parseAgentActivityRow(item)
+        if (until !== undefined && row.bucketStart >= until) continue
+        if (row.instanceIdHash !== instanceIdHash) continue
+        if (rows.length === limit) return { rows, hasMore: true }
+        rows.push(row)
+      }
+      exclusiveStartKey = page.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return { rows, hasMore: false }
+  }
+
+  /** @inheritdoc */
+  async readSessionCursors(directoryId: string, memberKey: string, sessionKeys: readonly string[]): Promise<Map<string, number>> {
+    const cursors = new Map<string, number>()
+    const partition = agentSessionCursorPartition(directoryId, memberKey)
+    const unique = [...new Set(sessionKeys)]
+    for (let start = 0; start < unique.length; start += cursorsPerBatchGet) {
+      const keys = unique.slice(start, start + cursorsPerBatchGet).map((recordKey) => ({ directoryTeamId: partition, recordKey }))
+      try {
+        const result = await this.#client.send(new BatchGetCommand({ RequestItems: { [this.#tableName]: { Keys: keys } } }))
+        for (const item of result.Responses?.[this.#tableName] ?? []) {
+          const { recordKey, lastEventAtMs } = item
+          if (typeof recordKey !== 'string' || typeof lastEventAtMs !== 'number' || !Number.isSafeInteger(lastEventAtMs)) {
+            throw createAgentRunIntegrityError()
+          }
+          cursors.set(recordKey, lastEventAtMs)
+        }
+        // Unprocessed keys read as no cursor: the waits of those sessions in this export are not counted.
+      } catch (error) {
+        if (isTransientUsageWriteFailure(error)) throw createAgentUsageUnavailableError()
+        throw error
+      }
+    }
+    return cursors
+  }
+
+  /** @inheritdoc */
+  async advanceSessionCursors(directoryId: string, memberKey: string, cursors: readonly AgentSessionCursor[], now: Date): Promise<void> {
+    for (const cursor of cursors) {
+      try {
+        await this.#client.send(new UpdateCommand({
+          TableName: this.#tableName,
+          Key: { directoryTeamId: agentSessionCursorPartition(directoryId, memberKey), recordKey: cursor.sessionKey },
+          UpdateExpression: 'SET #entityType = :entityType, #workspaceId = :workspaceId, #lastEventAtMs = :lastEventAtMs, #ttl = :ttl',
+          ConditionExpression: 'attribute_not_exists(#lastEventAtMs) OR #lastEventAtMs < :lastEventAtMs',
+          ExpressionAttributeNames: {
+            '#entityType': 'entityType',
+            '#workspaceId': 'workspaceId',
+            '#lastEventAtMs': 'lastEventAtMs',
+            '#ttl': AGENT_USAGE_TTL_ATTRIBUTE,
+          },
+          ExpressionAttributeValues: {
+            ':entityType': 'agent-session',
+            ':workspaceId': directoryId,
+            ':lastEventAtMs': cursor.lastEventAtMs,
+            ':ttl': expiresAfterDays(now, AGENT_SESSION_CURSOR_DAYS),
+          },
+        }))
+      } catch (error) {
+        // A newer cursor already saved stays; the cursor is a best-effort aid for the next export.
+        if (isRecord(error) && error.name === 'ConditionalCheckFailedException') continue
+        if (isTransientUsageWriteFailure(error)) throw createAgentUsageUnavailableError()
+        throw error
+      }
+    }
   }
 }

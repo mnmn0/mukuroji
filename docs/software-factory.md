@@ -397,6 +397,13 @@ Factory board の上部に、期間内に終わった Run の集計を出す。d
   （新しい順に最大 300 件、超えたら `runsHasMore`）の合計、Project 別の合計、トークンの多い Work Item 上位 10 件を
   返す。推定費用は Team manager にだけ入れる。Analytics の report では `agent-tokens` / `agent-cost` metric として
   widget・snapshot・export に使える（[ADR 0108](adr/0108-analytics-agent-usage-metrics.md)、[docs/analytics.md](analytics.md)）。
+- 同じ Run の tool・待ち時間を `activity` に返す（[ADR 0117](adr/0117-agent-run-time-breakdown-and-peer-comparison.md)、
+  #834）: model の応答時間、tool の回数・時間・失敗の合計、時間の長い tool 上位 10 件、承認待ちと指示待ち、
+  model と tool の時間が「作業時間 + 待ち時間」に占める割合（`agentWorkShare`）。
+- `comparison` は同じ Run を Work Item ごとにまとめ、種類 × 規模（見積もりの段階、`compareFieldId` を付けると
+  その custom field の値）の group ごとに所要分・トークン・推定費用（manager のみ）の中央値と model ごとの中央値を返す。
+  3 件以上の group で所要分かトークンが中央値の 2 倍以上の Work Item を、比率の大きい順に最大 20 件返す。
+  値のない Work Item は `none` の group にし、`unsizedWorkItems` で件数を返す。
 
 ## Triage への自動起票
 
@@ -607,7 +614,10 @@ tool は次のとおり変更・追加する。
   `agent-run-questions` と MCP の `get_task` の `questions` で読む。
 - Run と report に prompt、生成内容、model 名、token 数を保存しない。token 数・推定費用・model 名は
   OpenTelemetry で受け取った usage の行として member ごとに別に持ち、読み取り時に時刻で Run に割り当てる
-  （[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)）。prompt と生成内容は引き続き保存しない。
+  （[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)）。tool 別の所要時間と人の待ち時間（推定）も同じ logs から
+  member ごとの activity 行に足し、読み取り時に同じ規則で Run に割り当てる。Factory analytics はこれを使って、
+  時間のかかった tool と、同じ種類・規模のタスク同士の比較を返す（[ADR 0117](adr/0117-agent-run-time-breakdown-and-peer-comparison.md)）。
+  prompt と生成内容は引き続き保存しない。
 - 外部 chat sync や Update Feed への Run event の配信は行わない。comment は従来どおり既存経路で
   配信され、判断待ちの Run は「担当者への通知」で担当者に届く。
 
