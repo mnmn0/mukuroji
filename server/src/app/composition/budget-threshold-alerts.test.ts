@@ -125,6 +125,13 @@ test('leaves out managers whose Workspace access ended, so an expired owner does
 test('counts Agent Run cost of a USD budget when the Workspace profile includes it (ADR 0119)', async () => {
   const now = new Date('2026-01-10T00:00:00.000Z')
   const base = sources()
+  /**
+   * Builds sources whose Workspace profile counts Agent Run cost or not, with a budget and expense in a currency.
+   *
+   * @param includeInProjectBudgets - Workspace agent cost setting.
+   * @param currency - Currency of the budget and the expense.
+   * @returns The test sources.
+   */
   const withAgentCost = (includeInProjectBudgets: boolean, currency: string) => sources({
     readProfile: async () => ({ status: 'active', agentCost: { includeInProjectBudgets } }),
     getBudget: async () => ({ ...budget, currency }),
