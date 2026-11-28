@@ -201,10 +201,14 @@ export type SaveGitHubRepositoryLinkRequest = {
 }
 
 /**
- * GitHub login: 1 to 39 letters, digits, or single hyphens, not starting or ending with a hyphen,
- * optionally followed by `_` and an Enterprise Managed Users short code (`mona-cat_octo`).
+ * GitHub login shape: letters, digits, or single hyphens, not starting or ending with a hyphen,
+ * optionally followed by `_` and an Enterprise Managed Users short code of 3 to 8 characters
+ * (`mona-cat_octo`). {@link isGitHubLogin} also caps the whole login at 39 characters.
  */
-export const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}(?:_[A-Za-z0-9]{1,39})?$/u
+export const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}(?:_[A-Za-z0-9]{3,8})?$/u
+
+/** Longest GitHub login, Enterprise Managed Users short code included. */
+const GITHUB_LOGIN_MAX_LENGTH = 39
 
 /** GitHub repository ID: a positive decimal integer of up to 20 digits. */
 export const GITHUB_REPOSITORY_ID_PATTERN = /^[1-9][0-9]{0,19}$/u
@@ -219,7 +223,7 @@ const GITHUB_TEAM_ID_MAX_LENGTH = 256
  * @returns True for a syntactically valid GitHub login.
  */
 export function isGitHubLogin(value: unknown): value is string {
-  return typeof value === 'string' && GITHUB_LOGIN_PATTERN.test(value)
+  return typeof value === 'string' && value.length <= GITHUB_LOGIN_MAX_LENGTH && GITHUB_LOGIN_PATTERN.test(value)
 }
 
 /**

@@ -152,8 +152,13 @@ function fakeGateway(open: GitHubPullRequestSnapshot[], byNumber: Map<number, Gi
 }
 
 test('accepts ordinary and Enterprise Managed Users logins and rejects malformed ones', () => {
-  for (const login of ['a', 'demo-user', 'Octo42', 'mona-cat_octo', 'a'.repeat(39)]) expect(isGitHubLogin(login)).toBe(true)
-  for (const login of ['', '-alice', 'alice-', 'al--ice', 'a'.repeat(40), 'alice_', '_octo', 'mona_cat_octo', 'mona cat', 'mona@octo']) {
+  for (const login of ['a', 'demo-user', 'Octo42', 'mona-cat_octo', 'a'.repeat(39), 'mona_abc', 'mona_abcdefgh', `${'a'.repeat(34)}_octo`]) {
+    expect(isGitHubLogin(login)).toBe(true)
+  }
+  for (const login of [
+    '', '-alice', 'alice-', 'al--ice', 'a'.repeat(40), 'alice_', '_octo', 'mona_cat_octo', 'mona cat', 'mona@octo',
+    'alice_ab', 'alice_abcdefghi', `${'a'.repeat(35)}_octo`,
+  ]) {
     expect(isGitHubLogin(login)).toBe(false)
   }
 })
