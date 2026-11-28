@@ -97,6 +97,7 @@ function createWorkItem(id: string, overrides: Partial<CanonicalWorkItem> = {}):
  * @param tokens - Total tokens.
  * @param estimatedCostMicroUsd - Estimated cost, when visible.
  * @param hasMore - Whether the usage read stopped early.
+ * @param costVisible - Whether the viewer may see the run's cost.
  * @returns The run usage.
  */
 function createRun(
@@ -105,12 +106,14 @@ function createRun(
   tokens: number,
   estimatedCostMicroUsd?: number,
   hasMore = false,
+  costVisible = true,
 ): AnalyticsAgentUsageRun {
   return {
     runId,
     finishedAt: Date.parse(finishedAt),
     tokens,
     ...(estimatedCostMicroUsd === undefined ? {} : { estimatedCostMicroUsd }),
+    costVisible,
     hasMore,
   }
 }
@@ -137,9 +140,10 @@ const agentUsage: AnalyticsAgentUsage = {
       createRun('run-2', '2026-01-04T10:00:00.000Z', 500, 30_000, true),
       createRun('run-old', '2025-12-31T23:59:59.000Z', 9_999, 999_999),
     ]],
-    ['ops\0item-2', [createRun('run-3', '2026-01-04T12:00:00.000Z', 2_000, 400_000)]],
+    // The viewer manages neither the ops Team nor its Project and did not run the agent.
+    ['ops\0item-2', [createRun('run-3', '2026-01-04T12:00:00.000Z', 2_000, undefined, false, false)]],
   ]),
-  costTeamIds: ['core'],
+  costScopeKeys: ['member:core\0viewer@example.com', 'member:ops\0viewer@example.com', 'team:core'],
 }
 
 describe('Agent usage metrics', () => {
@@ -191,7 +195,7 @@ describe('Agent usage metrics', () => {
     expect(cost?.value).toBe(0.15)
     expect(cost?.definition.unit).toBe('usd')
     expect(cost?.sampleSize).toBe(2)
-    expect(cost?.warnings).toContain('1 Agent Run(s) of Teams you do not manage were left out of the estimated cost.')
+    expect(cost?.warnings).toContain('1 Agent Run(s) whose cost you may not see were left out of the estimated cost.')
     // A Team whose cost the viewer cannot see has no value rather than zero.
     expect(byTeam?.groups.map((group) => [group.key, group.value])).toEqual([['core', 0.15], ['ops', null]])
   })
@@ -201,7 +205,7 @@ describe('Agent usage metrics', () => {
       workItems: [coreItem],
       events: [],
       authorizedProjectIds,
-      agentUsage: { runs: new Map([['core\0item-1', [createRun('run-1', '2026-01-02T10:00:00.000Z', 10)]]]), costTeamIds: ['core'] },
+      agentUsage: { runs: new Map([['core\0item-1', [createRun('run-1', '2026-01-02T10:00:00.000Z', 10)]]]), costScopeKeys: ['team:core'] },
       query: createQuery([{ id: 'cost', title: 'Cost', type: 'metric', metric: 'agent-cost' }]),
     })
     expect(snapshot.widgets[0]?.value).toBe(0)
@@ -263,14 +267,14 @@ describe('Agent usage metrics', () => {
     )
   })
 
-  test('fixes the Teams whose cost the viewer could see in the permission scope', () => {
+  test('fixes whose cost the viewer could see in the permission scope', () => {
     const query = createQuery([{ id: 'cost', title: 'Cost', type: 'metric', metric: 'agent-cost' }])
     const managed = createAnalyticsSnapshot({ workItems, events: [], authorizedProjectIds, agentUsage, query })
     const notManaged = createAnalyticsSnapshot({
       workItems,
       events: [],
       authorizedProjectIds,
-      agentUsage: { ...agentUsage, costTeamIds: [] },
+      agentUsage: { ...agentUsage, costScopeKeys: [] },
       query,
     })
     expect(analyticsSnapshotReadAgentCost(managed)).toBe(true)
@@ -281,9 +285,9 @@ describe('Agent usage metrics', () => {
       authorizedProjectIds,
       undefined,
       undefined,
-      ['core'],
+      agentUsage.costScopeKeys,
     ))
-    // Token widgets do not depend on the managed Teams.
+    // Token widgets do not depend on whose cost the viewer may see.
     const tokens = createAnalyticsSnapshot({
       workItems,
       events: [],

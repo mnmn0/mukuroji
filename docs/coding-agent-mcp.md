@@ -328,7 +328,7 @@ Run とそのタスクに積み上がります（[ADR 0061](adr/0061-agent-token
 - 同じ instance ID の session を同時に 2 つ動かし、それぞれ別のタスクに着手すると、その間の usage は両方の Run に
   数えられます。同時に動かす session には別の instance ID を指定します（プロジェクトの
   `.claude/settings.local.json` と `.mcp.json` で分けるなど）。
-- 推定費用は Claude Code の見積もりで、請求額とは一致しません。Web では Team manager にだけ表示されます。
+- 推定費用は Claude Code の見積もりで、請求額とは一致しません。Web では Workspace 管理者、Team manager、その Run の Project manager、Run の本人に表示されます（[ADR 0111](adr/0111-agent-run-cost-visibility.md)）。
 - Codex と Kiro には対応していません。Codex の OpenTelemetry は token 数を出しますが、resource attribute の指定方法、
   header での環境変数の展開、event の attribute 名が公開資料の間で食い違っており、Run への割り当てと token を
   設定ファイルに書かない運用を確かめられないためです（#729 に残します）。

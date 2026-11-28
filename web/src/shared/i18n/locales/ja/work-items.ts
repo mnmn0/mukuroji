@@ -852,7 +852,7 @@ export const workItemsMessages = {
   'workItems.agentRuns.usageCost': '推定 {cost}',
   'workItems.agentRuns.usageRequests': '{count} 回のリクエスト',
   'workItems.agentRuns.usagePartial': '記録が多いため、一部だけを合計しています。',
-  'workItems.agentRuns.usageHint': 'エージェントが OpenTelemetry で送った値を、実行中の Run に時刻で割り当てています。推定費用はエージェントの見積もりで、Team の管理者にだけ表示されます。',
+  'workItems.agentRuns.usageHint': 'エージェントが OpenTelemetry で送った値を、実行中の Run に時刻で割り当てています。推定費用はエージェントの見積もりで、Workspace 管理者、Team か Work Item の Project の管理者、エージェントを動かした本人に表示されます。',
   'workItems.agentRuns.state.running': '処理中',
   'workItems.agentRuns.state.stalled': '停滞',
   'workItems.agentRuns.state.completed': '完了',

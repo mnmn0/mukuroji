@@ -175,8 +175,9 @@ export type AgentRunUsage = {
   /** Model requests the totals cover. */
   requestCount: number
   /**
-   * Estimated cost in millionths of US dollars, as the agent runtime estimated it. Only Team managers
-   * receive it.
+   * Estimated cost in millionths of US dollars, as the agent runtime estimated it. Only viewers who may
+   * see the run's cost receive it (ADR 0111): Workspace administrators, managers of the Team or of the
+   * Work Item's Project, and the member whose agent ran.
    */
   estimatedCostMicroUsd?: number
   /** Models that served the requests, sorted. */
@@ -672,7 +673,10 @@ export type WorkItemAgentRunsResponse = {
   items: AgentRunView[]
   /** Whether older runs exist beyond the returned ones. */
   hasMore: boolean
-  /** Usage of the returned runs added together; absent when none of them has usage. */
+  /**
+   * Usage of the returned runs added together; absent when none of them has usage. It carries the
+   * estimated cost only when every run with usage does (ADR 0111).
+   */
   usageTotal?: AgentRunUsage
 }
 
@@ -942,7 +946,10 @@ export type FactoryAnalyticsWorkItemUsage = {
  * estimated cost is included only for Team managers.
  */
 export type FactoryAnalyticsUsage = {
-  /** Usage of every evaluated run. */
+  /**
+   * Usage of every evaluated run. A total, Project, or Work Item carries the estimated cost only when
+   * the viewer may see the cost of every run in it (ADR 0111).
+   */
   total: AgentRunUsage
   /** Usage per Project, most tokens first. */
   projects: FactoryAnalyticsProjectUsage[]

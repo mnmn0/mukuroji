@@ -3431,7 +3431,7 @@ function formatAnalyticsWarning(
     return t('analytics.warning.noEarnedValue')
   }
   const agentUsageWarnings = [
-    [/^(\d+) Agent Run\(s\) of Teams you do not manage were left out of the estimated cost\.$/u, 'analytics.warning.agentCostHidden'],
+    [/^(\d+) Agent Run\(s\) whose cost you may not see were left out of the estimated cost\.$/u, 'analytics.warning.agentCostHidden'],
     [/^(\d+) Agent Run\(s\) reported no estimated cost and counted as zero\.$/u, 'analytics.warning.agentCostMissing'],
     [/^(\d+) Agent Run\(s\) had more usage than one read returns, so the total is a lower bound\.$/u, 'analytics.warning.agentUsageTruncated'],
     [/^(\d+) Project\(s\) you do not manage were left out of the earned value\.$/u, 'analytics.warning.earnedValueUnmanaged'],

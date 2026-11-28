@@ -105,7 +105,7 @@ export const factoryBoardMessages = {
   'factoryBoard.analytics.reworkColumn': '手戻り率',
   'factoryBoard.analytics.interventionsColumn': '介入',
   'factoryBoard.analytics.usageHeading': 'トークン使用量',
-  'factoryBoard.analytics.usageHint': '期間内に終わった Run に、エージェントが OpenTelemetry で送った値を合計しています。推定費用は Team の管理者にだけ表示されます。',
+  'factoryBoard.analytics.usageHint': '期間内に終わった Run に、エージェントが OpenTelemetry で送った値を合計しています。推定費用は、Workspace 管理者と Team の管理者にはすべての Run、Project の管理者にはその Project の Run、それ以外の人には自分の Run の分だけ表示されます。',
   'factoryBoard.analytics.usagePartial': '読み込み上限に達したため、一部の Run または使用量が合計に含まれていません。',
   'factoryBoard.analytics.usageProjectsHeading': 'Project 別',
   'factoryBoard.analytics.usageNoProject': 'Project なし',

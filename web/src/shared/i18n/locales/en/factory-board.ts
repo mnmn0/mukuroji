@@ -105,7 +105,7 @@ export const factoryBoardMessages = {
   'factoryBoard.analytics.reworkColumn': 'Rework rate',
   'factoryBoard.analytics.interventionsColumn': 'Interventions',
   'factoryBoard.analytics.usageHeading': 'Token usage',
-  'factoryBoard.analytics.usageHint': 'Adds up what agents sent over OpenTelemetry for the runs that finished in the period. Only Team managers see the estimated cost.',
+  'factoryBoard.analytics.usageHint': 'Adds up what agents sent over OpenTelemetry for the runs that finished in the period. The estimated cost is shown for the runs whose cost you may see: all runs to Workspace administrators and Team managers, a Project’s runs to its managers, and your own runs to you.',
   'factoryBoard.analytics.usagePartial': 'A read limit was reached, so some runs or usage are not included.',
   'factoryBoard.analytics.usageProjectsHeading': 'By Project',
   'factoryBoard.analytics.usageNoProject': 'No Project',

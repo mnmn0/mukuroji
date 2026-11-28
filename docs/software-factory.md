@@ -395,7 +395,7 @@ Factory board の上部に、期間内に終わった Run の集計を出す。d
 - token / 費用は agent の自己申告ではなく OpenTelemetry で受け取る（[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)、
   #729）。Run と Work Item の合計は Web の Run 一覧で返す。期間サマリーは `usage` に、期間内に終わった Run
   （新しい順に最大 300 件、超えたら `runsHasMore`）の合計、Project 別の合計、トークンの多い Work Item 上位 10 件を
-  返す。推定費用は Team manager にだけ入れる。Analytics の report では `agent-tokens` / `agent-cost` metric として
+  返す。推定費用は費用を見られる Run だけに入れる（[ADR 0111](adr/0111-agent-run-cost-visibility.md)）。Analytics の report では `agent-tokens` / `agent-cost` metric として
   widget・snapshot・export に使える（[ADR 0108](adr/0108-analytics-agent-usage-metrics.md)、[docs/analytics.md](analytics.md)）。
 
 ## Triage への自動起票

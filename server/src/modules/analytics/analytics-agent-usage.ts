@@ -12,10 +12,15 @@ export type AnalyticsAgentUsageRun = {
   /** Input, output, prompt cache read, and prompt cache write tokens added together. */
   tokens: number
   /**
-   * Estimated cost in millionths of US dollars. Present only when the viewer manages the run's Team
+   * Estimated cost in millionths of US dollars. Present only when the viewer may see the run's cost
    * and the agent runtime reported a cost.
    */
   estimatedCostMicroUsd?: number
+  /**
+   * Whether the viewer may see the run's cost (ADR 0111): they administer the Workspace, manage the
+   * run's Team or its Work Item's Project, or ran the agent themselves.
+   */
+  costVisible: boolean
   /** True when the run had more usage than one read returns, so its totals are a lower bound. */
   hasMore: boolean
 }
@@ -25,10 +30,10 @@ export type AnalyticsAgentUsage = {
   /** Runs that finished in the query period, keyed by Team-qualified Work Item key (`teamId\0workItemId`). */
   runs: ReadonlyMap<string, readonly AnalyticsAgentUsageRun[]>
   /**
-   * Teams whose estimated cost the viewer may see (the Teams they manage), sorted. Set only when the
-   * query has an `agent-cost` widget; the snapshot permission scope fixes it.
+   * Keys of whose estimated cost the viewer may see (managed Teams and Projects, and their own runs),
+   * sorted. Set only when the query has an `agent-cost` widget; the snapshot permission scope fixes it.
    */
-  costTeamIds?: readonly string[]
+  costScopeKeys?: readonly string[]
 }
 
 /** Warning of an Agent usage widget computed by a run that cannot read Agent Run usage. */

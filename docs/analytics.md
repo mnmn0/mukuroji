@@ -178,7 +178,7 @@ Metric contract の version は snapshot に固定します。同じ入力、met
 | Cumulative flow | 評価時点で archive されていない Work Item 数。Chart の各 point は status category（`completed` / `started` / `unstarted` / `backlog` / `canceled`）ごとの件数を `segments` で返します。 |
 | Milestone trend | 期間中に予定日（forecast の終了日）が変わった Milestone 数。Chart の各 point は bucket 末時点の各 Milestone の予定日を、key が Milestone ID、value が 1970-01-01 からの日数の `segments` で返します。Group は Milestone ごとに、期間中に予定日が動いた日数（遅れは正）と変更回数（`sampleSize`）を返します。 |
 | Agent tokens | 期間内（`asOf` まで）に終わった Agent Run が使ったトークン数（入力・出力・prompt cache の読み取り・書き込みの合計、unit `tokens`）。`sampleSize` は数えた Run 数です。 |
-| Agent estimated cost | 期間内に終わった Agent Run の推定費用（USD、unit `usd`）。閲覧者が manager である Team の Run だけを数えます。 |
+| Agent estimated cost | 期間内に終わった Agent Run の推定費用（USD、unit `usd`）。閲覧者が費用を見られる Run（[ADR 0111](adr/0111-agent-run-cost-visibility.md)）だけを数えます。 |
 | SPI | `asOf` の日付の出来高（EV）÷ 計画値（PV）。baseline の予定工数（分）で測り、unit は `index`（小数 2 桁）。閲覧者が manager で、予定工数のある baseline を持つ Project だけを数えます。 |
 | CPI | EV ÷ Project に記録した時間（AC）。unit `index`。対象は SPI と同じです。 |
 | EAC | baseline の予定工数（BAC）÷ CPI を時間で表した値（unit `hours`）。対象は SPI と同じです。 |
@@ -253,10 +253,12 @@ evidence、定期配信の hash に含まれます。
 分け、group は他の metric と同じく `asOf` 時点の Work Item の state で分けます。Evidence と table は Run ごとに 1 行で、
 値はその Run のトークン数または推定費用です。
 
-推定費用は閲覧者が manager である Team（Team の全 active Project の manager）の Run だけを数え、それ以外の Run は件数を warning で返します（数えられる Run の
+推定費用は閲覧者が費用を見られる Run だけを数え（[ADR 0111](adr/0111-agent-run-cost-visibility.md)：Workspace 管理者は
+すべて、Team manager（Team の全 active Project の manager）は Team の Run、Project manager は今その Project にある
+Work Item の Run、それ以外は本人の agent の Run）、見られない Run は件数を warning で返します（数えられる Run の
 ない group の値は `null`）。費用が届いていない Run は 0 として数え、usage の読み取りが上限で止まった Run は合計が
-下限であることを warning で返します。`agent-cost` を含む snapshot の permission scope hash には、Work Item の Team の
-うち閲覧者が manager である Team の ID を加え、一覧・export の再検証でも同じ規則で比べます。`agent-cost` のない query の
+下限であることを warning で返します。`agent-cost` を含む snapshot の permission scope hash には、Work Item の
+Team ごとに費用を見られる範囲の key（`team:`・`project:`・`member:`）を加え、一覧・export の再検証でも同じ規則で比べます。`agent-cost` のない query の
 hash は変わりません。Software factory を deploy していない環境と定期配信の runner は usage を読まず、widget は
 warning だけを返します（hash にも Team を加えません）。
 

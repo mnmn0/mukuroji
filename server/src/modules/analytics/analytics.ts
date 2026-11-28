@@ -804,7 +804,7 @@ export const ANALYTICS_METRIC_DEFINITIONS: Readonly<Record<
     label: 'Agent estimated cost',
     unit: 'usd',
     description:
-      'Adds up the estimated cost in US dollars that the agent runtime reported for the Agent Runs that finished in the period, counting only Teams the viewer manages.',
+      'Adds up the estimated cost in US dollars that the agent runtime reported for the Agent Runs that finished in the period, counting only runs whose cost the viewer may see: every run for a Workspace administrator or Team manager, the runs of a Project for its manager, and the viewer\'s own runs.',
   }),
   'evm-spi': Object.freeze({
     key: 'evm-spi',
@@ -1305,7 +1305,7 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
       ? input.planningGroups.entityScopeKeys
       : undefined,
     input.agentUsage !== undefined && analyticsQueryReadsAgentCost(normalized.query)
-      ? input.agentUsage.costTeamIds ?? []
+      ? input.agentUsage.costScopeKeys ?? []
       : undefined,
     input.earnedValue !== undefined && analyticsQueryReadsEarnedValue(normalized.query)
       ? input.earnedValue.managedProjectKeys
@@ -1387,7 +1387,7 @@ export function queryAnalyticsEvidence(
       authorizedProjectIds,
       undefined,
       undefined,
-      evidence.metric === 'agent-cost' ? input.agentUsage?.costTeamIds ?? [] : undefined,
+      evidence.metric === 'agent-cost' ? input.agentUsage?.costScopeKeys ?? [] : undefined,
     ),
   })
   const offset = evidence.cursor
@@ -3059,7 +3059,7 @@ function createAgentUsageUnavailableWidgetResult(
 
 /**
  * Adds up the telemetry usage of the Agent Runs that finished between two instants on the given
- * Work Items. `agent-cost` counts only runs of Teams whose cost the viewer may see.
+ * Work Items. `agent-cost` counts only runs whose cost the viewer may see (ADR 0111).
  *
  * @param metric - `agent-tokens` or `agent-cost`.
  * @param facts - Filtered Work Item facts of the group or bucket.
@@ -3075,14 +3075,13 @@ function calculateAgentUsageMetric(
   from: number,
   to: number,
 ): MetricComputation {
-  const costTeamIds = new Set(agentUsage?.costTeamIds ?? [])
   const samples = facts.flatMap((fact) =>
     (agentUsage?.runs.get(workItemKey(fact.state.teamId, fact.state.id)) ?? [])
       .filter((run) => run.finishedAt >= from && run.finishedAt <= to)
       .map((run) => ({ fact, run }))
   )
   const counted = metric === 'agent-cost'
-    ? samples.filter(({ fact }) => costTeamIds.has(fact.state.teamId))
+    ? samples.filter(({ run }) => run.costVisible)
     : samples
   const values = counted.map(({ run }) =>
     metric === 'agent-cost' ? (run.estimatedCostMicroUsd ?? 0) / 1_000_000 : run.tokens
@@ -3105,7 +3104,7 @@ function calculateAgentUsageMetric(
       ...(samples.length === 0 ? ['No Agent Runs with usage finished in this period.'] : []),
       ...(hidden === 0
         ? []
-        : [`${hidden} Agent Run(s) of Teams you do not manage were left out of the estimated cost.`]),
+        : [`${hidden} Agent Run(s) whose cost you may not see were left out of the estimated cost.`]),
       ...(withoutCost === 0
         ? []
         : [`${withoutCost} Agent Run(s) reported no estimated cost and counted as zero.`]),
