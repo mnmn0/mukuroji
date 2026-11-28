@@ -91,13 +91,22 @@ export async function updateSlackChannelTarget<AuditContext>(
 ): Promise<SlackChannelSummary> {
   const channel = await ports.store.getChannel(workspaceId, channelId)
   if (!channel) throw new SlackIngestError('not-found', 'SlackChannelNotFound', 'The bot has not joined this channel.')
-  const updated = await ports.store.setChannelTarget(
-    workspaceId,
-    channelId,
-    target ?? undefined,
-    channel.mappingRevision,
-    audit,
-  )
+  let updated: SlackChannelRecord
+  try {
+    updated = await ports.store.setChannelTarget(
+      workspaceId,
+      channelId,
+      target ?? undefined,
+      channel.mappingRevision,
+      audit,
+    )
+  } catch (error) {
+    // A retry of a change that was saved but could not queue its job reuses the same audit event,
+    // so the write conflicts. When the channel already has the requested target, queue the job.
+    const current = isConflict(error) ? await ports.store.getChannel(workspaceId, channelId) : undefined
+    if (!current || !sameTarget(current.target, target ?? undefined)) throw error
+    updated = current
+  }
   try {
     if (!updated.target) {
       await ports.queue.send({
@@ -144,7 +153,15 @@ export async function updateSlackIngestSettings<AuditContext>(
   audit: SlackIngestAuditInput<AuditContext>,
 ): Promise<{ retentionDays: number, settingsRevision: number }> {
   const previous = await ports.store.getSettings(workspaceId)
-  const saved = await ports.store.saveSettings(workspaceId, request.retentionDays, request.expectedRevision, audit)
+  let saved: { retentionDays: number, revision: number }
+  try {
+    saved = await ports.store.saveSettings(workspaceId, request.retentionDays, request.expectedRevision, audit)
+  } catch (error) {
+    // A retry of a saved change reuses its audit event and conflicts; queue the cleanup again.
+    const current = isConflict(error) ? await ports.store.getSettings(workspaceId) : undefined
+    if (!current || current.retentionDays !== request.retentionDays) throw error
+    saved = current
+  }
   if (saved.retentionDays <= previous.retentionDays) {
     const channels = await ports.store.listChannels(workspaceId)
     for (const channel of channels) {
@@ -159,4 +176,27 @@ export async function updateSlackIngestSettings<AuditContext>(
     }
   }
   return { retentionDays: saved.retentionDays, settingsRevision: saved.revision }
+}
+
+/**
+ * Reports whether an error is a revision conflict of the store.
+ *
+ * @param error - Thrown error.
+ * @returns Whether it is a conflict.
+ */
+function isConflict(error: unknown): boolean {
+  return error instanceof SlackIngestError && error.category === 'conflict'
+}
+
+/**
+ * Compares two channel targets.
+ *
+ * @param left - First target.
+ * @param right - Second target.
+ * @returns Whether both name the same Team or Project, or both are unset.
+ */
+function sameTarget(left: SlackChannelTarget | undefined, right: SlackChannelTarget | undefined): boolean {
+  if (!left || !right) return left === right
+  if (left.kind !== right.kind || left.teamId !== right.teamId) return false
+  return left.kind === 'team' || (right.kind === 'project' && left.projectId === right.projectId)
 }

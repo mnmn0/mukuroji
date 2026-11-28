@@ -65,6 +65,8 @@ export type SlackIngestJob =
       mode: 'all' | 'expired'
       /** Mapping revision that asked for the deletion; a later mapping stops an `all` prune. */
       mappingRevision: number
+      /** For `expired`, messages up to this `ts` already have the shorter expiry. */
+      afterTs?: string
     }
 
 /** Sends ingest jobs to the worker queue. */
@@ -312,6 +314,24 @@ export interface SlackIngestStore<AuditContext = unknown> {
     limit: number,
     mappingRevision: number,
   ): Promise<{ deleted: number, done: boolean, superseded?: true }>
+  /**
+   * Shortens the expiry of a channel's remaining messages and their key rows to the retention,
+   * so a shorter retention also bounds how long messages newer than its cutoff stay stored.
+   *
+   * @param workspaceId - Workspace ID.
+   * @param channelId - Channel ID.
+   * @param afterTs - Continues after this message, when given.
+   * @param retentionDays - Days messages are kept.
+   * @param limit - Most messages to read in this call.
+   * @returns The `ts` to continue after, or nothing when every message was visited.
+   */
+  shortenChannelExpiry(
+    workspaceId: string,
+    channelId: string,
+    afterTs: string | undefined,
+    retentionDays: number,
+    limit: number,
+  ): Promise<{ next?: string }>
   /**
    * Reads a cached author display name.
    *

@@ -314,6 +314,9 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/workspace/work-calendar/*',
     permission: 'workspace.manage',
   },
+  // Slack channel ingest settings name private channels and decide who reads them (ADR 0113).
+  { method: '*', pathPattern: '/api/workspace/slack-ingest', permission: 'workspace.manage' },
+  { method: '*', pathPattern: '/api/workspace/slack-ingest/*', permission: 'workspace.manage' },
   // Workspace agent defaults are Workspace administration.
   { method: '*', pathPattern: '/api/workspace/agent-defaults', permission: 'workspace.manage' },
   { method: 'GET', pathPattern: '/api/workspace/*', permission: 'members.read' },

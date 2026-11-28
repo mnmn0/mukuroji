@@ -18,6 +18,7 @@ import {
 } from '@mukuroji/contracts'
 import { createMutationAuditEventPut, type MutationAuditContext } from '../../../audit'
 import { isSlackTs, isSlackUserId } from '../../domain/slack-events'
+import { messageExpiresAt } from '../../domain/slack-message'
 import { SlackIngestError } from '../../errors'
 import type {
   SlackChannelRecord,
@@ -916,6 +917,58 @@ export class DynamoDbSlackIngestStore implements SlackIngestStore<MutationAuditC
       }
     }
     return { deleted: rows.length, done: startKey === undefined && rows.length < limit }
+  }
+
+  /**
+   * Shortens the expiry of a channel's remaining messages and their key rows. Each row is updated
+   * only when it still exists and expires later, so the change never lengthens a TTL.
+   *
+   * @param workspaceId - Workspace ID.
+   * @param channelId - Channel ID.
+   * @param afterTs - Continues after this message, when given.
+   * @param retentionDays - Days messages are kept.
+   * @param limit - Most messages to read.
+   * @returns The `ts` to continue after, or nothing when done.
+   */
+  async shortenChannelExpiry(
+    workspaceId: string,
+    channelId: string,
+    afterTs: string | undefined,
+    retentionDays: number,
+    limit: number,
+  ): Promise<{ next?: string }> {
+    const prefix = messagePrefix(channelId)
+    const response = await this.client.send(new QueryCommand({
+      TableName: this.tableName,
+      KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :start)',
+      ExpressionAttributeValues: { ':workspaceId': workspaceId, ':start': prefix },
+      Limit: limit,
+      ConsistentRead: true,
+      ...(afterTs ? { ExclusiveStartKey: { workspaceId, recordKey: messageKey({ channelId, ts: afterTs }) } } : {}),
+    }))
+    let last: string | undefined
+    for (const row of response.Items ?? []) {
+      const parsed = parseMessageRow(row)
+      if (isSlackTs(row.ts)) last = row.ts
+      const message = parsed.message
+      if (!message) continue
+      const expiresAt = messageExpiresAt(message.ts, retentionDays)
+      if (message.expiresAt <= expiresAt) continue
+      for (const recordKey of [messageKey(message), ...parsed.keys.map((key) => keyIndexKey(key, message))]) {
+        try {
+          await this.client.send(new UpdateCommand({
+            TableName: this.tableName,
+            Key: { workspaceId, recordKey },
+            UpdateExpression: 'SET expiresAt = :expiresAt',
+            ConditionExpression: 'attribute_exists(recordKey) AND expiresAt > :expiresAt',
+            ExpressionAttributeValues: { ':expiresAt': expiresAt },
+          }))
+        } catch (error) {
+          if (!isConditionFailure(error)) throw error
+        }
+      }
+    }
+    return response.LastEvaluatedKey && last ? { next: last } : {}
   }
 
   /**

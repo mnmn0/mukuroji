@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto'
 import { expect, test } from 'bun:test'
 import { InMemorySlackIngestStore } from './adapter-out/in-memory/in-memory-slack-ingest-store'
-import { SlackRateLimitedError } from './errors'
+import { SlackIngestError, SlackRateLimitedError } from './errors'
 import type { SlackIngestConfig, SlackIngestJob, SlackWebApi } from './application/ports/slack-ingest-ports'
 import { readSlackIngestStatus, updateSlackChannelTarget, updateSlackIngestSettings } from './application/slack-ingest-admin'
 import { receiveSlackEvent } from './application/slack-event-receiver'
@@ -370,6 +370,46 @@ test('saving the same retention again queues its cleanup again', async () => {
   queued.length = 0
   await updateSlackIngestSettings(WS, { retentionDays: 30, expectedRevision: 2 }, admin, audit)
   expect(queued).toEqual([])
+})
+
+test('a shorter retention also shortens the expiry of messages it keeps', async () => {
+  const { store, queued, ports } = createWorld()
+  const admin = { config: ports.config, store, queue: ports.queue }
+  await store.recordMembership(WS, { channelId: CHANNEL, isPrivate: false, membership: 'joined', now: NOW.toISOString() })
+  await updateSlackChannelTarget(WS, CHANNEL, { kind: 'team', teamId: 'team-a' }, admin, audit)
+  await runSlackIngestJob(posted(RECENT_TS, 'MK-1 new'), ports)
+  queued.length = 0
+  await updateSlackIngestSettings(WS, { retentionDays: 7, expectedRevision: 0 }, admin, audit)
+  const prune = queued.shift()
+  if (!prune) throw new Error('prune was not queued')
+  expect(await runSlackIngestJob(prune.job, ports)).toBe('pruned')
+  const [kept] = await store.getMessages(WS, [{ channelId: CHANNEL, ts: RECENT_TS }])
+  expect(kept?.expiresAt).toBe(Math.floor(Number(RECENT_TS)) + 7 * 86_400)
+})
+
+test('retrying a saved change that could not queue its job queues it instead of conflicting', async () => {
+  const { store, queued, ports } = createWorld()
+  let failSend = true
+  const flakyQueue = {
+    async send(job: SlackIngestJob, delaySeconds?: number) {
+      if (failSend) throw new Error('queue down')
+      await ports.queue.send(job, delaySeconds)
+    },
+  }
+  await store.recordMembership(WS, { channelId: CHANNEL, isPrivate: false, membership: 'joined', now: NOW.toISOString() })
+  const admin = { config: ports.config, store, queue: flakyQueue }
+  await expect(updateSlackChannelTarget(WS, CHANNEL, { kind: 'team', teamId: 'team-a' }, admin, audit))
+    .rejects.toMatchObject({ code: 'SlackIngestQueueUnavailable' })
+  failSend = false
+  // The retry reuses the audit event, so the store reports a conflict for the same target.
+  store.setChannelTarget = async () => {
+    throw new SlackIngestError('conflict', 'SlackChannelMappingConflict', 'The channel changed.')
+  }
+  const retried = await updateSlackChannelTarget(WS, CHANNEL, { kind: 'team', teamId: 'team-a' }, admin, audit)
+  expect(retried.target).toEqual({ kind: 'team', teamId: 'team-a' })
+  expect(queued.map((entry) => entry.job.kind)).toEqual(['backfill'])
+  await expect(updateSlackChannelTarget(WS, CHANNEL, { kind: 'team', teamId: 'team-b' }, admin, audit))
+    .rejects.toMatchObject({ code: 'SlackChannelMappingConflict' })
 })
 
 test('a superseded backfill stops, and jobs for another Workspace end', async () => {

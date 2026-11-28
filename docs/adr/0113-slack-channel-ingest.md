@@ -80,6 +80,9 @@ Workspace の export と削除は既存の developer-platform の対象に入る
   対応づけたあとに届いた返信は、親の古さにかかわらず event で取り込む。
 - 掃除（prune）は Slack の credential を使わないので、secret を消したあとも実行する。
   掃除の削除も channel の mapping revision を同じ transaction で確かめ、対応づけし直したあとに読み込んだ発言は消さない。
+- 保持日数を短くしたときは、残す発言と key 索引の `expiresAt` も新しい保持日数まで縮める（TTL を延ばす更新はしない）。
+- 管理 API は Enterprise の route permission で `workspace.manage` を求める（private channel 名と対応先を扱うため、`members.read` の既定に落とさない）。
+- 対応づけ・保持日数の保存が成功したあと job を入れられず、同じ idempotency key で再送された場合は、監査 event の重複で衝突しても、保存済みの値が要求と同じなら job を入れ直す。
 - worker は event と過去分の job を始める前に Workspace のライフサイクルを読み直し、closing・closed なら何もしない（掃除だけは続ける）。
 - 対応づけの変更と保持日数の変更は監査ログに残す。
 

@@ -113,7 +113,15 @@ export function parseSlackIngestJob(body: string | undefined): SlackIngestJob {
     }
   }
   if (value.kind === 'prune' && (value.mode === 'all' || value.mode === 'expired')) {
-    return { kind: 'prune', workspaceId, channelId: value.channelId, mode: value.mode, mappingRevision: value.mappingRevision }
+    if (value.afterTs !== undefined && !isSlackTs(value.afterTs)) throw new TypeError('afterTs is invalid.')
+    return {
+      kind: 'prune',
+      workspaceId,
+      channelId: value.channelId,
+      mode: value.mode,
+      mappingRevision: value.mappingRevision,
+      ...(isSlackTs(value.afterTs) ? { afterTs: value.afterTs } : {}),
+    }
   }
   throw new TypeError('job kind is invalid.')
 }

@@ -407,13 +407,18 @@ async function runPrune(
   const { store } = ports
   const channel = await store.getChannel(job.workspaceId, job.channelId)
   let beforeTs: string | undefined
+  let retentionDays: number | undefined
   if (job.mode === 'all') {
     // A newer mapping keeps the messages it loads.
     if (channel?.target && channel.mappingRevision !== job.mappingRevision) return 'superseded'
   } else {
     if (!channel?.target) return 'unmapped'
     const settings = await store.getSettings(job.workspaceId)
+    retentionDays = settings.retentionDays
     beforeTs = retentionCutoffTs(Math.floor(now.getTime() / 1000), settings.retentionDays)
+  }
+  if (job.afterTs !== undefined && retentionDays !== undefined) {
+    return await shortenExpiry(ports, job, job.afterTs, retentionDays)
   }
   const result = await store.deleteChannelMessages(
     job.workspaceId,
@@ -423,6 +428,33 @@ async function runPrune(
     job.mappingRevision,
   )
   if (result.superseded) return 'superseded'
-  if (!result.done) await ports.queue.send(job)
-  return result.done ? 'pruned' : 'prune-continues'
+  if (!result.done) {
+    await ports.queue.send(job)
+    return 'prune-continues'
+  }
+  // The messages that stay still carry the expiry of the longer retention; shorten it too.
+  if (retentionDays !== undefined) return await shortenExpiry(ports, job, undefined, retentionDays)
+  return 'pruned'
+}
+
+/**
+ * Shortens the expiry of a channel's remaining messages to the current retention, one page per
+ * job.
+ *
+ * @param ports - Worker ports.
+ * @param job - Expired prune job.
+ * @param afterTs - Continues after this message, when given.
+ * @param retentionDays - Days messages are kept.
+ * @returns What happened, for logs.
+ */
+async function shortenExpiry(
+  ports: SlackIngestWorkerPorts,
+  job: Extract<SlackIngestJob, { kind: 'prune' }>,
+  afterTs: string | undefined,
+  retentionDays: number,
+): Promise<string> {
+  const { next } = await ports.store.shortenChannelExpiry(job.workspaceId, job.channelId, afterTs, retentionDays, PRUNE_BATCH_LIMIT)
+  if (!next) return 'pruned'
+  await ports.queue.send({ ...job, afterTs: next })
+  return 'prune-continues'
 }

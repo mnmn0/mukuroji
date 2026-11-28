@@ -1,3 +1,4 @@
+import { messageExpiresAt } from '../../domain/slack-message'
 import { SLACK_INGEST_DEFAULT_RETENTION_DAYS, type SlackChannelTarget } from '@mukuroji/contracts'
 import { SlackIngestError } from '../../errors'
 import type {
@@ -292,6 +293,36 @@ export class InMemorySlackIngestStore implements SlackIngestStore {
       .sort()
     for (const key of keys.slice(0, limit)) this.messages.delete(key)
     return { deleted: Math.min(limit, keys.length), done: keys.length < limit }
+  }
+
+  /**
+   * Shortens message expiries.
+   *
+   * @param workspaceId - Workspace ID.
+   * @param channelId - Channel ID.
+   * @param afterTs - Cursor.
+   * @param retentionDays - Retention.
+   * @param limit - Most messages.
+   * @returns The cursor.
+   */
+  async shortenChannelExpiry(
+    workspaceId: string,
+    channelId: string,
+    afterTs: string | undefined,
+    retentionDays: number,
+    limit: number,
+  ): Promise<{ next?: string }> {
+    const prefix = `${workspaceId}#${channelId}#`
+    const keys = [...this.messages.keys()]
+      .filter((key) => key.startsWith(prefix) && (afterTs === undefined || key.slice(prefix.length) > afterTs))
+      .sort()
+    for (const key of keys.slice(0, limit)) {
+      const entry = this.messages.get(key)
+      if (!entry?.message) continue
+      entry.message.expiresAt = Math.min(entry.message.expiresAt, messageExpiresAt(entry.message.ts, retentionDays))
+    }
+    const last = keys[Math.min(limit, keys.length) - 1]
+    return keys.length > limit && last ? { next: last.slice(prefix.length) } : {}
   }
 
   /**

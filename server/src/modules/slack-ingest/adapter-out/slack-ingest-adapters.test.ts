@@ -144,6 +144,28 @@ test('channel cleanup reads consistently and fences every delete on the mapping 
   ])
 })
 
+test('a shorter retention lowers the TTL of a kept message and its key rows only', async () => {
+  const sent: SentCommand[] = []
+  const client = {
+    async send(command: { constructor: { name: string }, input: Record<string, unknown> }) {
+      sent.push({ name: command.constructor.name, input: command.input })
+      return command.constructor.name === 'QueryCommand' ? { Items: [messageRow] } : {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const store = new DynamoDbSlackIngestStore('dev-platform', client)
+  expect(await store.shortenChannelExpiry('w', 'C012345678', undefined, 7, 1000)).toEqual({})
+  const updates = sent.filter((command) => command.name === 'UpdateCommand').map((command) => command.input)
+  expect(updates.map((input) => Reflect.get(Reflect.get(input, 'Key') as object, 'recordKey'))).toEqual([
+    messageRow.recordKey,
+    'slack-ingest#key#MK-1#1700000000.000100#C012345678',
+    'slack-ingest#key#MK-2#1700000000.000100#C012345678',
+  ])
+  expect(updates[0]).toMatchObject({
+    ConditionExpression: 'attribute_exists(recordKey) AND expiresAt > :expiresAt',
+    ExpressionAttributeValues: { ':expiresAt': 1700000000 + 7 * 86_400 },
+  })
+})
+
 test('a malformed stored row fails closed', async () => {
   const { client } = createClient({ 'slack-ingest#channel#C012345678': { recordKey: 'slack-ingest#channel#C012345678', channelId: 'C012345678' } })
   const store = new DynamoDbSlackIngestStore('dev-platform', client)
