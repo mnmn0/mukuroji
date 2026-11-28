@@ -2,6 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import type {
   ChannelDestinationRecord,
   ChannelDestinationStore,
+  RetiredChannelSecretStore,
   DeleteChannelDestinationInput,
   SaveChannelDestinationInput,
 } from '../../modules/notifications'
@@ -23,7 +24,7 @@ const webhookUrl = 'https://hooks.slack.com/services/TTEST/BTEST/ROUTESECRET'
 function installStores() {
   const records = new Map<string, ChannelDestinationRecord>()
   const secrets = new Map<string, string>()
-  const channelDestinations: ChannelDestinationStore = {
+  const channelDestinations: ChannelDestinationStore & Pick<RetiredChannelSecretStore, 'forgetRetiredSecret'> = {
     async get(_workspaceId, target) { return records.get(JSON.stringify(target)) },
     async getRevision(_workspaceId, target) { return records.get(JSON.stringify(target))?.revision ?? 0 },
     async save(input: SaveChannelDestinationInput) {
@@ -41,6 +42,7 @@ function installStores() {
       return record ? { record, revision: record.revision } : { revision: 0 }
     },
     async recordAudit() {},
+    async forgetRetiredSecret() {},
     personalAuditEntityId() { return 'workspace/wsp_test/member/mbr_test/slack-destination' },
   }
   setTestAppDependencies({

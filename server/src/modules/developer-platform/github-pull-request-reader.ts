@@ -3,7 +3,7 @@ import type {
   AgentRunPullRequestReviewState,
   AgentRunPullRequestStatus,
 } from '@mukuroji/contracts'
-import { ConnectorRuntimeError } from './connector-runtime-error'
+import { CONNECTOR_PROVIDER_HISTORY_TOO_LONG, ConnectorRuntimeError } from './connector-runtime-error'
 import type { ConnectorProviderRequester } from './connector-resource-protocol'
 import type { ConnectorPullRequestReference } from './connectors'
 
@@ -122,7 +122,7 @@ async function readHeadChecks(
  * @param repositoryPath - `repos/{owner}/{repo}` path.
  * @param sha - Commit SHA.
  * @returns The check runs, unvalidated, and the count GitHub reports.
- * @throws ConnectorRuntimeError ConnectorProviderResponseMalformed when more than
+ * @throws ConnectorRuntimeError {@link CONNECTOR_PROVIDER_HISTORY_TOO_LONG} when more than
  * {@link MAXIMUM_CHECK_RUN_PAGES} pages exist.
  */
 async function readCheckRuns(
@@ -145,7 +145,7 @@ async function readCheckRuns(
     const total = typeof payload.total_count === 'number' ? payload.total_count : runs.length
     if (runs.length >= total || pageRuns.length < CHECK_RUNS_PAGE_SIZE) return { runs, total }
   }
-  throw malformed('GitHub check runs are too many to read in full.')
+  throw tooLong('GitHub check runs are too many to read in full.')
 }
 
 /**
@@ -156,7 +156,7 @@ async function readCheckRuns(
  * @param pullPath - `repos/{owner}/{repo}/pulls/{number}` path.
  * @returns `changes-requested` when any reviewer's latest decision requests changes, `approved`
  * when at least one approves, and `none` otherwise.
- * @throws ConnectorRuntimeError ConnectorProviderResponseMalformed when the history is longer than
+ * @throws ConnectorRuntimeError {@link CONNECTOR_PROVIDER_HISTORY_TOO_LONG} when the history is longer than
  * {@link MAXIMUM_REVIEW_PAGES} pages, since a partial history could show an outdated decision.
  */
 async function readReviewState(
@@ -189,7 +189,7 @@ async function readReviewState(
       break
     }
   }
-  if (!complete) throw malformed('GitHub review history is too long to read in full.')
+  if (!complete) throw tooLong('GitHub review history is too long to read in full.')
   const values = [...decisions.values()]
   if (values.includes('changes-requested')) return 'changes-requested'
   return values.includes('approved') ? 'approved' : 'none'
@@ -228,6 +228,16 @@ function requireObject(value: unknown, label: string): Record<string, unknown> {
  */
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Builds the error of a history too long to read in full, which a partial read must not judge.
+ *
+ * @param message - Error message.
+ * @returns The error.
+ */
+function tooLong(message: string) {
+  return new ConnectorRuntimeError(CONNECTOR_PROVIDER_HISTORY_TOO_LONG, message)
 }
 
 /**

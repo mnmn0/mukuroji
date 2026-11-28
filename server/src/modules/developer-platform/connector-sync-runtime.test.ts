@@ -1071,6 +1071,37 @@ describe('ConnectorSyncEngine', () => {
     ])
   })
 
+  test('does not send a connection made during a call back to reauthorization when the old credential fails', async () => {
+    let reconnect: (() => Promise<unknown>) | undefined
+    const fixture = await createRuntimeFixture(createAdapter({
+      async readPullRequest() {
+        // The installation is connected again with a new credential while the old one's call runs.
+        await reconnect?.()
+        throw new ConnectorRuntimeError(
+          'ConnectorAuthorizationRequired',
+          'Authorization required.',
+          { authorizationRequired: true, providerStatus: 401 },
+        )
+      },
+    }))
+    reconnect = () => fixture.platform.recoverConnector({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      credential: serializeConnectorCredential({ accessToken: 'new-access-token', externalAccountId: 'account-1', scopes: ['repo'] }),
+      reason: 'recovery',
+    })
+    const reference = { repository: 'org/repo', number: 7 }
+    await expect(fixture.engine.readPullRequest('workspace-1', fixture.installation.id, reference))
+      .rejects.toMatchObject({ code: 'ConnectorAuthorizationRequired' })
+    expect(fixture.healthEvents).toEqual([])
+
+    // A failure of the credential the installation still holds does ask for reauthorization.
+    reconnect = undefined
+    await expect(fixture.engine.readPullRequest('workspace-1', fixture.installation.id, reference))
+      .rejects.toMatchObject({ code: 'ConnectorAuthorizationRequired' })
+    expect(fixture.healthEvents).toEqual([`authorization:${fixture.installation.id}`])
+  })
+
   test('reads a pull request through a degraded installation but not a disconnected one', async () => {
     const pullRequest = {
       state: 'open' as const, draft: false, headSha: 'a'.repeat(40), checks: 'success' as const, review: 'none' as const,

@@ -3,7 +3,6 @@ import {
   type AgentRunReport,
   type AgentRunReportAnswer,
   type AnswerAgentRunReportResponse,
-  type WorkItemAgentRunQuestionsResponse,
 } from '@mukuroji/contracts'
 import type { MutationAuditContext } from '../../modules/audit/audit'
 import {
@@ -225,41 +224,131 @@ export async function answerWebAgentRunReport(
   return { report: toAgentRunReport({ ...report, answer }) }
 }
 
+/** Where a question list continues: a report store page and how many of its reports were read. */
+type QuestionContinuation = {
+  /** Store cursor of the page to read next, or undefined for the newest page. */
+  cursor?: string
+  /** Reports at the start of that page that an earlier list already went through. */
+  skip: number
+}
+
+/** One page of questions with the internal continuation the Public API signs into its cursor. */
+export type AgentRunQuestionPage = {
+  /** Questions, newest first. */
+  items: AgentRunReport[]
+  /** True when older questions may exist. */
+  hasMore: boolean
+  /** Internal continuation, present exactly when `hasMore` is true. */
+  nextContinuation?: string
+}
+
 /**
- * Lists the newest `blocker` and `handoff` reports of a Work Item with their answers, for anyone who can
- * view the Work Item. Each answer is read as its comment now stands: an edited comment gives the edited
- * text, and a deleted one leaves the report unanswered.
+ * Encodes where a question list continues.
+ *
+ * @param continuation - Store page and reports already read in it.
+ * @returns Opaque continuation.
+ */
+function encodeQuestionContinuation(continuation: QuestionContinuation): string {
+  return Buffer.from(JSON.stringify(continuation)).toString('base64url')
+}
+
+/**
+ * Reads where a question list continues. The Public API signs the continuation, so a value that does
+ * not parse is an integrity error rather than caller input.
+ *
+ * @param value - Opaque continuation, or undefined for the newest questions.
+ * @returns Store page and reports already read in it.
+ */
+function decodeQuestionContinuation(value: string | undefined): QuestionContinuation {
+  if (value === undefined) return { skip: 0 }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+  } catch {
+    throw createAgentRunIntegrityError()
+  }
+  if (typeof parsed !== 'object' || parsed === null) throw createAgentRunIntegrityError()
+  const cursor: unknown = Reflect.get(parsed, 'cursor')
+  const skip: unknown = Reflect.get(parsed, 'skip')
+  if ((cursor !== undefined && typeof cursor !== 'string') || typeof skip !== 'number'
+    || !Number.isInteger(skip) || skip < 0 || skip >= reportPageSize) {
+    throw createAgentRunIntegrityError()
+  }
+  return cursor === undefined ? { skip } : { cursor, skip }
+}
+
+/**
+ * Lists a Work Item's `blocker` and `handoff` reports with their answers, newest first, for anyone who
+ * can view the Work Item. Each answer is read as its comment now stands: an edited comment gives the
+ * edited text, and a deleted one leaves the report unanswered. One list stops at a number of
+ * questions, a byte budget, or a number of report pages, and returns where to continue, so every
+ * question can be reached however many other reports came after it.
  *
  * @param principal - Viewer.
  * @param teamId - Team ID.
  * @param workItemId - Work Item ID.
- * @returns Up to {@link AGENT_RUN_QUESTIONS_MAX_ITEMS} questions, newest first, within a byte budget;
- * `hasMore` is true when older questions were left out.
+ * @param continuation - Continuation from the previous list, or undefined for the newest questions.
+ * @param limit - Most questions to return, at most {@link AGENT_RUN_QUESTIONS_MAX_ITEMS}.
+ * @returns Questions within the byte budget; `hasMore` and `nextContinuation` when older questions
+ * may exist.
  */
 export async function listWorkItemAgentRunQuestions(
   principal: WorkspacePrincipal,
   teamId: string,
   workItemId: string,
-): Promise<WorkItemAgentRunQuestionsResponse> {
+  continuation?: string,
+  limit: number = AGENT_RUN_QUESTIONS_MAX_ITEMS,
+): Promise<AgentRunQuestionPage> {
   await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
+  const maximumItems = Math.max(1, Math.min(limit, AGENT_RUN_QUESTIONS_MAX_ITEMS))
   const items: AgentRunReport[] = []
   let bytes = 0
-  let cursor: string | undefined
+  let { cursor, skip } = decodeQuestionContinuation(continuation)
+  /**
+   * Ends the list before a report of the current page. A page after a store cursor starts at a fixed
+   * report, so an offset into it stays put. The newest page has no such start, and reports that
+   * arrive later would shift an offset, so the list is anchored after the last report it went
+   * through: the store cursor after that report, read again here and checked against it.
+   *
+   * @param pageCursor - Store cursor of the current page.
+   * @param position - Position of the first report left for the next list.
+   * @param pageReports - Reports of the current page.
+   * @returns The page with its continuation.
+   */
+  const stopAt = async (
+    pageCursor: string | undefined,
+    position: number,
+    pageReports: readonly StoredAgentRunReport[],
+  ): Promise<AgentRunQuestionPage> => {
+    let next: QuestionContinuation = pageCursor === undefined ? { skip: position } : { cursor: pageCursor, skip: position }
+    const last = pageReports[position - 1]
+    if (pageCursor === undefined && last !== undefined) {
+      const head = await workItemDependencies.agentRuns.listWorkItemReports(principal.directoryId, teamId, workItemId, undefined, position)
+      const anchor = head.reports.at(-1)
+      if (head.nextCursor !== undefined && anchor?.runId === last.runId && anchor.sequence === last.sequence) {
+        next = { cursor: head.nextCursor, skip: 0 }
+      }
+    }
+    return { items, hasMore: true, nextContinuation: encodeQuestionContinuation(next) }
+  }
   for (let page = 0; page < maximumReportPages; page += 1) {
     const result = await workItemDependencies.agentRuns.listWorkItemReports(principal.directoryId, teamId, workItemId, cursor, reportPageSize)
-    for (const report of result.reports) {
+    for (const [position, report] of result.reports.entries()) {
+      if (position < skip) continue
       if (report.workItemId !== workItemId) throw createAgentRunIntegrityError()
       if (!isAgentRunQuestionReport(report)) continue
-      if (items.length === AGENT_RUN_QUESTIONS_MAX_ITEMS) return { items, hasMore: true }
+      if (items.length === maximumItems) return await stopAt(cursor, position, result.reports)
       const item = toAgentRunReport(await withCurrentAnswer(principal.directoryId, report))
       const itemBytes = Buffer.byteLength(JSON.stringify(item))
-      // The newest question is always returned; later ones stop at the byte budget.
-      if (items.length > 0 && bytes + itemBytes > questionsResponseByteBudget) return { items, hasMore: true }
+      // The first question of a list is always returned; later ones stop at the byte budget.
+      if (items.length > 0 && bytes + itemBytes > questionsResponseByteBudget) return await stopAt(cursor, position, result.reports)
       bytes += itemBytes
       items.push(item)
     }
+    skip = 0
     cursor = result.nextCursor
     if (cursor === undefined) return { items, hasMore: false }
   }
-  return { items, hasMore: true }
+  // The read budget ran out; the next list starts at the next report page.
+  return await stopAt(cursor, 0, [])
 }

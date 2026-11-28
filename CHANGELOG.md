@@ -24,6 +24,8 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Added
 
+- `list_task_questions` を追加しました。`get_task` の `questions` より古い blocker・handoff の質問と回答を `nextCursor` でさかのぼれます。
+  `GET /api/v1/work-items/{workItemId}/agent-run-questions` は `cursor` と `limit`（20 まで）を受け取り、続きがあれば `nextCursor` を返します（#808 の CodeRabbit 指摘）。
 - Workspace profile の `list_issues` で `teamId` を省くと、読める Team を順に 1 Team ずつ読みます。`nextCursor` が次の Team へ進み、
   Project・status・Type の絞り込みは `teamId` と一緒に渡します（#705）。
 - Workspace profile の `list_issues` に `query`（タイトルの語。すべてを含む Work Item だけ、大文字小文字と全角半角を区別しない）を追加しました（#705）。

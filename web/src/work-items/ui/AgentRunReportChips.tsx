@@ -1,7 +1,7 @@
 import type { AgentRunArtifactStatus, AgentRunReport, AgentRunVerificationStatus } from '@mukuroji/contracts'
 import { isAgentRunReportAwaitingDecision, readAgentRunArtifactText } from '../model/agentRunReportDisplay'
 import type { AgentRunReportAnswerResult } from '../mutations/useAnswerAgentRunReport'
-import { AgentRunReportAnswerForm } from './AgentRunReportAnswerForm'
+import { AgentRunReportAnswerForm, type AgentRunReportAnswerDraft } from './AgentRunReportAnswerForm'
 import type { AgentRunArtifactStatusLabels, AgentRunReportChipsLabels, AgentRunReportsNoticeLabels } from './agentRunReportLabels'
 
 /** Props of the report chips shown under one comment. */
@@ -12,6 +12,10 @@ export type AgentRunReportChipsProps = {
   labels: AgentRunReportChipsLabels
   /** Answers a blocker or hand-off; without it, the report shows no answer form. */
   onAnswer?: (body: string) => Promise<AgentRunReportAnswerResult>
+  /** Unsent answer kept from an earlier mount of the answer form. */
+  answerDraft?: AgentRunReportAnswerDraft
+  /** Keeps the unsent answer while the answer form changes. */
+  onAnswerDraftChange?: (draft: AgentRunReportAnswerDraft | undefined) => void
   /** Provider status of reported pull requests by URL; a pull request without one shows only its link. */
   artifactStatuses?: ReadonlyMap<string, AgentRunArtifactStatus>
 }
@@ -32,7 +36,7 @@ const verificationBadgeClasses: Record<AgentRunVerificationStatus, string> = {
  * @param props - Report and text.
  * @returns Chip group.
  */
-export function AgentRunReportChips({ artifactStatuses, labels, onAnswer, report }: AgentRunReportChipsProps) {
+export function AgentRunReportChips({ answerDraft, artifactStatuses, labels, onAnswer, onAnswerDraftChange, report }: AgentRunReportChipsProps) {
   const question = isAgentRunReportAwaitingDecision(report.kind)
   const awaitingDecision = question && report.answer === undefined
   return (
@@ -80,7 +84,9 @@ export function AgentRunReportChips({ artifactStatuses, labels, onAnswer, report
           {labels.changedFiles.replace('{count}', String(report.changedFileCount))}
         </span>
       )}
-      {awaitingDecision && onAnswer ? <AgentRunReportAnswerForm labels={labels.answer} onAnswer={onAnswer} /> : null}
+      {awaitingDecision && onAnswer ? (
+        <AgentRunReportAnswerForm draft={answerDraft} labels={labels.answer} onAnswer={onAnswer} onDraftChange={onAnswerDraftChange} />
+      ) : null}
     </div>
   )
 }

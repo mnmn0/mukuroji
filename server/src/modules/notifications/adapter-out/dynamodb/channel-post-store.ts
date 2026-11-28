@@ -22,6 +22,8 @@ import type {
   ChannelPostSource,
   ChannelPostStore,
   DeleteChannelDestinationInput,
+  RetiredChannelSecret,
+  RetiredChannelSecretStore,
   SaveChannelDestinationInput,
 } from '../../application/ports/channel-posts'
 import {
@@ -47,6 +49,27 @@ const destinationItemType = 'channel-destination'
 
 /** Item type of a queued post row. */
 const postItemType = 'channel-post'
+
+/** Partition suffix of a Workspace's retired webhook versions that still have to be deleted. */
+const retiredSecretPartitionSuffix = '!channel-secret-cleanup'
+
+/** Item type of a retired webhook version row. */
+const retiredSecretItemType = 'channel-secret-cleanup'
+
+/** Due-index partition of retired webhook versions; the channel worker reads it with its posts. */
+export const RETIRED_CHANNEL_SECRET_SHARD = 'channel-secret-cleanup'
+
+/** Due-index partition of retired versions whose deletion gave up; nothing reads it. */
+const exhaustedRetiredSecretShard = 'channel-secret-cleanup-failed'
+
+/**
+ * Wait before the worker first retries a retired version. The change that retires it deletes the
+ * secret right away, so the worker only meets the ones that failed.
+ */
+const retiredSecretFirstRetryMs = 5 * 60_000
+
+/** Days a deleted version's row is kept before DynamoDB TTL removes it. */
+const retiredSecretRetentionSeconds = 7 * 24 * 60 * 60
 
 /**
  * Number of queue partitions for channel posts. Posts share the personal Slack due index under
@@ -80,7 +103,7 @@ function channelPostShard(eventId: string): string {
 }
 
 /** DynamoDB store for channel destination settings and the channel post queue. */
-export class DynamoDbChannelPostStore implements ChannelDestinationStore, ChannelPostStore {
+export class DynamoDbChannelPostStore implements ChannelDestinationStore, ChannelPostStore, RetiredChannelSecretStore {
   /** DocumentClient used for reads and writes. */
   readonly #client: Pick<DynamoDBDocumentClient, 'send'>
   /** NotificationsTable name. */
@@ -170,6 +193,7 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
       },
       ...checks,
       ...(input.auditPut ? [input.auditPut] : []),
+      ...(input.retiredSecretVersion ? [this.#retiredSecretPut(input.workspaceId, input.target, input.retiredSecretVersion, input.now)] : []),
     ], checks.length)
     return record
   }
@@ -198,7 +222,122 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
       },
       ...checks,
       ...(input.auditPut ? [input.auditPut] : []),
+      ...(input.retiredSecretVersion
+        ? [this.#retiredSecretPut(input.workspaceId, input.target, input.retiredSecretVersion, input.now ?? new Date())]
+        : []),
     ], checks.length)
+  }
+
+  /**
+   * Builds the row that records a retired webhook version until its secret is deleted. The row
+   * goes last in the transaction, so a failed condition index still names the settings or a check.
+   *
+   * @param workspaceId - Canonical Workspace ID.
+   * @param target - Team or Project the webhook belonged to.
+   * @param secretVersion - Retired version.
+   * @param now - Time of the change that retires it.
+   * @returns Transaction item.
+   */
+  #retiredSecretPut(workspaceId: string, target: ChannelDestinationTarget, secretVersion: string, now: Date) {
+    if (!isChannelDestinationSecretVersion(secretVersion)) throw new Error('Invalid webhook secret version.')
+    return {
+      Put: {
+        TableName: this.#tableName,
+        Item: {
+          ...retiredSecretKey(workspaceId, target, secretVersion),
+          itemType: retiredSecretItemType,
+          workspaceId,
+          scope: target.scope,
+          teamId: target.teamId,
+          ...(target.scope === 'project' ? { projectId: target.projectId } : {}),
+          secretVersion,
+          attempts: 0,
+          slackQueueShard: RETIRED_CHANNEL_SECRET_SHARD,
+          slackNextAttemptAt: new Date(now.getTime() + retiredSecretFirstRetryMs).toISOString(),
+        },
+      },
+    }
+  }
+
+  /** @inheritdoc */
+  async listDueRetiredSecrets(now: Date, limit: number): Promise<{ secrets: RetiredChannelSecret[], invalidCount: number }> {
+    const page = await this.#client.send(new QueryCommand({
+      TableName: this.#tableName, IndexName: 'SlackDeliveryIndex',
+      KeyConditionExpression: 'slackQueueShard = :shard AND slackNextAttemptAt <= :now',
+      ExpressionAttributeValues: { ':shard': RETIRED_CHANNEL_SECRET_SHARD, ':now': now.toISOString() },
+      Limit: limit,
+    }))
+    const secrets: RetiredChannelSecret[] = []
+    let invalidCount = 0
+    for (const candidate of page.Items ?? []) {
+      if (typeof candidate.recipientKey !== 'string' || typeof candidate.notificationKey !== 'string') {
+        invalidCount += 1
+        continue
+      }
+      const key = { recipientKey: candidate.recipientKey, notificationKey: candidate.notificationKey }
+      const response = await this.#client.send(new GetCommand({ TableName: this.#tableName, ConsistentRead: true, Key: key }))
+      // A row deleted, deferred, or moved aside since the index was read is no longer due.
+      if (
+        !response.Item ||
+        response.Item.slackQueueShard !== RETIRED_CHANNEL_SECRET_SHARD ||
+        typeof response.Item.slackNextAttemptAt !== 'string' ||
+        response.Item.slackNextAttemptAt > now.toISOString()
+      ) continue
+      const secret = parseRetiredSecretRow(response.Item)
+      if (secret) {
+        secrets.push(secret)
+        continue
+      }
+      invalidCount += 1
+      await this.#client.send(new UpdateCommand({
+        TableName: this.#tableName, Key: key,
+        UpdateExpression: 'SET slackQueueShard = :failed',
+        ConditionExpression: 'slackQueueShard = :shard',
+        ExpressionAttributeValues: { ':failed': exhaustedRetiredSecretShard, ':shard': RETIRED_CHANNEL_SECRET_SHARD },
+      })).catch(() => undefined)
+    }
+    return { secrets, invalidCount }
+  }
+
+  /** @inheritdoc */
+  async forgetRetiredSecret(secret: Pick<RetiredChannelSecret, 'workspaceId' | 'target' | 'secretVersion'>, now: Date): Promise<void> {
+    try {
+      await this.#client.send(new UpdateCommand({
+        TableName: this.#tableName, Key: retiredSecretKey(secret.workspaceId, secret.target, secret.secretVersion),
+        // The row leaves the due index and expires; the worker never lists it again.
+        UpdateExpression: 'REMOVE slackQueueShard, slackNextAttemptAt SET deletedAt = :now, expiresAt = :expiresAt',
+        ConditionExpression: 'attribute_exists(recipientKey)',
+        ExpressionAttributeValues: {
+          ':now': now.toISOString(),
+          ':expiresAt': Math.floor(now.getTime() / 1_000) + retiredSecretRetentionSeconds,
+        },
+      }))
+    } catch (error) {
+      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') return
+      throw error
+    }
+  }
+
+  /** @inheritdoc */
+  async deferRetiredSecret(secret: RetiredChannelSecret, nextAttemptAt: Date, exhausted: boolean): Promise<void> {
+    try {
+      await this.#client.send(new UpdateCommand({
+        TableName: this.#tableName, Key: retiredSecretKey(secret.workspaceId, secret.target, secret.secretVersion),
+        UpdateExpression: 'SET attempts = :next, slackNextAttemptAt = :due, slackQueueShard = :target',
+        // Another run that already counted this attempt wins.
+        ConditionExpression: 'attempts = :attempts AND slackQueueShard = :shard',
+        ExpressionAttributeValues: {
+          ':attempts': secret.attempts,
+          ':next': secret.attempts + 1,
+          ':due': nextAttemptAt.toISOString(),
+          ':shard': RETIRED_CHANNEL_SECRET_SHARD,
+          ':target': exhausted ? exhaustedRetiredSecretShard : RETIRED_CHANNEL_SECRET_SHARD,
+        },
+      }))
+    } catch (error) {
+      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') return
+      throw error
+    }
   }
 
   /** @inheritdoc */
@@ -426,6 +565,41 @@ function destinationKey(workspaceId: string, target: ChannelDestinationTarget) {
     recipientKey: `${workspace}#${destinationPartitionSuffix}`,
     notificationKey: channelDestinationTargetKey(target),
   }
+}
+
+/**
+ * Builds the key of a retired webhook version row.
+ * @param workspaceId - Canonical Workspace ID.
+ * @param target - Team or Project the webhook belonged to.
+ * @param secretVersion - Retired version.
+ * @returns Table key inside the Workspace's tenant range.
+ */
+function retiredSecretKey(workspaceId: string, target: ChannelDestinationTarget, secretVersion: string) {
+  // Validates the Workspace and target the same way as the settings row.
+  destinationKey(workspaceId, target)
+  return {
+    recipientKey: `${workspaceId.trim()}#${retiredSecretPartitionSuffix}`,
+    notificationKey: `SECRET#${channelDestinationTargetKey(target)}#${secretVersion}`,
+  }
+}
+
+/**
+ * Reads a retired webhook version row.
+ * @param row - Stored row.
+ * @returns The version, or undefined when the row is malformed.
+ */
+function parseRetiredSecretRow(row: Record<string, unknown>): RetiredChannelSecret | undefined {
+  const { workspaceId, scope, teamId, projectId, secretVersion, attempts, itemType } = row
+  if (itemType !== retiredSecretItemType || typeof workspaceId !== 'string' || typeof teamId !== 'string' || teamId === '') return undefined
+  if (typeof secretVersion !== 'string' || !isChannelDestinationSecretVersion(secretVersion)) return undefined
+  if (typeof attempts !== 'number' || !Number.isSafeInteger(attempts) || attempts < 0) return undefined
+  let target: ChannelDestinationTarget
+  if (scope === 'team') target = { scope, teamId }
+  else if (scope === 'project' && typeof projectId === 'string' && projectId !== '') target = { scope, teamId, projectId }
+  else return undefined
+  const key = retiredSecretKey(workspaceId, target, secretVersion)
+  if (row.recipientKey !== key.recipientKey || row.notificationKey !== key.notificationKey) return undefined
+  return { workspaceId, target, secretVersion, attempts }
 }
 
 /**

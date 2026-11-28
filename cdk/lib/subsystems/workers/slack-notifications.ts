@@ -79,6 +79,11 @@ export function defineSlackNotificationJob(
         // Personal destinations, and Team and Project channel destinations (#399, ADR 0086).
         resources: ['slack', 'slack-channel'].map((directory) => scope.formatArn({ service: 'secretsmanager', resource: 'secret', resourceName: `mukuroji/automation-webhooks/*/${directory}/*`, arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME })),
       }));
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['secretsmanager:DeleteSecret'],
+        // Retries the deletion of a removed or replaced channel webhook whose request-time deletion failed (ADR 0121).
+        resources: [scope.formatArn({ service: 'secretsmanager', resource: 'secret', resourceName: 'mukuroji/automation-webhooks/*/slack-channel/*', arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME })],
+      }));
     },
   };
 }

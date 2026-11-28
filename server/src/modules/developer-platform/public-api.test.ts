@@ -4711,8 +4711,11 @@ describe('public Agent Run routes', () => {
       answer: { body: 'Use staging.', answeredBy: 'user-1', answeredAt: NOW.toISOString(), commentId: 'cmt_3' },
     } satisfies AgentRunReport
     const { platform, router } = createTestRouter({ agentRuns: createAgentRunService({
-      async listWorkItemQuestions(_credential, teamId, workItemId) {
+      async listWorkItemQuestions(_credential, teamId, workItemId, continuation) {
         expect([teamId, workItemId]).toEqual(['team-1', 'work-item-1'])
+        // Older questions are read through the signed cursor of the first page.
+        if (continuation === undefined) return { items: [], hasMore: true, nextContinuation: 'older' }
+        expect(continuation).toBe('older')
         return { items: [question], hasMore: false }
       },
     }) })
@@ -4722,7 +4725,18 @@ describe('public Agent Run routes', () => {
     })
     expect(listed.status).toBe(200)
     expect(listed.headers.get('Cache-Control')).toBe('private, no-store')
-    expect(await listed.json()).toEqual({ items: [question], hasMore: false })
+    const first = await listed.json()
+    expect(first.items).toEqual([])
+    expect(first.hasMore).toBe(true)
+    expect(typeof first.nextCursor).toBe('string')
+    const older = await router.request(`/v1/work-items/work-item-1/agent-run-questions?teamId=team-1&cursor=${encodeURIComponent(first.nextCursor)}`, {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    expect(await older.json()).toEqual({ items: [question], hasMore: false })
+    // The cursor is bound to the Team it was issued for.
+    expect((await router.request(`/v1/work-items/work-item-1/agent-run-questions?teamId=team-2&cursor=${encodeURIComponent(first.nextCursor)}`, {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })).status).toBe(400)
     expect((await router.request('/v1/work-items/work-item-1/agent-run-questions', {
       headers: { Authorization: `Bearer ${reader.secret}` },
     })).status).toBe(400)

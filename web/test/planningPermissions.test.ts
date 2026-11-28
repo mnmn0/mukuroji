@@ -12,6 +12,7 @@ import {
   canLinkPlanningEntity,
   canManageAnyPlanningScope,
   canManagePlanningScope,
+  canManagePlanningUpdateTarget,
   canPublishPlanningUpdateTarget,
   canUpdatePlanningWorkItemLink,
   createPlanningAccessSnapshot,
@@ -264,6 +265,33 @@ describe('planning permissions', () => {
       [workspaceInitiative],
       createPlanningAccessSnapshot(teams, {}),
     )).toBe(false)
+  })
+
+  test('uses a grant at the Team itself for Team update targets only', () => {
+    const teamTarget = { type: 'team', teamId: 'team-1' } satisfies PlanningUpdateTarget
+    const projectTarget = { type: 'project', teamId: 'team-1', projectId: 'project-1' } satisfies PlanningUpdateTarget
+    const updateTargets = [{
+      target: teamTarget,
+      cadence: {
+        updateOwnerMemberKey: 'member@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-08-10T00:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+    }] as PlanningUpdateTargetSummary[]
+    const member = createPlanningAccessSnapshot(teams, {}, [{ teamId: 'team-1', role: 'member' }])
+    const manager = createPlanningAccessSnapshot(teams, {}, [{ teamId: 'team-1', role: 'manager' }])
+
+    // A member grant lets the reviewer acknowledge and the owner publish, as the server does.
+    expect(canAnnotatePlanningUpdateTarget(memberUser, teamTarget, [], member)).toBe(true)
+    expect(canPublishPlanningUpdateTarget(memberUser, teamTarget, [], updateTargets, member)).toBe(true)
+    expect(canManagePlanningUpdateTarget(memberUser, teamTarget, [], member)).toBe(false)
+    expect(canManagePlanningUpdateTarget(memberUser, teamTarget, [], manager)).toBe(true)
+    // A Project still needs the Project role, and Team structure is not managed through the grant.
+    expect(canAnnotatePlanningUpdateTarget(memberUser, projectTarget, [], member)).toBe(false)
+    expect(canManagePlanningScope(memberUser, { teamId: 'team-1' }, manager)).toBe(false)
+    expect(canAnnotatePlanningUpdateTarget(memberUser, teamTarget, [], createPlanningAccessSnapshot(teams, {}))).toBe(false)
   })
 
   test('fails closed when an unqualified Project role matches IDs under multiple Teams', () => {

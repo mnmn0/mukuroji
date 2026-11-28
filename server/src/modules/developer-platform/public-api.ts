@@ -1131,17 +1131,24 @@ export interface PublicAgentRunService {
     limit: number,
   ): Promise<PublicAgentRunPage>
   /**
-   * Lists the newest `blocker` and `handoff` reports of a Work Item with the answers people recorded.
+   * Lists a Work Item's `blocker` and `handoff` reports with the answers people recorded, newest first.
    * @param credential - Authenticated developer credential.
    * @param teamId - Team that owns the Work Item.
    * @param workItemId - Work Item.
-   * @returns Questions, newest first.
+   * @param continuation - Internal continuation from the signed cursor.
+   * @param limit - Most questions to return.
+   * @returns One page of questions; a page can be empty and still continue.
    */
   listWorkItemQuestions?(
     credential: AuthenticatedDeveloperCredential,
     teamId: string,
     workItemId: string,
-  ): Promise<WorkItemAgentRunQuestionsResponse>
+    continuation: string | undefined,
+    limit: number,
+  ): Promise<Omit<WorkItemAgentRunQuestionsResponse, 'nextCursor'> & {
+    /** Internal continuation wrapped by the public API's signed cursor. */
+    nextContinuation?: string
+  }>
   /**
    * Lists a Team's runs the caller can see.
    * @param credential - Authenticated developer credential.
@@ -2335,11 +2342,15 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     if (!agentRuns.listWorkItemQuestions) {
       throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Agent Run questions are not configured.', true)
     }
-    const questions = await agentRuns.listWorkItemQuestions(
-      credential,
-      readRequiredQuery(c.req.query('teamId'), 'teamId'),
-      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
-    )
+    const listQuestions = agentRuns.listWorkItemQuestions.bind(agentRuns)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const questions = await createOrderedSignedContinuationPage(c, dependencies, {
+      workspaceId: credential.workspaceId,
+      actorId: `credential:${credential.credentialId}`,
+      resource: `/v1/work-items/${encodeURIComponent(workItemId)}/agent-run-questions`,
+      filters: { teamId },
+    }, (continuation, limit) => listQuestions(credential, teamId, workItemId, continuation, limit))
     c.header('Cache-Control', 'private, no-store')
     return c.json(questions)
   })

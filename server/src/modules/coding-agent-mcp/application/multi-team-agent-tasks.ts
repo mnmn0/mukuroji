@@ -100,7 +100,13 @@ export function createMultiTeamAgentTasks(teams: readonly TeamWorkItemApi[], sco
     throw new AgentTaskError('configuration', 'Each Team may be configured only once.')
   }
   const bound: TeamTasks[] = teams.map((team) => ({ ...team, tasks: createAgentTasks(team.api, scope) }))
+  /** Team of each task whose ID every configured Team was asked about, so it is known to be unique. */
   const teamOfTask = new Map<string, TeamTasks>()
+  /**
+   * Team each listed task was read from. A listing reads only some Teams, so it proves no ID unique
+   * and only finds IDs that two Teams hold.
+   */
+  const listedTeamOfTask = new Map<string, TeamTasks>()
   const teamOfRun = new Map<string, TeamTasks>()
   /** Task IDs that more than one configured Team holds; operations on them are refused. */
   const ambiguousTasks = new Set<string>()
@@ -118,8 +124,10 @@ export function createMultiTeamAgentTasks(teams: readonly TeamWorkItemApi[], sco
   }
 
   /**
-   * Remembers the Team of each listed task, so later calls on it need no lookup. A task ID seen in
-   * two Teams is marked ambiguous instead of being routed to either.
+   * Remembers the Team each listed task was read from. A task ID seen in two Teams is marked
+   * ambiguous instead of being routed to either. With one configured Team the listing is the whole
+   * answer, so later calls need no lookup; with more, a later call still asks every Team, because
+   * another Team may hold the same ID.
    *
    * @param team - Team the tasks were read from.
    * @param ids - Task IDs.
@@ -127,13 +135,15 @@ export function createMultiTeamAgentTasks(teams: readonly TeamWorkItemApi[], sco
   function rememberTasks(team: TeamTasks, ids: readonly string[]): void {
     for (const id of ids) {
       if (ambiguousTasks.has(id)) continue
-      const known = teamOfTask.get(id)
+      const known = teamOfTask.get(id) ?? listedTeamOfTask.get(id)
       if (known !== undefined && known !== team) {
         ambiguousTasks.add(id)
         teamOfTask.delete(id)
+        listedTeamOfTask.delete(id)
         continue
       }
-      teamOfTask.set(id, team)
+      if (bound.length === 1) teamOfTask.set(id, team)
+      else listedTeamOfTask.set(id, team)
     }
   }
 
@@ -166,6 +176,7 @@ export function createMultiTeamAgentTasks(teams: readonly TeamWorkItemApi[], sco
       ambiguousTasks.add(id)
       throw ambiguousTask()
     }
+    listedTeamOfTask.delete(id)
     teamOfTask.set(id, holder)
     return holder
   }
@@ -392,7 +403,11 @@ export function createMultiTeamAgentTasks(teams: readonly TeamWorkItemApi[], sco
     async comments(id: string, cursor?: string, limit?: number) {
       return (await teamForTask(id)).tasks.comments(id, cursor, limit)
     },
-    /** Lists a task's linked Documents in the Team that holds it. */
+    /** Lists a task's agent questions in the Team that holds it. */
+    async questions(id: string, cursor?: string) {
+      return (await teamForTask(id)).tasks.questions(id, cursor)
+    },
+    /** Lists linked Documents of a task in the Team that holds it. */
     async documents(id: string, cursor?: string, limit?: number) {
       return (await teamForTask(id)).tasks.documents(id, cursor, limit)
     },

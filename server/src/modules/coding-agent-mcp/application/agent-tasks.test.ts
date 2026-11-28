@@ -575,8 +575,9 @@ describe('agent task lifecycle', () => {
     expect(await service.get('keyed')).toMatchObject({ task: { id: 'keyed', key: 'TEAM-7' } })
     expect((await service.get('legacy')).task).not.toHaveProperty('key')
     expect((await service.get('old-server')).task).not.toHaveProperty('key')
-    // The key is read before and after the task, so the pair belongs to one Work Item.
-    expect(keyReads).toEqual(['keyed', 'keyed', 'legacy', 'legacy', 'old-server', 'old-server'])
+    // The key is read before and after the task and again after its details, so all of them belong
+    // to one Work Item.
+    expect(keyReads).toEqual(['keyed', 'keyed', 'keyed', 'legacy', 'legacy', 'legacy', 'old-server', 'old-server', 'old-server'])
   })
 
   test('refuses to pair a task with the key of a Work Item created again under the same ID', async () => {
@@ -595,6 +596,17 @@ describe('agent task lifecycle', () => {
       async taskKey() { return { key: keys.shift() ?? 'TEAM-10', createdAt } },
     })
     await expect(service.get('same-instant')).rejects.toMatchObject({ code: 'conflict', retryable: true })
+  })
+
+  test('refuses details read after the Work Item was created again under the same ID', async () => {
+    const original = { key: 'TEAM-9', createdAt: task('recreated').createdAt }
+    const keys = [original, original, { key: 'TEAM-12', createdAt: '2026-09-03T00:00:00.000Z' }]
+    const { service } = fixture([task('recreated')], {
+      // The task and its key match, then the Work Item is replaced while its questions and other
+      // details are read.
+      async taskKey() { return keys.shift() },
+    })
+    await expect(service.get('recreated')).rejects.toMatchObject({ code: 'conflict', retryable: true })
   })
 
   test('resumes only work this instance claimed and counts all statuses', async () => {
@@ -1040,6 +1052,21 @@ describe('agent task lifecycle', () => {
     expect(await hidden.service.get('one')).toMatchObject({ questions: null })
     const outage = fixture([task('one')], { async questions() { throw new AgentTaskError('unavailable', 'Down', true) } })
     await expect(outage.service.get('one')).rejects.toMatchObject({ code: 'unavailable' })
+  })
+
+  test('pages through questions older than get_task shows and names an older server', async () => {
+    const cursors: (string | undefined)[] = []
+    const { service } = fixture([task('one')], {
+      async questions(_id, cursor) {
+        cursors.push(cursor)
+        return cursor === undefined ? { items: [], hasMore: true, nextCursor: 'older' } : { items: [], hasMore: false }
+      },
+    })
+    expect(await service.questions('one')).toEqual({ items: [], hasMore: true, nextCursor: 'older' })
+    expect(await service.questions('one', 'older')).toEqual({ items: [], hasMore: false })
+    expect(cursors).toEqual([undefined, 'older'])
+    await expect(fixture([task('one')]).service.questions('one')).rejects.toMatchObject({ code: 'unsupported' })
+    await expect(service.questions('missing')).rejects.toMatchObject({ code: 'not_found' })
   })
 
   test('reads linked Documents only through tasks inside the configured Project', async () => {

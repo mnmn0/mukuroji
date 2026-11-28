@@ -33,6 +33,8 @@ export {
   type PlanningWorkItemState,
 } from './planning'
 
+export { syncCharterUpdateOwner } from './application/charter-update-owner-sync'
+
 export {
   createPlanningEntityWithAssignedId,
   type PlanningEntityCreationWithAssignedIdOutcome,

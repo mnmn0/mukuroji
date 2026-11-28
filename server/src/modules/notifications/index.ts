@@ -144,6 +144,7 @@ export { createSlackChannelPostSender, createSlackTestMessageSender } from './ad
 /** Exposes the destination settings use cases the HTTP routes call. */
 export {
   deleteChannelDestination,
+  deleteDueRetiredChannelSecrets,
   deletePersonalSlackDestination,
   readChannelDestinationSaveBody,
   readExpectedRevision,
@@ -156,6 +157,8 @@ export {
 export type { ChannelDestinationRecord, ChannelDestinationTarget } from './domain/channel-destination'
 export type {
   ChannelDestinationStore,
+  RetiredChannelSecret,
+  RetiredChannelSecretStore,
   DeleteChannelDestinationInput,
   SaveChannelDestinationInput,
 } from './application/ports/channel-posts'

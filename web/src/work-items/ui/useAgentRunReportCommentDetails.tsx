@@ -1,6 +1,7 @@
-import { useCallback, useMemo, type ReactNode } from 'react'
+import { useCallback, useMemo, useRef, type ReactNode } from 'react'
 import type { Locale } from '../../shared/i18n/i18n'
 import {
+  agentRunReportAnswerDraftKey,
   indexAgentRunReportsByComment,
   selectAgentRunReportLoadFailure,
   selectAgentRunReportsForWorkItem,
@@ -8,6 +9,7 @@ import {
 import { useAnswerAgentRunReport } from '../mutations/useAnswerAgentRunReport'
 import { useWorkItemAgentRunReports } from '../queries/useWorkItemAgentRunReports'
 import { useWorkItemArtifactStatuses } from '../queries/useWorkItemArtifactStatuses'
+import type { AgentRunReportAnswerDraft } from './AgentRunReportAnswerForm'
 import { AgentRunReportChips, AgentRunReportsLoadNotice } from './AgentRunReportChips'
 import {
   createAgentRunArtifactStatusIncompleteNoticeLabels,
@@ -49,6 +51,8 @@ export type AgentRunReportCommentDetails = {
  * Reads a Work Item's reports and returns a renderer that shows the chips of the report saved with
  * a comment, with an answer form under a waiting blocker or hand-off for members who may comment. Comments without a report render nothing, so the conversation never waits on reports;
  * a failed read is shown as a separate notice with a retry action instead of as missing reports.
+ * Unsent answers are kept per report here, so hiding the chips while the reports cannot be read
+ * does not lose text typed in another report's form; a saved answer clears only its own draft.
  *
  * @param input - Work Item, session, and locale.
  * @returns Comment renderer and loading notice.
@@ -75,30 +79,47 @@ export function useAgentRunReportCommentDetails({
     [accessToken, reports, teamId, workItemId],
   )
   const hasPullRequests = reports?.some((report) => report.artifacts.some((artifact) => artifact.type === 'pull-request')) === true
+  // Older reports than the shown ones may list pull requests, so the status read is asked whether
+  // it reached them even when no shown report lists one.
+  const hasOlderReports = !error && data?.hasMore === true
   const { data: statusData, error: statusError, mutate: refreshStatuses } = useWorkItemArtifactStatuses(
-    accessToken, teamId, workItemId, hasPullRequests ? reports?.length ?? 0 : 0,
+    accessToken, teamId, workItemId, hasPullRequests || hasOlderReports ? reports?.length ?? 0 : 0,
   )
   // A failed status read shows the plain links again rather than statuses that may be stale.
   const statuses = statusError || statusData?.workItemId !== workItemId ? undefined : statusData.items
   const statusByUrl = useMemo(() => new Map(statuses?.map((status) => [status.url, status])), [statuses])
   const answer = useAnswerAgentRunReport({ accessToken, teamId, refreshReports: mutate, onAnswered })
+  // A ref, not state: the forms own what they show, and typing must not render the conversation again.
+  const drafts = useRef(new Map<string, AgentRunReportAnswerDraft>())
   const renderCommentDetails = useCallback((comment: { id: string }) => {
     const report = byComment.get(comment.id)
     if (!report) return null
+    const draftKey = agentRunReportAnswerDraftKey(workItemId, report)
     return (
       <AgentRunReportChips
+        answerDraft={drafts.current.get(draftKey)}
         artifactStatuses={statusByUrl}
         labels={labels}
-        onAnswer={canAnswer && accessToken && teamId ? (body) => answer(report, body) : undefined}
+        onAnswer={canAnswer && accessToken && teamId ? async (body) => {
+          const result = await answer(report, body)
+          // The answered report shows no form again, so its draft is dropped even if the form is gone.
+          if (result === 'saved') drafts.current.delete(draftKey)
+          return result
+        } : undefined}
+        onAnswerDraftChange={(draft) => {
+          if (draft) drafts.current.set(draftKey, draft)
+          else drafts.current.delete(draftKey)
+        }}
         report={report}
       />
     )
-  }, [accessToken, answer, byComment, canAnswer, labels, statusByUrl, teamId])
+  }, [accessToken, answer, byComment, canAnswer, labels, statusByUrl, teamId, workItemId])
   const failure = accessToken && teamId
     ? selectAgentRunReportLoadFailure({
       reportsFailed: Boolean(error),
       statusesFailed: Boolean(statusError),
       hasPullRequests,
+      hasOlderReports,
       statusesIncomplete: statuses !== undefined && statusData?.incomplete === true,
     })
     : undefined

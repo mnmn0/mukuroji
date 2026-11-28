@@ -263,8 +263,8 @@ export function TeamIssuePage() {
   )
   const projectRoles = projectRolesResult?.roles ?? emptyProjectRoles
   const planningAccess = useMemo(
-    () => createPlanningAccessSnapshot(teams, projectRoles),
-    [projectRoles, teams],
+    () => createPlanningAccessSnapshot(teams, projectRoles, planningSnapshot?.viewerTeamGrants),
+    [planningSnapshot?.viewerTeamGrants, projectRoles, teams],
   )
   const activeTeam = teams.find((team) => team.id === teamId)
   const {

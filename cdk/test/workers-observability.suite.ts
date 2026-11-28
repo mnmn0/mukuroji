@@ -84,6 +84,11 @@ test('Slack notifications use the sparse due queue with bounded execution and re
   expect(serialized).toContain('mukuroji/automation-webhooks/*/slack/*');
   expect(serialized).not.toContain('secretsmanager:PutSecretValue');
   expect(serialized).not.toContain('dynamodb:Scan');
+  // Only channel webhooks may be deleted, to retry a failed deletion (ADR 0121).
+  const deleteStatements = statements.filter((statement: unknown) => JSON.stringify(statement).includes('secretsmanager:DeleteSecret'));
+  expect(deleteStatements).toHaveLength(1);
+  expect(JSON.stringify(deleteStatements[0])).toContain('mukuroji/automation-webhooks/*/slack-channel/*');
+  expect(JSON.stringify(deleteStatements[0])).not.toContain('/slack/*');
   template.hasResourceProperties('AWS::CloudWatch::Alarm', {
     Namespace: 'Mukuroji/Notifications', MetricName: 'OldestDueAgeSeconds',
     Dimensions: [{ Name: 'Channel', Value: 'Slack' }],

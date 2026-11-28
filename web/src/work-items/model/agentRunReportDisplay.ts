@@ -73,9 +73,11 @@ export type AgentRunReportLoadFailure = 'reports' | 'artifact-statuses' | 'artif
 
 /**
  * Chooses the load notice of a Work Item's conversation. A failed report read hides every chip,
- * so it wins; a failed or incomplete status read only matters when a report lists a pull request.
+ * so it wins; a failed status read only matters when a shown report lists a pull request. An
+ * incomplete status read also matters when older reports exist beyond the shown ones, since they
+ * may list pull requests nobody checked.
  *
- * @param state - Which reads failed, and whether a report lists a pull request.
+ * @param state - Which reads failed, whether a report lists a pull request, and whether older reports exist.
  * @returns The failure to show, or undefined when nothing failed.
  */
 export function selectAgentRunReportLoadFailure(state: {
@@ -87,10 +89,22 @@ export function selectAgentRunReportLoadFailure(state: {
   hasPullRequests: boolean
   /** The status read stopped before every reported pull request was listed. */
   statusesIncomplete?: boolean
+  /** The Work Item has older reports than the shown ones. */
+  hasOlderReports?: boolean
 }): AgentRunReportLoadFailure | undefined {
   if (state.reportsFailed) return 'reports'
-  if (!state.hasPullRequests) return undefined
-  if (state.statusesFailed) return 'artifact-statuses'
-  if (state.statusesIncomplete) return 'artifact-statuses-incomplete'
+  if (state.hasPullRequests && state.statusesFailed) return 'artifact-statuses'
+  if ((state.hasPullRequests || state.hasOlderReports) && state.statusesIncomplete) return 'artifact-statuses-incomplete'
   return undefined
+}
+
+/**
+ * Identifies a report's answer draft, so drafts of different Work Items and reports never mix.
+ *
+ * @param workItemId - Work Item shown.
+ * @param report - Report the draft answers.
+ * @returns Draft key.
+ */
+export function agentRunReportAnswerDraftKey(workItemId: string, report: Pick<AgentRunReport, 'runId' | 'sequence'>): string {
+  return JSON.stringify([workItemId, report.runId, report.sequence])
 }

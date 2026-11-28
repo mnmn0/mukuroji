@@ -883,7 +883,7 @@ export const workItemsMessages = {
   'workItems.agentRunReports.answer.cancel': 'キャンセル',
   'workItems.agentRunReports.answer.answered': '回答済み',
   'workItems.agentRunReports.artifactStatus.loadError': 'pull request の状態を確かめられませんでした。リンクは状態なしで表示しています。',
-  'workItems.agentRunReports.artifactStatus.incomplete': '報告が多いため、一部の pull request は状態を確かめていません。そのリンクは状態なしで表示しています。',
+  'workItems.agentRunReports.artifactStatus.incomplete': '報告が多いため、古い報告の pull request は状態を確かめていない可能性があります。状態なしで表示しているリンクは確かめていません。',
   'workItems.agentRunReports.artifactStatus.state.open': 'Open',
   'workItems.agentRunReports.artifactStatus.state.closed': 'Closed',
   'workItems.agentRunReports.artifactStatus.state.merged': 'Merged',

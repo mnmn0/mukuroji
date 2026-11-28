@@ -11,7 +11,7 @@ import type { AuditTransactWriteItem } from '../../audit'
 import type { ChannelDestinationRecord, ChannelDestinationTarget } from '../domain/channel-destination'
 import { NotificationError } from '../domain/notification-error'
 import type { ChannelSendResult } from './channel-delivery'
-import type { ChannelDestinationStore } from './ports/channel-posts'
+import type { ChannelDestinationStore, RetiredChannelSecret, RetiredChannelSecretStore } from './ports/channel-posts'
 
 /** Webhook storage the destination use cases need; it never returns a URL to a client. */
 export type NotificationDestinationSecrets = {
@@ -191,15 +191,16 @@ export type SaveChannelDestinationCommand = {
  * Saves a channel destination. A new webhook is written to Secrets Manager under a new version
  * first, and the fenced settings save switches to that version, so a save rejected by its revision
  * or authorization fences never changes where posts go. The candidate is removed after a rejected
- * save and the replaced version after a committed one. A first save needs a webhook.
+ * save and the replaced version after a committed one; the replaced version is recorded with the
+ * save, so a failed deletion is retried by the channel worker (ADR 0121). A first save needs a webhook.
  *
- * @param store - Settings store.
+ * @param store - Settings store and record of retired webhook versions.
  * @param secrets - Webhook storage.
  * @param command - Target, body, caller, and fences.
  * @returns The saved settings.
  */
 export async function saveChannelDestination(
-  store: ChannelDestinationStore,
+  store: ChannelDestinationStore & Pick<RetiredChannelSecretStore, 'forgetRetiredSecret'>,
   secrets: Pick<NotificationDestinationSecrets, 'put' | 'delete'>,
   command: SaveChannelDestinationCommand,
 ): Promise<ChannelDestinationRecord> {
@@ -217,6 +218,7 @@ export async function saveChannelDestination(
     throw new NotificationError(400, 'InvalidNotificationDestination', 'A Slack Incoming Webhook URL is required.')
   }
   if (command.body.webhookUrl) await secrets.put(command.secretIdOf(secretVersion), command.body.webhookUrl)
+  const retiredSecretVersion = replacesWebhook && current && current.secretVersion !== secretVersion ? current.secretVersion : undefined
   let record: ChannelDestinationRecord
   try {
     record = await store.save({
@@ -230,6 +232,7 @@ export async function saveChannelDestination(
       now: command.now,
       authorizationConditionChecks: command.authorizationConditionChecks,
       ...(command.auditPut ? { auditPut: command.auditPut } : {}),
+      ...(retiredSecretVersion ? { retiredSecretVersion } : {}),
     })
   } catch (error) {
     // Only a definite rejection leaves the settings on the previous version. When the outcome is
@@ -239,10 +242,35 @@ export async function saveChannelDestination(
     }
     throw error
   }
-  if (replacesWebhook && current && current.secretVersion !== secretVersion) {
-    await deleteQuietly(secrets, command.secretIdOf(current.secretVersion))
+  if (retiredSecretVersion) {
+    await deleteRetiredSecret(store, secrets, command.secretIdOf, { workspaceId: command.workspaceId, target: command.target, secretVersion: retiredSecretVersion }, command.now)
   }
   return record
+}
+
+/**
+ * Deletes a retired webhook version right after the change that retired it, and marks its record
+ * done. A failure leaves the record, so the channel worker deletes the secret later.
+ *
+ * @param store - Record of retired webhook versions.
+ * @param secrets - Webhook storage.
+ * @param secretIdOf - Secret name of a version of the target.
+ * @param secret - Retired version.
+ * @param now - Time of the change.
+ */
+async function deleteRetiredSecret(
+  store: Pick<RetiredChannelSecretStore, 'forgetRetiredSecret'>,
+  secrets: Pick<NotificationDestinationSecrets, 'delete'>,
+  secretIdOf: (secretVersion: string) => string,
+  secret: Pick<RetiredChannelSecret, 'workspaceId' | 'target' | 'secretVersion'>,
+  now: Date,
+): Promise<void> {
+  try {
+    await secrets.delete(secretIdOf(secret.secretVersion))
+    await store.forgetRetiredSecret(secret, now)
+  } catch {
+    // The record stays due; the channel worker retries the deletion.
+  }
 }
 
 /**
@@ -269,6 +297,8 @@ export type DeleteChannelDestinationCommand = {
   secretIdOf(secretVersion: string): string
   /** Revision the caller read. */
   expectedRevision: number
+  /** Delete time. */
+  now: Date
   /** Commit-time authorization fences. */
   authorizationConditionChecks: readonly AuditTransactWriteItem[]
   /** Audit event built for this delete. */
@@ -277,14 +307,16 @@ export type DeleteChannelDestinationCommand = {
 
 /**
  * Deletes a channel destination: the settings row first, so posts stop at once, then the secret.
- * Queued posts whose destination is gone are dropped when they come due.
+ * The webhook version is recorded with the settings delete, so when the secret cannot be deleted
+ * now, the channel worker retries it (ADR 0121). Queued posts whose destination is gone are
+ * dropped when they come due.
  *
- * @param store - Settings store.
+ * @param store - Settings store and record of retired webhook versions.
  * @param secrets - Webhook storage.
  * @param command - Target, revision, and fences.
  */
 export async function deleteChannelDestination(
-  store: ChannelDestinationStore,
+  store: ChannelDestinationStore & Pick<RetiredChannelSecretStore, 'forgetRetiredSecret'>,
   secrets: Pick<NotificationDestinationSecrets, 'delete'>,
   command: DeleteChannelDestinationCommand,
 ): Promise<void> {
@@ -296,10 +328,65 @@ export async function deleteChannelDestination(
     workspaceId: command.workspaceId,
     target: command.target,
     expectedRevision: command.expectedRevision,
+    retiredSecretVersion: current.secretVersion,
+    now: command.now,
     authorizationConditionChecks: command.authorizationConditionChecks,
     ...(command.auditPut ? { auditPut: command.auditPut } : {}),
   })
-  await deleteQuietly(secrets, command.secretIdOf(current.secretVersion))
+  await deleteRetiredSecret(store, secrets, command.secretIdOf, {
+    workspaceId: command.workspaceId, target: command.target, secretVersion: current.secretVersion,
+  }, command.now)
+}
+
+/** Retired versions one worker run deletes. */
+const retiredSecretsPerRun = 20
+
+/** Deletion attempts the worker makes before it gives up on a retired version and alarms. */
+const maximumRetiredSecretAttempts = 8
+
+/** Dependencies of the scheduled deletion of retired webhook versions. */
+export type RetiredChannelSecretCleanupDependencies = {
+  /** Record of retired webhook versions. */
+  store: RetiredChannelSecretStore
+  /** Webhook storage. */
+  secrets: Pick<NotificationDestinationSecrets, 'delete'>
+  /** Server-derived secret name of a version of a Workspace's Team or Project destination. */
+  secretIdOf(workspaceId: string, target: ChannelDestinationTarget, secretVersion: string): string
+  /** Current time. */
+  now(): Date
+}
+
+/**
+ * Deletes webhook versions whose deletion failed when their settings were removed or replaced.
+ * A failed attempt waits longer each time; after {@link maximumRetiredSecretAttempts} the version is
+ * moved aside, and the run fails so the scheduled-jobs alarm reports it.
+ *
+ * @param dependencies - Record, webhook storage, secret naming, and clock.
+ * @returns Number of secrets deleted.
+ * @throws Error when a version was given up on or a record could not be read.
+ */
+export async function deleteDueRetiredChannelSecrets(dependencies: RetiredChannelSecretCleanupDependencies): Promise<number> {
+  const { secrets: due, invalidCount } = await dependencies.store.listDueRetiredSecrets(dependencies.now(), retiredSecretsPerRun)
+  let deleted = 0
+  let exhaustedCount = 0
+  for (const secret of due) {
+    try {
+      await dependencies.secrets.delete(dependencies.secretIdOf(secret.workspaceId, secret.target, secret.secretVersion))
+    } catch {
+      const exhausted = secret.attempts + 1 >= maximumRetiredSecretAttempts
+      if (exhausted) exhaustedCount += 1
+      // 10, 20, 40 minutes and so on, up to about a day.
+      const delayMs = Math.min(10 * 60_000 * 2 ** secret.attempts, 24 * 60 * 60_000)
+      await dependencies.store.deferRetiredSecret(secret, new Date(dependencies.now().getTime() + delayMs), exhausted)
+      continue
+    }
+    await dependencies.store.forgetRetiredSecret(secret, dependencies.now())
+    deleted += 1
+  }
+  if (invalidCount > 0 || exhaustedCount > 0) {
+    throw new Error(`Retired channel webhooks: ${exhaustedCount} could not be deleted, ${invalidCount} unreadable records.`)
+  }
+  return deleted
 }
 
 /**

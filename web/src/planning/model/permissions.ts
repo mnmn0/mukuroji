@@ -1,5 +1,6 @@
 import type {
   PlanningEntity,
+  PlanningViewerTeamGrant,
   PlanningUpdateTarget,
   PlanningUpdateTargetSummary,
   PlanningWorkItemSummary,
@@ -22,6 +23,8 @@ export type PlanningAccessSnapshot = {
   projectRoles: Readonly<Record<string, ProjectMemberRole>>
   /** Team ID ごとの active Project ID 一覧です。 */
   projectIdsByTeamId: Readonly<Record<string, readonly string[]>>
+  /** Role the server grants at each Team itself, without a Project role (ADR 0123). */
+  teamGrantRoles: Readonly<Record<string, PlanningViewerTeamGrant['role']>>
 }
 
 /** Team-qualified Project scope used when loading UI role assignments. */
@@ -47,11 +50,13 @@ export type PlanningScope = {
  *
  * @param teams - Active Team / Project directory です。
  * @param projectRoles - Project ID ごとの現在ユーザーの role です。
+ * @param teamGrants - Team grants the Planning snapshot reports for the current user.
  * @returns Planning scope 判定用の immutable snapshot です。
  */
 export function createPlanningAccessSnapshot(
   teams: readonly ProjectDirectoryTeam[],
   projectRoles: Readonly<Record<string, ProjectMemberRole>>,
+  teamGrants: readonly PlanningViewerTeamGrant[] = [],
 ): PlanningAccessSnapshot {
   const projectIdCounts = new Map<string, number>()
   for (const project of teams.flatMap((team) => team.projects)) {
@@ -67,6 +72,7 @@ export function createPlanningAccessSnapshot(
     projectIdsByTeamId: Object.fromEntries(
       teams.map((team) => [team.id, team.projects.map((project) => project.id)]),
     ),
+    teamGrantRoles: Object.fromEntries(teamGrants.map((grant) => [grant.teamId, grant.role])),
   }
 }
 
@@ -102,7 +108,7 @@ export function canManagePlanningUpdateTarget(
   access: PlanningAccessSnapshot,
 ) {
   const scope = resolvePlanningUpdateTargetScope(target, entities)
-  return scope ? canManagePlanningScope(user, scope, access) : false
+  return scope ? canUsePlanningScope(user, scope, access, 'manager', false, true) : false
 }
 
 /**
@@ -121,7 +127,7 @@ export function canAnnotatePlanningUpdateTarget(
   access: PlanningAccessSnapshot,
 ) {
   const scope = resolvePlanningUpdateTargetScope(target, entities)
-  return scope ? canUsePlanningScope(user, scope, access, 'member', true) : false
+  return scope ? canUsePlanningScope(user, scope, access, 'member', true, true) : false
 }
 
 /**
@@ -152,9 +158,9 @@ export function canPublishPlanningUpdateTarget(
     .trim()
     .toLowerCase()
   if (cadence.updateOwnerMemberKey.trim().toLowerCase() === currentMemberKey) {
-    return canUsePlanningScope(user, scope, access, 'member', true)
+    return canUsePlanningScope(user, scope, access, 'member', true, true)
   }
-  return canUsePlanningScope(user, scope, access, 'manager', false)
+  return canUsePlanningScope(user, scope, access, 'manager', false, true)
 }
 
 /**
@@ -286,12 +292,25 @@ export function filterManageablePlanningScopeTeams(
   })
 }
 
+/**
+ * Checks whether the current user holds a role at a Planning scope.
+ *
+ * @param user - Current authenticated user.
+ * @param scope - Team / Project scope to check.
+ * @param access - Current user's Project role snapshot.
+ * @param minimumRole - Least role required.
+ * @param allowWorkspaceScopeMember - Whether a Workspace scope is open to members.
+ * @param acceptTeamGrants - Whether a grant at the Team itself counts on a Team-only scope, as the
+ * server's update target check accepts it (ADR 0123).
+ * @returns True when the role is held.
+ */
 function canUsePlanningScope(
   user: CurrentUser | null | undefined,
   scope: PlanningScope,
   access: PlanningAccessSnapshot,
   minimumRole: Extract<ProjectMemberRole, 'manager' | 'member'>,
   allowWorkspaceScopeMember: boolean,
+  acceptTeamGrants = false,
 ) {
   if (!canWritePlanning(user)) return false
   if (user?.isSystemAdmin) return true
@@ -302,6 +321,10 @@ function canUsePlanningScope(
   const roleForProject = (teamId: string, projectId: string) =>
     access.projectRoles[`${teamId}\0${projectId}`] ??
     (access.ambiguousProjectIds.has(projectId) ? undefined : access.projectRoles[projectId])
+  // A grant at the Team itself stands in for a Project role on a Team-only update target, as the
+  // server's Team check accepts it; a Project scope still needs the Project role.
+  const teamGrantRole = acceptTeamGrants && scope.teamId ? access.teamGrantRoles[scope.teamId] : undefined
+  if (scope.teamId && !scope.projectId && roleAllows(teamGrantRole, minimumRole)) return true
   if (
     scope.teamId &&
     !scopedProjectIds.some((projectId) =>

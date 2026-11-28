@@ -265,6 +265,14 @@ describe('multi-Team agent tasks', () => {
       cursor = result.nextCursor
     }
     await expect(listed.comments('shared')).rejects.toMatchObject({ code: 'invalid_request' })
+
+    // A listing that has read only the first Team does not prove the ID unique, so the operation
+    // still asks the other Team and refuses the shared ID.
+    const partial = createMultiTeamAgentTasks([teamApi('team-a', [task('team-a', 'shared')]), teamApi('team-b', [task('team-b', 'shared')])], scope)
+    const first = await partial.list({}, undefined, 1)
+    expect(first.items.map((item) => item.id)).toEqual(['shared'])
+    await expect(partial.attachments('shared')).rejects.toMatchObject({ code: 'invalid_request' })
+    await expect(partial.attachmentDownload('shared', 'file-1')).rejects.toMatchObject({ code: 'invalid_request' })
   })
 
   test('returns each Team configuration', async () => {

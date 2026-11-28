@@ -549,6 +549,41 @@ test('pages a large Customer directory without accumulating the full dataset', a
   }
 })
 
+test('lists Project Customer links of a Workspace with more rows than one bounded read holds', async () => {
+  const link = (projectId: string) => ({ projectId, linkedAt: NOW, linkedBy: 'user-1' })
+  const requestRows = Array.from({ length: CUSTOMER_MAX_OPERATION_ROWS + 1 }, (_, index) => {
+    const request = createRequest(`request-${index + 1}`, '2027-08-01T00:00:00.000Z', index % 2 === 0 ? 'customer-1' : 'customer-2')
+    return createRequestRow({ ...request, projectLinks: index < 3 ? [link('project-a')] : [] })
+  })
+  const harness = createHarness([
+    createCustomerRow('customer-1', 'Acme Corporation'),
+    createCustomerRow('customer-2', 'Beta Industries'),
+    // A Customer whose retention has passed is shown redacted, as before its redaction is saved.
+    createCustomerRow('customer-3', 'Expired Customer', {}, '2026-07-01T00:00:00.000Z'),
+    ...requestRows,
+    createRequestRow({ ...createRequest('request-expired', '2027-08-01T00:00:00.000Z', 'customer-3'), projectLinks: [link('project-b')] }),
+    // A request without its Customer record and a merged request are left out.
+    createRequestRow({ ...createRequest('request-orphan', '2027-08-01T00:00:00.000Z', 'customer-missing'), projectLinks: [link('project-a')] }),
+    createRequestRow({ ...createRequest('request-merged', '2027-08-01T00:00:00.000Z', 'customer-1'), status: 'merged', projectLinks: [link('project-a')] }),
+  ], { queryPageSize: 1_000 })
+  try {
+    await expect(harness.client.listProjectCustomerLinks('workspace-1')).resolves.toEqual([
+      {
+        projectId: 'project-a',
+        customers: [
+          { customerId: 'customer-1', name: 'Acme Corporation', requestCount: 2 },
+          { customerId: 'customer-2', name: 'Beta Industries', requestCount: 1 },
+        ],
+      },
+      { projectId: 'project-b', customers: [{ customerId: 'customer-3', name: '[redacted customer]', requestCount: 1 }] },
+    ])
+    // The read writes nothing, not even the redaction a bounded read would save.
+    expect(harness.commands.filter((command) => command.name.startsWith('Transact'))).toHaveLength(0)
+  } finally {
+    harness.restore()
+  }
+})
+
 test('does not return a Customer left behind by an eventually consistent directory index', async () => {
   const staleDirectoryRow = createCustomerRow('customer-deleted', 'Deleted Customer')
   const harness = createHarness([], { directoryIndexRows: [staleDirectoryRow] })

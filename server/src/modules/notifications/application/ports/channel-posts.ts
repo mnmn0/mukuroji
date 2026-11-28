@@ -16,6 +16,11 @@ export type SaveChannelDestinationInput = {
   expectedRevision: number
   /** Webhook secret version the settings point at after the save. */
   secretVersion: string
+  /**
+   * Webhook version the save stops pointing at. It is recorded for deletion in the same
+   * transaction, so a failed secret deletion can be retried later.
+   */
+  retiredSecretVersion?: string
   /** Member who saves. */
   updatedBy: string
   /** Save time. */
@@ -34,6 +39,10 @@ export type DeleteChannelDestinationInput = {
   target: ChannelDestinationTarget
   /** Revision the caller read. */
   expectedRevision: number
+  /** Webhook version the removed settings pointed at, recorded for deletion in the same transaction. */
+  retiredSecretVersion?: string
+  /** Delete time. */
+  now?: Date
   /** Read-only checks on the caller's authorization rows, committed with the delete. */
   authorizationConditionChecks?: readonly AuditTransactWriteItem[]
   /** Audit event written in the same transaction. */
@@ -46,6 +55,50 @@ export type ChannelDestinationState = {
   record?: ChannelDestinationRecord
   /** Revision the next change must name; it survives a removal. */
   revision: number
+}
+
+/** Webhook secret version that no settings point at and that still has to be deleted. */
+export type RetiredChannelSecret = {
+  /** Canonical Workspace ID. */
+  workspaceId: string
+  /** Team or Project the webhook belonged to. */
+  target: ChannelDestinationTarget
+  /** Retired webhook version. */
+  secretVersion: string
+  /** Deletion attempts that failed so far. */
+  attempts: number
+}
+
+/**
+ * Record of retired webhook versions, written with the settings change that retires them and
+ * read by the scheduled channel worker until each secret is gone (ADR 0121).
+ */
+export type RetiredChannelSecretStore = {
+  /**
+   * Lists retired versions whose deletion is due.
+   * @param now - Current time.
+   * @param limit - Most versions to return.
+   * @returns Due versions and how many rows could not be read.
+   */
+  listDueRetiredSecrets(now: Date, limit: number): Promise<{
+    /** Due versions. */
+    secrets: RetiredChannelSecret[]
+    /** Rows that could not be read; they are moved aside and fail the run. */
+    invalidCount: number
+  }>
+  /**
+   * Marks a retired version deleted, so it is not listed again.
+   * @param secret - Version whose secret is gone.
+   * @param now - Current time.
+   */
+  forgetRetiredSecret(secret: Pick<RetiredChannelSecret, 'workspaceId' | 'target' | 'secretVersion'>, now: Date): Promise<void>
+  /**
+   * Records a failed deletion and when to try again, or that no further attempt is made.
+   * @param secret - Version whose deletion failed, with the attempts before this one.
+   * @param nextAttemptAt - When to try again.
+   * @param exhausted - True when no further attempt is made.
+   */
+  deferRetiredSecret(secret: RetiredChannelSecret, nextAttemptAt: Date, exhausted: boolean): Promise<void>
 }
 
 /** Persistence of the non-secret settings of channel destinations. */

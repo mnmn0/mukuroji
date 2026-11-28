@@ -1459,7 +1459,20 @@ export class ConnectorSyncEngine {
     return link
   }
 
-  /** Encrypted credential を worker 内だけで復号して adapter operation を実行します。 */
+  /**
+   * Encrypted credential を worker 内だけで復号して adapter operation を実行します。
+   *
+   * An authorization failure marks the installation `needs-reauth` only while it still holds the
+   * credential the failed call used. A failure from a credential that a reconnect or another
+   * worker's refresh has since replaced is stale, so it never sends the new connection back to
+   * reauthorization.
+   *
+   * @param workspaceId - Workspace of the installation.
+   * @param installation - Installation whose credential the operation uses.
+   * @param lifecycleRevision - Lifecycle revision read before the credential.
+   * @param operation - Provider call with the decrypted credential.
+   * @returns The operation's result.
+   */
   private async withConnectorCredential<T>(
     workspaceId: string,
     installation: ConnectorInstallation,
@@ -1469,11 +1482,14 @@ export class ConnectorSyncEngine {
       credential: ReturnType<typeof deserializeConnectorCredential>,
     ) => Promise<T>,
   ) {
+    /** Serialized credential the provider call used, compared with the stored one on a 401. */
+    let usedCredential: string | undefined
     try {
       const serialized = await this.platform.readConnectorCredential({
         workspaceId,
         installationId: installation.id,
       })
+      usedCredential = serialized
       const credential = deserializeConnectorCredential(serialized)
       const adapter = this.registry.get(readSupportedProvider(installation.provider))
       let operationCredential = credential
@@ -1497,6 +1513,7 @@ export class ConnectorSyncEngine {
               { retryable: true },
             )
           }
+          usedCredential = winner
           operationCredential = deserializeConnectorCredential(winner)
           return await operation(adapter, operationCredential)
         }
@@ -1512,6 +1529,7 @@ export class ConnectorSyncEngine {
           throw error
         }
         operationCredential = refreshed
+        usedCredential = serializeConnectorCredential(refreshed)
         try {
           await this.platform.recoverConnector({
             workspaceId,
@@ -1529,12 +1547,12 @@ export class ConnectorSyncEngine {
           }).catch(() => false)
           if (!isConnectorCredentialCasConflict(error)) throw error
           try {
-            operationCredential = deserializeConnectorCredential(
-              await this.platform.readConnectorCredential({
-                workspaceId,
-                installationId: installation.id,
-              }),
-            )
+            const reloaded = await this.platform.readConnectorCredential({
+              workspaceId,
+              installationId: installation.id,
+            })
+            usedCredential = reloaded
+            operationCredential = deserializeConnectorCredential(reloaded)
           } catch (reloadError) {
             if (
               reloadError instanceof DeveloperPlatformError &&
@@ -1557,11 +1575,15 @@ export class ConnectorSyncEngine {
         const healthLifecycleRevision =
           latestSnapshot?.lifecycleRevision ?? lifecycleRevision
         if (error.authorizationRequired) {
-          await this.health.authorizationRequired(
-            workspaceId,
-            healthInstallation,
-            healthLifecycleRevision,
-          )
+          // The snapshot is read before the credential, so a reconnect after this check changes the
+          // revision and the health update refuses it.
+          if (await this.holdsCredential(workspaceId, installation.id, usedCredential)) {
+            await this.health.authorizationRequired(
+              workspaceId,
+              healthInstallation,
+              healthLifecycleRevision,
+            )
+          }
         } else if (
           error.retryable &&
           error.code !== 'ConnectorCredentialRefreshInProgress'
@@ -1576,6 +1598,25 @@ export class ConnectorSyncEngine {
       }
       throw error
     }
+  }
+
+  /**
+   * Checks whether an installation still holds the credential a failed provider call used.
+   *
+   * @param workspaceId - Workspace of the installation.
+   * @param installationId - Installation ID.
+   * @param usedCredential - Serialized credential of the call, or undefined when none was read.
+   * @returns True when the stored credential is the one used; false when it changed or cannot be read.
+   */
+  private async holdsCredential(
+    workspaceId: string,
+    installationId: string,
+    usedCredential: string | undefined,
+  ): Promise<boolean> {
+    if (usedCredential === undefined) return false
+    const current = await this.platform.readConnectorCredential({ workspaceId, installationId })
+      .catch(() => undefined)
+    return current === usedCredential
   }
 
   /**

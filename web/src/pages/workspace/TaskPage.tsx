@@ -460,8 +460,8 @@ export function TaskPage() {
   )
   const planningProjectRoles = planningProjectRolesResult?.roles ?? emptyProjectRoles
   const planningAccess = useMemo(
-    () => createPlanningAccessSnapshot(teams, planningProjectRoles),
-    [planningProjectRoles, teams],
+    () => createPlanningAccessSnapshot(teams, planningProjectRoles, planningSnapshot?.viewerTeamGrants),
+    [planningSnapshot?.viewerTeamGrants, planningProjectRoles, teams],
   )
   const canManageProjectMembers =
     canMutateContent && (

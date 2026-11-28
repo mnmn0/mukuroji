@@ -384,7 +384,10 @@ function isArtifactRowValid(
   if (kind === 'artifact-refresh') {
     return item.recordKey === artifactRefreshRecordKey(workItemId) &&
       item.workspaceId === directoryId &&
-      isTimestamp(item.refreshedAt)
+      isTimestamp(item.refreshedAt) &&
+      // Rows claimed before the count existed have none.
+      (item.refreshCount === undefined ||
+        (typeof item.refreshCount === 'number' && Number.isSafeInteger(item.refreshCount) && item.refreshCount >= 1))
   }
   try {
     parseArtifactStatus(item, directoryId, workItemId)

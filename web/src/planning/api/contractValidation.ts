@@ -11,6 +11,7 @@ import {
   type PlanningUpdateReactionPage,
   type PlanningUpdateTargetSummary,
   type PlanningReadScope,
+  type PlanningViewerTeamGrant,
   type PlanningSnapshot,
 } from '@mukuroji/contracts'
 import {
@@ -486,7 +487,19 @@ export function isPlanningSnapshot(value: unknown): value is PlanningSnapshot {
     isWorkItemDependencySummary(value.workItemDependencySummary) &&
     isPlanningCapacity(value.capacity) &&
     isOptionalString(value.updatedAt) &&
-    (value.readScope === undefined || isPlanningReadScope(value.readScope))
+    (value.readScope === undefined || isPlanningReadScope(value.readScope)) &&
+    (value.viewerTeamGrants === undefined ||
+      Array.isArray(value.viewerTeamGrants) && value.viewerTeamGrants.every(isPlanningViewerTeamGrant))
+}
+
+/**
+ * Returns whether a value is a Team grant the server reports for the caller.
+ *
+ * @param value - Unknown grant candidate.
+ * @returns Whether the value names a Team and a manager or member role.
+ */
+function isPlanningViewerTeamGrant(value: unknown): value is PlanningViewerTeamGrant {
+  return isRecord(value) && isNonEmptyText(value.teamId) && (value.role === 'manager' || value.role === 'member')
 }
 
 /**

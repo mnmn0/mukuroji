@@ -411,13 +411,18 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
     const reports = [...this.state.reports.values()]
       .filter((report) => report.directoryId === directoryId && report.teamId === teamId && report.workItemId === workItemId)
       .sort((left, right) => order(right).localeCompare(order(left)))
-    const offset = cursor === undefined ? 0 : Number(cursor)
-    if (!Number.isSafeInteger(offset) || offset < 0) {
+    // Like the DynamoDB store, a cursor continues after the sort key of the last returned report, so
+    // reports added later never shift a page that starts at a cursor.
+    if (cursor !== undefined && !cursor.startsWith('after:')) {
       throw new AgentRunError('validation_failed', 'The cursor is invalid.', { pointer: '/cursor' })
     }
+    const after = cursor?.slice('after:'.length)
+    const remaining = after === undefined ? reports : reports.filter((report) => order(report) < after)
+    const page = remaining.slice(0, limit)
+    const last = page.at(-1)
     return {
-      reports: reports.slice(offset, offset + limit).map((report) => structuredClone(report)),
-      ...(offset + limit < reports.length ? { nextCursor: String(offset + limit) } : {}),
+      reports: page.map((report) => structuredClone(report)),
+      ...(remaining.length > limit && last !== undefined ? { nextCursor: `after:${order(last)}` } : {}),
     }
   }
 

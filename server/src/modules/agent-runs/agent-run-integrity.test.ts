@@ -336,6 +336,10 @@ describe('checkAgentRunPartition', () => {
     expect(result.counts.artifactStatuses).toBe(2)
     expect(codes([...healthyRows(), { ...statusRow, workItemId: 'task-2' }])).toEqual(['AGENT_RUN_ROW_MALFORMED'])
     expect(codes([...healthyRows(), { ...refreshRow, refreshedAt: 'soon' }])).toEqual(['AGENT_RUN_ROW_MALFORMED'])
+    // The refresh count is optional for rows claimed before it existed, and a positive integer otherwise.
+    expect(checkAgentRunPartition(team, [...healthyRows(), { ...refreshRow, refreshCount: 4 }]).findings).toEqual([])
+    expect(codes([...healthyRows(), { ...refreshRow, refreshCount: 0 }])).toEqual(['AGENT_RUN_ROW_MALFORMED'])
+    expect(codes([...healthyRows(), { ...refreshRow, refreshCount: '4' }])).toEqual(['AGENT_RUN_ROW_MALFORMED'])
     // Tenant export and deletion find rows by Workspace, so a row naming another one, or none, is malformed.
     expect(codes([...healthyRows(), { ...statusRow, workspaceId: 'other-workspace' }])).toEqual(['AGENT_RUN_ROW_MALFORMED'])
     expect(codes([...healthyRows(), { ...refreshRow, workspaceId: 'other-workspace' }])).toEqual(['AGENT_RUN_ROW_MALFORMED'])

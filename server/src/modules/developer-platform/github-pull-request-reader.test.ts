@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import type { ConnectorProviderRequest, ConnectorProviderResponse } from './connector-resource-protocol'
+import { CONNECTOR_PROVIDER_HISTORY_TOO_LONG } from './connector-runtime-error'
 import { readGitHubPullRequest } from './github-pull-request-reader'
 
 /** Head commit of the pull request. */
@@ -94,7 +95,7 @@ test('reads check runs past the first page, and fails rather than show a partial
   expect((await readGitHubPullRequest(pagedRuns(failedOnSecondPage), { repository: 'org/repo', number: 7 })).checks).toBe('failure')
   const tooMany = Array.from({ length: 11 }, () => Array.from({ length: 50 }, () => passed))
   await expect(readGitHubPullRequest(pagedRuns(tooMany), { repository: 'org/repo', number: 7 }))
-    .rejects.toMatchObject({ code: 'ConnectorProviderResponseMalformed' })
+    .rejects.toMatchObject({ code: CONNECTOR_PROVIDER_HISTORY_TOO_LONG })
 })
 
 test('a hidden pull request, a bad reference, or a malformed payload fails with a connector error', async () => {
@@ -121,5 +122,5 @@ test('reads the review history to its end, and refuses to judge one too long to 
   ]), { repository: 'org/repo', number: 7 })).review).toBe('changes-requested')
 
   await expect(readGitHubPullRequest(paged(Array.from({ length: 10 }, () => page('APPROVED'))), { repository: 'org/repo', number: 7 }))
-    .rejects.toMatchObject({ code: 'ConnectorProviderResponseMalformed' })
+    .rejects.toMatchObject({ code: CONNECTOR_PROVIDER_HISTORY_TOO_LONG })
 })

@@ -9,8 +9,10 @@ import {
   createSlackChannelPostSender,
   createSlackDeliveryTelemetry,
   createSlackNotificationSender,
+  deleteDueRetiredChannelSecrets,
   deliverDueChannelPosts,
   deliverDueSlackNotifications,
+  slackChannelDestinationSecretId,
 } from '../../modules/notifications'
 import { DynamoDbSlackDeliveryStore } from '../../modules/notifications/adapter-out/dynamodb/slack-delivery-store'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
@@ -58,10 +60,11 @@ export function createProductionSlackNotificationHandler() {
     return response.SecretString
   }, fetch, appOrigin, createMemberNotificationLocaleReader(new DynamoDbProjectDirectoryClient(undefined, documentClient)))
   const channelPostStore = new DynamoDbChannelPostStore(documentClient, tableName)
-  const sendChannelPost = createSlackChannelPostSender(new SecretsManagerSlackDestinationSecretStore(secrets), fetch, appOrigin)
+  const channelSecrets = new SecretsManagerSlackDestinationSecretStore(secrets)
+  const sendChannelPost = createSlackChannelPostSender(channelSecrets, fetch, appOrigin)
   return async () => {
     // Personal and channel queues run independently, so a failure in one never holds the other back.
-    const [personal, channel] = await Promise.allSettled([
+    const [personal, channel, retiredSecrets] = await Promise.allSettled([
       deliverDueSlackNotifications({
         store, send, telemetry: createSlackDeliveryTelemetry(), createToken: randomUUID, now: () => new Date(), isAuthorized,
       }),
@@ -77,9 +80,17 @@ export function createProductionSlackNotificationHandler() {
         createToken: randomUUID,
         now: () => new Date(),
       }),
+      // Webhooks of removed or replaced channel destinations whose deletion failed (ADR 0121).
+      deleteDueRetiredChannelSecrets({
+        store: channelPostStore,
+        secrets: channelSecrets,
+        secretIdOf: slackChannelDestinationSecretId,
+        now: () => new Date(),
+      }),
     ])
     if (personal.status === 'rejected') throw personal.reason
     if (channel.status === 'rejected') throw channel.reason
+    if (retiredSecrets.status === 'rejected') throw retiredSecrets.reason
     return personal.value + channel.value
   }
 }

@@ -1,3 +1,9 @@
+/**
+ * Code of a provider history, such as check runs or reviews, too long to read in full. It does not
+ * pass like an outage, so a result read earlier must not stand in for it.
+ */
+export const CONNECTOR_PROVIDER_HISTORY_TOO_LONG = 'ConnectorProviderHistoryTooLong'
+
 /** Connector runtime が外部 provider 失敗を分類する stable error です。 */
 export class ConnectorRuntimeError extends Error {
   /** Stable internal error code です。 */

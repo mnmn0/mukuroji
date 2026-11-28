@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import type { AgentRunPullRequestStatus, AgentSettings, ConnectorInstallation } from '@mukuroji/contracts'
-import { ConnectorRuntimeError } from '../../modules/developer-platform/connector-oauth'
+import { CONNECTOR_PROVIDER_HISTORY_TOO_LONG, ConnectorRuntimeError } from '../../modules/developer-platform/connector-oauth'
 import {
   InMemoryAgentRunArtifactStatusStore,
   createDefaultAgentSettings,
@@ -87,7 +87,8 @@ test('reads each reported pull request once, keeps fresh results, and refreshes 
   expect(reads).toEqual(['org/repo#7', 'group/app#3'])
 
   await readWorkItemArtifactStatuses(target, deps, new Date(now.getTime() + ARTIFACT_STATUS_STALE_AFTER_MS))
-  expect(reads).toEqual(['org/repo#7', 'group/app#3', 'org/repo#7', 'group/app#3'])
+  // The second refresh starts at the next reference.
+  expect(reads).toEqual(['org/repo#7', 'group/app#3', 'group/app#3', 'org/repo#7'])
 })
 
 test('does not read a repository outside the Team allowlist, and never reads a merged pull request again', async () => {
@@ -320,4 +321,77 @@ test('the connector reader reaches accounts past the first ten on a later read, 
   expect(tried[0]?.at(-1)).toBe('account-10')
   expect(await reader('workspace', reference)).toEqual({ kind: 'verified', pullRequest: openPullRequest })
   expect(tried[2]?.[0]).toBe('account-11')
+})
+
+test('a viewed Work Item reaches every account in turn when refreshes come at the stale period', async () => {
+  // Twenty accounts that cannot all be tried in one read, refreshed every two minutes; only the
+  // fifteenth can read the pull request. Each refresh continues after the accounts the one before
+  // tried, so the pull request is verified on the second refresh, whatever the timing.
+  const accounts = Array.from({ length: 20 }, (_, index) => installation(`account-${index + 1}`))
+  const tried: string[] = []
+  const reader = createConnectorPullRequestStatusReader({
+    listConnectors: async () => accounts,
+    getEngine: async () => ({
+      readPullRequest: async (_workspaceId, installationId) => {
+        tried.push(installationId)
+        if (installationId !== 'account-15') throw new ConnectorRuntimeError('ConnectorExternalResourceMissing', 'Missing.')
+        return openPullRequest
+      },
+    }),
+  }, () => { throw new Error('A refresh never starts at a random account.') })
+  const deps = dependencies([report(1, ['https://github.com/org/repo/pull/1'])], reader)
+  const start = new Date('2026-11-26T01:00:00.000Z').getTime()
+  const first = await readWorkItemArtifactStatuses(target, deps, new Date(start))
+  expect(first.items[0]).toMatchObject({ verification: 'unverified', unverifiedReason: 'unavailable' })
+  expect(tried).toEqual(Array.from({ length: 10 }, (_, index) => `account-${index + 1}`))
+  const second = await readWorkItemArtifactStatuses(target, deps, new Date(start + ARTIFACT_STATUS_STALE_AFTER_MS))
+  expect(second.items[0]).toMatchObject({ verification: 'verified', pullRequest: openPullRequest })
+  expect(tried.slice(10, 15)).toEqual(['account-11', 'account-12', 'account-13', 'account-14', 'account-15'])
+})
+
+test('each full pass over the accounts starts one later, so every account is eventually tried first', async () => {
+  const reference = { url: 'https://github.com/org/repo/pull/1', provider: 'github' as const, repository: 'org/repo', number: 1 }
+  const accounts = Array.from({ length: 20 }, (_, index) => installation(`account-${index + 1}`))
+  const firsts: string[] = []
+  let first = true
+  const reader = createConnectorPullRequestStatusReader({
+    listConnectors: async () => accounts,
+    getEngine: async () => ({
+      readPullRequest: async (_workspaceId, installationId) => {
+        if (first) firsts.push(installationId)
+        first = false
+        throw new ConnectorRuntimeError('ConnectorExternalResourceMissing', 'Missing.')
+      },
+    }),
+  })
+  for (let refresh = 1; refresh <= 40; refresh += 1) {
+    first = true
+    await reader('workspace', reference, refresh)
+  }
+  // A slow account at a window's start would otherwise use every refresh's time budget.
+  expect(firsts.slice(0, 4)).toEqual(['account-1', 'account-11', 'account-2', 'account-12'])
+  expect(new Set(firsts).size).toBe(20)
+})
+
+test('does not keep an earlier verified status when the check history grew too long to judge', async () => {
+  let tooLong = false
+  const reader = createConnectorPullRequestStatusReader({
+    listConnectors: async () => [installation('account-1'), installation('account-2')],
+    getEngine: async () => ({
+      readPullRequest: async (_workspaceId, installationId) => {
+        if (!tooLong) return openPullRequest
+        // One account cannot read the pull request; the other finds too many check runs to judge.
+        if (installationId === 'account-1') throw new ConnectorRuntimeError(CONNECTOR_PROVIDER_HISTORY_TOO_LONG, 'Too many.')
+        throw new ConnectorRuntimeError('ConnectorExternalResourceMissing', 'Missing.')
+      },
+    }),
+  })
+  const deps = dependencies([report(1, ['https://github.com/org/repo/pull/1'])], reader)
+  const now = new Date('2026-11-26T01:00:00.000Z')
+  expect((await readWorkItemArtifactStatuses(target, deps, now)).items[0]).toMatchObject({ verification: 'verified' })
+  tooLong = true
+  const later = await readWorkItemArtifactStatuses(target, deps, new Date(now.getTime() + ARTIFACT_STATUS_STALE_AFTER_MS))
+  // The old checks are not shown as current; the pull request is unchecked until the history can be read.
+  expect(later.items[0]).toMatchObject({ verification: 'unverified', unverifiedReason: 'unavailable' })
+  expect(later.items[0]?.pullRequest).toBeUndefined()
 })

@@ -106,7 +106,7 @@
 | [0083](0083-signed-calendar-feeds.md) | カレンダーフィードを token の hash で引き、読むたびに持ち主の現在の権限で組み立てる | 提案 |
 | [0084](0084-charter-owner-moves-project-update-owner.md) | Project charter の責任者変更を、charter 保存後の書き込みで Project の進捗報告の担当者へ移す | 提案 |
 | [0085](0085-workflow-transition-actor-roles-and-status-requirements.md) | Workflow の遷移を実行できる役割と status ごとの必須項目を configuration に持ち、人の操作だけに許す | 提案 |
-| [0086](0086-slack-destinations-and-channel-posts.md) | Slack の送信先を画面から登録し、Project・Team の channel 投稿を既存の Slack index に相乗りさせる | 提案 |
+| [0086](0086-slack-destinations-and-channel-posts.md) | Slack の送信先を画面から登録し、Project・Team の channel 投稿を既存の Slack index に相乗りさせる | 一部を置き換え済み（0121） |
 | [0087](0087-team-owned-automation-definitions.md) | Automation 定義と Request form に所有 Team を持たせ、Team manager に自 Team の分の管理を任せる | 提案 |
 | [0088](0088-requester-index-and-scopeless-notifications.md) | 依頼者ごとの索引行を Request Intake table に置き、依頼者への通知を scope なしの event で届ける | 提案 |
 | [0089](0089-calendar-connector-event-sync.md) | Google Calendar / Outlook の予定を既存の connector link で双方向に同期する | 提案 |
@@ -123,7 +123,7 @@
 | [0100](0100-completion-gate-manager-override.md) | 完了 Gate の override は Work Item の manager だけが Web の更新で理由付きで行い、更新の監査と活動履歴に残す | 提案 |
 | [0101](0101-ai-assistance-monthly-usage-and-deployment-switch.md) | AI の月次利用量を AI table の月ごとの counter row で数え、全体停止を runtime control の任意 field で持つ | 提案 |
 | [0102](0102-retire-mail-and-storage-connector-providers.md) | Gmail・Outlook・Google Drive・OneDrive・Dropbox を connector の選択肢から外す | 提案 |
-| [0103](0103-verify-reported-pull-requests.md) | agent が報告した pull request を Workspace の connector で照会し、状態を保存する | 提案 |
+| [0103](0103-verify-reported-pull-requests.md) | agent が報告した pull request を Workspace の connector で照会し、状態を保存する | 一部を置き換え済み（0120） |
 | [0104](0104-project-expense-entries.md) | Project の経費を Planning table に1件1行で保存し、申請者以外の Project manager の承認で予算の実績に入れる | 提案 |
 | [0105](0105-project-budget-threshold-alerts.md) | Project 予算の消化率を毎日1回調べ、通知の閾値に達した予算ごとに1回だけ通知と Automation trigger を出す | 提案 |
 | [0106](0106-public-workspace-documents-markdown.md) | Workspace の Document を Public API と MCP で Markdown として一覧・作成・更新し、scope は既存の `work-items:read` / `work-items:write` を使う | 提案 |
@@ -133,3 +133,7 @@
 | [0110](0110-analytics-earned-value-metrics.md) | Analytics の EVM（SPI / CPI / EAC）は query のたびに管理する Project の予算レポートの値を読み、その Project の集合を snapshot の scope に固定する | 提案 |
 | [0114](0114-project-decision-log.md) | 意思決定ログを Planning table の1決定1行で持ち、Team の一覧は読み取り時に Project をまたいで集める | 提案 |
 | [0119](0119-agent-cost-in-project-budgets.md) | coding agent の推定費用は USD のまま Project 予算レポートに出し、USD の予算だけ実績・閾値通知・EVM に足すかを Workspace 設定で選ぶ | 提案 |
+| [0120](0120-artifact-status-refresh-sequence-and-stale-authorization.md) | pull request の照会は refresh の連番で接続を順に試し、古い credential の 401 で再認証にしない | 提案 |
+| [0121](0121-retry-retired-channel-webhook-deletion.md) | 削除・差し替えた channel 投稿先の古い Webhook secret の削除を再試行する | 提案 |
+| [0122](0122-charter-owner-sync-use-case-and-streamed-project-customer-links.md) | Charter owner の同期を Planning の use case に置き、Project ごとの顧客リンクは件数上限なしで数える | 提案 |
+| [0123](0123-team-update-target-direct-planning-grants.md) | Team の近況では Team に付与された Planning の権限を member の操作に使い、Web にもその付与を渡す | 提案 |

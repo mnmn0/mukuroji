@@ -42,6 +42,7 @@ import {
   updateCustomerRequestRecord,
 } from './domain/customer'
 import { CustomerError } from './domain/customer'
+import { ProjectCustomerLinkAccumulator } from './domain/project-customer-links'
 import type { TriageAuthorizationConditionChecks } from '../triage'
 import type { MutationAuditContext } from '../audit'
 
@@ -2095,29 +2096,10 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async listProjectCustomerLinks(workspaceId: string): Promise<ProjectCustomerLinks[]> {
     const state = this.state(workspaceId)
-    const counts = new Map<string, Map<string, number>>()
-    for (const request of state.requests.values()) {
-      // A merged request's links live on in its target, so it would count twice.
-      if (request.status === 'merged') continue
-      if (this.isCustomerUnavailable(workspaceId, request.customerId)) continue
-      if (!state.customers.has(request.customerId)) continue
-      for (const projectId of new Set(request.projectLinks.map((link) => link.projectId))) {
-        const customers = counts.get(projectId) ?? new Map<string, number>()
-        customers.set(request.customerId, (customers.get(request.customerId) ?? 0) + 1)
-        counts.set(projectId, customers)
-      }
-    }
-    return [...counts.entries()]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([projectId, customers]) => ({
-        projectId,
-        customers: [...customers.entries()]
-          .flatMap(([customerId, requestCount]) => {
-            const customer = state.customers.get(customerId)
-            return customer ? [{ customerId, name: customer.name, requestCount }] : []
-          })
-          .sort((left, right) => left.name.localeCompare(right.name) || left.customerId.localeCompare(right.customerId)),
-      }))
+    const links = new ProjectCustomerLinkAccumulator((customerId) => this.isCustomerUnavailable(workspaceId, customerId))
+    for (const request of state.requests.values()) links.addRequest(request)
+    for (const customer of state.customers.values()) links.addCustomer(customer)
+    return links.result()
   }
 
   /** Returns Work Items associated with a Customer.

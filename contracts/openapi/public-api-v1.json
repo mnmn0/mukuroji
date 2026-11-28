@@ -5820,10 +5820,10 @@
       },
       "WorkItemAgentRunQuestionsResponse": {
         "additionalProperties": false,
-        "description": "Newest blocker and handoff reports of a Work Item with the answers people recorded.",
+        "description": "One page of a Work Item's blocker and handoff reports, newest first, with the answers people recorded.",
         "properties": {
           "hasMore": {
-            "description": "True when older questions were left out.",
+            "description": "True when older questions may exist. Follow nextCursor, even when items is empty.",
             "type": "boolean"
           },
           "items": {
@@ -5832,6 +5832,10 @@
             },
             "maxItems": 20,
             "type": "array"
+          },
+          "nextCursor": {
+            "description": "Opaque cursor of the next page, present exactly when hasMore is true.",
+            "type": "string"
           }
         },
         "required": [
@@ -14567,6 +14571,25 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "前 response の opaque nextCursor です。発行から15分で失効します。",
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "1 page に返す最大件数です。20 を超える値は 20 として扱います。",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -14632,7 +14655,7 @@
             ]
           }
         ],
-        "summary": "List the newest blocker and handoff reports of a Work Item with their answers",
+        "summary": "List a Work Item's blocker and handoff reports with their answers, newest first",
         "tags": [
           "Agent Runs"
         ]

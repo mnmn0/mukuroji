@@ -25,7 +25,7 @@ import type {
   ConnectorResourceProtocol,
 } from './connector-resource-protocol'
 
-export { ConnectorRuntimeError } from './connector-runtime-error'
+export { CONNECTOR_PROVIDER_HISTORY_TOO_LONG, ConnectorRuntimeError } from './connector-runtime-error'
 
 const defaultRevocationTimeoutMilliseconds = 5_000
 const minimumRevocationTimeoutMilliseconds = 100

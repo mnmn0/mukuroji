@@ -387,6 +387,14 @@ describe('convertMarkdownToPageBlocks', () => {
     expect(split.map((block) => block.type === 'paragraph' ? block.text.length : 0)).toEqual([30_000, 30_000])
 
     const refuse = (source: string) => convertMarkdownToPageBlocks(source, (prefix) => prefix)
+    // A list that starts after other text in its section stays one list, so it is not renumbered.
+    expect(refuse(`Intro\n1. ${part}\n\n1. ${part}`)).toEqual({ ok: false, code: 'block-too-long' })
+    expect(refuse(`Intro\n1. ${part}\nlazy\n\n2. ${part}`)).toEqual({ ok: false, code: 'block-too-long' })
+    // A list closed by another block before the blank line can be split from the list after it.
+    const closed = convert(`1. ${part}\n> quote\n\n1. ${part}`).blocks
+    expect(closed.map((block) => block.type === 'paragraph' ? block.text.length : 0)).toEqual([30_011, 30_003])
+    const fencedAfter = convert(`1. ${part}\n\`\`\`\n1. x\n\`\`\`\n\n1. ${part}`).blocks
+    expect(fencedAfter.filter((block) => block.type === 'paragraph')).toHaveLength(2)
     const fenced = `- item\n  \`\`\`\n  ${part}\n\n  ${part}\n  \`\`\``
     expect(refuse(fenced)).toEqual({ ok: false, code: 'block-too-long' })
     expect(refuse(`- item\n\n  ${part}\n\n  ${part}`)).toEqual({ ok: false, code: 'block-too-long' })

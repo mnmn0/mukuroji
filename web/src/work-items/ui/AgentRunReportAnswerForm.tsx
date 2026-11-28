@@ -3,27 +3,51 @@ import { useId, useState, type FormEvent } from 'react'
 import type { AgentRunReportAnswerResult } from '../mutations/useAnswerAgentRunReport'
 import type { AgentRunReportAnswerLabels } from './agentRunReportLabels'
 
+/** Unsent state of an answer form, kept outside the form so it survives the form unmounting. */
+export type AgentRunReportAnswerDraft = {
+  /** Whether the form was open. */
+  open: boolean
+  /** Text typed and not yet saved. */
+  body: string
+}
+
 /** Props of the answer form under a blocker or hand-off. */
 export type AgentRunReportAnswerFormProps = {
   /** Locale-aware text. */
   labels: AgentRunReportAnswerLabels
   /** Sends the answer and tells how it ended. */
   onAnswer: (body: string) => Promise<AgentRunReportAnswerResult>
+  /** Draft kept from an earlier mount of the form, restored when it mounts again. */
+  draft?: AgentRunReportAnswerDraft
+  /** Receives the draft as it changes, or undefined once nothing is left to keep. */
+  onDraftChange?: (draft: AgentRunReportAnswerDraft | undefined) => void
 }
 
 /**
  * Lets a member answer a blocker or hand-off that an agent reported. The form stays closed behind a
  * button so the conversation keeps its layout, keeps the text after a failure so it can be sent again,
- * and closes once the answer is saved.
+ * and closes once the answer is saved. The unsent text is handed to `onDraftChange`, so a form that
+ * unmounts, such as while the reports cannot be read, gets it back from `draft` when it returns.
  *
- * @param props - Text and send action.
+ * @param props - Text, send action, and draft.
  * @returns Answer button or form.
  */
-export function AgentRunReportAnswerForm({ labels, onAnswer }: AgentRunReportAnswerFormProps) {
+export function AgentRunReportAnswerForm({ draft, labels, onAnswer, onDraftChange }: AgentRunReportAnswerFormProps) {
   const fieldId = useId()
   const errorId = useId()
-  const [open, setOpen] = useState(false)
-  const [body, setBody] = useState('')
+  const [open, setOpenState] = useState(draft?.open ?? false)
+  const [body, setBodyState] = useState(draft?.body ?? '')
+  /**
+   * Changes the form and hands the result to the parent in the same event, so the kept draft never
+   * lags behind what the form shows.
+   *
+   * @param next - Open state and text after the change.
+   */
+  const update = (next: AgentRunReportAnswerDraft) => {
+    setOpenState(next.open)
+    setBodyState(next.body)
+    onDraftChange?.(next.open || next.body !== '' ? next : undefined)
+  }
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string>()
   const trimmed = body.trim()
@@ -32,7 +56,7 @@ export function AgentRunReportAnswerForm({ labels, onAnswer }: AgentRunReportAns
 
   if (!open) {
     return (
-      <button className="workbench-button-secondary h-7 px-2 text-xs" onClick={() => setOpen(true)} type="button">
+      <button className="workbench-button-secondary h-7 px-2 text-xs" onClick={() => update({ open: true, body })} type="button">
         {labels.open}
       </button>
     )
@@ -51,8 +75,7 @@ export function AgentRunReportAnswerForm({ labels, onAnswer }: AgentRunReportAns
     const result = await onAnswer(trimmed).catch((): AgentRunReportAnswerResult => 'failed')
     setSending(false)
     if (result === 'saved') {
-      setBody('')
-      setOpen(false)
+      update({ open: false, body: '' })
       return
     }
     setError(result === 'conflict' ? labels.conflict : labels.failed)
@@ -72,7 +95,7 @@ export function AgentRunReportAnswerForm({ labels, onAnswer }: AgentRunReportAns
         className="workbench-input min-h-20 w-full p-2 text-sm"
         disabled={sending}
         id={fieldId}
-        onChange={(event) => setBody(event.target.value)}
+        onChange={(event) => update({ open, body: event.target.value })}
         placeholder={labels.placeholder}
         value={body}
       />
@@ -85,7 +108,7 @@ export function AgentRunReportAnswerForm({ labels, onAnswer }: AgentRunReportAns
           className="workbench-button-secondary h-8 px-3"
           disabled={sending}
           onClick={() => {
-            setOpen(false)
+            update({ open: false, body })
             setError(undefined)
           }}
           type="button"
