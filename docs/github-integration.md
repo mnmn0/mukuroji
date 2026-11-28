@@ -32,10 +32,11 @@ deploy する人（Shinji）が1回だけ行います。
    値は 5 分以内にすべての Lambda に反映されます。足りない項目や RSA でない鍵を入れると、各 runtime は
    `GitHubAppCredentialsInvalid` で失敗します（placeholder に戻せば「未設定」に戻ります）。
 6. **届くか確かめる**：App の Advanced → Recent Deliveries の `ping` が `200` なら受け口は動いています。
-7. **repository を Team に link する**：Workspace 管理者が `PUT /api/workspace/github/repositories/:repositoryId`
-   （body `{"teamId": "..."}`）で link します。管理画面は続く PR で足します。link した repository の open な
-   pull request はすぐに読み込まれます。
-8. **member が GitHub login を登録する**：各 member が `PUT /api/me/github-login`（body `{"githubLogin": "..."}`）で登録します。
+7. **repository を Team に link する**：Workspace 管理者が **設定** → **Workspace 管理** → **GitHub リポジトリ** で
+   Team を選びます（API は `PUT /api/workspace/github/repositories/:repositoryId`、body `{"teamId": "..."}`）。
+   link した repository の open な pull request はすぐに読み込まれます。
+8. **member が GitHub login を登録する**：各 member が **設定** → **個人** → **GitHub** で登録します
+   （API は `PUT /api/me/github-login`、body `{"githubLogin": "..."}`）。
 
 ### webhook secret を入れ替える
 
@@ -57,6 +58,24 @@ deploy する人（Shinji）が1回だけ行います。
   link を外した repository の snapshot と閉じて 30 日たった snapshot を消します。
 - 5 回失敗した job と、再試行を使い切った reconcile は `GitHubSyncDlq` に入り、alarm が鳴ります。
   queue の最古の job が 15 分を超えたときも alarm が鳴ります。
+
+## 受信箱の通知
+
+worker は snapshot を書く前に、保存済みの snapshot と比べて次の通知を audit event として書きます。
+collaboration projection がそれを受信箱の通知にし、届ける時点で受け手が link 先の Team を読めることを確かめます。
+
+| event type | 受け手 | いつ |
+| --- | --- | --- |
+| `github.pull_request_review_requested` | 新しくレビューを頼まれた人 | open な pull request の reviewer に加わったとき |
+| `github.pull_request_checks_failed` | 作成者 | CI が失敗に変わったとき、または新しい head commit で失敗したとき |
+| `github.pull_request_conflict` | 作成者 | conflict のない状態から conflict に変わったとき |
+
+- 受け手は登録済みの GitHub login で引きます。login を登録していない人には届きません。自分の操作は通知しません。
+- 初めて読む pull request は、webhook が知らせたときだけ reviewer に通知します。repository の link と毎時の reconcile は
+  通知しません（link した直後にすべての open な pull request が届かないようにするため）。
+- event の ID は「比べた snapshot・変化の種類・受け手」から決まるので、再試行や重複した webhook で二重に届きません。
+- audit log の summary には pull request の題名を書きません（題名は権限を確かめる通知の側だけに入ります）。
+- 通知の deep link は `/reviews` です。
 
 ## API
 

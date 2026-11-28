@@ -64,7 +64,7 @@ export function buildGitHubAppWorkers(
   scope: cdk.Stack,
   input: GitHubAppWorkerInput,
 ): GitHubAppResources {
-  const { planningTable } = input.dataStores;
+  const { auditEventsTable, planningTable } = input.dataStores;
   const { depsLockFilePath, projectRoot } = input.lambdaBuildPaths;
 
   const gitHubAppSecret = new secretsmanager.Secret(scope, 'GitHubAppSecret', {
@@ -94,6 +94,9 @@ export function buildGitHubAppWorkers(
   });
 
   const environment = {
+    // Pull request notifications are audit events the collaboration projection delivers (#775).
+    AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
+    AUDIT_RETENTION_DAYS: input.parameters.auditRetentionDays.valueAsString,
     GITHUB_APP_SECRET_ARN: gitHubAppSecret.secretArn,
     GITHUB_SYNC_QUEUE_URL: gitHubSyncQueue.queueUrl,
     MUKUROJI_WORKSPACE_DIRECTORY_ID: input.parameters.workspaceDirectoryId.valueAsString,
@@ -162,6 +165,10 @@ export function buildGitHubAppWorkers(
     worker.addToRolePolicy(new iam.PolicyStatement({
       actions: ['dynamodb:DeleteItem', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query'],
       resources: [planningTable.tableArn],
+    }));
+    worker.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:PutItem'],
+      resources: [auditEventsTable.tableArn],
     }));
   }
   gitHubSyncQueue.grants.consumeMessages(gitHubSyncFunction);

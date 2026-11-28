@@ -106,6 +106,18 @@ export const NOTIFICATION_MESSAGE_TEMPLATES = {
     en: 'The Project budget is {percent}% used, reaching its {threshold}% alert.',
     ja: 'Project の予算消化率が {percent}% になり、通知の閾値 {threshold}% に達しました。',
   },
+  'github.review-requested': {
+    en: 'Your review was requested on {repository}#{number}: {title}',
+    ja: '{repository}#{number} のレビューを頼まれました: {title}',
+  },
+  'github.checks-failed': {
+    en: 'CI failed on your pull request {repository}#{number}: {checks}',
+    ja: 'あなたの pull request {repository}#{number} の CI が失敗しました: {checks}',
+  },
+  'github.conflict': {
+    en: 'Your pull request {repository}#{number} has a merge conflict.',
+    ja: 'あなたの pull request {repository}#{number} に conflict があります。',
+  },
   'planning-update.health-changed': {
     en: 'Health changed to {health}: {excerpt}',
     ja: 'Health が{health}になりました: {excerpt}',

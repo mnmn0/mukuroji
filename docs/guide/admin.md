@@ -455,6 +455,12 @@ Phase / Milestone を持つテンプレートを適用するときは、Phase �
   マージで稼働日を含む日付を選び直すこともできます）。依存関係のある Work Item の日付は、Mukuroji の画面で
   影響を確認してから変えてください。
   自分のカレンダーに表示するだけなら、各メンバーがカレンダーフィードを使えます（[メンバー向けガイド](member.md)）。
+- **GitHub リポジトリ**: GitHub App が読める repository を Team に紐付けます（owner / admin）。紐付けた repository の
+  pull request は、その Team を見られるメンバーの **レビュー** 画面と受信箱に出ます（[メンバー向けガイド](member.md)）。
+  紐付けを外すと、その repository の pull request はすぐ表示されなくなります。GitHub App の作成と secret の登録は
+  運用者が行います（手順は [`docs/github-integration.md`](../github-integration.md)）。設定前は「GitHub App がまだ
+  設定されていません」と表示されます。メンバーが誤った GitHub のユーザー名を登録したときは、
+  `DELETE /api/workspace/github/logins/:login` で外せます。
 - **Import / Export**: Work Item の CSV / JSON / Excel / MS Project XML の export と、検証（dry-run）してから確定する import。
   import は 1 回 10,000 行・4 MB まで取り込めます（引用符や改行が多いファイルは、送るときにその分大きく数えます）。確定すると「5,000 行中 1,200 行を作成」のように進み具合が出て、
   終わるまで画面を開いておく必要はありません。大きな import は 10 分ごとに区切って続きを処理し、途中で止まっても続きから再開します。

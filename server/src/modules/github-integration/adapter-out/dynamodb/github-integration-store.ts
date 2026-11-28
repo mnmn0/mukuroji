@@ -376,6 +376,25 @@ export class DynamoDbGitHubIntegrationStore implements GitHubIntegrationStore<Mu
   }
 
   /**
+   * Reads one snapshot with a consistent read.
+   *
+   * @param workspaceId - Workspace.
+   * @param repositoryId - Repository ID.
+   * @param number - Pull request number.
+   * @returns The snapshot, or `null` when none is stored or the row cannot be read.
+   */
+  async getPullRequestSnapshot(workspaceId: string, repositoryId: string, number: number): Promise<GitHubPullRequestSnapshot | null> {
+    const row = await this.readItem(workspaceId, pullRequestKey(repositoryId, number))
+    if (!row) return null
+    try {
+      return parseSnapshotRow(row)
+    } catch {
+      // The row is rewritten by this read; an unreadable one only means no change is detected.
+      return null
+    }
+  }
+
+  /**
    * Writes a snapshot unless a later read is stored.
    *
    * @param workspaceId - Workspace.
@@ -612,6 +631,19 @@ export class InMemoryGitHubIntegrationStore implements GitHubIntegrationStore<un
     if (this.memberLogins.get(memberKey) !== input.login) throw conflict()
     this.memberLogins.delete(memberKey)
     this.loginHolders.delete(`${input.workspaceId}\0${input.login.toLowerCase()}`)
+  }
+
+  /**
+   * Reads one snapshot.
+   *
+   * @param workspaceId - Workspace.
+   * @param repositoryId - Repository ID.
+   * @param number - Pull request number.
+   * @returns A copy of the snapshot, or `null`.
+   */
+  async getPullRequestSnapshot(workspaceId: string, repositoryId: string, number: number): Promise<GitHubPullRequestSnapshot | null> {
+    const snapshot = this.snapshots.get(`${workspaceId}\0${pullRequestKey(repositoryId, number)}`)
+    return snapshot ? structuredClone(snapshot) : null
   }
 
   /**

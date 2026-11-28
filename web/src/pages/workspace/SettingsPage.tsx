@@ -7,6 +7,10 @@ import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platfor
 import { AccountSecurityPanelContainer } from '../../features/account-security/ui/AccountSecurityPanel'
 import { AuditLogPanelContainer } from '../../features/audit-log/ui/AuditLogPanelContainer'
 import { CalendarFeedsPanelContainer } from '../../features/calendar-feeds/ui/CalendarFeedsPanelContainer'
+import {
+  GitHubLoginPanelContainer,
+  GitHubRepositoryLinksPanelContainer,
+} from '../../features/github-reviews/ui/GitHubSettingsContainers'
 import { resolveBrowserTimeZone } from '../../features/time-tracking/model/timePeriod'
 import { WorkspaceTimePeriodContainer } from '../../features/time-tracking/ui/WorkspaceTimePeriodContainer'
 import { AgentSettingsPanelContainer } from '../../features/agent-settings/ui/AgentSettingsPanelContainer'
@@ -81,6 +85,9 @@ export function SettingsPage() {
                     accessToken={workspace.accessToken}
                     locale={workspace.locale}
                   />
+                </SettingsPanelAnchor>
+                <SettingsPanelAnchor panel="github">
+                  <GitHubLoginPanelContainer accessToken={workspace.accessToken} locale={workspace.locale} />
                 </SettingsPanelAnchor>
                 {aiAssistanceUiEnabled ? (
                   <SettingsPanelAnchor panel="ai-assistance">
@@ -226,6 +233,15 @@ export function SettingsPage() {
                     teams={workspace.teams}
                   />
                 </SettingsPanelAnchor>
+                {workspace.canManageWorkspaceConfiguration ? (
+                  <SettingsPanelAnchor panel="github-repositories">
+                    <GitHubRepositoryLinksPanelContainer
+                      accessToken={workspace.accessToken}
+                      locale={workspace.locale}
+                      teams={workspace.teams}
+                    />
+                  </SettingsPanelAnchor>
+                ) : null}
                 <SettingsPanelAnchor panel="automation">
                   <AutomationManagementPanelContainer
                     accessToken={workspace.accessToken}
@@ -344,6 +360,7 @@ function listSettingsPanels(
         // The install card hides itself where the browser cannot install the app, so it is not linked.
         signedIn && 'notifications',
         signedIn && 'account-security',
+        signedIn && 'github',
         signedIn && available.aiAssistance && 'ai-assistance',
         'agent-connection',
       ]
@@ -355,6 +372,7 @@ function listSettingsPanels(
           signedIn && available.workspaceConfiguration && 'directory',
           signedIn && available.workspaceTimePeriods && 'time-periods',
           signedIn && 'developer-platform',
+          signedIn && available.workspaceConfiguration && 'github-repositories',
           signedIn && 'automation',
           signedIn && available.auditLog && 'audit-log',
         ]

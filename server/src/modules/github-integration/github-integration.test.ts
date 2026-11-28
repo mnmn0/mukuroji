@@ -18,6 +18,8 @@ import {
 import type { GitHubAppCredentialSource, GitHubAppGateway, GitHubRepositoryLinkRecord } from './application/ports'
 import { InMemoryGitHubIntegrationStore } from './adapter-out/dynamodb/github-integration-store'
 import { InMemoryGitHubSyncQueue } from './adapter-out/sqs/github-sync-queue'
+import { createGitHubNotificationAuditEvent, InMemoryGitHubNotificationSink } from './adapter-out/dynamodb/github-notification-sink'
+import { detectPullRequestNotifications } from './domain/pull-request-notifications'
 import { createGitHubSyncQueueHandler } from './adapter-in/events/github-sync-worker'
 
 /** Workspace of the tests. */
@@ -263,17 +265,17 @@ test('stores snapshots of linked repositories only and retries an unknown confli
   const { gateway } = fakeGateway([], new Map([[5, unknown]]))
   const job = { installationId: '7', repositoryId: '42', repository: 'acme/app', attempt: 0, kind: 'pull-requests' as const, numbers: [5, 6] }
   // Without a link, nothing is read or written.
-  expect(await processGitHubSyncJob({ store, gateway, queue }, WORKSPACE_ID, job, new Date())).toMatchObject({ skipped: true })
+  expect(await processGitHubSyncJob({ store, gateway, queue, notifications: new InMemoryGitHubNotificationSink() }, WORKSPACE_ID, job, new Date())).toMatchObject({ skipped: true })
   await store.saveRepositoryLink({ workspaceId: WORKSPACE_ID, record: link })
   // A delivery from an installation the link does not name is skipped too.
-  expect(await processGitHubSyncJob({ store, gateway, queue }, WORKSPACE_ID, { ...job, installationId: '8' }, new Date())).toMatchObject({ skipped: true })
+  expect(await processGitHubSyncJob({ store, gateway, queue, notifications: new InMemoryGitHubNotificationSink() }, WORKSPACE_ID, { ...job, installationId: '8' }, new Date())).toMatchObject({ skipped: true })
   await store.putPullRequestSnapshot(WORKSPACE_ID, snapshot({ number: 6 }))
-  const result = await processGitHubSyncJob({ store, gateway, queue }, WORKSPACE_ID, job, new Date('2026-11-28T02:00:00Z'))
+  const result = await processGitHubSyncJob({ store, gateway, queue, notifications: new InMemoryGitHubNotificationSink() }, WORKSPACE_ID, job, new Date('2026-11-28T02:00:00Z'))
   expect(result).toEqual({ skipped: false, written: 1, deleted: 1, requeued: true })
   expect((await store.listPullRequestSnapshots(WORKSPACE_ID)).snapshots.map((item) => item.number)).toEqual([5])
   expect(queue.sent).toEqual([{ job: { ...job, attempt: 1, numbers: [5] }, delaySeconds: 30 }])
   // The last attempt does not requeue again.
-  const last = await processGitHubSyncJob({ store, gateway, queue }, WORKSPACE_ID, { ...job, attempt: 3, numbers: [5] }, new Date('2026-11-28T03:00:00Z'))
+  const last = await processGitHubSyncJob({ store, gateway, queue, notifications: new InMemoryGitHubNotificationSink() }, WORKSPACE_ID, { ...job, attempt: 3, numbers: [5] }, new Date('2026-11-28T03:00:00Z'))
   expect(last.requeued).toBe(false)
 })
 
@@ -287,7 +289,7 @@ test('reconciles open pull requests and removes unlinked and expired snapshots',
   const merged = snapshot({ number: 1, state: 'MERGED', mergedAt: '2026-11-27T00:00:00Z', closedAt: '2026-11-27T00:00:00Z' }, '2026-11-28T05:00:00.000Z')
   const { gateway, calls } = fakeGateway([snapshot({ number: 4 }, '2026-11-28T05:00:00.000Z')], new Map([[1, merged]]))
   const errors: unknown[] = []
-  const result = await reconcileGitHubPullRequests({ store, gateway, queue }, WORKSPACE_ID, new Date('2026-11-28T05:00:00Z'), (_link, error) => errors.push(error))
+  const result = await reconcileGitHubPullRequests({ store, gateway, queue, notifications: new InMemoryGitHubNotificationSink() }, WORKSPACE_ID, new Date('2026-11-28T05:00:00Z'), (_link, error) => errors.push(error))
   expect(errors).toEqual([])
   expect(result).toEqual({ repositories: 1, failedRepositories: 0, written: 2, deleted: 2 })
   expect(calls).toEqual(['name', 'open:*', 'numbers:1'])
@@ -349,6 +351,7 @@ test('reports retryable job failures to SQS and drops malformed messages', async
     store,
     gateway: failing,
     queue: new InMemoryGitHubSyncQueue(),
+    notifications: new InMemoryGitHubNotificationSink(),
     workspaceId: WORKSPACE_ID,
     now: () => new Date(),
     log: (message) => logs.push(message),
@@ -357,4 +360,60 @@ test('reports retryable job failures to SQS and drops malformed messages', async
   const response = await handler({ Records: [{ messageId: 'm1', body: JSON.stringify(job) }, { messageId: 'm2', body: 'not json' }] })
   expect(response).toEqual({ batchItemFailures: [{ itemIdentifier: 'm1' }] })
   expect(logs).toEqual(['GitHub sync job failed.', 'GitHub sync worker dropped a malformed message.'])
+})
+
+test('notifies new reviewers and the author of new CI failures and conflicts, once', () => {
+  const before = { ...snapshot({}, '2026-11-28T01:00:00.000Z'), checks: { state: 'success' as const, failedNames: [], total: 2 } }
+  // A pull request seen for the first time notifies only when a webhook announced it.
+  expect(detectPullRequestNotifications(undefined, before, { notifyNew: false })).toEqual([])
+  expect(detectPullRequestNotifications(undefined, before, { notifyNew: true }).map((item) => [item.kind, item.login])).toEqual([['review-requested', 'bob']])
+  const failing = snapshot({
+    reviewRequests: { nodes: [{ requestedReviewer: { __typename: 'User', login: 'Bob' } }, { requestedReviewer: { __typename: 'User', login: 'dave' } }, { requestedReviewer: { __typename: 'User', login: 'alice' } }] },
+    mergeable: 'CONFLICTING',
+  }, '2026-11-28T02:00:00.000Z')
+  const found = detectPullRequestNotifications(before, failing, { notifyNew: false })
+  // Bob was already requested, and the author never reviews their own pull request.
+  expect(found.map((item) => [item.kind, item.login])).toEqual([['review-requested', 'dave'], ['checks-failed', 'alice'], ['conflict', 'alice']])
+  // Reading the same change again from the same stored snapshot yields the same keys.
+  expect(detectPullRequestNotifications(before, failing, { notifyNew: false }).map((item) => item.key)).toEqual(found.map((item) => item.key))
+  // A failure that keeps failing on the same head, or a closed pull request, says nothing.
+  expect(detectPullRequestNotifications(failing, { ...failing, syncedAt: '2026-11-28T03:00:00.000Z' }, { notifyNew: false })).toEqual([])
+  expect(detectPullRequestNotifications(before, { ...failing, state: 'merged' }, { notifyNew: false })).toEqual([])
+  // GitHub recomputing the conflict state after a push is not a new conflict.
+  const recomputing = { ...failing, mergeable: 'unknown' as const, syncedAt: '2026-11-28T03:00:00.000Z' }
+  expect(detectPullRequestNotifications(recomputing, { ...failing, syncedAt: '2026-11-28T04:00:00.000Z' }, { notifyNew: false })).toEqual([])
+})
+
+test('sends pull request notifications to registered members before storing the snapshot', async () => {
+  const store = new InMemoryGitHubIntegrationStore()
+  const notifications = new InMemoryGitHubNotificationSink()
+  await store.saveRepositoryLink({ workspaceId: WORKSPACE_ID, record: link })
+  await store.saveMemberLogin({ workspaceId: WORKSPACE_ID, memberKey: 'bob@example.com', login: 'bob', now: 'now' })
+  const { gateway } = fakeGateway([], new Map([[5, snapshot({}, 'ignored')]]))
+  const job = { installationId: '7', repositoryId: '42', repository: 'acme/app', attempt: 0, kind: 'pull-requests' as const, numbers: [5] }
+  await processGitHubSyncJob({ store, gateway, queue: new InMemoryGitHubSyncQueue(), notifications }, WORKSPACE_ID, job, new Date('2026-11-28T02:00:00Z'))
+  // Alice has no registered login, so only Bob is told.
+  expect(notifications.published.map((item) => [item.kind, item.memberKey, item.teamId])).toEqual([['review-requested', 'bob@example.com', 'core-team']])
+  // Linking a repository reads every open pull request without notifying.
+  const linked = new InMemoryGitHubNotificationSink()
+  const fresh = new InMemoryGitHubIntegrationStore()
+  await fresh.saveRepositoryLink({ workspaceId: WORKSPACE_ID, record: link })
+  await fresh.saveMemberLogin({ workspaceId: WORKSPACE_ID, memberKey: 'bob@example.com', login: 'bob', now: 'now' })
+  const repositoryJob = { installationId: '7', repositoryId: '42', repository: 'acme/app', attempt: 0, kind: 'repository' as const }
+  const result = await processGitHubSyncJob({ store: fresh, gateway: fakeGateway([snapshot()]).gateway, queue: new InMemoryGitHubSyncQueue(), notifications: linked }, WORKSPACE_ID, repositoryJob, new Date())
+  expect(result.written).toBe(1)
+  expect(linked.published).toEqual([])
+  const event = createGitHubNotificationAuditEvent(notifications.published[0], new Date('2026-11-28T02:00:00Z'), 30)
+  expect(event).toMatchObject({
+    eventType: 'github.pull_request_review_requested',
+    summary: 'A GitHub pull request notification was sent.',
+    metadata: {
+      teamId: 'core-team',
+      deepLink: '/reviews',
+      notificationCandidates: [{ memberKey: 'bob@example.com', reason: 'review-requested' }],
+      notificationMessage: { code: 'github.review-requested', params: { repository: 'acme/app', number: 5 } },
+    },
+  })
+  // The event ID comes from the notification key, so a retry writes the same row.
+  expect(createGitHubNotificationAuditEvent(notifications.published[0], new Date('2026-11-28T02:05:00Z'), 30).eventId).toBe(event.eventId)
 })

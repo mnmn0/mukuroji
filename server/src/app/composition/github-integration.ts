@@ -9,14 +9,17 @@ import {
   createGitHubReconcileHandler,
   createGitHubSyncQueueHandler,
   DynamoDbGitHubIntegrationStore,
+  DynamoDbGitHubNotificationSink,
   GitHubAppHttpGateway,
   GitHubIntegrationError,
   InMemoryGitHubIntegrationStore,
+  InMemoryGitHubNotificationSink,
   InMemoryGitHubSyncQueue,
   SqsGitHubSyncQueue,
   type GitHubAppCredentialSource,
   type GitHubAppGateway,
   type GitHubIntegrationStore,
+  type GitHubPullRequestNotificationSink,
   type GitHubSyncQueue,
 } from '../../modules/github-integration'
 
@@ -81,19 +84,41 @@ export function createTestGitHubIntegrationDependencies(): GitHubIntegrationDepe
   }
 }
 
+/** Audit retention used when `AUDIT_RETENTION_DAYS` is not set, as for the other workers. */
+const DEFAULT_AUDIT_RETENTION_DAYS = 2_555
+
+/**
+ * Creates the sink of pull request notifications: audit events in the audit table, or memory when
+ * no audit table is configured (local runs).
+ *
+ * @returns The sink.
+ */
+function createProductionNotificationSink(): GitHubPullRequestNotificationSink {
+  const auditTableName = getConfiguredAuditTableName()
+  if (!auditTableName) return new InMemoryGitHubNotificationSink()
+  const configured = Number(loadServerConfig().environment.AUDIT_RETENTION_DAYS)
+  const retentionDays = Number.isSafeInteger(configured) && configured > 0 ? configured : DEFAULT_AUDIT_RETENTION_DAYS
+  return new DynamoDbGitHubNotificationSink(auditTableName, createDynamoDbDocumentClient(), retentionDays)
+}
+
 /**
  * Creates the GitHub sync worker entrypoints.
  *
  * @param dependencies - Adapters.
+ * @param notifications - Sink of pull request notifications.
  * @returns The SQS handler and the hourly reconcile handler.
  */
-export function createGitHubSyncWorkerHandlers(dependencies: GitHubIntegrationDependencies = createProductionGitHubIntegrationDependencies()) {
+export function createGitHubSyncWorkerHandlers(
+  dependencies: GitHubIntegrationDependencies = createProductionGitHubIntegrationDependencies(),
+  notifications: GitHubPullRequestNotificationSink = createProductionNotificationSink(),
+) {
   const workspaceId = dependencies.workspaceId
   if (!workspaceId) throw new Error('GitHub sync worker requires MUKUROJI_WORKSPACE_DIRECTORY_ID.')
   const worker = {
     store: dependencies.store,
     gateway: dependencies.gateway,
     queue: dependencies.queue,
+    notifications,
     workspaceId,
     now: () => new Date(),
     log: (message: string, details: Record<string, unknown>) => console.info(JSON.stringify({ message, ...details })),

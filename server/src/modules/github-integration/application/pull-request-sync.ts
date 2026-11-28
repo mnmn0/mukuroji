@@ -6,11 +6,13 @@ import {
   type GitHubSyncJob,
 } from '../domain/sync-jobs'
 import { isExpiredPullRequestSnapshot } from '../domain/pull-request-inbox'
+import { detectPullRequestNotifications } from '../domain/pull-request-notifications'
 import type { GitHubPullRequestSnapshot } from '../domain/pull-request-snapshot'
 import type {
   GitHubAppCredentialSource,
   GitHubAppGateway,
   GitHubIntegrationStore,
+  GitHubPullRequestNotificationSink,
   GitHubRepositoryLinkRecord,
   GitHubRepositoryReference,
   GitHubSyncQueue,
@@ -91,6 +93,8 @@ export type GitHubSyncDependencies = {
   gateway: GitHubAppGateway
   /** Queue that takes requeued jobs. */
   queue: GitHubSyncQueue
+  /** Inbox notifications of pull request changes. */
+  notifications: GitHubPullRequestNotificationSink
 }
 
 /** Outcome of one sync job. */
@@ -155,7 +159,8 @@ export async function processGitHubSyncJob(
       snapshots = (await dependencies.gateway.readOpenPullRequests(reference, {}, syncedAt)).snapshots
       break
   }
-  const result = await storeSnapshots(dependencies.store, workspaceId, reference.repositoryId, snapshots, missing)
+  // Linking a repository reads every open pull request; only a webhook announces a new one.
+  const result = await storeSnapshots(dependencies, workspaceId, link, snapshots, missing, job.kind !== 'repository')
   const unknown = snapshots
     .filter((snapshot) => snapshot.state === 'open' && snapshot.mergeable === 'unknown')
     .map((snapshot) => snapshot.number)
@@ -231,7 +236,7 @@ export async function reconcileGitHubPullRequests(
       const reference = { installationId: link.installationId, repositoryId: link.repositoryId, repository: name }
       const open = await dependencies.gateway.readOpenPullRequests(reference, {}, syncedAt)
       const openNumbers = new Set(open.snapshots.map((snapshot) => snapshot.number))
-      const result = await storeSnapshots(dependencies.store, workspaceId, link.repositoryId, open.snapshots, [])
+      const result = await storeSnapshots(dependencies, workspaceId, link, open.snapshots, [], false)
       written += result.written
       // Without the complete open list, a stored open pull request may still be open.
       const stale = open.incomplete ? [] : (storedOpen.get(link.repositoryId) ?? []).filter((number) => !openNumbers.has(number))
@@ -241,7 +246,7 @@ export async function reconcileGitHubPullRequests(
           stale.slice(index, index + GITHUB_SYNC_JOB_MAX_NUMBERS),
           syncedAt,
         )
-        const chunk = await storeSnapshots(dependencies.store, workspaceId, link.repositoryId, read.snapshots, read.missing)
+        const chunk = await storeSnapshots(dependencies, workspaceId, link, read.snapshots, read.missing, false)
         written += chunk.written
         deleted += chunk.deleted
       }
@@ -254,26 +259,41 @@ export async function reconcileGitHubPullRequests(
 }
 
 /**
- * Writes snapshots and deletes the ones GitHub no longer shows.
+ * Writes snapshots, sends the notifications their changes imply, and deletes the ones GitHub no
+ * longer shows.
  *
- * @param store - Store.
+ * Each notification is written before its snapshot, and its key comes from the snapshot it is
+ * compared with, so a retry after a failure sends it once. A snapshot older than the stored one is
+ * skipped without notifying.
+ *
+ * @param dependencies - Store and notification sink.
  * @param workspaceId - Workspace.
- * @param repositoryId - Repository the snapshots belong to.
+ * @param link - Repository link, which names the Team the notifications are scoped to.
  * @param snapshots - Snapshots read from GitHub.
  * @param missing - Numbers GitHub no longer shows.
+ * @param notifyNew - Whether a pull request seen for the first time notifies its reviewers.
  * @returns Counts of written and deleted snapshots.
  */
 async function storeSnapshots(
-  store: GitHubIntegrationStore,
+  dependencies: Pick<GitHubSyncDependencies, 'store' | 'notifications'>,
   workspaceId: string,
-  repositoryId: string,
+  link: GitHubRepositoryLinkRecord,
   snapshots: readonly GitHubPullRequestSnapshot[],
   missing: readonly number[],
+  notifyNew: boolean,
 ): Promise<{ written: number, deleted: number }> {
+  const { store } = dependencies
   let written = 0
   for (const snapshot of snapshots) {
+    const previous = await store.getPullRequestSnapshot(workspaceId, snapshot.repositoryId, snapshot.number) ?? undefined
+    if (previous && previous.syncedAt >= snapshot.syncedAt) continue
+    for (const notification of detectPullRequestNotifications(previous, snapshot, { notifyNew })) {
+      const memberKey = await store.findMemberByLogin(workspaceId, notification.login)
+      if (!memberKey) continue
+      await dependencies.notifications.publish({ ...notification, workspaceId, memberKey, teamId: link.teamId, pullRequest: snapshot })
+    }
     if (await store.putPullRequestSnapshot(workspaceId, snapshot) === 'written') written += 1
   }
-  for (const number of missing) await store.deletePullRequestSnapshot(workspaceId, repositoryId, number)
+  for (const number of missing) await store.deletePullRequestSnapshot(workspaceId, link.repositoryId, number)
   return { written, deleted: missing.length }
 }

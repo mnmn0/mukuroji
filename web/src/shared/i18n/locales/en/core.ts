@@ -16,5 +16,6 @@ export const coreMessages = {
   'language.aria': 'Select display language',
   'sidebar.nav.focus': 'Focus',
   'sidebar.nav.updates': 'Updates',
+  'sidebar.nav.reviews': 'Reviews',
 } as const
 // Update Feed navigation is separate from the event Inbox.

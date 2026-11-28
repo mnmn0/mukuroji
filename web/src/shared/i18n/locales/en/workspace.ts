@@ -592,6 +592,8 @@ export const workspaceMessages = {
   'workspace.settings.panel.work-item-key-prefix': 'Work Item key prefix',
   'workspace.settings.panel.team-automation': 'Team automation',
   'workspace.settings.panel.agent-settings': 'Agent settings',
+  'workspace.settings.panel.github': 'GitHub',
+  'workspace.settings.panel.github-repositories': 'GitHub repositories',
   'workspace.settings.profile.nameLabel': 'Display name',
   'workspace.settings.profile.nameHelp': 'The name other members see in assignee lists, comments, weekly reports and more. Leave it empty to be shown by email address.',
   'workspace.settings.profile.directoryManaged': 'Your directory (SCIM) manages this display name, so it cannot be changed here.',

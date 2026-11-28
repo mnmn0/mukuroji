@@ -13,7 +13,7 @@ import {
   type ArchiveImpactState,
 } from '../archive-impact'
 import { BrandMark } from '../BrandMark'
-import { HandoffIcon, FormIcon } from '../icons'
+import { CheckIcon, HandoffIcon, FormIcon } from '../icons'
 
 /**
  * サイドバー内の SVG アイコンに渡す共通 props です。
@@ -92,6 +92,7 @@ export type SidebarNavId =
   | 'my-tasks'
   | 'work-items'
   | 'inbox'
+  | 'reviews'
   | 'requests'
   | 'customers'
   | 'collections'
@@ -602,6 +603,11 @@ function UpdateFeedSidebarIcon({ className }: SidebarIconProps) {
   return <FormIcon className={`${className ?? ''} fill-none stroke-current stroke-[1.8]`} />
 }
 
+/** Marks the GitHub pull request review inbox with the shared check outline. */
+function ReviewsSidebarIcon({ className }: SidebarIconProps) {
+  return <CheckIcon className={className} />
+}
+
 const primaryNavItems: MainNavItem[] = [
   { id: 'home', icon: HomeIcon },
   { id: 'focus', icon: FocusIcon },
@@ -609,6 +615,7 @@ const primaryNavItems: MainNavItem[] = [
   { id: 'my-tasks', icon: CheckCircleIcon },
   { id: 'work-items', icon: ListIcon },
   { id: 'inbox', icon: BellIcon },
+  { id: 'reviews', icon: ReviewsSidebarIcon },
 ]
 
 const secondaryNavItems: MainNavItem[] = [
@@ -713,6 +720,7 @@ const defaultLabels: SidebarLabels = {
     'my-tasks': 'マイタスク',
     'work-items': 'Work Item 一覧',
     inbox: '受信箱',
+    reviews: 'レビュー',
     requests: 'リクエスト',
     customers: '顧客',
     collections: 'コレクション',

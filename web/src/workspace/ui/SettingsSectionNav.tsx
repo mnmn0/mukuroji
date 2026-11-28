@@ -62,6 +62,8 @@ const settingsPanelLabelKeys: Record<SettingsPanelId, MessageKey> = {
   'work-item-key-prefix': 'workspace.settings.panel.work-item-key-prefix',
   'team-automation': 'workspace.settings.panel.team-automation',
   'agent-settings': 'workspace.settings.panel.agent-settings',
+  github: 'workspace.settings.panel.github',
+  'github-repositories': 'workspace.settings.panel.github-repositories',
 }
 
 /**

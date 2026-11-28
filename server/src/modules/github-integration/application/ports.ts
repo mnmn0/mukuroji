@@ -1,4 +1,5 @@
 import type { GitHubPullRequestSnapshot } from '../domain/pull-request-snapshot'
+import type { GitHubPullRequestNotification } from '../domain/pull-request-notifications'
 import type { GitHubSyncJob } from '../domain/sync-jobs'
 
 /** GitHub App credentials of this deployment (ADR 0079). */
@@ -245,6 +246,15 @@ export interface GitHubIntegrationStore<AuditContext = unknown> {
    */
   listPullRequestSnapshots(workspaceId: string): Promise<GitHubPullRequestSnapshotPage>
   /**
+   * Reads one snapshot with a consistent read.
+   *
+   * @param workspaceId - Workspace.
+   * @param repositoryId - Repository ID.
+   * @param number - Pull request number.
+   * @returns The snapshot, or `null` when none is stored or the stored row cannot be read.
+   */
+  getPullRequestSnapshot(workspaceId: string, repositoryId: string, number: number): Promise<GitHubPullRequestSnapshot | null>
+  /**
    * Writes a snapshot unless a snapshot read later is already stored.
    *
    * @param workspaceId - Workspace.
@@ -271,4 +281,26 @@ export interface GitHubSyncQueue {
    * @param delaySeconds - Seconds before the worker may receive it, at most 900.
    */
   send(job: GitHubSyncJob, delaySeconds?: number): Promise<void>
+}
+
+/** One Inbox notification to deliver, resolved to a member. */
+export type GitHubPullRequestNotificationDelivery = GitHubPullRequestNotification & {
+  /** Workspace. */
+  workspaceId: string
+  /** Member key of the recipient. */
+  memberKey: string
+  /** Team the repository is linked to; the recipient must still read it when it is delivered. */
+  teamId: string
+  /** Pull request the notification is about. */
+  pullRequest: GitHubPullRequestSnapshot
+}
+
+/** Writes Inbox notifications of pull request changes (#775). */
+export interface GitHubPullRequestNotificationSink {
+  /**
+   * Writes one notification; writing the same key again does nothing.
+   *
+   * @param delivery - Notification and its recipient.
+   */
+  publish(delivery: GitHubPullRequestNotificationDelivery): Promise<void>
 }

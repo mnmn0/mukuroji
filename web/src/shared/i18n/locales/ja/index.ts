@@ -22,6 +22,7 @@ import { codingAgentMessages } from './coding-agent'
 import { codingAgentGuideMessages } from './coding-agent-guide'
 import { agentConnectionMessages } from './agent-connection'
 import { calendarFeedsMessages } from './calendar-feeds'
+import { githubReviewsMessages } from './github-reviews'
 import { connectorOAuthMessages } from './connector-oauth'
 import { connectorCatalogMessages } from './connector-catalog'
 import { developerPlatformMessages } from './developer-platform'
@@ -62,6 +63,7 @@ export const jaMessages = {
   ...codingAgentGuideMessages,
   ...agentConnectionMessages,
   ...calendarFeedsMessages,
+  ...githubReviewsMessages,
   ...connectorOAuthMessages,
   ...connectorCatalogMessages,
   ...developerPlatformMessages,

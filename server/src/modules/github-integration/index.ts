@@ -4,6 +4,7 @@ export type {
   GitHubAppCredentialSource,
   GitHubAppGateway,
   GitHubIntegrationStore,
+  GitHubPullRequestNotificationSink,
   GitHubSyncQueue,
 } from './application/ports'
 export {
@@ -30,6 +31,10 @@ export {
   DynamoDbGitHubIntegrationStore,
   InMemoryGitHubIntegrationStore,
 } from './adapter-out/dynamodb/github-integration-store'
+export {
+  DynamoDbGitHubNotificationSink,
+  InMemoryGitHubNotificationSink,
+} from './adapter-out/dynamodb/github-notification-sink'
 export { GitHubAppHttpGateway } from './adapter-out/github/github-app-gateway'
 export { CachedGitHubAppCredentialSource } from './adapter-out/secrets-manager/github-app-credential-source'
 export { InMemoryGitHubSyncQueue, SqsGitHubSyncQueue } from './adapter-out/sqs/github-sync-queue'

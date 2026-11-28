@@ -70,6 +70,8 @@ export type SettingsPanelId =
   | 'work-item-key-prefix'
   | 'team-automation'
   | 'agent-settings'
+  | 'github'
+  | 'github-repositories'
 
 /**
  * Builds the element ID, and URL fragment without `#`, of a settings panel.
