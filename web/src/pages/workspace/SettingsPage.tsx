@@ -28,6 +28,7 @@ import { resolveSettingsSection } from '../../workspace/model/settingsSections'
 import { EnterpriseSecuritySettingsLink } from '../../workspace/ui/EnterpriseSecuritySettingsLink'
 import { SettingsSectionNav, type SettingsPanelLink } from '../../workspace/ui/SettingsSectionNav'
 import { MemberProfileSectionContainer } from '../../workspace/ui/MemberProfileSection'
+import { SlackIngestPanelContainer } from '../../features/slack-ingest/ui/SlackIngestPanelContainer'
 import { SettingsPanelAnchor } from '../../workspace/ui/SettingsPanelAnchor'
 import { useSettingsPanelScroll } from '../../workspace/ui/useSettingsPanelScroll'
 import { WorkspaceSettingsView } from '../../workspace/ui/WorkspaceSettingsView'
@@ -226,6 +227,15 @@ export function SettingsPage() {
                     teams={workspace.teams}
                   />
                 </SettingsPanelAnchor>
+                {workspace.canManageWorkspaceConfiguration ? (
+                  <SettingsPanelAnchor panel="slack-ingest">
+                    <SlackIngestPanelContainer
+                      accessToken={workspace.accessToken}
+                      locale={workspace.locale}
+                      teams={workspace.teams}
+                    />
+                  </SettingsPanelAnchor>
+                ) : null}
                 <SettingsPanelAnchor panel="automation">
                   <AutomationManagementPanelContainer
                     accessToken={workspace.accessToken}
@@ -355,6 +365,7 @@ function listSettingsPanels(
           signedIn && available.workspaceConfiguration && 'directory',
           signedIn && available.workspaceTimePeriods && 'time-periods',
           signedIn && 'developer-platform',
+          signedIn && available.workspaceConfiguration && 'slack-ingest',
           signedIn && 'automation',
           signedIn && available.auditLog && 'audit-log',
         ]

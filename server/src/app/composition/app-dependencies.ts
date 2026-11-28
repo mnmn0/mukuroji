@@ -73,6 +73,7 @@ import type { TeamPortfolioSnapshotStore } from '../../modules/portfolio-dashboa
 import type { ProjectRaidLogStore } from '../../modules/project-raid-log'
 import type { ProjectExpenseStore } from '../../modules/project-budget'
 import type { CalendarFeedStore } from '../../modules/calendar-feeds'
+import type { SlackIngestDependencies } from './slack-ingest'
 import type { MutationAuditContext } from '../../modules/audit'
 import type { ProjectStatusShareStore } from '../../modules/project-status-shares'
 import type { WeeklyReportStore } from '../../modules/weekly-reports'
@@ -314,6 +315,8 @@ export interface DeveloperPlatformDependencies {
   workItemImportQueue: WorkItemImportQueue
   /** Enqueues Public API replays on the durable Webhook delivery queue. */
   queueWebhookDelivery: NonNullable<PublicApiDependencies['queueWebhookDelivery']>
+  /** Provides the Slack channel ingest settings, rows, and worker queue (ADR 0113). */
+  slackIngest: SlackIngestDependencies
 }
 
 /** Provides dependencies required by time-tracking routes. */

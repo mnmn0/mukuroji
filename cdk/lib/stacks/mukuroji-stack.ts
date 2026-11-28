@@ -58,6 +58,7 @@ import { buildTenantOperationWorker } from '../subsystems/workers/tenant-operati
 import { defineTriageScheduleJob } from '../subsystems/workers/triage';
 import { buildWebhookDeliveryWorkers } from '../subsystems/workers/webhook-delivery';
 import { buildWorkItemImportWorker } from '../subsystems/workers/work-item-import';
+import { buildSlackIngestWorker } from '../subsystems/workers/slack-ingest';
 import { buildAuditExportWorker } from '../subsystems/workers/audit-export';
 import { defineAgentRunTriageJob } from '../subsystems/workers/agent-run-triage';
 
@@ -235,6 +236,12 @@ export class MukurojiStack extends cdk.Stack {
     buildAuditExportWorker(this, {
       dataStores,
       fileStorage,
+      lambdaBuildPaths,
+      runtimeControls,
+      workerChannels,
+    });
+    buildSlackIngestWorker(this, {
+      dataStores,
       lambdaBuildPaths,
       runtimeControls,
       workerChannels,

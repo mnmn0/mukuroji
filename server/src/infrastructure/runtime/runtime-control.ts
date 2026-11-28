@@ -34,6 +34,7 @@ export type RuntimeControlSurface =
   | 'readiness'
   | 'realtime'
   | 'request-intake-email'
+  | 'slack-ingest'
   | 'tenant-operation-execution'
   | 'triage-schedule'
   | 'webhook-delivery'

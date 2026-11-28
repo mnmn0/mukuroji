@@ -49,7 +49,7 @@ export function createInboxDigestAppDependencies(planningTable: string, enterpri
       apiKeys: unavailable(), oauthCredentials: unavailable(), webhookSubscriptions: unavailable(), webhookDeliveries: unavailable(),
       connectors: unavailable(), externalLinks: unavailable(), imports: unavailable(), idempotency: unavailable(), rateLimits: unavailable(),
       transactions: unavailable(), publicWorkItems: unavailable(), publicAgentRuns: unavailable(), workItemImportExecutions: unavailable(), workItemImportSources: unavailable(),
-      workItemImportQueue: unavailable(), queueWebhookDelivery: unsupported,
+      workItemImportQueue: unavailable(), queueWebhookDelivery: unsupported, slackIngest: unavailable(),
     },
   }
 }

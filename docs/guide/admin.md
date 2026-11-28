@@ -9,7 +9,7 @@ coding agent の受け入れ、Enterprise のセキュリティ設定をまと�
 | 区分 | URL | 主な内容 |
 | --- | --- | --- |
 | 個人 | `/settings/personal`（`/settings` も同じ） | 表示設定、通知設定、サインインとセキュリティ、AI の利用、agent の接続 |
-| Workspace 管理 | `/settings/workspace` | アクセス台帳、ID・セキュリティ管理への入口、テナント管理、チームとプロジェクトの管理、API と外部連携、オートメーション |
+| Workspace 管理 | `/settings/workspace` | アクセス台帳、ID・セキュリティ管理への入口、テナント管理、チームとプロジェクトの管理、API と外部連携、Slack の取り込み、オートメーション |
 | Team | `/settings/team` | ワークフローとフィールド、Work Item key の prefix、Team のオートメーション、エージェント設定 |
 
 区分は画面の分け方だけで、操作できる範囲はこれまでどおりロールで決まります。
@@ -467,6 +467,66 @@ Phase / Milestone を持つテンプレートを適用するときは、Phase �
   import の mapping では、WBS 番号・アウトラインの深さ・親のキーから親子を、先行タスク（`1.2FS+2d` など）から依存を、
   Contributor と受け入れ条件もあわせて取り込めます。Excel と MS Project XML の file も選べ、file を選ぶと mapping を提案します。書き方と dry-run で見つかる error は
   [Public API の説明](../public-api.md#階層依存contributor受け入れ条件の-import) にあります。
+
+## Slack の取り込み
+
+Slack の channel の発言を Mukuroji に写しとして取り込み、タスクの key（`MK-12` など）を書いた発言を
+そのタスクの詳細に表示します（[ADR 0113](../adr/0113-slack-channel-ingest.md)）。Slack はどの情報の正本にもしません。
+上の **Connector** の Slack（通知の送信先）とは別の仕組みで、Slack app も別に作ります。
+
+Slack app と secret を用意するまでは、この機能は何もしません。設定画面には「Slack app はまだ設定されていません」と出て、
+Slack からの request は受け付けません。
+
+### Slack app を用意する（運用担当、最初の1回）
+
+1. [Slack API の Your Apps](https://api.slack.com/apps) で **Create New App** → **From scratch** を選び、
+   取り込む Slack workspace に app を作ります。他の workspace へ配布しない社内用の app にします。
+2. **OAuth & Permissions** の **Bot Token Scopes** に、次の5つだけを追加します。
+   `channels:history`、`groups:history`、`channels:read`、`groups:read`、`users:read`
+3. **Event Subscriptions** を有効にし、**Request URL** に `https://<Mukuroji の domain>/api/public/slack/events` を入れます。
+   URL の確認は、手順 6 の secret を登録したあとで通ります。先に secret を登録してから URL を入れるか、
+   登録後に **Retry** を押してください。
+4. 同じ画面の **Subscribe to bot events** に、次の5つを追加して保存します。
+   `message.channels`、`message.groups`、`member_joined_channel`、`channel_left`、`group_left`
+5. **Install App** で workspace に install し、**Bot User OAuth Token**（`xoxb-` で始まる）を控えます。
+   **Basic Information** の **Signing Secret**、**App ID**、Slack workspace の team ID（`T` で始まる）も控えます。
+6. Mukuroji を deploy した AWS アカウント・region の Secrets Manager に、名前 `mukuroji/slack-ingest` の secret を作り、
+   次の JSON を保存します。`workspaceId` は、Mukuroji の **設定** → **Workspace 管理** → **Slack の取り込み** に
+   表示される Workspace ID です。
+
+   ```json
+   {
+     "signingSecret": "<Signing Secret>",
+     "botToken": "xoxb-...",
+     "teamId": "T0123456789",
+     "appId": "A0123456789",
+     "workspaceId": "<Workspace ID>"
+   }
+   ```
+
+   `appId` は省略できますが、入れると別の app から届いた request を断ります。
+   secret は月 $0.40 かかります。値を変えたときは、5 分以内に反映されます。
+7. Mukuroji の設定画面を開き直し、「Slack app と接続しています」と出ることを確かめます。
+
+secret を消すと、Slack からの request を断り、取り込みも止まります（取り込み済みの発言は保持日数まで残ります）。
+
+### channel を対応づける（Workspace の owner / admin）
+
+1. Slack で、取り込みたい channel に app を招待します（`/invite @app の名前`）。private channel も招待すれば取り込めます。
+2. **設定** → **Workspace 管理** → **Slack の取り込み** の一覧に channel が出るので、対応先の Team か Project を選んで **保存** します。
+   対応づけるまでは何も取り込みません。
+3. 対応づけると、保持日数の範囲の過去の発言（最大 2,000 件、thread の返信は1つの thread につき 200 件まで）も読み込みます。
+   進み具合は一覧に出ます。
+
+取り込んだ発言を読めるのは、対応先の Team を見られる人（Project のときは、その Project を見られる人）だけです。
+Slack 側で channel に入っているかどうかは見ません。対応先を選ぶときは、その channel の発言を見せてよい範囲かを確かめてください。
+
+- **取り込まない** に戻して保存すると、その channel から取り込んだ発言をすべて消します。
+- app が channel から外されると、それ以降は取り込みません（一覧に「bot が退出済み」と出ます）。
+- Slack で発言を編集・削除すると、Mukuroji の写しも直す・消します。bot や system の発言は取り込みません。
+- **保持日数** は 7〜730 日（既定 90 日）です。期限を過ぎた発言は自動で消えます。短くすると、新しい期限より古い発言をすぐ消します。
+  Slack の有料プランでない場合など Slack 側の保持期間が短いときは、それ以下にしてください。
+- 設定の変更と channel の対応づけは監査ログに残ります。
 
 ## AI assistance の接続先と API キー
 

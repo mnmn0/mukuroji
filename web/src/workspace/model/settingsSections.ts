@@ -62,6 +62,7 @@ export type SettingsPanelId =
   | 'directory'
   | 'time-periods'
   | 'developer-platform'
+  | 'slack-ingest'
   | 'automation'
   | 'audit-log'
   | 'team-profile'

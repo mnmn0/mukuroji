@@ -2046,7 +2046,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 0,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 26);
+  template.resourceCountIs('AWS::SQS::Queue', 28);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -2112,7 +2112,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
 
   template.resourcePropertiesCountIs('AWS::Lambda::Function', {
     TracingConfig: { Mode: { Ref: 'LambdaTracingMode' } },
-  }, 28);
+  }, 29);
 
   for (const logicalIdPrefix of [
     'CollaborationProjectionDlq',

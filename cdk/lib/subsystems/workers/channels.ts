@@ -31,6 +31,10 @@ export type WorkerChannels = {
   readonly auditExportDlq: sqs.Queue;
   /** Queue that carries asynchronous audit export steps. */
   readonly auditExportQueue: sqs.Queue;
+  /** Dead-letter queue for Slack ingest jobs that kept failing (ADR 0113). */
+  readonly slackIngestDlq: sqs.Queue;
+  /** Queue that carries Slack events, history pages, and deletions (ADR 0113). */
+  readonly slackIngestQueue: sqs.Queue;
 };
 
 /**
@@ -98,6 +102,24 @@ export function buildWorkerChannels(
     // Six times the five-minute worker timeout, as AWS recommends for SQS event sources.
     visibilityTimeout: cdk.Duration.minutes(30),
   });
+  const slackIngestDlq = new sqs.Queue(scope, 'SlackIngestDlq', {
+    encryption: sqs.QueueEncryption.SQS_MANAGED,
+    enforceSSL: true,
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    retentionPeriod: cdk.Duration.days(14),
+  });
+  const slackIngestQueue = new sqs.Queue(scope, 'SlackIngestQueue', {
+    deadLetterQueue: {
+      maxReceiveCount: 5,
+      queue: slackIngestDlq,
+    },
+    encryption: sqs.QueueEncryption.SQS_MANAGED,
+    enforceSSL: true,
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    retentionPeriod: cdk.Duration.days(4),
+    // Six times the worker timeout, as AWS recommends for SQS event sources.
+    visibilityTimeout: cdk.Duration.minutes(12),
+  });
   return {
     connectorChannels: connectorsEnabled ? buildConnectorChannels(scope) : undefined,
     webhookDeliveryDlq,
@@ -106,6 +128,8 @@ export function buildWorkerChannels(
     workItemImportQueue,
     auditExportDlq,
     auditExportQueue,
+    slackIngestDlq,
+    slackIngestQueue,
   };
 }
 
