@@ -3,6 +3,7 @@ import type { ChannelDestinationRecord, ChannelDestinationTarget } from '../doma
 import { NotificationError } from '../domain/notification-error'
 import {
   deleteChannelDestination,
+  deleteDueRetiredChannelSecrets,
   deletePersonalSlackDestination,
   readChannelDestinationSaveBody,
   readExpectedRevision,
@@ -12,7 +13,7 @@ import {
   testNotificationDestination,
   toPublicChannelDestination,
 } from './notification-destinations'
-import type { ChannelDestinationStore, SaveChannelDestinationInput } from './ports/channel-posts'
+import type { ChannelDestinationStore, RetiredChannelSecret, RetiredChannelSecretStore, SaveChannelDestinationInput } from './ports/channel-posts'
 
 const url = 'https://hooks.slack.com/services/TTEST/BTEST/TESTTOKEN'
 const target: ChannelDestinationTarget = { scope: 'project', teamId: 'core', projectId: 'alpha' }
@@ -42,12 +43,14 @@ function saved(revision: number, secretVersion = v1): ChannelDestinationRecord {
 function memoryStore(initial?: ChannelDestinationRecord, rejectSave?: Error, calls: string[] = []) {
   let record = initial
   let removedRevision = 0
-  const store: ChannelDestinationStore = {
+  const retired: string[] = []
+  const store: ChannelDestinationStore & Pick<RetiredChannelSecretStore, 'forgetRetiredSecret'> = {
     async get() { return record },
     async getRevision() { return record?.revision ?? removedRevision },
     async save(input: SaveChannelDestinationInput) {
       calls.push('save')
       if (rejectSave) throw rejectSave
+      if (input.retiredSecretVersion) retired.push(input.retiredSecretVersion)
       const next: ChannelDestinationRecord = {
         target: input.target, provider: 'slack', ...(input.label ? { label: input.label } : {}), locale: input.locale,
         revision: input.expectedRevision + 1, updatedAt: input.now.toISOString(), updatedBy: input.updatedBy,
@@ -56,12 +59,21 @@ function memoryStore(initial?: ChannelDestinationRecord, rejectSave?: Error, cal
       record = next
       return next
     },
-    async delete(input) { calls.push('delete'); record = undefined; removedRevision = input.expectedRevision + 1 },
+    async delete(input) {
+      calls.push('delete')
+      record = undefined
+      removedRevision = input.expectedRevision + 1
+      if (input.retiredSecretVersion) retired.push(input.retiredSecretVersion)
+    },
+    async forgetRetiredSecret(secret) {
+      calls.push(`forget ${secret.secretVersion}`)
+      retired.splice(retired.indexOf(secret.secretVersion), 1)
+    },
     async getState() { return record ? { record, revision: record.revision } : { revision: removedRevision } },
     async recordAudit() { calls.push('audit') },
     personalAuditEntityId() { return 'member-pseudonym/slack-destination' },
   }
-  return { store, calls, current: () => record }
+  return { store, calls, retired, current: () => record }
 }
 
 /**
@@ -165,7 +177,7 @@ describe('channel destination save and delete', () => {
       body: { webhookUrl: replacement, locale: 'ja', expectedRevision: 1 }, authorizationConditionChecks: [],
     })
     expect(record.secretVersion).toBe(v2)
-    expect(history).toEqual([`put secret/${v2}`, 'save', `delete secret/${v1}`])
+    expect(history).toEqual([`put secret/${v2}`, 'save', `delete secret/${v1}`, `forget ${v1}`])
     expect([...secrets.values.entries()]).toEqual([[`secret/${v2}`, replacement]])
   })
 
@@ -197,7 +209,7 @@ describe('channel destination save and delete', () => {
     const existing = memoryStore(saved(1))
     const secrets = memorySecrets()
     await deleteChannelDestination(existing.store, secrets.secrets, {
-      workspaceId: 'workspace-1', target, secretIdOf, expectedRevision: 1, authorizationConditionChecks: [],
+      workspaceId: 'workspace-1', target, secretIdOf, expectedRevision: 1, now, authorizationConditionChecks: [],
     })
     await expect(saveChannelDestination(existing.store, secrets.secrets, {
       workspaceId: 'workspace-1', target, secretIdOf, newSecretVersion: v2, memberKey: 'm@example.test', now,
@@ -209,7 +221,7 @@ describe('channel destination save and delete', () => {
     })
     expect(again.revision).toBe(3)
     await expect(deleteChannelDestination(existing.store, secrets.secrets, {
-      workspaceId: 'workspace-1', target, secretIdOf, expectedRevision: 1, authorizationConditionChecks: [],
+      workspaceId: 'workspace-1', target, secretIdOf, expectedRevision: 1, now, authorizationConditionChecks: [],
     })).rejects.toMatchObject({ status: 409 })
     expect(existing.current()?.revision).toBe(3)
   })
@@ -227,14 +239,71 @@ describe('channel destination save and delete', () => {
   test('deletes the settings before the webhook version they point at', async () => {
     const order: string[] = []
     const existing = memoryStore(saved(1))
-    const store: ChannelDestinationStore = { ...existing.store, async delete(input) { order.push('settings'); await existing.store.delete(input) } }
+    const store: typeof existing.store = { ...existing.store, async delete(input) { order.push('settings'); await existing.store.delete(input) } }
     await deleteChannelDestination(store, { async delete(secretId) { order.push(secretId) } }, {
-      workspaceId: 'workspace-1', target, secretIdOf, expectedRevision: 1, authorizationConditionChecks: [],
+      workspaceId: 'workspace-1', target, secretIdOf, expectedRevision: 1, now, authorizationConditionChecks: [],
     })
     expect(order).toEqual(['settings', `secret/${v1}`])
     await expect(deleteChannelDestination(store, { async delete() { throw new Error('Must not delete') } }, {
-      workspaceId: 'workspace-1', target, secretIdOf, expectedRevision: 1, authorizationConditionChecks: [],
+      workspaceId: 'workspace-1', target, secretIdOf, expectedRevision: 1, now, authorizationConditionChecks: [],
     })).rejects.toMatchObject({ status: 409 })
+  })
+})
+
+describe('retired webhook versions', () => {
+  test('records the retired version with the change and keeps it when the secret cannot be deleted', async () => {
+    const existing = memoryStore(saved(1))
+    const failing = { async delete() { throw new Error('Secrets Manager unavailable') } }
+    await deleteChannelDestination(existing.store, failing, {
+      workspaceId: 'workspace-1', target, secretIdOf, expectedRevision: 1, now, authorizationConditionChecks: [],
+    })
+    // The settings are gone at once, and the version waits for the worker.
+    expect(existing.current()).toBeUndefined()
+    expect(existing.retired).toEqual([v1])
+
+    const replaced = memoryStore(saved(1))
+    const secrets = memorySecrets()
+    await saveChannelDestination(replaced.store, secrets.secrets, {
+      workspaceId: 'workspace-1', target, secretIdOf, newSecretVersion: v2, memberKey: 'm@example.test', now,
+      body: { webhookUrl: url, locale: 'ja', expectedRevision: 1 }, authorizationConditionChecks: [],
+    })
+    // A deleted secret clears its record.
+    expect(replaced.calls).toEqual(['save', `forget ${v1}`])
+    expect(replaced.retired).toEqual([])
+  })
+
+  test('the worker deletes due versions, waits longer after each failure, and alarms when it gives up', async () => {
+    const due: RetiredChannelSecret[] = [
+      { workspaceId: 'workspace-1', target, secretVersion: v1, attempts: 0 },
+      { workspaceId: 'workspace-1', target, secretVersion: v2, attempts: 7 },
+    ]
+    const forgotten: string[] = []
+    const deferred: { version: string, nextAttemptAt: string, exhausted: boolean }[] = []
+    const store: RetiredChannelSecretStore = {
+      async listDueRetiredSecrets() { return { secrets: due, invalidCount: 0 } },
+      async forgetRetiredSecret(secret) { forgotten.push(secret.secretVersion) },
+      async deferRetiredSecret(secret, nextAttemptAt, exhausted) {
+        deferred.push({ version: secret.secretVersion, nextAttemptAt: nextAttemptAt.toISOString(), exhausted })
+      },
+    }
+    const names: string[] = []
+    let available = true
+    const dependencies = {
+      store,
+      secrets: { async delete(secretId: string) { names.push(secretId); if (!available) throw new Error('Unavailable') } },
+      secretIdOf: (workspaceId: string, _target: ChannelDestinationTarget, version: string) => `${workspaceId}/${version}`,
+      now: () => now,
+    }
+    expect(await deleteDueRetiredChannelSecrets(dependencies)).toBe(2)
+    expect(names).toEqual([`workspace-1/${v1}`, `workspace-1/${v2}`])
+    expect(forgotten).toEqual([v1, v2])
+
+    available = false
+    await expect(deleteDueRetiredChannelSecrets(dependencies)).rejects.toThrow('1 could not be deleted')
+    expect(deferred).toEqual([
+      { version: v1, nextAttemptAt: new Date(now.getTime() + 10 * 60_000).toISOString(), exhausted: false },
+      { version: v2, nextAttemptAt: new Date(now.getTime() + 1_280 * 60_000).toISOString(), exhausted: true },
+    ])
   })
 })
 

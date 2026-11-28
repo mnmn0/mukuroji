@@ -130,6 +130,7 @@ export function registerNotificationDestinationRoutes(routeApp: Hono): void {
           target,
           secretIdOf: (version) => slackChannelDestinationSecretId(principal.directoryId, target, version),
           expectedRevision,
+          now: new Date(),
           authorizationConditionChecks: await createAuthorizationChecks(principal, target),
           auditPut: createChannelAuditPut(c, principal, target, 'deleted', { beforeRevision: expectedRevision }),
         },

@@ -53,7 +53,7 @@ import type { FileProofingClient } from '../../modules/files/file-proofing'
 import type { FocusStateClient } from '../../modules/focus'
 import type { PushSubscriptionStore } from '../../modules/notifications/application/push-subscriptions'
 import type { TeamReminderSettingsStore } from '../../modules/notifications/application/ports/reminder-settings-reader'
-import type { ChannelDestinationStore } from '../../modules/notifications/application/ports/channel-posts'
+import type { ChannelDestinationStore, RetiredChannelSecretStore } from '../../modules/notifications/application/ports/channel-posts'
 import type {
   NotificationDestinationSecrets,
   NotificationDestinationTestSender,
@@ -205,7 +205,7 @@ export interface WorkItemDependencies {
   /** Provides Team notification reminder settings persistence. */
   teamReminderSettings: TeamReminderSettingsStore
   /** Provides Team and Project chat channel destination settings persistence. */
-  channelDestinations: ChannelDestinationStore
+  channelDestinations: ChannelDestinationStore & Pick<RetiredChannelSecretStore, 'forgetRetiredSecret'>
   /** Keeps Slack webhook URLs of personal and channel destinations in Secrets Manager. */
   notificationDestinationSecrets: NotificationDestinationSecrets
   /** Sends the fixed test message to a registered Slack webhook. */

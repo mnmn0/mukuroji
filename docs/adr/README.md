@@ -106,7 +106,7 @@
 | [0083](0083-signed-calendar-feeds.md) | カレンダーフィードを token の hash で引き、読むたびに持ち主の現在の権限で組み立てる | 提案 |
 | [0084](0084-charter-owner-moves-project-update-owner.md) | Project charter の責任者変更を、charter 保存後の書き込みで Project の進捗報告の担当者へ移す | 提案 |
 | [0085](0085-workflow-transition-actor-roles-and-status-requirements.md) | Workflow の遷移を実行できる役割と status ごとの必須項目を configuration に持ち、人の操作だけに許す | 提案 |
-| [0086](0086-slack-destinations-and-channel-posts.md) | Slack の送信先を画面から登録し、Project・Team の channel 投稿を既存の Slack index に相乗りさせる | 提案 |
+| [0086](0086-slack-destinations-and-channel-posts.md) | Slack の送信先を画面から登録し、Project・Team の channel 投稿を既存の Slack index に相乗りさせる | 一部を置き換え済み（0121） |
 | [0087](0087-team-owned-automation-definitions.md) | Automation 定義と Request form に所有 Team を持たせ、Team manager に自 Team の分の管理を任せる | 提案 |
 | [0088](0088-requester-index-and-scopeless-notifications.md) | 依頼者ごとの索引行を Request Intake table に置き、依頼者への通知を scope なしの event で届ける | 提案 |
 | [0089](0089-calendar-connector-event-sync.md) | Google Calendar / Outlook の予定を既存の connector link で双方向に同期する | 提案 |
@@ -133,3 +133,4 @@
 | [0110](0110-analytics-earned-value-metrics.md) | Analytics の EVM（SPI / CPI / EAC）は query のたびに管理する Project の予算レポートの値を読み、その Project の集合を snapshot の scope に固定する | 提案 |
 | [0119](0119-agent-cost-in-project-budgets.md) | coding agent の推定費用は USD のまま Project 予算レポートに出し、USD の予算だけ実績・閾値通知・EVM に足すかを Workspace 設定で選ぶ | 提案 |
 | [0120](0120-artifact-status-refresh-sequence-and-stale-authorization.md) | pull request の照会は refresh の連番で接続を順に試し、古い credential の 401 で再認証にしない | 提案 |
+| [0121](0121-retry-retired-channel-webhook-deletion.md) | 削除・差し替えた channel 投稿先の古い Webhook secret の削除を再試行する | 提案 |
