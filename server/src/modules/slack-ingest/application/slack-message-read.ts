@@ -78,7 +78,10 @@ export async function listWorkItemSlackMessages(
   const messages = (await ports.store.getMessages(
     workspaceId,
     refs.filter((ref) => readable.has(ref.channelId) && ref.ts >= cutoff),
-  )).sort((left, right) => right.ts.localeCompare(left.ts))
+  ))
+    // The index can lag an edit that removed the key; the stored message decides.
+    .filter((message) => message.keys.includes(key))
+    .sort((left, right) => right.ts.localeCompare(left.ts))
   const views: SlackMessageView[] = []
   for (const message of messages.slice(0, SLACK_WORK_ITEM_MESSAGE_LIMIT)) {
     const channel = readable.get(message.channelId)

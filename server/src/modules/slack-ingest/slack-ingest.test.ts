@@ -551,4 +551,17 @@ test('a Work Item lists only messages in channels the caller can read, newest fi
   expect(result.messages[0]).toMatchObject({ channelName: 'c0visible1', authorId: AUTHOR, text: 'MK-9' })
   expect((await listWorkItemSlackMessages(WS, 'MK-404', { store, canReadTarget: async () => true, now: () => NOW })).messages).toEqual([])
   expect(ports.config).toBeDefined()
+
+  // An index that still points at a message whose edit removed the key does not list it.
+  const edited = `${NOW.getTime() / 1000 - 3_600}.000000`
+  await store.putMessage(WS, {
+    channelId: visible, ts: edited, userId: AUTHOR, text: 'MK-1 only', version: edited, keys: ['MK-1'], permalink: 'https://example.slack.com/x', expiresAt: 9_999_999_999,
+  }, 1, 0)
+  const lagging = store.listMessageRefsByKey.bind(store)
+  store.listMessageRefsByKey = async (workspaceId, key, limit) => {
+    const page = await lagging(workspaceId, key, limit)
+    return { ...page, refs: [...page.refs, { channelId: visible, ts: edited }] }
+  }
+  const stale = await listWorkItemSlackMessages(WS, 'MK-9', { store, canReadTarget: async () => true, now: () => NOW })
+  expect(stale.messages.map((message) => message.ts)).not.toContain(edited)
 })
