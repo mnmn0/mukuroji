@@ -131,6 +131,7 @@
 | [0108](0108-analytics-agent-usage-metrics.md) | Analytics の `agent-tokens` / `agent-cost` は query のたびに終了済み Run と usage 行を読み、費用を見られる Team を snapshot の scope に固定する | 提案 |
 | [0109](0109-work-item-web-links-in-planning-table.md) | Work Item の URL リンクを Planning table の 1 row に置き、Public API と MCP から work-items scope で読み書きする | 提案 |
 | [0110](0110-analytics-earned-value-metrics.md) | Analytics の EVM（SPI / CPI / EAC）は query のたびに管理する Project の予算レポートの値を読み、その Project の集合を snapshot の scope に固定する | 提案 |
+| [0114](0114-project-decision-log.md) | 意思決定ログを Planning table の1決定1行で持ち、Team の一覧は読み取り時に Project をまたいで集める | 提案 |
 | [0119](0119-agent-cost-in-project-budgets.md) | coding agent の推定費用は USD のまま Project 予算レポートに出し、USD の予算だけ実績・閾値通知・EVM に足すかを Workspace 設定で選ぶ | 提案 |
 | [0120](0120-artifact-status-refresh-sequence-and-stale-authorization.md) | pull request の照会は refresh の連番で接続を順に試し、古い credential の 401 で再認証にしない | 提案 |
 | [0121](0121-retry-retired-channel-webhook-deletion.md) | 削除・差し替えた channel 投稿先の古い Webhook secret の削除を再試行する | 提案 |

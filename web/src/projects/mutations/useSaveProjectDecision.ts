@@ -1,0 +1,79 @@
+import type { ProjectDecisionEntry, ProjectDecisionEntryInput } from '@mukuroji/contracts'
+import { useCallback } from 'react'
+import { useSWRConfig } from 'swr'
+import { readAccessTokenSubject } from '../../auth/session'
+import { onSessionDraftsDiscarded } from '../../auth/sessionDrafts'
+import { createMutationRequestContext, type MutationRequestContext } from '../../shared/api/mutationHeaders'
+import { ProjectDirectoryApiError } from '../api/errors'
+import { createProjectDecision, updateProjectDecision } from '../api/decisionLog'
+import { isTeamDecisionLogKey, projectDecisionLogKey } from '../queries/useProjectDecisionLog'
+
+/**
+ * Request contexts of saves that got no answer, by signed-in account and input.
+ *
+ * They live outside any component, so a retry reuses the Idempotency-Key even after the screen
+ * that started the save was left, such as when another Work Item was selected meanwhile. The key
+ * names the account by its token subject rather than the token, so a retry after the token was
+ * refreshed keeps it too. Signing out drops them.
+ */
+const pendingSaves = new Map<string, MutationRequestContext>()
+onSessionDraftsDiscarded(() => pendingSaves.clear())
+
+/** Session a save applies to. */
+export type ProjectDecisionSaveScope = {
+  /** Cognito access token; saving does nothing without it. */
+  accessToken?: string
+}
+
+/**
+ * Returns a function that records or changes one decision and reloads the logs showing it.
+ *
+ * A failed save keeps its request context for the page's lifetime, so saving the same input again,
+ * from any screen, reuses its Idempotency-Key and the server returns the result of an attempt
+ * whose response was lost. A context is dropped once the server answers, with success or a client
+ * error other than 401. A conflict also
+ * reloads the log, so the form can move onto the latest revision.
+ *
+ * @param scope - Session.
+ * @returns The save function, which returns the stored decision and rethrows the API error of a
+ * failed save.
+ */
+export function useSaveProjectDecision({ accessToken }: ProjectDecisionSaveScope) {
+  const { mutate } = useSWRConfig()
+  return useCallback(async (
+    teamId: string | undefined,
+    projectId: string,
+    entry: ProjectDecisionEntry | undefined,
+    input: ProjectDecisionEntryInput,
+  ): Promise<ProjectDecisionEntry | undefined> => {
+    if (!accessToken || !teamId) return undefined
+    const key = projectDecisionLogKey(accessToken, teamId, projectId)
+    const fingerprint = JSON.stringify([readAccessTokenSubject(accessToken) ?? null, teamId, projectId, entry?.id ?? null, entry?.revision ?? null, input])
+    const context = pendingSaves.get(fingerprint) ?? createMutationRequestContext()
+    pendingSaves.set(fingerprint, context)
+    /** Drops this save's context, but not one that a later save of the same input started. */
+    const clearAttempt = () => {
+      if (pendingSaves.get(fingerprint) === context) pendingSaves.delete(fingerprint)
+    }
+    let stored: ProjectDecisionEntry
+    try {
+      stored = entry
+        ? (await updateProjectDecision(accessToken, teamId, projectId, entry.id, entry.revision, input, context)).entry
+        : (await createProjectDecision(accessToken, teamId, projectId, input, context)).entry
+    } catch (error) {
+      // An expired session says nothing about the earlier attempt, so its key is kept for the
+      // retry after signing in again.
+      if (error instanceof ProjectDirectoryApiError && error.status < 500 && error.status !== 401) {
+        clearAttempt()
+        if (error.status === 409) void mutate(key)
+      }
+      throw error
+    }
+    clearAttempt()
+    await Promise.all([
+      mutate(key),
+      mutate((cacheKey) => isTeamDecisionLogKey(cacheKey, teamId)),
+    ])
+    return stored
+  }, [accessToken, mutate])
+}

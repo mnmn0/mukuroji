@@ -71,6 +71,7 @@ import type { TriageClient } from '../../modules/triage'
 import type { ProjectScheduleBaselineStore, TeamIssuesClient, WorkItemWebLinkStore } from '../../modules/work-items'
 import type { TeamPortfolioSnapshotStore } from '../../modules/portfolio-dashboard'
 import type { ProjectRaidLogStore } from '../../modules/project-raid-log'
+import type { ProjectDecisionLogStore } from '../../modules/project-decision-log'
 import type { ProjectExpenseStore } from '../../modules/project-budget'
 import type { CalendarFeedStore } from '../../modules/calendar-feeds'
 import type { MutationAuditContext } from '../../modules/audit'
@@ -234,6 +235,8 @@ export interface WorkItemDependencies {
   savedUpdateFeeds: SavedUpdateFeedsPersistence
   /** Provides each Project's risk, issue, and change request log. */
   projectRaidLogs: ProjectRaidLogStore
+  /** Provides each Project's decision log (ADR 0114). */
+  projectDecisionLogs: ProjectDecisionLogStore
   /** Provides each Project's expenses other than people's time (ADR 0104). */
   projectExpenses: ProjectExpenseStore
   /** Provides members' signed calendar feeds and their token lookup rows. */
