@@ -30,6 +30,7 @@ export const slackIngestMessages = {
   'slackIngest.workItem.title': 'Slack',
   'slackIngest.workItem.description': 'このタスクの key を書いた Slack の発言です。',
   'slackIngest.workItem.loadError': 'Slack の発言を読み込めませんでした。',
+  'slackIngest.workItem.retry': 'Slack の発言を再読み込み',
   'slackIngest.workItem.reply': 'thread の返信',
   'slackIngest.workItem.edited': '(編集済み)',
   'slackIngest.workItem.open': 'Slack で開く',

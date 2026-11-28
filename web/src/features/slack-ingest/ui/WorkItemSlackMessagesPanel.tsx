@@ -1,6 +1,7 @@
 import type { SlackMessageView } from '@mukuroji/contracts'
 import { useMemo } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../../../shared/i18n/i18n'
+import { SlackIngestApiError } from '../api/slackIngest'
 import { useWorkItemSlackMessages } from '../queries/useWorkItemSlackMessages'
 
 /** Props of the pure Slack message panel. */
@@ -47,6 +48,8 @@ export function WorkItemSlackMessagesPanelContainer({ accessToken, locale, teamI
   const { data, error, mutate } = useWorkItemSlackMessages(accessToken, teamId, workItemId)
   if (!data && !error) return null
   if (data && data.messages.length === 0) return null
+  // A server without the Slack ingest route answers 404; show no panel rather than an error.
+  if (!data && error instanceof SlackIngestApiError && error.status === 404) return null
   return (
     <WorkItemSlackMessagesPanel
       formatDateTime={(value) => formatter.format(new Date(value))}
@@ -82,7 +85,7 @@ export function WorkItemSlackMessagesPanel({
           <span>{t('slackIngest.workItem.loadError')}</span>
           {onRetry ? (
             <button className="workbench-button-secondary min-h-9 px-3" onClick={onRetry} type="button">
-              {t('slackIngest.retry')}
+              {t('slackIngest.workItem.retry')}
             </button>
           ) : null}
         </div>

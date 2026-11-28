@@ -32,6 +32,7 @@ export const slackIngestMessages = {
   'slackIngest.workItem.title': 'Slack',
   'slackIngest.workItem.description': 'Slack messages that mention this task’s key.',
   'slackIngest.workItem.loadError': 'Slack messages could not be loaded.',
+  'slackIngest.workItem.retry': 'Reload Slack messages',
   'slackIngest.workItem.reply': 'thread reply',
   'slackIngest.workItem.edited': '(edited)',
   'slackIngest.workItem.open': 'Open in Slack',
