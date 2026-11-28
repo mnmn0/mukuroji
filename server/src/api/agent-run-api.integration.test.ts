@@ -3646,6 +3646,15 @@ describe('Agent telemetry usage', () => {
     })
     expect(JSON.stringify([...usage.activity.values(), ...usage.sessionCursors.keys()])).not.toContain('secret')
     expect(JSON.stringify([...usage.sessionCursors.keys()])).not.toContain('session-1')
+
+    // A run with more tools than one run lists still adds every tool to the Work Item total.
+    const many = exportOf(Array.from({ length: 31 }, (_, index) =>
+      record(80_000 + index, 'tool_result', { tool_name: `mcp__srv__t${index}`, success: 'true', duration_ms: String(100 + index) })))
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, many))).toEqual({ rejectedRecords: 0, duplicate: false })
+    const wide: unknown = await (await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })).json()
+    expect(wide).toMatchObject({ items: [{ activity: { toolCount: 33 } }], activityTotal: { toolCount: 33 } })
+    if (!isRecord(wide) || !Array.isArray(wide.items) || !isRecord(wide.items[0]) || !isRecord(wide.items[0].activity)) throw new Error('unexpected body')
+    expect(wide.items[0].activity.tools).toHaveLength(30)
   })
 
   test('refuses an export that is not an OTLP logs request', async () => {

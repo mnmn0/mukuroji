@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from 'node:crypto'
 import {
+  AGENT_RUN_ACTIVITY_MAX_TOOLS,
   FACTORY_BOARD_COMPLETED_WINDOW_HOURS,
   FACTORY_BOARD_MAX_ACTIVE_RUNS,
   FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS,
@@ -230,8 +231,12 @@ export async function listWebWorkItemAgentRuns(
   // Tokens are visible to every viewer of the Work Item; the estimated cost only to Team managers.
   const usages = await Promise.all(page.runs.map((run) => readAgentRunUsage(principal.directoryId, run, manager)))
   const usageTotal = combineAgentRunUsage(usages)
-  const activities = await Promise.all(page.runs.map((run) => readAgentRunActivity(principal.directoryId, run)))
-  const activityTotal = combineAgentRunActivity(activities)
+  // Every tool of each run is read, so the Work Item total adds them all before it keeps the longest.
+  const fullActivities = await Promise.all(page.runs.map((run) => readAgentRunActivity(principal.directoryId, run, Number.MAX_SAFE_INTEGER)))
+  const activityTotal = combineAgentRunActivity(fullActivities)
+  const activities = fullActivities.map((activity) => activity === undefined
+    ? undefined
+    : { ...activity, tools: activity.tools.slice(0, AGENT_RUN_ACTIVITY_MAX_TOOLS) })
   return {
     items: page.runs.map((run, index) => toAgentRunView(
       run,
