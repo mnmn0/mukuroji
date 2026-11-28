@@ -546,9 +546,9 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
     },
 
     /** Lists a Work Item's questions for an agent, with the answers people recorded. */
-    async listWorkItemQuestions(credential, teamId, workItemId) {
+    async listWorkItemQuestions(credential, teamId, workItemId, continuation, limit) {
       const principal = await resolveReader(credential, teamId)
-      return listWorkItemAgentRunQuestions(principal, teamId, workItemId)
+      return listWorkItemAgentRunQuestions(principal, teamId, workItemId, continuation, limit)
     },
 
     /** Lists one Work Item's runs after checking that the caller can see it. */

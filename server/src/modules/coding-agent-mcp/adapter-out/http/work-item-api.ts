@@ -163,7 +163,8 @@ const reportResultSchema: z.ZodType<AgentRunReportResult> = z.object({
 const questionsSchema: z.ZodType<AgentTaskQuestions> = z.object({
   items: z.array(reportSchema).max(AGENT_RUN_QUESTIONS_MAX_ITEMS),
   hasMore: z.boolean(),
-})
+  nextCursor: z.string().min(1).max(16384).optional(),
+}).refine((page) => page.nextCursor === undefined || page.hasMore)
 /** Agent brief, bounded in UTF-8 bytes like the server. */
 const briefText = z.string().min(1).refine((value) => new TextEncoder().encode(value).byteLength <= AGENT_SETTINGS_BRIEF_MAX_BYTES)
 const settingsSchema = z.object({
@@ -488,11 +489,11 @@ export function createAgentWorkItemApi(
         throw error
       }
     },
-    /** Reads a task's agent questions with their answers; a server older than the endpoint has none. */
-    async questions(id) {
+    /** Reads a page of a task's agent questions with their answers; a server older than the endpoint has none. */
+    async questions(id, cursor) {
       let found: AgentTaskQuestions
       try {
-        found = await request(`work-items/${encodeURIComponent(id)}/agent-run-questions`, questionsSchema)
+        found = await request(`work-items/${encodeURIComponent(id)}/agent-run-questions`, questionsSchema, 'GET', undefined, undefined, { cursor })
       } catch (error) {
         if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
         throw error

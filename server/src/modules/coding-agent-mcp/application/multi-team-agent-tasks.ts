@@ -403,7 +403,11 @@ export function createMultiTeamAgentTasks(teams: readonly TeamWorkItemApi[], sco
     async comments(id: string, cursor?: string, limit?: number) {
       return (await teamForTask(id)).tasks.comments(id, cursor, limit)
     },
-    /** Lists a task's linked Documents in the Team that holds it. */
+    /** Lists a task's agent questions in the Team that holds it. */
+    async questions(id: string, cursor?: string) {
+      return (await teamForTask(id)).tasks.questions(id, cursor)
+    },
+    /** Lists linked Documents of a task in the Team that holds it. */
     async documents(id: string, cursor?: string, limit?: number) {
       return (await teamForTask(id)).tasks.documents(id, cursor, limit)
     },

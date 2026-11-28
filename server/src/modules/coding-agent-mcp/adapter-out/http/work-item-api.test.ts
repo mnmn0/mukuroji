@@ -300,7 +300,11 @@ test('reads a task\'s agent questions with their answers and treats an older ser
     paths.push(`${url.pathname}${url.search}`)
     switch (url.pathname) {
       case '/api/v1/work-items/task/agent-run-questions':
-        return Response.json({ items: [question], hasMore: false })
+        return url.searchParams.get('cursor') === null
+          ? Response.json({ items: [], hasMore: true, nextCursor: 'older' })
+          : Response.json({ items: [question], hasMore: false })
+      case '/api/v1/work-items/broken/agent-run-questions':
+        return Response.json({ items: [], hasMore: false, nextCursor: 'older' })
       case '/api/v1/work-items/other/agent-run-questions':
         return Response.json({ items: [question], hasMore: false })
       case '/api/v1/work-items/edited/agent-run-questions':
@@ -309,8 +313,12 @@ test('reads a task\'s agent questions with their answers and treats an older ser
         return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
     }
   })
-  expect(await api.questions('task')).toEqual({ items: [question], hasMore: false })
+  expect(await api.questions('task')).toEqual({ items: [], hasMore: true, nextCursor: 'older' })
   expect(paths[0]).toBe('/api/v1/work-items/task/agent-run-questions?teamId=team')
+  expect(await api.questions('task', 'older')).toEqual({ items: [question], hasMore: false })
+  expect(paths[1]).toBe('/api/v1/work-items/task/agent-run-questions?teamId=team&cursor=older')
+  // A cursor without older questions is not a page the server sends.
+  await expect(api.questions('broken')).rejects.toMatchObject({ code: 'invalid_response' })
   expect(await api.questions('legacy')).toBeUndefined()
   await expect(api.questions('other')).rejects.toMatchObject({ code: 'invalid_response' })
   expect((await api.questions('edited'))?.items[0]?.answer?.body).toHaveLength(20_000)

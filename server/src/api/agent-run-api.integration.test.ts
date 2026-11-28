@@ -2180,7 +2180,7 @@ describe('Web Agent Run routes', () => {
      *
      * @returns The questions, newest first.
      */
-    const questions = async () => (await runWithTestAppDependencies(() => listWorkItemQuestions(credential, 'core-team', 'task-1'))).items
+    const questions = async () => (await runWithTestAppDependencies(() => listWorkItemQuestions(credential, 'core-team', 'task-1', undefined, 20))).items
     const answerComment = storedComments.get(saved.report.answer.commentId)
     if (!answerComment) throw new Error('The answer comment was not stored.')
     storedComments.set(answerComment.id, { ...answerComment, bodyMarkdown: 'Use the backup bucket.', editedAt: '2026-10-22T01:00:00.000Z' })
@@ -2306,11 +2306,45 @@ describe('Web Agent Run routes', () => {
     }
     const { listWorkItemQuestions } = createCanonicalPublicAgentRunService()
     if (!listWorkItemQuestions) throw new Error('The Public API service must list questions.')
-    const questions = await runWithTestAppDependencies(() => listWorkItemQuestions(credential, 'core-team', 'task-1'))
+    const questions = await runWithTestAppDependencies(() => listWorkItemQuestions(credential, 'core-team', 'task-1', undefined, 20))
     expect(questions.hasMore).toBe(true)
     expect(questions.items[0]?.sequence).toBe(20)
     expect(questions.items.length).toBeLessThan(20)
     expect(Buffer.byteLength(JSON.stringify(questions))).toBeLessThanOrEqual(1_000_100)
+    // The continuation starts at the first question left out, so following it reaches every question once.
+    const sequences = questions.items.map((item) => item.sequence)
+    let continuation = questions.nextContinuation
+    for (let page = 0; continuation !== undefined && page < 20; page += 1) {
+      const from = continuation
+      const next = await runWithTestAppDependencies(() => listWorkItemQuestions(credential, 'core-team', 'task-1', from, 20))
+      sequences.push(...next.items.map((item) => item.sequence))
+      expect(next.hasMore).toBe(next.nextContinuation !== undefined)
+      continuation = next.nextContinuation
+    }
+    expect(sequences).toEqual(Array.from({ length: 20 }, (_, index) => 20 - index))
+  })
+
+  test('reaches a question older than the reports one question list reads', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'viewer' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    // One blocker, then more progress reports than one list reads.
+    for (let sequence = 1; sequence <= 2_001; sequence += 1) {
+      store.state.reports.set(`${workspaceId}|core-team|${held.runId}|${sequence}`, {
+        schemaVersion: 1, runId: held.runId, directoryId: workspaceId, teamId: 'core-team', workItemId: 'task-1', sequence,
+        kind: sequence === 1 ? 'blocker' : 'progress', commentId: `cmt_${sequence}`, verifications: [], artifacts: [],
+        createdAt: new Date(Date.UTC(2026, 9, 22, 0, 0, sequence)).toISOString(), createdBy: 'demo@example.com',
+      })
+    }
+    const { listWorkItemQuestions } = createCanonicalPublicAgentRunService()
+    if (!listWorkItemQuestions) throw new Error('The Public API service must list questions.')
+    const first = await runWithTestAppDependencies(() => listWorkItemQuestions(credential, 'core-team', 'task-1', undefined, 20))
+    expect(first.items).toEqual([])
+    expect(first.hasMore).toBe(true)
+    const from = first.nextContinuation
+    const older = await runWithTestAppDependencies(() => listWorkItemQuestions(credential, 'core-team', 'task-1', from, 20))
+    expect(older.items.map((item) => [item.sequence, item.kind])).toEqual([[1, 'blocker']])
+    expect(older.hasMore).toBe(false)
   })
 
   test('stops a report page at its byte budget so the response stays within the Lambda limit', async () => {

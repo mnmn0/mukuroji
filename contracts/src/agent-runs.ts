@@ -444,12 +444,14 @@ export type AnswerAgentRunReportResponse = {
 /** Most questions one Work Item question list returns. */
 export const AGENT_RUN_QUESTIONS_MAX_ITEMS = 20
 
-/** The newest `blocker` and `handoff` reports of a Work Item, with their answers. */
+/** One page of a Work Item's `blocker` and `handoff` reports, newest first, with their answers. */
 export type WorkItemAgentRunQuestionsResponse = {
   /** Questions, newest first. */
   items: AgentRunReport[]
-  /** True when older questions exist. */
+  /** True when older questions may exist; follow `nextCursor` to read them, even when `items` is empty. */
   hasMore: boolean
+  /** Opaque cursor of the next page, present exactly when `hasMore` is true. */
+  nextCursor?: string
 }
 
 /** Request body that saves a structured report and its comment for an agent's own run. */

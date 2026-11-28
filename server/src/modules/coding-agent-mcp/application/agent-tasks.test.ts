@@ -1054,6 +1054,21 @@ describe('agent task lifecycle', () => {
     await expect(outage.service.get('one')).rejects.toMatchObject({ code: 'unavailable' })
   })
 
+  test('pages through questions older than get_task shows and names an older server', async () => {
+    const cursors: (string | undefined)[] = []
+    const { service } = fixture([task('one')], {
+      async questions(_id, cursor) {
+        cursors.push(cursor)
+        return cursor === undefined ? { items: [], hasMore: true, nextCursor: 'older' } : { items: [], hasMore: false }
+      },
+    })
+    expect(await service.questions('one')).toEqual({ items: [], hasMore: true, nextCursor: 'older' })
+    expect(await service.questions('one', 'older')).toEqual({ items: [], hasMore: false })
+    expect(cursors).toEqual([undefined, 'older'])
+    await expect(fixture([task('one')]).service.questions('one')).rejects.toMatchObject({ code: 'unsupported' })
+    await expect(service.questions('missing')).rejects.toMatchObject({ code: 'not_found' })
+  })
+
   test('reads linked Documents only through tasks inside the configured Project', async () => {
     const reads: string[] = []
     const content = {

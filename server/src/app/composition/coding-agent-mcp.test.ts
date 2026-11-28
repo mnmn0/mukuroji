@@ -241,7 +241,7 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     clients.push(readOnly)
     const readTools = (await readOnly.listTools()).tools.map((tool) => tool.name)
     expect(readTools).toContain('get_next_task')
-    expect(readTools).toEqual(expect.arrayContaining(['list_task_documents', 'read_document', 'list_task_attachments', 'get_attachment_download_url']))
+    expect(readTools).toEqual(expect.arrayContaining(['list_task_documents', 'list_task_questions', 'read_document', 'list_task_attachments', 'get_attachment_download_url']))
     for (const name of ['start_task', 'report_progress', 'heartbeat', 'finish_run', 'take_over_task', 'resume_task']) expect(readTools).not.toContain(name)
     expect((await readOnly.readResource({ uri: 'mukuroji://agent/workflow' })).contents).toHaveLength(1)
     expect((await readOnly.readResource({ uri: 'mukuroji://project/web/brief' })).contents)
@@ -260,7 +260,7 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
 
     const client = await connect(fake.api.port, 'legacy', { MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' })
     clients.push(client)
-    expect((await client.listTools()).tools).toHaveLength(22)
+    expect((await client.listTools()).tools).toHaveLength(23)
     expect((await call(client, 'get_configuration')).content).toMatchObject({ data: {
       runtime: 'claude-code', agentSettings: { leaseMinutes: 30, readyStatusIds: [] }, brief: 'Run bun test.',
       mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 8, serverCompatibility: { status: 'compatible', server: { apiRevision: 8, minimumApiRevision: 1 } } },
@@ -460,7 +460,7 @@ test('the distributable Node bundle serves the same tools over stdio', async () 
     expect(await version.exited).toBe(0)
     expect((await new Response(version.stdout).text()).trim()).toBe(CODING_AGENT_MCP_VERSION)
     client = await connect(fake.api.port, 'auto', { MUKUROJI_MCP_RUNTIME: 'codex' }, join(outdir, 'mcp.mjs'), node)
-    expect((await client.listTools()).tools).toHaveLength(22)
+    expect((await client.listTools()).tools).toHaveLength(23)
     expect((await call(client, 'get_configuration')).content).toMatchObject({
       data: { runtime: 'codex', mcp: { version: CODING_AGENT_MCP_VERSION, serverCompatibility: { status: 'compatible' } } },
     })

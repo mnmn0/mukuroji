@@ -312,11 +312,12 @@ export interface AgentWorkItemApi {
    */
   relatedDocuments(id: string, cursor?: string, limit?: number): Promise<AgentPage<AgentTaskDocument> | undefined>
   /**
-   * Lists the newest blocker and handoff reports of a task with the answers people recorded.
+   * Lists one page of a task's blocker and handoff reports with the answers people recorded, newest first.
    * @param id - Task ID.
+   * @param cursor - `nextCursor` of the previous page, or undefined for the newest questions.
    * @returns The questions, or `undefined` when the server predates the endpoint.
    */
-  questions(id: string): Promise<AgentTaskQuestions | undefined>
+  questions(id: string, cursor?: string): Promise<AgentTaskQuestions | undefined>
   /**
    * Reads the charter and lifecycle state of a Project of the configured Team.
    * @param projectId - Project ID.
@@ -350,8 +351,10 @@ export interface AgentWorkItemApi {
 export type AgentTaskQuestions = {
   /** Questions, newest first. */
   items: AgentRunReport[]
-  /** True when older questions were left out. */
+  /** True when older questions may exist. */
   hasMore: boolean
+  /** Cursor of the older questions; a server older than question paging sends none. */
+  nextCursor?: string
 }
 
 /** File attached to a task, as get_task and list_task_attachments show it. The name is user data. */

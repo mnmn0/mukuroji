@@ -761,6 +761,22 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       return api.comments(id, cursor, limit, scope.assignedProjectId)
     },
     /**
+     * Lists one page of a task's blocker and handoff questions with the answers people gave, newest
+     * first, so questions older than the ones get_task shows can be read.
+     *
+     * @param id - Task ID.
+     * @param cursor - `questions.nextCursor` from get_task or `nextCursor` of the previous page.
+     * @returns The questions.
+     */
+    async questions(id: string, cursor?: string) {
+      inScope(await api.get(id))
+      const page = await api.questions(id, cursor)
+      if (page === undefined) throw unsupportedQuestionsError()
+      // The task may have moved to another Project while the page was read.
+      if (scope.assignedProjectId !== undefined && page.items.length > 0) inScope(await api.get(id))
+      return page
+    },
+    /**
      * Lists one page of Documents linked to a task that the credential owner can view.
      *
      * @param id - Task ID.
@@ -917,6 +933,15 @@ function unsupportedAttachmentsError(): AgentTaskError {
 
 /** Number of linked Documents get_task evaluates; list_task_documents pages through the rest. */
 const maximumTaskDocuments = 20
+
+/**
+ * Creates the error returned when the server does not serve agent questions.
+ *
+ * @returns Safe error that names what to update.
+ */
+function unsupportedQuestionsError(): AgentTaskError {
+  return new AgentTaskError('unsupported', 'This Mukuroji server does not serve agent questions yet. Ask an administrator to update Mukuroji.')
+}
 
 /**
  * Creates the error returned when the server does not serve linked Documents.
