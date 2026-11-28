@@ -13,6 +13,11 @@ import { useSaveProjectDecision } from '../src/projects/mutations/useSaveProject
 import { loadTeamDecisionNotes } from '../src/projects/queries/useTeamDecisionNotes'
 import { ProjectDecisionLogPanel } from '../src/projects/ui/ProjectDecisionLogPanel'
 import { RecordDecisionDialog } from '../src/projects/ui/RecordDecisionDialog'
+import {
+  currentUnsentDecisionDraftGeneration,
+  keepUnsentDecisionDraft,
+  readUnsentDecisionDraft,
+} from '../src/projects/ui/unsentDecisionDrafts'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
 const originalFetch = globalThis.fetch
@@ -310,5 +315,22 @@ describe('saving a decision', () => {
     await expect(mountSave()('core-team', 'atlas', undefined, input)).rejects.toThrow()
     expect(keys).toHaveLength(2)
     expect(keys[1]).not.toBe(keys[0])
+  })
+})
+
+describe('failed decision forms', () => {
+  test('a save that fails after a sign-out does not keep its form, even after another dialog opened', () => {
+    const draft = { projectKey: JSON.stringify(['core-team', 'atlas']), values: toProjectDecisionFormValues(undefined, { title: 'サインアウト中に失敗した決定' }) }
+    const openedBeforeSignOut = currentUnsentDecisionDraftGeneration()
+    discardSessionDrafts()
+    // A dialog opened after the sign-out belongs to the new period and may keep its own form.
+    const openedAfterSignOut = currentUnsentDecisionDraftGeneration()
+    expect(openedAfterSignOut).not.toBe(openedBeforeSignOut)
+    expect(keepUnsentDecisionDraft('k', draft, openedBeforeSignOut)).toBe(false)
+    expect(readUnsentDecisionDraft('k')).toBeUndefined()
+    expect(keepUnsentDecisionDraft('k', draft, openedAfterSignOut)).toBe(true)
+    expect(readUnsentDecisionDraft('k')).toEqual(draft)
+    discardSessionDrafts()
+    expect(readUnsentDecisionDraft('k')).toBeUndefined()
   })
 })

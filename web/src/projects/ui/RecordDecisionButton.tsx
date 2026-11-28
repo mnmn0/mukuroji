@@ -1,12 +1,17 @@
 import type { ProjectDecisionOrigin } from '@mukuroji/contracts'
 import { useRef, useState } from 'react'
-import { readAccessTokenSubject } from '../../auth/session'
-import { onSessionDraftsDiscarded } from '../../auth/sessionDrafts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { ProjectDecisionFormPrefill } from '../model/projectDecisionForm'
 import { useSaveProjectDecision } from '../mutations/useSaveProjectDecision'
 import type { ProjectDecisionReferenceOption } from './ProjectDecisionForm'
 import { RecordDecisionDialog, type RecordDecisionProjectOption, type RecordDecisionUnsentDraft } from './RecordDecisionDialog'
+import {
+  currentUnsentDecisionDraftGeneration,
+  dropUnsentDecisionDraft,
+  keepUnsentDecisionDraft,
+  readUnsentDecisionDraft,
+  unsentDecisionDraftKey,
+} from './unsentDecisionDrafts'
 
 /** Props of the button that records a decision from another screen. */
 export type RecordDecisionButtonProps = {
@@ -39,30 +44,6 @@ export type RecordDecisionButtonProps = {
 }
 
 /**
- * Forms whose save failed, by signed-in account and draft key, kept while another item is shown.
- * Another account never sees them, and signing out drops them.
- */
-const unsentDrafts = new Map<string, RecordDecisionUnsentDraft>()
-/** Counts sign-outs, so a save that fails after one does not keep its form again. */
-let discardGeneration = 0
-onSessionDraftsDiscarded(() => {
-  discardGeneration += 1
-  unsentDrafts.clear()
-})
-
-/**
- * Builds the key a failed form is kept under.
- *
- * @param accessToken - Token of the signed-in account.
- * @param draftKey - Item the decision is recorded from.
- * @returns The key, or `undefined` when the account or the item is unknown and nothing is kept.
- */
-function unsentDraftStoreKey(accessToken: string | undefined, draftKey: string | undefined): string | undefined {
-  const owner = accessToken ? readAccessTokenSubject(accessToken) : undefined
-  return owner && draftKey !== undefined ? JSON.stringify([owner, draftKey]) : undefined
-}
-
-/**
  * Renders a "Record as decision" button that opens the record dialog and confirms the save.
  *
  * @param props - Session, Projects, and prefill.
@@ -90,27 +71,33 @@ export function RecordDecisionButton({
   const openCount = useRef(0)
   const [openedAs, setOpenedAs] = useState(0)
   // A failed save's form is reopened as it was, so its retry reuses the same Idempotency-Key.
-  const storeKey = unsentDraftStoreKey(accessToken, draftKey)
-  // Sign-outs seen when the dialog was last opened; a later one means the form must not come back.
-  const generationAtOpen = useRef(discardGeneration)
+  const storeKey = unsentDecisionDraftKey(accessToken, draftKey)
+  // Sign-outs counted when the open dialog was opened. Each dialog's callbacks keep the value of
+  // the render that made them, so a save that fails after a sign-out cannot keep its form, even
+  // when another dialog was opened since.
+  const [openedGeneration, setOpenedGeneration] = useState(currentUnsentDecisionDraftGeneration)
   const [unsentDraft, setUnsentDraftState] = useState<RecordDecisionUnsentDraft | undefined>(
-    () => (storeKey === undefined ? undefined : unsentDrafts.get(storeKey)),
+    () => (storeKey === undefined ? undefined : readUnsentDecisionDraft(storeKey)),
   )
   /**
-   * Keeps or drops the failed form, also for a later mount with the same draft key.
+   * Keeps the failed form of a dialog, also for a later mount with the same draft key.
    *
-   * @param draft - Form to keep, or `undefined` once it was saved.
+   * @param draft - Form of the failed save.
+   * @param generation - Sign-outs counted when that dialog was opened.
    */
-  const setUnsentDraft = (draft: RecordDecisionUnsentDraft | undefined) => {
-    if (draft && generationAtOpen.current !== discardGeneration) return
+  const keepUnsentDraft = (draft: RecordDecisionUnsentDraft, generation: number) => {
+    if (generation !== currentUnsentDecisionDraftGeneration()) return
     setUnsentDraftState(draft)
-    if (storeKey === undefined) return
-    if (draft) unsentDrafts.set(storeKey, draft)
-    else unsentDrafts.delete(storeKey)
+    if (storeKey !== undefined) keepUnsentDecisionDraft(storeKey, draft, generation)
+  }
+  /** Drops the failed form once it was saved or discarded. */
+  const clearUnsentDraft = () => {
+    setUnsentDraftState(undefined)
+    if (storeKey !== undefined) dropUnsentDecisionDraft(storeKey)
   }
   /** Opens a new dialog with a fresh prefill, replacing any dialog that is open. */
   const openDialog = () => {
-    generationAtOpen.current = discardGeneration
+    setOpenedGeneration(currentUnsentDecisionDraftGeneration())
     openCount.current += 1
     setOpenedAs(openCount.current)
     setPrefill(createPrefill())
@@ -140,9 +127,9 @@ export function RecordDecisionButton({
           key={openedAs}
           save={save}
           {...(unsentDraft ? { unsentDraft } : {})}
-          onUnsent={setUnsentDraft}
+          onUnsent={(draft) => keepUnsentDraft(draft, openedGeneration)}
           onDiscardUnsent={() => {
-            setUnsentDraft(undefined)
+            clearUnsentDraft()
             openDialog()
           }}
           {...(defaultProject ? { defaultProject } : {})}
@@ -155,7 +142,7 @@ export function RecordDecisionButton({
           onClose={() => setPrefill(undefined)}
           onRecorded={(project) => {
             if (openCount.current !== openedAs) return
-            setUnsentDraft(undefined)
+            clearUnsentDraft()
             setPrefill(undefined)
             setRecordedProjectName(project.name)
           }}
