@@ -58,7 +58,7 @@ import type {
   NotificationDestinationSecrets,
   NotificationDestinationTestSender,
 } from '../../modules/notifications/application/notification-destinations'
-import type { AgentRunArtifactStatusStore, AgentRunStore, AgentRunUsageStore } from '../../modules/agent-runs'
+import type { AgentRunArtifactStatusStore, AgentRunStore, AgentRunUsageStore, AgentTelemetryAnalyticsSink } from '../../modules/agent-runs'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
 import type { CycleScheduleBaselineStore } from '../../modules/planning'
@@ -215,6 +215,8 @@ export interface WorkItemDependencies {
   agentRuns: AgentRunStore
   /** Provides agent telemetry usage persistence, attributed to Agent Runs when read. */
   agentRunUsage: AgentRunUsageStore
+  /** Writes allowlisted agent telemetry, run snapshots, and Work Item values to the S3 analytics store (ADR 0118). */
+  agentTelemetryAnalytics: AgentTelemetryAnalyticsSink
   /** Provides the stored verification of pull requests reported by Agent Runs (ADR 0103). */
   agentRunArtifactStatuses: AgentRunArtifactStatusStore
   /** Provides Focus policy and recipient snooze persistence. */

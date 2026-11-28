@@ -37,6 +37,8 @@ export interface TenantOperationWorkerInput {
    * Without them the worker only reconciles audit retention.
    */
   readonly lifecycleEnabled: boolean;
+  /** Agent telemetry analytics bucket whose Workspace prefixes are exported and deleted (ADR 0118). */
+  readonly agentAnalyticsBucket?: s3.IBucket;
 }
 
 /** Resource owners, queues, and the export bucket that run tenant export and closure. */
@@ -303,6 +305,7 @@ function buildTenantLifecycleOwners(
     tenantExportBucket,
     tenantAdministrationTable: input.dataStores.tenantAdministrationTable,
     workspaceAuditPseudonymSecret: input.workspaceAuditPseudonymSecret,
+    ...(input.agentAnalyticsBucket ? { agentAnalyticsBucket: input.agentAnalyticsBucket } : {}),
   };
   return {
     tenantExportBucket,
@@ -381,6 +384,8 @@ type TenantOperationCapabilityFunctionInput = {
   readonly tenantAdministrationTable: DataStoreResources['tenantAdministrationTable'];
   /** Retained secret containing the shared Workspace audit pseudonym key. */
   readonly workspaceAuditPseudonymSecret: secretsmanager.ISecret;
+  /** Agent telemetry analytics bucket, when the deployment has it. */
+  readonly agentAnalyticsBucket?: s3.IBucket;
 };
 
 /**
@@ -474,6 +479,9 @@ function buildTenantOperationCapabilityFunction(
       AUDIT_EXPORT_BUCKET_NAME:
         input.fileStorage.auditExportBucket.bucketName,
       WORK_ITEMS_TABLE_NAME: input.dataStores.workItemsTable.tableName,
+      ...(input.agentAnalyticsBucket
+        ? { AGENT_ANALYTICS_BUCKET_NAME: input.agentAnalyticsBucket.bucketName }
+        : {}),
     },
   });
   bindRuntimeControls(
@@ -590,6 +598,7 @@ function grantTenantResourceOwner(
       actions: ['s3:GetObject', 's3:PutObject'],
       resources: [input.tenantExportBucket.arnForObjects('tenant-exports/*')],
     }));
+    grantAgentAnalyticsAccess(target, input.agentAnalyticsBucket, ['s3:GetObject', 's3:GetObjectVersion']);
     return;
   }
   if (owner === 'access') {
@@ -640,6 +649,7 @@ function grantTenantResourceOwner(
       actions: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
       resources: [input.fileStorage.auditExportBucket.arnForObjects('audit-exports/*')],
     }));
+    grantAgentAnalyticsAccess(target, input.agentAnalyticsBucket, ['s3:DeleteObject', 's3:DeleteObjectVersion']);
     return;
   }
   if (owner === 'secrets') {
@@ -683,6 +693,32 @@ function grantTenantResourceOwner(
     },
   }));
   grantAuditExportList(target, input.fileStorage.auditExportBucket, true);
+  grantAgentAnalyticsAccess(target, input.agentAnalyticsBucket, []);
+}
+
+/**
+ * Grants listing of a Workspace's agent analytics prefixes and the given object actions on them.
+ *
+ * @param target Resource-owner Lambda.
+ * @param bucket Analytics bucket, when the deployment has it.
+ * @param objectActions Object actions on `agent-analytics/*`; none for verification.
+ */
+function grantAgentAnalyticsAccess(
+  target: lambdaNodejs.NodejsFunction,
+  bucket: s3.IBucket | undefined,
+  objectActions: readonly string[],
+): void {
+  if (!bucket) return;
+  target.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['s3:ListBucket', 's3:ListBucketVersions'],
+    resources: [bucket.bucketArn],
+    conditions: { StringLike: { 's3:prefix': ['agent-analytics/*'] } },
+  }));
+  if (objectActions.length === 0) return;
+  target.addToRolePolicy(new iam.PolicyStatement({
+    actions: [...objectActions],
+    resources: [bucket.arnForObjects('agent-analytics/*')],
+  }));
 }
 
 /**

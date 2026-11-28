@@ -240,6 +240,7 @@ function readTenantOperationResourceOwnerConfig(): TenantOperationResourceOwnerC
     fileBucketName: requireEnvironment('FILE_BUCKET_NAME'),
     workItemImportBucketName: requireEnvironment('WORK_ITEM_IMPORT_BUCKET_NAME'),
     auditExportBucketName: requireEnvironment('AUDIT_EXPORT_BUCKET_NAME'),
+    ...readOptionalAgentAnalyticsBucket(),
     cognitoUserPoolId: requireEnvironment('COGNITO_USER_POOL_ID'),
     workItemsTableName: requireEnvironment('WORK_ITEMS_TABLE_NAME'),
     workItemEventsTableName: requireEnvironment('TEAM_ISSUE_EVENTS_TABLE_NAME'),
@@ -269,6 +270,16 @@ function readTenantOperationResourceOwnerConfig(): TenantOperationResourceOwnerC
     realtimeSessionsTableName: requireEnvironment('REALTIME_SESSIONS_TABLE_NAME'),
     fileProofingTableName: requireEnvironment('FILE_PROOFING_TABLE_NAME'),
   }
+}
+
+/**
+ * Reads the agent telemetry analytics bucket, which only a deployment with the analytics store has.
+ *
+ * @returns The bucket name field, or nothing.
+ */
+function readOptionalAgentAnalyticsBucket(): { agentAnalyticsBucketName?: string } {
+  const value = loadServerConfig().environment.AGENT_ANALYTICS_BUCKET_NAME?.trim()
+  return value ? { agentAnalyticsBucketName: value } : {}
 }
 
 /** Reads one mandatory CDK-injected environment value. */

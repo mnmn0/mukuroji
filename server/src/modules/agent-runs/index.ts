@@ -157,6 +157,25 @@ export {
 } from './adapter-out/dynamodb/agent-run-usage-store'
 export { InMemoryAgentRunUsageStore } from './adapter-out/in-memory/agent-run-usage-store'
 export {
+  AGENT_ANALYTICS_EXPORT_MAX_RUNS,
+  runAgentAnalyticsDailyExport,
+  type AgentAnalyticsDailyExportResult,
+} from './adapter-in/schedules/agent-analytics-daily-export'
+export { InMemoryAgentTelemetryAnalyticsSink } from './adapter-out/in-memory/agent-telemetry-analytics-sink'
+export {
+  FirehoseAgentTelemetryAnalyticsSink,
+  disabledAgentTelemetryAnalyticsSink,
+  type AgentTelemetryAnalyticsSink,
+} from './adapter-out/firehose/agent-telemetry-analytics-sink'
+export {
+  agentAnalyticsWorkspaceKey,
+  buildAgentAnalyticsEventRows,
+  buildAgentAnalyticsRunStartRow,
+  buildAgentAnalyticsRunStateRow,
+  buildAgentAnalyticsWorkItemRow,
+  type AgentAnalyticsWorkItem,
+} from './domain/agent-telemetry-analytics'
+export {
   AGENT_RUN_TRIAGE_FAILED_BATCH,
   AGENT_RUN_TRIAGE_MAX_TEAMS,
   AGENT_RUN_TRIAGE_STALLED_BATCH,

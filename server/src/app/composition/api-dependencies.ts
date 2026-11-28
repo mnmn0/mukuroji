@@ -8,6 +8,7 @@ import type {
   WorkItemRelationMutationResponse,
   WorkItemRelationType,
 } from '@mukuroji/contracts'
+import { createAgentTelemetryAnalyticsSink } from './agent-telemetry-analytics'
 import {
   DynamoDbProjectRaidLogStore,
   InMemoryProjectRaidLogStore,
@@ -168,6 +169,7 @@ import {
   InMemoryAgentRunArtifactStatusStore,
   InMemoryAgentRunStore,
   InMemoryAgentRunUsageStore,
+  disabledAgentTelemetryAnalyticsSink,
 } from '../../modules/agent-runs'
 import { DynamoDbNotificationsClient } from '../../modules/notifications/notifications'
 import {
@@ -738,6 +740,7 @@ export function createProductionWorkItemDependencies(
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
     ),
+    agentTelemetryAnalytics: createAgentTelemetryAnalyticsSink(loadServerConfig().environment),
     agentRunArtifactStatuses: new DynamoDbAgentRunArtifactStatusStore(
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
@@ -2118,6 +2121,7 @@ export function createTestAppDependencies(): AppDependencies {
       analytics: new InMemoryAnalyticsRepository(),
       agentRuns: new InMemoryAgentRunStore(),
       agentRunUsage: new InMemoryAgentRunUsageStore(),
+      agentTelemetryAnalytics: disabledAgentTelemetryAnalyticsSink,
       agentRunArtifactStatuses: new InMemoryAgentRunArtifactStatusStore(),
       requestIntake,
     },
@@ -2232,6 +2236,7 @@ export function overrideAppDependencies(
         : {}),
       ...(overrides.agentRuns ? { agentRuns: overrides.agentRuns } : {}),
       ...(overrides.agentRunUsage ? { agentRunUsage: overrides.agentRunUsage } : {}),
+      ...(overrides.agentTelemetryAnalytics ? { agentTelemetryAnalytics: overrides.agentTelemetryAnalytics } : {}),
       ...(overrides.agentRunArtifactStatuses ? { agentRunArtifactStatuses: overrides.agentRunArtifactStatuses } : {}),
       ...(overrides.focusState ? { focusState: overrides.focusState } : {}),
       ...(overrides.workspaceSearch

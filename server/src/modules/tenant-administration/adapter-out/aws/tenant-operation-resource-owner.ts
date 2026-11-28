@@ -77,6 +77,8 @@ export type TenantOperationResourceOwnerConfig = {
   workItemImportBucketName: string
   /** Bucket containing asynchronous audit export jobs and NDJSON parts. */
   auditExportBucketName: string
+  /** Agent telemetry analytics bucket (ADR 0118), when the deployment has it. */
+  agentAnalyticsBucketName?: string
   /** Cognito user pool whose tenant sessions are revoked. */
   cognitoUserPoolId: string
   /** Canonical Work Item table. */
@@ -600,6 +602,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         // request fingerprint and the index markers are bookkeeping, so neither is exported.
         exportsObject: isAuditExportPartKey,
       },
+      ...agentAnalyticsNamespaces(this.config.agentAnalyticsBucketName, workspaceId),
     ]
   }
 
@@ -2476,4 +2479,26 @@ function isAwsNamedError(error: unknown, name: string): boolean {
 /** Returns true for a non-array object. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Tables of the agent telemetry analytics store, each under its own prefix (ADR 0118). */
+const AGENT_ANALYTICS_TABLE_PREFIXES = ['events', 'runs', 'work-items'] as const
+
+/**
+ * Lists a Workspace's namespaces in the agent telemetry analytics bucket: one prefix per table,
+ * partitioned by the SHA-256 of the Workspace ID.
+ *
+ * @param bucketName - Analytics bucket, when the deployment has it.
+ * @param workspaceId - Workspace ID.
+ * @returns Namespaces, or none without the bucket.
+ */
+function agentAnalyticsNamespaces(bucketName: string | undefined, workspaceId: string): TenantFileNamespace[] {
+  if (bucketName === undefined) return []
+  const workspaceKey = createHash('sha256').update(workspaceId).digest('hex')
+  return AGENT_ANALYTICS_TABLE_PREFIXES.map((table) => ({
+    id: `agent-analytics-${table}`,
+    bucketName,
+    prefix: `agent-analytics/${table}/workspace_key=${workspaceKey}/`,
+    exportDirectory: `agent-analytics/${table}`,
+  }))
 }

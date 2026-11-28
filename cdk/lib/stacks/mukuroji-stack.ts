@@ -60,6 +60,8 @@ import { buildWebhookDeliveryWorkers } from '../subsystems/workers/webhook-deliv
 import { buildWorkItemImportWorker } from '../subsystems/workers/work-item-import';
 import { buildAuditExportWorker } from '../subsystems/workers/audit-export';
 import { defineAgentRunTriageJob } from '../subsystems/workers/agent-run-triage';
+import { defineAgentAnalyticsExportJob } from '../subsystems/workers/agent-analytics-export';
+import { buildAgentAnalytics, grantAgentAnalyticsPut } from '../subsystems/agent-analytics';
 
 /** Stack configuration, including the optional modules the stack deploys. */
 export type MukurojiStackProps = cdk.StackProps & Readonly<{
@@ -94,6 +96,12 @@ export type MukurojiStackProps = cdk.StackProps & Readonly<{
    */
   readonly softwareFactoryEnabled?: boolean;
   /**
+   * Keeps allowlisted agent telemetry, run snapshots, and Work Item values in S3 as Parquet for
+   * Athena (ADR 0118): one bucket, three Firehose streams, Glue tables, and an Athena workgroup. Needs
+   * Software factory. Off unless the composition root turns it on.
+   */
+  readonly agentAnalyticsEnabled?: boolean;
+  /**
    * Seeds demo members (`@example.com`), two Teams, four Projects, and ten Work Items when the
    * stack is created, and makes the initial owner a manager of the demo Projects. For trial and
    * development environments; a company Workspace starts with only its owner. Off unless the
@@ -126,6 +134,10 @@ export class MukurojiStack extends cdk.Stack {
     const requestEmailEnabled = props?.requestEmailEnabled ?? false;
     const tenantLifecycleEnabled = props?.tenantLifecycleEnabled ?? false;
     const softwareFactoryEnabled = props?.softwareFactoryEnabled ?? false;
+    const agentAnalyticsEnabled = props?.agentAnalyticsEnabled ?? false;
+    if (agentAnalyticsEnabled && !softwareFactoryEnabled) {
+      throw new Error('Agent analytics needs Software factory; turn on mukuroji:softwareFactory too.');
+    }
     const demoDataEnabled = props?.demoDataEnabled ?? false;
     const webCustomDomain = resolveWebCustomDomain(props?.webCustomDomain);
 
@@ -204,6 +216,7 @@ export class MukurojiStack extends cdk.Stack {
       : undefined;
 
     const workerChannels = buildWorkerChannels(this, connectorsEnabled);
+    const agentAnalytics = agentAnalyticsEnabled ? buildAgentAnalytics(this) : undefined;
     const apiRuntime = buildApiRuntime(this, {
       dataStores,
       fileStorage,
@@ -248,6 +261,7 @@ export class MukurojiStack extends cdk.Stack {
       parameters,
       runtimeControls,
       workerChannels,
+      ...(agentAnalytics ? { agentAnalyticsStreamEnvironment: agentAnalytics.streamEnvironment } : {}),
       // The API reads the app origins from the distribution, which is built from the API below.
       webBrowserOrigins: cdk.Lazy.string({
         produce: () => {
@@ -338,8 +352,14 @@ export class MukurojiStack extends cdk.Stack {
         defineMemberAccessExpiryJob({ dataStores, parameters }),
         defineInboxDigestJob({ dataStores, parameters }),
         defineJapanesePublicHolidaySyncJob({ dataStores, parameters }),
+        ...(agentAnalytics ? [defineAgentAnalyticsExportJob({ dataStores, agentAnalytics })] : []),
       ],
     });
+    if (agentAnalytics) {
+      // The telemetry receiver writes events, and a run start writes its snapshot. The stream names
+      // reach the API through its runtime configuration secret.
+      grantAgentAnalyticsPut(apiRuntime.apiFunction, [agentAnalytics.eventsStream, agentAnalytics.runsStream]);
+    }
     // The API and the scheduled-jobs Lambda read this to refuse Software factory routes and to
     // skip the Agent Run triage job.
     const softwareFactorySwitch = softwareFactoryEnabled ? 'enabled' : 'disabled';
@@ -354,6 +374,7 @@ export class MukurojiStack extends cdk.Stack {
       workspaceAuditPseudonymSecret:
         apiTransports.workspaceAuditPseudonymSecret,
       lifecycleEnabled: tenantLifecycleEnabled,
+      ...(agentAnalytics ? { agentAnalyticsBucket: agentAnalytics.bucket } : {}),
     });
     const { tenantLifecycle } = tenantOperationWorker;
     // The API refuses export and closure requests unless their resource owners exist.

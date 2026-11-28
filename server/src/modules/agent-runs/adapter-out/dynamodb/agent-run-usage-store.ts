@@ -1,5 +1,6 @@
 import {
   BatchGetCommand,
+  PutCommand,
   QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
@@ -45,7 +46,7 @@ const cursorReadBackoffMs = 50
 /** Minimal DynamoDB command boundary used by the usage store. */
 export type AgentRunUsageDocumentClient = {
   /** Sends one query, transaction, batch read, or update. */
-  send(command: QueryCommand | TransactWriteCommand | BatchGetCommand | UpdateCommand): Promise<{
+  send(command: QueryCommand | TransactWriteCommand | BatchGetCommand | UpdateCommand | PutCommand): Promise<{
     /** Query page. */
     Items?: Record<string, unknown>[]
     /** Key of the last evaluated item when more items remain. */
@@ -65,6 +66,39 @@ export type AgentActivityWrite = {
   waitSlots: readonly (AgentActivityRow | undefined)[]
   /** Cursor moves saved with the wait rows, each from the value the waits were measured from. */
   claims: readonly AgentSessionCursorClaim[]
+}
+
+/** Days a started run stays on the daily analytics export (ADR 0118). */
+export const AGENT_ANALYTICS_WATCH_DAYS = 30
+
+/** A run the daily analytics export reads. */
+export type AgentAnalyticsWatch = {
+  /** Workspace ID. */
+  directoryId: string
+  /** Team ID. */
+  teamId: string
+  /** Run ID. */
+  runId: string
+}
+
+/** One page of runs to export. */
+export type AgentAnalyticsWatchPage = {
+  /** Runs in key order. */
+  watches: AgentAnalyticsWatch[]
+  /** Cursor of the next page; undefined on the last page. */
+  nextCursor?: string
+}
+
+/**
+ * Builds the partition of the runs that started on one UTC day. It is the only partition of the
+ * table that does not start with a Workspace ID, because the daily job reads every Workspace's
+ * runs; its rows hold IDs only and expire on their own.
+ *
+ * @param day - UTC day as `YYYY-MM-DD`.
+ * @returns Partition key value.
+ */
+export function agentAnalyticsWatchPartition(day: string): string {
+  return `agent-analytics-watch#${day}`
 }
 
 /** Activity rows read for one member and time range. */
@@ -159,6 +193,23 @@ export interface AgentRunUsageStore {
    * @param now - Receive time.
    */
   advanceSessionCursors(directoryId: string, memberKey: string, cursors: readonly AgentSessionCursor[], now: Date): Promise<void>
+  /**
+   * Notes a started run for the daily analytics export (ADR 0118). The note holds IDs only and
+   * expires after {@link AGENT_ANALYTICS_WATCH_DAYS} days.
+   *
+   * @param watch - Run to export.
+   * @param startedAt - Start time; the note goes to the partition of that UTC day.
+   */
+  watchRunForAnalytics(watch: AgentAnalyticsWatch, startedAt: Date): Promise<void>
+  /**
+   * Reads one page of the runs that started on a UTC day.
+   *
+   * @param day - UTC day as `YYYY-MM-DD`.
+   * @param cursor - Cursor of the previous page.
+   * @param limit - Largest number of runs to return.
+   * @returns Runs and the cursor of the next page.
+   */
+  listAnalyticsWatches(day: string, cursor: string | undefined, limit: number): Promise<AgentAnalyticsWatchPage>
 }
 
 /** Rows of other instances one usage read may pass over, as a multiple of its bucket limit. */
@@ -775,4 +826,51 @@ export class DynamoDbAgentRunUsageStore implements AgentRunUsageStore {
       }
     }
   }
+
+  /** @inheritdoc */
+  async watchRunForAnalytics(watch: AgentAnalyticsWatch, startedAt: Date): Promise<void> {
+    try {
+      await this.#client.send(new PutCommand({
+        TableName: this.#tableName,
+        Item: {
+          directoryTeamId: agentAnalyticsWatchPartition(startedAt.toISOString().slice(0, 10)),
+          recordKey: `${watch.directoryId}#${watch.teamId}#${watch.runId}`,
+          entityType: 'agent-analytics-watch',
+          workspaceId: watch.directoryId,
+          teamId: watch.teamId,
+          runId: watch.runId,
+          [AGENT_USAGE_TTL_ATTRIBUTE]: expiresAfterDays(startedAt, AGENT_ANALYTICS_WATCH_DAYS + 2),
+        },
+      }))
+    } catch (error) {
+      if (isTransientUsageWriteFailure(error)) throw createAgentUsageUnavailableError()
+      throw error
+    }
+  }
+
+  /** @inheritdoc */
+  async listAnalyticsWatches(day: string, cursor: string | undefined, limit: number): Promise<AgentAnalyticsWatchPage> {
+    const partition = agentAnalyticsWatchPartition(day)
+    const page = await this.#client.send(new QueryCommand({
+      TableName: this.#tableName,
+      KeyConditionExpression: '#partition = :partition',
+      ExpressionAttributeNames: { '#partition': 'directoryTeamId' },
+      ExpressionAttributeValues: { ':partition': partition },
+      Limit: limit,
+      ...(cursor === undefined ? {} : { ExclusiveStartKey: { directoryTeamId: partition, recordKey: cursor } }),
+    }))
+    const watches = (page.Items ?? []).map((item) => {
+      const { workspaceId, teamId, runId, recordKey } = item
+      if (
+        typeof workspaceId !== 'string' || typeof teamId !== 'string' || typeof runId !== 'string' ||
+        recordKey !== `${workspaceId}#${teamId}#${runId}`
+      ) {
+        throw createAgentRunIntegrityError()
+      }
+      return { directoryId: workspaceId, teamId, runId }
+    })
+    const last = page.LastEvaluatedKey?.recordKey
+    return { watches, ...(typeof last === 'string' ? { nextCursor: last } : {}) }
+  }
+
 }

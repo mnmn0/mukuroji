@@ -176,6 +176,9 @@ tool の実行時間（Bash、MCP、skill ごと。回数と失敗回数も）�
   難易度など）で分けることもできます。見積もりのないタスクは件数だけ表示され、比べません。
 - **レポート** の「エージェントのトークン」「エージェントの推定費用」は、グループに「model」を選ぶと model ごとに
   分けて見られます。
+- 分析用のストア（CDK context `mukuroji:agentAnalytics=true`）を有効にした環境では、同じ event と Run・タスクの値が
+  S3 に残り、Athena の SQL で好きな軸（custom field、model、tool の組み合わせなど）で集計できます。prompt や tool の
+  入出力は残りません。使い方と SQL の例は [`docs/agent-telemetry-analytics.md`](../agent-telemetry-analytics.md)。
 
 ### agent の質問に答える
 
