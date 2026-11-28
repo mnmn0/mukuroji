@@ -1304,6 +1304,7 @@ function IssueDetailContent({
                 accessToken={accessToken}
                 createPrefill={() => ({ title: resolveIssueTitle(issue, t), relatedWorkItemIds: [issue.id] })}
                 disabled={isAiSummaryOperationPending}
+                draftKey={`work-item:${issue.teamId}:${issue.id}`}
                 defaultProject={{ teamId: issue.teamId, id: issue.assignedProjectId }}
                 lockProject
                 origin="work-item"

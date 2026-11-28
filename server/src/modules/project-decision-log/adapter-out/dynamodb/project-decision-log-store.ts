@@ -184,9 +184,11 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
     // the transaction then requires that exact count.
     const count = readCounterCount(await this.readCounter(input), input)
     if (count !== undefined && count >= PROJECT_DECISION_LOG_MAX_ENTRIES) {
+      // A key already used here answers as it would below the limit, so only a new decision is refused as full.
       const row = await this.readRow(input, input.entry.id)
-      if (row && row.creationFingerprint === input.creationFingerprint) return parseStoredEntry(row, input)
-      throw logFull()
+      if (!row) throw logFull()
+      if (row.creationFingerprint === input.creationFingerprint) return parseStoredEntry(row, input)
+      throw creationKeyConflict()
     }
     try {
       await this.client.send(new TransactWriteCommand({
@@ -243,7 +245,7 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
         // the same request was already applied, unless it carried different content.
         const row = await this.readRow(input, input.entry.id)
         if (row && row.creationFingerprint === input.creationFingerprint) return parseStoredEntry(row, input)
-        throw new ProjectDataError(409, 'ProjectDecisionEntryIdempotencyConflict', 'This Idempotency-Key was already used for another decision.')
+        throw creationKeyConflict()
       }
       if (reasons?.[1] === 'ConditionalCheckFailed') {
         // A valid counter at the limit means the log is full, and a valid counter below it means
@@ -470,7 +472,7 @@ export class InMemoryProjectDecisionLogStore implements ProjectDecisionLogStore 
     const existing = this.rows.get(key)
     if (existing) {
       if (existing.creationFingerprint === input.creationFingerprint) return structuredClone(existing.entry)
-      throw new ProjectDataError(409, 'ProjectDecisionEntryIdempotencyConflict', 'This Idempotency-Key was already used for another decision.')
+      throw creationKeyConflict()
     }
     // Counting and adding happen without an await in between, so concurrent creates cannot both
     // pass the limit or the duplicate check.
@@ -688,6 +690,15 @@ function isCounterAtLimit(row: Record<string, unknown> | undefined, scope: Proje
  */
 function logFull() {
   return new ProjectDataError(413, 'ProjectDecisionLogFull', `A Project decision log can hold at most ${PROJECT_DECISION_LOG_MAX_ENTRIES} decisions.`)
+}
+
+/**
+ * Creates the error for an Idempotency-Key that already created a different decision.
+ *
+ * @returns The error.
+ */
+function creationKeyConflict() {
+  return new ProjectDataError(409, 'ProjectDecisionEntryIdempotencyConflict', 'This Idempotency-Key was already used for another decision.')
 }
 
 /**

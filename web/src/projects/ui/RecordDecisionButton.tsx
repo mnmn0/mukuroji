@@ -26,9 +26,17 @@ export type RecordDecisionButtonProps = {
   className?: string
   /** Disables the button, such as while another operation runs. */
   disabled?: boolean
+  /**
+   * Names what the decision is recorded from, such as one Work Item, so a failed save's form
+   * comes back when the same item is shown again after another one was selected.
+   */
+  draftKey?: string
   /** Translator. */
   t: (key: MessageKey) => string
 }
+
+/** Forms whose save failed, by draft key, kept while another item is shown. */
+const unsentDrafts = new Map<string, RecordDecisionUnsentDraft>()
 
 /**
  * Renders a "Record as decision" button that opens the record dialog and confirms the save.
@@ -46,6 +54,7 @@ export function RecordDecisionButton({
   origin,
   className = 'workbench-button-secondary h-8 px-3 text-xs',
   disabled = false,
+  draftKey,
   t,
 }: RecordDecisionButtonProps) {
   const [prefill, setPrefill] = useState<ProjectDecisionFormPrefill>()
@@ -57,7 +66,20 @@ export function RecordDecisionButton({
   const openCount = useRef(0)
   const [openedAs, setOpenedAs] = useState(0)
   // A failed save's form is reopened as it was, so its retry reuses the same Idempotency-Key.
-  const [unsentDraft, setUnsentDraft] = useState<RecordDecisionUnsentDraft>()
+  const [unsentDraft, setUnsentDraftState] = useState<RecordDecisionUnsentDraft | undefined>(
+    () => (draftKey === undefined ? undefined : unsentDrafts.get(draftKey)),
+  )
+  /**
+   * Keeps or drops the failed form, also for a later mount with the same draft key.
+   *
+   * @param draft - Form to keep, or `undefined` once it was saved.
+   */
+  const setUnsentDraft = (draft: RecordDecisionUnsentDraft | undefined) => {
+    setUnsentDraftState(draft)
+    if (draftKey === undefined) return
+    if (draft) unsentDrafts.set(draftKey, draft)
+    else unsentDrafts.delete(draftKey)
+  }
   return (
     <>
       <button

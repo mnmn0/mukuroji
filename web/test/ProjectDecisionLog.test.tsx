@@ -8,6 +8,7 @@ import {
   toProjectDecisionEntryInput,
   toProjectDecisionFormValues,
 } from '../src/projects/model/projectDecisionForm'
+import { useSaveProjectDecision } from '../src/projects/mutations/useSaveProjectDecision'
 import { loadTeamDecisionNotes } from '../src/projects/queries/useTeamDecisionNotes'
 import { ProjectDecisionLogPanel } from '../src/projects/ui/ProjectDecisionLogPanel'
 import { RecordDecisionDialog } from '../src/projects/ui/RecordDecisionDialog'
@@ -219,5 +220,41 @@ describe('record decision dialog', () => {
     // back into the same request body.
     expect(html).toContain('value="2026-01-02T03:04"')
     expect(toProjectDecisionEntryInput(values, 'document')).toEqual(sent)
+  })
+})
+
+describe('saving a decision', () => {
+  /**
+   * Mounts the save hook once and returns its save function, like one screen that is later left.
+   *
+   * @returns The save function of that mount.
+   */
+  function mountSave() {
+    let save: ReturnType<typeof useSaveProjectDecision> | undefined
+    /** Captures the hook's save function. */
+    function Capture() {
+      save = useSaveProjectDecision({ accessToken: 'token' })
+      return null
+    }
+    renderToStaticMarkup(<Capture />)
+    if (!save) throw new Error('The save hook did not mount.')
+    return save
+  }
+
+  test('reuses the Idempotency-Key of a save that got no answer, even from a new mount', async () => {
+    const keys: (string | null)[] = []
+    globalThis.fetch = async (_input, init) => {
+      keys.push(new Headers(init?.headers).get('Idempotency-Key'))
+      return keys.length === 1
+        ? new Response(JSON.stringify({ code: 'Unavailable' }), { status: 503 })
+        : Response.json({ teamId: 'core-team', projectId: 'atlas', entry: decision }, { status: 201 })
+    }
+    const input = toProjectDecisionEntryInput(toProjectDecisionFormValues(undefined, { title: '再送する決定' }), 'work-item')
+    await expect(mountSave()('core-team', 'atlas', undefined, input)).rejects.toThrow()
+    // The screen was left and shown again, so the hook is a new mount with an empty state.
+    expect(await mountSave()('core-team', 'atlas', undefined, input)).toEqual(decision)
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toBeTruthy()
+    expect(keys[1]).toBe(keys[0])
   })
 })

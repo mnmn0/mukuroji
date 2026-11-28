@@ -177,6 +177,9 @@ test('reports a full log only for a valid counter of this Project, and fails clo
   const counter = { workspaceId: 'w', recordKey: 'PROJECT_DECISION#t#p', entryType: 'project-decision-log', schemaVersion: 1, teamId: 't', projectId: 'p', entryCount: 100 }
   expect(await createWith(fakeClient({ counter })))
     .toMatchObject({ status: 413, code: 'ProjectDecisionLogFull' })
+  expect(await createWith(fakeClient({ counter, row: entryRow(entry) }))).toEqual(entry)
+  expect(await createWith(fakeClient({ counter, row: entryRow(entry) }), 'f2'))
+    .toMatchObject({ status: 409, code: 'ProjectDecisionEntryIdempotencyConflict' })
   expect(await createWith(fakeClient({ counter: { ...counter, projectId: 'other' } })))
     .toMatchObject({ status: 502, code: 'ProjectDecisionLogCorruptState' })
   expect(await createWith(fakeClient({ counter: { ...counter, entryCount: 99.5 } })))

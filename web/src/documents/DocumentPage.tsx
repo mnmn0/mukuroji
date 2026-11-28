@@ -2147,6 +2147,7 @@ export function DocumentScreen({
                 key={selectedDocument.id}
                 accessToken={accessToken}
                 className="workbench-button-secondary inline-flex min-h-9 shrink-0 px-3"
+                draftKey={`document:${selectedDocument.id}`}
                 createPrefill={() => ({
                   title: selectedDocument.title,
                   sources: [{
