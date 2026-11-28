@@ -158,13 +158,21 @@ export type PullRequestStatusReadResult =
       kind: 'unverified'
       /** Why it could not be read. */
       reason: Exclude<AgentRunArtifactUnverifiedReason, 'repository-not-allowed'>
+      /**
+       * True when the read failed for a reason that does not pass like an outage, such as a check run
+       * history too long to judge, so an earlier verified status must not be shown in its place.
+       */
+      lasting?: true
     }
 
 /**
  * Reads one pull request through the connector of its provider. It never throws: a provider
- * failure is an unverified result, so one artifact never hides the others.
+ * failure is an unverified result, so one artifact never hides the others. `refresh` is the Work
+ * Item's refresh sequence, which tells a reader with more accounts than one read tries where to
+ * continue, so each refresh tries accounts the one before did not.
  */
 export type PullRequestStatusReader = (
   workspaceId: string,
   reference: PullRequestArtifactReference,
+  refresh?: number,
 ) => Promise<PullRequestStatusReadResult>

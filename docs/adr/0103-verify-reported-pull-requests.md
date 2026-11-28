@@ -1,6 +1,6 @@
 # 0103. agent が報告した pull request を Workspace の connector で照会し、状態を保存する
 
-- 状態: 提案
+- 状態: 一部を置き換え済み（0120）
 - 日付: 2026-11-26
 - 関連: Issue #353、ADR 0102
 

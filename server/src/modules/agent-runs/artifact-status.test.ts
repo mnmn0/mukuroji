@@ -67,7 +67,9 @@ test('status rows are keyed under the Work Item, saved only when newer, and pars
     send: async (command) => {
       sent.push(command)
       if (conflict) throw Object.assign(new Error('Condition failed'), { name: 'ConditionalCheckFailedException' })
-      if (!(command instanceof GetCommand)) return {}
+      if (!(command instanceof GetCommand)) {
+        return command.input.UpdateExpression?.includes('#refreshCount') ? { Attributes: { refreshCount: 3 } } : {}
+      }
       return command.input.Key?.recordKey === key ? { Item: row } : {}
     },
   }, 'table')
@@ -84,9 +86,10 @@ test('status rows are keyed under the Work Item, saved only when newer, and pars
     ConditionExpression: 'attribute_not_exists(#recordKey) OR #checkedAt < :checkedAt',
     ExpressionAttributeValues: { ':workspaceId': 'workspace' },
   })
-  expect(await store.claimRefresh('workspace', 'team', 'item', new Date('2026-11-26T00:00:00.000Z'), 60_000)).toBeTrue()
-  expect(sent[3]?.input).toMatchObject({ ExpressionAttributeValues: { ':workspaceId': 'workspace' } })
+  // The claim returns the refresh sequence, which says where the reader continues among accounts.
+  expect(await store.claimRefresh('workspace', 'team', 'item', new Date('2026-11-26T00:00:00.000Z'), 60_000)).toBe(3)
+  expect(sent[3]?.input).toMatchObject({ ExpressionAttributeValues: { ':workspaceId': 'workspace', ':one': 1 }, ReturnValues: 'UPDATED_NEW' })
   conflict = true
   await store.saveStatuses('workspace', 'team', 'item', [status])
-  expect(await store.claimRefresh('workspace', 'team', 'item', new Date('2026-11-26T00:00:30.000Z'), 60_000)).toBeFalse()
+  expect(await store.claimRefresh('workspace', 'team', 'item', new Date('2026-11-26T00:00:30.000Z'), 60_000)).toBeUndefined()
 })

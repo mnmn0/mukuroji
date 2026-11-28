@@ -5,7 +5,7 @@ import {
   type ConnectorInstallation,
   type WorkItemArtifactStatusesResponse,
 } from '@mukuroji/contracts'
-import { ConnectorRuntimeError } from '../../modules/developer-platform/connector-oauth'
+import { CONNECTOR_PROVIDER_HISTORY_TOO_LONG, ConnectorRuntimeError } from '../../modules/developer-platform/connector-oauth'
 import {
   collectPullRequestArtifacts,
   createUnverifiedArtifactStatus,
@@ -88,11 +88,13 @@ export async function readWorkItemArtifactStatuses(
     target.directoryId, target.teamId, target.workItemId, allowed.map((reference) => reference.url),
   )).map((status) => [status.url, status]))
   const stale = allowed.filter((reference) => needsRefresh(stored.get(reference.url), now))
-  if (stale.length > 0 &&
-      await dependencies.statuses.claimRefresh(target.directoryId, target.teamId, target.workItemId, now, ARTIFACT_STATUS_REFRESH_INTERVAL_MS)) {
+  const refresh = stale.length > 0
+    ? await dependencies.statuses.claimRefresh(target.directoryId, target.teamId, target.workItemId, now, ARTIFACT_STATUS_REFRESH_INTERVAL_MS)
+    : undefined
+  if (refresh !== undefined) {
     const refreshed = await refreshWithinBudget(
-      rotateForRefresh(stale, now),
-      (reference) => checkReference(target.directoryId, reference, stored.get(reference.url), dependencies.reader, now),
+      rotateForRefresh(stale, refresh),
+      (reference) => checkReference(target.directoryId, reference, stored.get(reference.url), dependencies.reader, refresh, now),
       dependencies.refreshBudgetMs ?? ARTIFACT_STATUS_REFRESH_BUDGET_MS,
     )
     await dependencies.statuses.saveStatuses(target.directoryId, target.teamId, target.workItemId, refreshed)
@@ -112,18 +114,18 @@ export async function readWorkItemArtifactStatuses(
 }
 
 /**
- * Starts each refresh at a different reference, moving on once per refresh interval, so slow
+ * Starts each refresh at a different reference, moving on by one with each claimed refresh, so slow
  * references at the front cannot use up every budget and keep the ones behind them unchecked.
  *
  * @param references - Stale references, newest report first.
- * @param now - Read time.
- * @returns The same references, starting at this interval's position.
+ * @param refresh - The Work Item's refresh sequence.
+ * @returns The same references, starting at this refresh's position.
  */
 function rotateForRefresh(
   references: readonly PullRequestArtifactReference[],
-  now: Date,
+  refresh: number,
 ): PullRequestArtifactReference[] {
-  const start = Math.floor(now.getTime() / ARTIFACT_STATUS_REFRESH_INTERVAL_MS) % references.length
+  const start = (refresh - 1) % references.length
   return [...references.slice(start), ...references.slice(0, start)]
 }
 
@@ -216,6 +218,7 @@ function needsRefresh(status: AgentRunArtifactStatus | undefined, now: Date): bo
  * @param reference - Pull request reference the Team's allowlist permits.
  * @param previous - Stored status, if any.
  * @param reader - Provider reader.
+ * @param refresh - The Work Item's refresh sequence, passed on to the reader.
  * @param now - Check time.
  * @returns The status to store.
  */
@@ -224,11 +227,13 @@ async function checkReference(
   reference: PullRequestArtifactReference,
   previous: AgentRunArtifactStatus | undefined,
   reader: PullRequestStatusReader,
+  refresh: number,
   now: Date,
 ): Promise<AgentRunArtifactStatus> {
-  const result = await reader(workspaceId, reference)
+  const result = await reader(workspaceId, reference, refresh)
   if (result.kind === 'unverified') {
-    if (result.reason === 'unavailable' && previous?.verification === 'verified') return previous
+    // A history too long to judge is not an outage, so the earlier result would stay forever.
+    if (result.reason === 'unavailable' && result.lasting !== true && previous?.verification === 'verified') return previous
     return createUnverifiedArtifactStatus(reference, result.reason, now)
   }
   return {
@@ -280,20 +285,21 @@ export type PullRequestReaderConnectors = {
  * Each connected GitHub installation is tried in turn until one can read the pull request, so the
  * result never shows a repository that none of the Workspace's accounts can read.
  *
- * When the Workspace has more accounts than one read tries, each read starts at a randomly chosen
- * one, and an unread pull request is reported as `unavailable` rather than `not-accessible`, since
- * an untried account might read it. A random start, unlike one taken from the clock, cannot fall
- * back on the same accounts every time the refresh period lines up with the account count.
+ * When the Workspace has more accounts than one read tries, the Work Item's refresh sequence picks
+ * where among them a read starts: each refresh continues after the accounts the one before tried,
+ * so every account is tried within a bounded number of refreshes, whatever the timing. A read
+ * without a sequence starts at a random account. An unread pull request is reported as
+ * `unavailable` rather than `not-accessible`, since an untried account might read it.
  *
  * @param connectors - Installation list and engine loader.
- * @param pickStart - Chooses where among the other accounts a read starts, from 0 to below `size`.
+ * @param pickStart - Chooses where a read without a refresh sequence starts, from 0 to below `size`.
  * @returns The reader.
  */
 export function createConnectorPullRequestStatusReader(
   connectors: PullRequestReaderConnectors,
   pickStart: (size: number) => number = pickRandomIndex,
 ): PullRequestStatusReader {
-  return async (workspaceId, reference) => {
+  return async (workspaceId, reference, refresh) => {
     if (reference.provider !== 'github') return { kind: 'unverified', reason: 'unsupported-provider' }
     let installations: ConnectorInstallation[]
     let untried = false
@@ -302,7 +308,7 @@ export function createConnectorPullRequestStatusReader(
         (await connectors.listConnectors(workspaceId)).filter((installation) => installation.provider === 'github' &&
           (installation.status === 'connected' || installation.status === 'degraded')),
         reference.repository,
-        pickStart,
+        (size, window) => refresh === undefined ? pickStart(size) : (refresh - 1) * window,
       )
       installations = candidates.slice(0, maximumInstallationsPerRead)
       untried = candidates.length > installations.length
@@ -332,7 +338,11 @@ export function createConnectorPullRequestStatusReader(
           }),
         }
       } catch (error) {
-        result = { kind: 'unverified', reason: toUnverifiedReason(error, result) }
+        const reason = toUnverifiedReason(error, result)
+        const lasting = error instanceof ConnectorRuntimeError && error.code === CONNECTOR_PROVIDER_HISTORY_TOO_LONG
+        result = lasting || (reason === 'unavailable' && result.kind === 'unverified' && result.lasting === true)
+          ? { kind: 'unverified', reason: 'unavailable', lasting: true }
+          : { kind: 'unverified', reason }
       }
     }
     return result
@@ -346,20 +356,22 @@ export function createConnectorPullRequestStatusReader(
  *
  * @param installations - Connected GitHub installations.
  * @param repository - Lowercase `owner/repo` path.
- * @param pickStart - Chooses the start position among the other accounts.
+ * @param pickStart - Chooses the start position among `size` other accounts, of which one read
+ * tries `window`.
  * @returns The installations in the order to try.
  */
 function orderInstallationsForRepository(
   installations: ConnectorInstallation[],
   repository: string,
-  pickStart: (size: number) => number,
+  pickStart: (size: number, window: number) => number,
 ): ConnectorInstallation[] {
   const owner = repository.split('/')[0]
   const ownsRepository = (installation: ConnectorInstallation) => installation.externalAccountName?.toLowerCase() === owner
   const owners = installations.filter(ownsRepository)
   const others = installations.filter((installation) => !ownsRepository(installation))
   if (owners.length + others.length <= maximumInstallationsPerRead) return [...owners, ...others]
-  const picked = Math.trunc(pickStart(others.length))
+  const window = Math.max(1, maximumInstallationsPerRead - owners.length)
+  const picked = Math.trunc(pickStart(others.length, window))
   const start = Number.isFinite(picked) ? ((picked % others.length) + others.length) % others.length : 0
   return [...owners, ...others.slice(start), ...others.slice(0, start)]
 }

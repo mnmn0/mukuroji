@@ -21,6 +21,8 @@ export type AgentRunArtifactStatusDocumentClient = {
   send(command: GetCommand | UpdateCommand): Promise<{
     /** Row a read found. */
     Item?: Record<string, unknown>
+    /** Attributes an update returned. */
+    Attributes?: Record<string, unknown>
   }>
 }
 
@@ -56,9 +58,10 @@ export interface AgentRunArtifactStatusStore {
    * @param workItemId - Work Item ID.
    * @param now - Claim time.
    * @param minimumIntervalMs - Shortest interval between two refreshes.
-   * @returns Whether this caller may refresh.
+   * @returns The refresh sequence (1 for the Work Item's first refresh, one more for each claim
+   * after it) when this caller may refresh, or undefined when another refresh was claimed too recently.
    */
-  claimRefresh(directoryId: string, teamId: string, workItemId: string, now: Date, minimumIntervalMs: number): Promise<boolean>
+  claimRefresh(directoryId: string, teamId: string, workItemId: string, now: Date, minimumIntervalMs: number): Promise<number | undefined>
 }
 
 /**
@@ -162,29 +165,35 @@ export class DynamoDbAgentRunArtifactStatusStore implements AgentRunArtifactStat
   }
 
   /** @inheritdoc */
-  async claimRefresh(directoryId: string, teamId: string, workItemId: string, now: Date, minimumIntervalMs: number): Promise<boolean> {
+  async claimRefresh(directoryId: string, teamId: string, workItemId: string, now: Date, minimumIntervalMs: number): Promise<number | undefined> {
     try {
-      await this.#client.send(new UpdateCommand({
+      const response = await this.#client.send(new UpdateCommand({
         TableName: this.#tableName,
         Key: {
           directoryTeamId: createAgentRunPartition(directoryId, teamId),
           recordKey: artifactRefreshRecordKey(workItemId),
         },
-        UpdateExpression: 'SET #refreshedAt = :now, #workspaceId = :workspaceId, #workItemId = :workItemId',
+        // A row written before the count existed starts counting at its next claim.
+        UpdateExpression: 'SET #refreshedAt = :now, #workspaceId = :workspaceId, #workItemId = :workItemId ADD #refreshCount :one',
         ConditionExpression: 'attribute_not_exists(#recordKey) OR #refreshedAt <= :threshold',
         ExpressionAttributeNames: {
           '#recordKey': 'recordKey', '#refreshedAt': 'refreshedAt', '#workspaceId': 'workspaceId', '#workItemId': 'workItemId',
+          '#refreshCount': 'refreshCount',
         },
         ExpressionAttributeValues: {
           ':now': now.toISOString(),
           ':threshold': new Date(now.getTime() - minimumIntervalMs).toISOString(),
           ':workspaceId': directoryId,
           ':workItemId': workItemId,
+          ':one': 1,
         },
+        ReturnValues: 'UPDATED_NEW',
       }))
-      return true
+      const count: unknown = response.Attributes?.refreshCount
+      if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 1) throw createAgentRunIntegrityError()
+      return count
     } catch (error) {
-      if (isConditionalCheckFailure(error)) return false
+      if (isConditionalCheckFailure(error)) return undefined
       throw error
     }
   }

@@ -307,5 +307,11 @@ describe('AgentRunReportsLoadNotice', () => {
       .toBe('artifact-statuses')
     expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: false, hasPullRequests: false, statusesIncomplete: true }))
       .toBeUndefined()
+    // Older reports may list pull requests nobody checked, even when no shown report lists one.
+    expect(selectAgentRunReportLoadFailure({
+      reportsFailed: false, statusesFailed: false, hasPullRequests: false, hasOlderReports: true, statusesIncomplete: true,
+    })).toBe('artifact-statuses-incomplete')
+    expect(selectAgentRunReportLoadFailure({ reportsFailed: false, statusesFailed: true, hasPullRequests: false, hasOlderReports: true }))
+      .toBeUndefined()
   })
 })

@@ -79,8 +79,11 @@ export function useAgentRunReportCommentDetails({
     [accessToken, reports, teamId, workItemId],
   )
   const hasPullRequests = reports?.some((report) => report.artifacts.some((artifact) => artifact.type === 'pull-request')) === true
+  // Older reports than the shown ones may list pull requests, so the status read is asked whether
+  // it reached them even when no shown report lists one.
+  const hasOlderReports = !error && data?.hasMore === true
   const { data: statusData, error: statusError, mutate: refreshStatuses } = useWorkItemArtifactStatuses(
-    accessToken, teamId, workItemId, hasPullRequests ? reports?.length ?? 0 : 0,
+    accessToken, teamId, workItemId, hasPullRequests || hasOlderReports ? reports?.length ?? 0 : 0,
   )
   // A failed status read shows the plain links again rather than statuses that may be stale.
   const statuses = statusError || statusData?.workItemId !== workItemId ? undefined : statusData.items
@@ -116,6 +119,7 @@ export function useAgentRunReportCommentDetails({
       reportsFailed: Boolean(error),
       statusesFailed: Boolean(statusError),
       hasPullRequests,
+      hasOlderReports,
       statusesIncomplete: statuses !== undefined && statusData?.incomplete === true,
     })
     : undefined

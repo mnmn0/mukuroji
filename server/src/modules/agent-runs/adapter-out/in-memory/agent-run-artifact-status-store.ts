@@ -7,6 +7,8 @@ export class InMemoryAgentRunArtifactStatusStore implements AgentRunArtifactStat
   readonly statuses = new Map<string, Map<string, AgentRunArtifactStatus>>()
   /** Last refresh claim time by Work Item key. */
   readonly #refreshedAt = new Map<string, number>()
+  /** Refresh claims made so far by Work Item key. */
+  readonly #refreshCounts = new Map<string, number>()
 
   /** @inheritdoc */
   async getStatuses(directoryId: string, teamId: string, workItemId: string, urls: readonly string[]): Promise<AgentRunArtifactStatus[]> {
@@ -29,12 +31,14 @@ export class InMemoryAgentRunArtifactStatusStore implements AgentRunArtifactStat
   }
 
   /** @inheritdoc */
-  async claimRefresh(directoryId: string, teamId: string, workItemId: string, now: Date, minimumIntervalMs: number): Promise<boolean> {
+  async claimRefresh(directoryId: string, teamId: string, workItemId: string, now: Date, minimumIntervalMs: number): Promise<number | undefined> {
     const key = workItemKey(directoryId, teamId, workItemId)
     const last = this.#refreshedAt.get(key)
-    if (last !== undefined && last > now.getTime() - minimumIntervalMs) return false
+    if (last !== undefined && last > now.getTime() - minimumIntervalMs) return undefined
     this.#refreshedAt.set(key, now.getTime())
-    return true
+    const count = (this.#refreshCounts.get(key) ?? 0) + 1
+    this.#refreshCounts.set(key, count)
+    return count
   }
 }
 
