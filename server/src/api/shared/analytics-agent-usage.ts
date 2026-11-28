@@ -181,7 +181,8 @@ export type AnalyticsAgentCostAccess = {
  *
  * @param principal - Viewer.
  * @param workItems - Currently authorized Work Items of the query scope.
- * @returns The decision of each Team and the keys of the whole scope.
+ * @returns The decision of each Team and the keys of the whole scope, including the Work Items now
+ *   in a Project the viewer manages without managing the Team.
  */
 export async function readAnalyticsAgentCostAccess(
   principal: WorkspacePrincipal,
@@ -192,8 +193,17 @@ export async function readAnalyticsAgentCostAccess(
     const decision: [string, AgentRunCostAccess] = [teamId, await readAgentRunCostAccess(principal, teamId)]
     return decision
   })
+  const teams = new Map(decisions)
+  // A Project manager's view depends on which Work Items are in the managed Projects now, so moving
+  // a Work Item out of them must change the snapshot scope too.
+  const managedWorkItemKeys = workItems.flatMap((item) => {
+    const access = teams.get(item.teamId)
+    return access !== undefined && !access.coversTeam && access.managesProject(item.assignedProjectId)
+      ? [`work-item:${item.teamId}\0${item.id}`]
+      : []
+  })
   return {
-    teams: new Map(decisions),
-    scopeKeys: decisions.flatMap(([, access]) => access.scopeKeys).sort(),
+    teams,
+    scopeKeys: [...decisions.flatMap(([, access]) => access.scopeKeys), ...managedWorkItemKeys].sort(),
   }
 }

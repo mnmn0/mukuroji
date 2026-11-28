@@ -213,6 +213,45 @@ test('hides a cost snapshot once its creator no longer manages the Team', async 
   expect(await list()).toBe(0)
 })
 
+test('hides a Project manager\'s cost snapshot once a Work Item leaves the managed Project (ADR 0111)', async () => {
+  const teamProjects: Array<{ id: string; name: string; tone: 'blue' | 'green' }> = [{ id: 'refero', name: 'Refero', tone: 'blue' }, { id: 'beta', name: 'Beta', tone: 'green' }]
+  const projectAccesses: Array<{ teamId: string; projectId: string; role: 'manager' | 'member' }> = [
+    { teamId: 'core-team', projectId: 'refero', role: 'manager' },
+    { teamId: 'core-team', projectId: 'beta', role: 'member' },
+  ]
+  const { repository } = await configure('manager', 0, { teamProjects, projectAccesses })
+  const query = createQuery([usageWidgets[1]!])
+  await repository.createReport(workspaceId, 'demo@example.com', {
+    id: 'cost-report',
+    name: 'Cost report',
+    visibility: 'personal',
+    timeZone: query.timeZone,
+    filter: query.filter,
+    widgets: query.widgets,
+  })
+  const created = await analyticsApiRequest('/api/analytics/reports/cost-report/snapshots', { asOf: query.asOf })
+  expect(created.status).toBe(201)
+  const list = async () => {
+    const response = await app.request('/api/analytics/reports/cost-report/snapshots', { headers: { Authorization: 'Bearer test-token' } })
+    expect(response.status).toBe(200)
+    const body: { snapshots: AnalyticsSnapshotRecord[] } = await response.json()
+    return body.snapshots.length
+  }
+  expect(await list()).toBe(1)
+
+  // Beta is still readable, so only where the Work Item is changes.
+  configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    role: 'manager',
+    workspaceRole: 'member',
+    teamProjects,
+    projectAccesses,
+    detailAssignedProjectIds: { 'work-item-1': 'beta' },
+  })
+  setTestAppDependencies({ analytics: repository })
+  expect(await list()).toBe(0)
+})
+
 test('fails with 413 instead of a partial total when the period holds too many runs', async () => {
   const { runs } = await configure('manager')
   for (let index = 0; index < MAX_ANALYTICS_AGENT_USAGE_RUNS; index += 1) {

@@ -29,7 +29,9 @@ Project の manager はその Project の AI コストの合計を予算レポ�
    Factory board の Project 行・Work Item 行・total）は今どおり、含まれる Run の費用が全部見えるときだけ費用を出す。
 3. **Analytics の snapshot**：`agent-cost` を含む snapshot の permission scope hash には、ADR 0108 の「manager である
    Team の ID」に代えて、判定の範囲を表す key（`team:<teamId>`、`project:<teamId>\0<projectId>`、
-   `member:<teamId>\0<userKey>`）を並べて加える。範囲が変わった人には、その snapshot を一覧・export で見せない。
+   `member:<teamId>\0<userKey>`）を並べて加える。Team 全体を見られない人には、今その人が管理する Project にある
+   Work Item の key（`work-item:<teamId>\0<workItemId>`）も加え、Work Item が管理外の Project へ移ったときにも hash が
+   変わるようにする。範囲が変わった人には、その snapshot を一覧・export で見せない。
    見られない Run は件数を warning で返し、数えられる Run がない group の値は `null` にする（ADR 0108 のまま）。
 4. **変えないこと**：定期配信の runner は usage を読まない（ADR 0108）。予算レポートは Project の合計だけを出す（ADR 0119）。
 

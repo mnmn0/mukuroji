@@ -14,6 +14,15 @@ export type AgentRunCostAccess = {
    */
   allows: (run: { assigneeUserId: string }, projectId: string | undefined) => boolean
   /**
+   * Whether the viewer manages the Project, so every run of a Work Item in it is visible.
+   *
+   * @param projectId - Project ID, or undefined for a Work Item without a Project.
+   * @returns Whether the Project's runs are visible whoever ran them.
+   */
+  managesProject: (projectId: string | undefined) => boolean
+  /** Whether every run of the Team is visible, so where a Work Item is does not matter. */
+  coversTeam: boolean
+  /**
    * Sorted keys of the scope the decision covers, for a stored snapshot to notice when it changes:
    * `team:<teamId>`, `project:<teamId>\0<projectId>`, and `member:<teamId>\0<userKey>`.
    */
@@ -64,9 +73,10 @@ async function readTeamContext(
  */
 export async function readAgentRunCostAccess(principal: WorkspacePrincipal, teamId: string): Promise<AgentRunCostAccess> {
   const own = `member:${teamId}\0${principal.userKey}`
-  if (administersWorkspace(principal)) return { allows: () => true, scopeKeys: [`team:${teamId}`] }
+  const team: AgentRunCostAccess = { allows: () => true, managesProject: () => true, coversTeam: true, scopeKeys: [`team:${teamId}`] }
+  if (administersWorkspace(principal)) return team
   const manager = await readTeamContext(principal, teamId, 'manager')
-  if (manager && managesEveryTeamProject(manager)) return { allows: () => true, scopeKeys: [`team:${teamId}`] }
+  if (manager && managesEveryTeamProject(manager)) return team
   // A direct Team grant read at viewer level reports every Project role as viewer, so the Projects
   // are judged from the manager-level context when there is one.
   const context = manager ?? await readTeamContext(principal, teamId, 'viewer')
@@ -75,11 +85,13 @@ export async function readAgentRunCostAccess(principal: WorkspacePrincipal, team
     : context.team.projects.filter((project) => principalManagesTeamWorkItem(principal, context, project.id)).map((project) => project.id))
   // An enterprise `teams.manage` grant manages every Project without a Project manager role.
   if (manager && manager.team.projects.every((project) => managedProjectIds.has(project.id))) {
-    return { allows: () => true, scopeKeys: [`team:${teamId}`] }
+    return team
   }
   return {
     allows: (run, projectId) =>
       run.assigneeUserId === principal.userKey || projectId !== undefined && managedProjectIds.has(projectId),
+    managesProject: (projectId) => projectId !== undefined && managedProjectIds.has(projectId),
+    coversTeam: false,
     scopeKeys: [...[...managedProjectIds].map((projectId) => `project:${teamId}\0${projectId}`), own].sort(),
   }
 }

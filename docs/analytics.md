@@ -258,7 +258,8 @@ evidence、定期配信の hash に含まれます。
 Work Item の Run、それ以外は本人の agent の Run）、見られない Run は件数を warning で返します（数えられる Run の
 ない group の値は `null`）。費用が届いていない Run は 0 として数え、usage の読み取りが上限で止まった Run は合計が
 下限であることを warning で返します。`agent-cost` を含む snapshot の permission scope hash には、Work Item の
-Team ごとに費用を見られる範囲の key（`team:`・`project:`・`member:`）を加え、一覧・export の再検証でも同じ規則で比べます。`agent-cost` のない query の
+Team ごとに費用を見られる範囲の key（`team:`・`project:`・`member:`、Team 全体を見られない人には管理する Project に
+今ある Work Item の `work-item:`）を加え、一覧・export の再検証でも同じ規則で比べます。`agent-cost` のない query の
 hash は変わりません。Software factory を deploy していない環境と定期配信の runner は usage を読まず、widget は
 warning だけを返します（hash にも Team を加えません）。
 
