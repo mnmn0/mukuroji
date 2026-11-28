@@ -38,9 +38,8 @@ export {
 export {
   DynamoDbGitHubIntegrationStore,
   InMemoryGitHubIntegrationStore,
-  parseGitHubPullRequestSnapshotRow,
-  parseGitHubRepositoryLinkRow,
 } from './adapter-out/dynamodb/github-integration-store'
+export { DynamoDbGitHubNotificationReader } from './adapter-out/dynamodb/github-notification-reader'
 export {
   DynamoDbGitHubNotificationSink,
   InMemoryGitHubNotificationSink,

@@ -9,6 +9,8 @@ import {
   type AuditProjectionEvent,
   type PlanningMilestoneNotificationRevalidator,
   type TimesheetReminderRevalidator,
+  type GitHubPullRequestNotificationRevalidator,
+  readGitHubPullRequestNotificationFence,
   type WeeklyReportReminderRevalidator,
 } from '../../modules/collaboration/adapter-in/events/collaboration-projection'
 import { DynamoDbEnterpriseIdentityReadClient } from '../../modules/enterprise-identity'
@@ -39,6 +41,11 @@ export type NotificationDeliveryAuthorizationTables = {
    * without it every Milestone notification is suppressed.
    */
   planningMilestones?: PlanningMilestoneNotificationRevalidator
+  /**
+   * Rereads a GitHub notification's repository link before it is sent; without it every GitHub
+   * pull request notification is suppressed.
+   */
+  githubPullRequests?: GitHubPullRequestNotificationRevalidator
 }
 
 /**
@@ -67,6 +74,8 @@ export function createProductionNotificationDeliveryAuthorizer(
     if (!(await readMemberAccessExpiryNoticeFence(event)).current) return false
     // A Milestone may have been archived or moved, or the recipient may have stopped watching it.
     if (!await isCurrentPlanningMilestoneNotification(event, tables.planningMilestones, delivery.memberKey)) return false
+    // The repository may have been unlinked or moved to another Team since the notification was saved.
+    if (!(await readGitHubPullRequestNotificationFence(event, tables.githubPullRequests, { checkSnapshot: false })).current) return false
     return authorizeNotificationDelivery(event, delivery.memberKey, enterpriseIdentity, createNotificationDeliveryAuthorizationCache(),
     (request) => documents.get(request), (workspaceId, teamId, entryId) => triage.getEntry(workspaceId, teamId, entryId), readApproval)
   }

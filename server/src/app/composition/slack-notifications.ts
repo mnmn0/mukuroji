@@ -22,6 +22,7 @@ import { isCurrentChannelPostSource } from '../../modules/collaboration/adapter-
 import { createProductionTenantAvailability } from './tenant-administration'
 import { createConfiguredTimesheetReminderRevalidator } from './timesheet-reminders'
 import { createConfiguredPlanningMilestoneNotificationRevalidator } from './planning-milestone-notifications'
+import { createConfiguredGitHubPullRequestNotificationRevalidator } from './github-pull-request-notifications'
 import { createConfiguredWeeklyReportReminderRevalidator } from './weekly-report-reminders'
 
 /**
@@ -44,6 +45,7 @@ export function createProductionSlackNotificationHandler() {
     timesheetReminders: createConfiguredTimesheetReminderRevalidator(environment.ANALYTICS_TABLE_NAME?.trim()),
     weeklyReportReminders: createConfiguredWeeklyReportReminderRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
     planningMilestones,
+    githubPullRequests: createConfiguredGitHubPullRequestNotificationRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
   })
   const tenant = createProductionTenantAvailability()
   // Without an origin (local runs), messages keep their text and omit links.
