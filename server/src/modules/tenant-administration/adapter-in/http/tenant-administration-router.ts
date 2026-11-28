@@ -20,8 +20,6 @@ import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   isKnownCurrencyCode,
-  MAX_AGENT_COST_USD_EXCHANGE_RATE,
-  MAX_AGENT_COST_USD_EXCHANGE_RATES,
   readWorkspaceAgentCostSettings,
   readPlanningUpdateTemplateSettings,
   readWeeklyReportReminderSettings,
@@ -513,17 +511,16 @@ function readTenantDefaultCurrencyInput(value: unknown): string {
  *
  * @param value - Untrusted `agentCost` field of the request body.
  * @returns The validated settings.
- * @throws TenantAdministrationError When the flag is not a boolean, a currency is not a known
- *   ISO 4217 code other than USD, a rate is not positive with at most six fraction digits, or there
- *   are too many rates.
+ * @throws TenantAdministrationError When the settings are not an object with a boolean
+ *   `includeInProjectBudgets`.
  */
 function readTenantAgentCostInput(value: unknown): WorkspaceAgentCostSettings {
   const settings = readWorkspaceAgentCostSettings(value)
-  if (!settings || !Object.keys(settings.usdExchangeRates).every((currency) => isKnownCurrencyCode(currency))) {
+  if (!settings) {
     throw new TenantAdministrationError(
       400,
       'InvalidTenantAgentCostSettings',
-      `Agent cost settings need a boolean flag and at most ${MAX_AGENT_COST_USD_EXCHANGE_RATES} USD rates keyed by ISO 4217 codes other than USD, each above 0 and at most ${MAX_AGENT_COST_USD_EXCHANGE_RATE} with up to six fraction digits.`,
+      'Agent cost settings need a boolean includeInProjectBudgets.',
     )
   }
   return settings

@@ -121,16 +121,22 @@ test('leaves out managers whose Workspace access ended, so an expired owner does
   expect(status?.managerMemberKeys).toEqual(['lead@example.com'])
 })
 
-test('counts Agent Run cost when the Workspace profile includes it (ADR 0119)', async () => {
+test('counts Agent Run cost of a USD budget when the Workspace profile includes it (ADR 0119)', async () => {
   const now = new Date('2026-01-10T00:00:00.000Z')
-  const withAgentCost = (includeInProjectBudgets: boolean) => sources({
-    readProfile: async () => ({ status: 'active', agentCost: { includeInProjectBudgets, usdExchangeRates: { JPY: 100 } } }),
+  const base = sources()
+  const withAgentCost = (includeInProjectBudgets: boolean, currency: string) => sources({
+    readProfile: async () => ({ status: 'active', agentCost: { includeInProjectBudgets } }),
+    getBudget: async () => ({ ...budget, currency }),
+    listExpenses: async (...args) => (await base.listExpenses(...args)).map((expense) => ({ ...expense, currency })),
     listWorkItems: async () => ({ issues: [{ id: 'a', assignedProjectId: 'p' }] }),
-    // $25 at 100 JPY is 2,500 yen on top of the 5,000 yen expense.
+    // $25 is 2,500 cents on top of the $50 expense of a $100 budget.
     listAgentRunCosts: async () => ({ runs: [{ finishedAt: '2026-01-06T00:00:00.000Z', costMicroUsd: 25_000_000 }], truncated: false }),
   })
-  const [included] = await createBudgetThresholdReader(withAgentCost(true)).listProjectBudgetStatuses('w', now)
+  const [included] = await createBudgetThresholdReader(withAgentCost(true, 'USD')).listProjectBudgetStatuses('w', now)
   expect(included).toMatchObject({ actualCostMinor: 7_500, consumedPercent: 75 })
-  const [excluded] = await createBudgetThresholdReader(withAgentCost(false)).listProjectBudgetStatuses('w', now)
+  const [excluded] = await createBudgetThresholdReader(withAgentCost(false, 'USD')).listProjectBudgetStatuses('w', now)
   expect(excluded).toMatchObject({ actualCostMinor: 5_000, consumedPercent: 50 })
+  // The cost is not converted, so a yen budget leaves it out.
+  const [yen] = await createBudgetThresholdReader(withAgentCost(true, 'JPY')).listProjectBudgetStatuses('w', now)
+  expect(yen).toMatchObject({ actualCostMinor: 5_000, consumedPercent: 50 })
 })

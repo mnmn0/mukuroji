@@ -190,10 +190,10 @@ function measureProjectBudget(
     actualByDate.set(expense.date, day)
   }
 
-  // Agent Run cost is actual cost in the budget currency when the Workspace counts it and has a
-  // rate for the currency (ADR 0119); it needs a budget currency to convert into.
+  // Agent Run cost stays in US dollars and is actual cost only for a USD budget (ADR 0119); other
+  // budgets show it beside the actual cost.
   const agentCostTotal = input.agentCost && currency !== undefined && measured
-    ? sumProjectAgentCost(input.agentCost, currency, input.from, asOf)
+    ? sumProjectAgentCost(input.agentCost, input.from, asOf)
     : undefined
   for (const [date, minor] of agentCostTotal?.byDate ?? []) {
     const day = actualByDate.get(date) ?? { minutes: 0, costMinor: 0 }

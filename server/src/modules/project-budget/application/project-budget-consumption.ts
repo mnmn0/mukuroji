@@ -8,7 +8,7 @@ import {
 import { splitTimeEntryByLocalDate } from '../../time-tracking'
 import {
   MAX_PROJECT_AGENT_COST_RUNS,
-  resolveProjectAgentCostRate,
+  resolveProjectAgentCostMode,
   sumProjectAgentCost,
   toProjectAgentRunCosts,
   type ProjectAgentRunCostReader,
@@ -217,8 +217,9 @@ async function loadAgentCostMinor(
 ): Promise<number> {
   const { listAgentRunCosts, listWorkItems, readAgentCostSettings } = ports
   if (!listAgentRunCosts || !listWorkItems || !readAgentCostSettings) return 0
-  const rate = resolveProjectAgentCostRate(await readAgentCostSettings(scope.workspaceId), budget.currency)
-  if (rate?.usdExchangeRate === undefined) return 0
+  // The cost stays in US dollars, so only a USD budget adds it, and other budgets read no runs.
+  const mode = resolveProjectAgentCostMode(await readAgentCostSettings(scope.workspaceId), budget.currency)
+  if (!mode?.addToActualCost) return 0
   const workItemIds = new Set<string>()
   let startAfterIssueId: string | undefined
   let pages = 0
@@ -250,8 +251,7 @@ async function loadAgentCostMinor(
     maxRuns: MAX_PROJECT_AGENT_COST_RUNS,
   })
   return sumProjectAgentCost(
-    { usdExchangeRate: rate.usdExchangeRate, costs: toProjectAgentRunCosts(read, timeZone) },
-    budget.currency,
+    { addToActualCost: true, costs: toProjectAgentRunCosts(read, timeZone) },
     budget.periodFrom,
     asOf,
   ).amountMinor

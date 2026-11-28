@@ -36,40 +36,32 @@ export const Default: Story = {
   },
 }
 
-/** A Workspace that counts coding agent cost in the budget at 150 JPY per USD (ADR 0119). */
+/** A yen budget shows the coding agent cost in US dollars beside the actual cost (ADR 0119). */
 export const WithAgentCost: Story = {
   args: {
     report: {
       ...projectBudgetReportFixture,
-      agentCost: {
-        status: 'included',
-        estimatedCostMicroUsd: 80_000_000,
-        amountMinor: 12_000,
-        usdExchangeRate: 150,
-        runCount: 14,
-        truncated: false,
-      },
-      budgetConsumedPercent: 40,
+      agentCost: { status: 'separate-currency', estimatedCostMicroUsd: 80_000_000, runCount: 14, truncated: false },
     },
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    await expect(canvas.getByTestId('project-budget-figures')).toHaveTextContent('480,000')
-    await expect(canvas.getByTestId('project-budget-figures')).toHaveTextContent('coding agent')
+    await expect(canvas.getByTestId('project-budget-agent-cost-separate')).toHaveTextContent('$80.00')
+    await expect(canvas.getByTestId('project-budget-figures')).toHaveTextContent('468,000')
   },
 }
 
-/** A Workspace that counts coding agent cost but has no rate for the budget currency. */
-export const AgentCostWithoutRate: Story = {
+/** A USD budget adds the coding agent cost to the actual cost; the read was cut at its limit. */
+export const UsdBudgetWithAgentCost: Story = {
   args: {
     report: {
       ...projectBudgetReportFixture,
-      agentCost: { status: 'missing-exchange-rate', estimatedCostMicroUsd: 80_000_000, runCount: 14, truncated: true },
+      agentCost: { status: 'included', estimatedCostMicroUsd: 80_000_000, amountMinor: 8_000, runCount: 14, truncated: true },
     },
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    await expect(canvas.getByTestId('project-budget-agent-cost-missing-rate')).toHaveTextContent('$80.00')
+    await expect(canvas.getByTestId('project-budget-figures')).toHaveTextContent('coding agent')
   },
 }
 

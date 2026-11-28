@@ -372,7 +372,7 @@ export const timeTrackingMessages = {
   'timeTracking.projectBudget.consumed': '予算の {percent}% を消化',
   'timeTracking.projectBudget.includesExpenses': 'うち承認済みの経費 {amount}',
   'timeTracking.projectBudget.includesAgentCost': 'うち coding agent の推定費用 {amount}',
-  'timeTracking.projectBudget.agentCostMissingRate': 'coding agent の推定費用 {amount} は、予算の通貨への換算レートが Workspace 設定にないので含めていません。',
+  'timeTracking.projectBudget.agentCostSeparate': 'coding agent の推定費用 {amount}(USD のまま扱うので、USD 以外の予算の実績には足していません)',
   'timeTracking.projectBudget.agentCostTruncated': 'Agent Run が多いため、coding agent の推定費用は新しい Run から読める分だけを数えています(下限の値です)。',
   'timeTracking.projectBudget.pendingExpenses': '承認待ちの経費 {amounts} は、承認されるまで実績コストと消化率に含めていません。',
   'timeTracking.projectBudget.actualEffort': '実績工数',

@@ -1,7 +1,6 @@
 import {
-  convertAgentCostMicroUsdToMinor,
+  agentCostMicroUsdToCents,
   toWorkspaceLocalDate,
-  resolveAgentCostUsdExchangeRate,
   type ProjectBudgetAgentCost,
   type WorkspaceAgentCostSettings,
 } from '@mukuroji/contracts'
@@ -82,17 +81,20 @@ export function projectAgentRunFinishDateTest(
 
 /** Agent Run cost a Project budget measurement adds, already read. */
 export type ProjectAgentCostInput = {
-  /** Rate of the budget currency per US dollar, or undefined when the Workspace has none. */
-  usdExchangeRate: number | undefined
+  /**
+   * Whether the cost is added to the actual cost: only for a budget in USD, because the cost is
+   * not converted to other currencies.
+   */
+  addToActualCost: boolean
   /** Runs and whether the read was cut. */
   costs: ProjectAgentRunCosts
 }
 
-/** Converted Agent Run cost of a Project within a local date range. */
+/** Agent Run cost of a Project within a local date range. */
 export type ProjectAgentCostTotal = {
-  /** Converted cost per local date, in minor units of the budget currency. */
+  /** Cost per local date in US cents; empty when the cost is not added to the actual cost. */
   byDate: ReadonlyMap<string, number>
-  /** Sum of `byDate`; zero when no rate is set. */
+  /** Sum of `byDate`; zero when the cost is not added. */
   amountMinor: number
   /** Estimated cost in millionths of a US dollar of the runs in the range. */
   estimatedCostMicroUsd: number
@@ -101,19 +103,16 @@ export type ProjectAgentCostTotal = {
 }
 
 /**
- * Totals the Agent Run cost of a Project within a local date range in the budget currency
- * (ADR 0119). Each day's US dollar cost is converted once, so the cumulative series and the total
- * add up to the same amount.
+ * Totals the Agent Run cost of a Project within a local date range (ADR 0119). Each day's cost is
+ * rounded to cents once, so the cumulative series and the total add up to the same amount.
  *
- * @param input - Runs and the rate.
- * @param currency - Budget currency.
+ * @param input - Runs and whether they are added to the actual cost.
  * @param from - First local date counted, or undefined for no lower bound.
  * @param to - Last local date counted.
- * @returns The converted cost by date and in total.
+ * @returns The cost by date in cents and in total.
  */
 export function sumProjectAgentCost(
   input: ProjectAgentCostInput,
-  currency: string,
   from: string | undefined,
   to: string,
 ): ProjectAgentCostTotal {
@@ -128,55 +127,55 @@ export function sumProjectAgentCost(
   }
   const byDate = new Map<string, number>()
   let amountMinor = 0
-  if (input.usdExchangeRate !== undefined) {
+  if (input.addToActualCost) {
     for (const [date, micro] of microByDate) {
-      const minor = convertAgentCostMicroUsdToMinor(micro, currency, input.usdExchangeRate)
-      byDate.set(date, minor)
-      amountMinor += minor
+      const cents = agentCostMicroUsdToCents(micro)
+      byDate.set(date, cents)
+      amountMinor += cents
     }
   }
   return { byDate, amountMinor, estimatedCostMicroUsd, runCount }
 }
 
 /**
- * Describes the Agent Run cost a budget report counts.
+ * Describes the Agent Run cost of a budget report.
  *
- * @param input - Runs and the rate.
+ * @param input - Runs and whether they are added to the actual cost.
  * @param total - The runs' total within the report range.
  * @returns The report's `agentCost` field.
  */
 export function describeProjectAgentCost(input: ProjectAgentCostInput, total: ProjectAgentCostTotal): ProjectBudgetAgentCost {
-  return input.usdExchangeRate === undefined
+  return input.addToActualCost
     ? {
-        status: 'missing-exchange-rate',
+        status: 'included',
         estimatedCostMicroUsd: total.estimatedCostMicroUsd,
+        amountMinor: total.amountMinor,
         runCount: total.runCount,
         truncated: input.costs.truncated,
       }
     : {
-        status: 'included',
+        status: 'separate-currency',
         estimatedCostMicroUsd: total.estimatedCostMicroUsd,
-        amountMinor: total.amountMinor,
-        usdExchangeRate: input.usdExchangeRate,
         runCount: total.runCount,
         truncated: input.costs.truncated,
       }
 }
 
 /**
- * Returns whether a Workspace counts Agent Run cost in a Project budget, and at which rate.
+ * Returns whether a Workspace counts Agent Run cost in a Project budget, and whether it is added
+ * to the actual cost.
  *
  * @param settings - Workspace agent cost settings, or undefined when never saved.
  * @param currency - Budget currency.
- * @returns Undefined when the Workspace does not count the cost; otherwise the rate, which is
- *   undefined when the Workspace has none for the currency.
+ * @returns Undefined when the Workspace does not count the cost; otherwise whether the budget is
+ *   in USD, the only currency the cost is added to.
  */
-export function resolveProjectAgentCostRate(
+export function resolveProjectAgentCostMode(
   settings: WorkspaceAgentCostSettings | undefined,
   currency: string,
-): { usdExchangeRate: number | undefined } | undefined {
+): { addToActualCost: boolean } | undefined {
   if (!settings?.includeInProjectBudgets) return undefined
-  return { usdExchangeRate: resolveAgentCostUsdExchangeRate(settings, currency) }
+  return { addToActualCost: currency === 'USD' }
 }
 
 /**

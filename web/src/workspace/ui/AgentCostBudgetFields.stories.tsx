@@ -27,7 +27,7 @@ const meta = {
   title: 'Application/Workspace/Agent Cost Budget Fields',
   component: AgentCostBudgetFields,
   args: {
-    settings: { includeInProjectBudgets: true, usdExchangeRates: { JPY: 150 } },
+    settings: { includeInProjectBudgets: true },
     currency: 'JPY',
     disabled: false,
     onChange: () => undefined,
@@ -40,23 +40,18 @@ export default meta
 /** Story type of the agent cost settings stories. */
 type Story = StoryObj<typeof meta>
 
-/** Counting agent cost at 150 JPY per USD. */
+/** Showing agent cost in US dollars beside a yen budget. */
 export const Default: Story = {}
 
-/** Turning the setting on and typing a rate saves both; an invalid rate is not saved. */
+/** A USD Workspace adds the cost to the budget actual. */
+export const UsdWorkspace: Story = { args: { currency: 'USD' } }
+
+/** Turning the setting on saves it. */
 export const Editing: Story = {
   render: () => <EditableAgentCost />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await userEvent.click(canvas.getByTestId('tenant-agent-cost-include'))
-    await expect(canvas.getByText('この通貨のレートがないので、予算には含めません。レートを入力してください。')).toBeVisible()
-    await userEvent.type(canvas.getByTestId('tenant-agent-cost-rate'), '152.5')
-    await expect(canvas.getByTestId('agent-cost-settings'))
-      .toHaveTextContent('{"includeInProjectBudgets":true,"usdExchangeRates":{"JPY":152.5}}')
-    await userEvent.clear(canvas.getByTestId('tenant-agent-cost-rate'))
-    await userEvent.type(canvas.getByTestId('tenant-agent-cost-rate'), '-1')
-    await expect(canvas.getByRole('alert')).toBeVisible()
-    await expect(canvas.getByTestId('agent-cost-settings'))
-      .toHaveTextContent('{"includeInProjectBudgets":true,"usdExchangeRates":{}}')
+    await expect(canvas.getByTestId('agent-cost-settings')).toHaveTextContent('{"includeInProjectBudgets":true}')
   },
 }

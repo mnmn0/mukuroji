@@ -230,9 +230,9 @@ function ReportContent({ locale, report, t }: { locale: Locale; report: ProjectB
         {Object.keys(report.pendingExpenseByCurrency).length > 0 ? (
           <li>{interpolate(t('timeTracking.projectBudget.pendingExpenses'), { amounts: formatCostsByCurrency(report.pendingExpenseByCurrency, locale) })}</li>
         ) : null}
-        {report.agentCost?.status === 'missing-exchange-rate' && report.agentCost.runCount > 0 ? (
-          <li data-testid="project-budget-agent-cost-missing-rate">
-            {interpolate(t('timeTracking.projectBudget.agentCostMissingRate'), {
+        {report.agentCost?.status === 'separate-currency' ? (
+          <li data-testid="project-budget-agent-cost-separate">
+            {interpolate(t('timeTracking.projectBudget.agentCostSeparate'), {
               amount: formatMinorAmount(Math.round(report.agentCost.estimatedCostMicroUsd / 10_000), 'USD', locale),
             })}
           </li>

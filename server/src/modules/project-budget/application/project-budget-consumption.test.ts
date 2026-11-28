@@ -184,16 +184,16 @@ describe('sumApprovedProjectExpenses', () => {
 
 describe('loadProjectBudgetConsumption Agent Run cost (ADR 0119)', () => {
   /**
-   * Builds ports that count Agent Run cost at a JPY rate.
+   * Builds ports that count Agent Run cost.
    *
-   * @param rates - USD rates of the Workspace.
+   * @param currency - Currency of the budget and of the time cost.
    * @param reads - Receives each Agent Run cost read.
    * @returns The ports.
    */
-  function agentPorts(rates: Record<string, number>, reads: unknown[]): ProjectBudgetConsumptionPorts {
+  function agentPorts(currency: string, reads: unknown[]): ProjectBudgetConsumptionPorts {
     return {
-      ...ports(budget({ periodFrom: '2026-01-05', periodTo: '2026-03-31' }), [entry('2026-01-05T00:00:00.000Z', 3_000)], []),
-      readAgentCostSettings: async () => ({ includeInProjectBudgets: true, usdExchangeRates: rates }),
+      ...ports(budget({ periodFrom: '2026-01-05', periodTo: '2026-03-31', currency }), [entry('2026-01-05T00:00:00.000Z', 3_000, { currency })], []),
+      readAgentCostSettings: async () => ({ includeInProjectBudgets: true }),
       listWorkItems: async (_workspaceId, _teamId, startAfterIssueId) => startAfterIssueId === undefined
         ? { issues: [{ id: 'a', assignedProjectId: 'p' }, { id: 'b', assignedProjectId: 'other' }], nextStartAfterIssueId: 'b' }
         : { issues: [{ id: 'c', assignedProjectId: 'p' }] },
@@ -203,7 +203,7 @@ describe('loadProjectBudgetConsumption Agent Run cost (ADR 0119)', () => {
         reads.push({ workItemIds: [...input.workItemIds].sort(), since: input.since, until: input.until, counts })
         return {
           runs: [
-            // $10 at 150 JPY is 1,500 yen; a run before the period is left out.
+            // $10 is 1,000 cents; a run before the period is left out.
             { finishedAt: '2026-01-10T00:00:00.000Z', costMicroUsd: 10_000_000 },
             { finishedAt: '2026-01-04T00:00:00.000Z', costMicroUsd: 10_000_000 },
           ],
@@ -213,24 +213,24 @@ describe('loadProjectBudgetConsumption Agent Run cost (ADR 0119)', () => {
     }
   }
 
-  test('adds the converted cost of the Project runs in the period', async () => {
+  test('adds the cost of the Project runs in the period to a USD budget', async () => {
     const reads: unknown[] = []
-    const consumption = await loadProjectBudgetConsumption(scope, 'Asia/Tokyo', new Date('2026-01-20T00:00:00.000Z'), agentPorts({ JPY: 150 }, reads))
+    const consumption = await loadProjectBudgetConsumption(scope, 'Asia/Tokyo', new Date('2026-01-20T00:00:00.000Z'), agentPorts('USD', reads))
 
     expect(reads).toEqual([{ workItemIds: ['a', 'c'], since: '2026-01-04T10:00:00.000Z', until: '2026-01-21T14:00:00.000Z', counts: [false, true, true, false] }])
-    expect(consumption).toMatchObject({ actualCostMinor: 4_500, consumedPercent: 45 })
+    expect(consumption).toMatchObject({ actualCostMinor: 4_000, consumedPercent: 40 })
   })
 
-  test('adds nothing and reads no runs without a rate for the budget currency', async () => {
+  test('adds nothing and reads no runs for a budget in another currency', async () => {
     const reads: unknown[] = []
-    const consumption = await loadProjectBudgetConsumption(scope, 'Asia/Tokyo', new Date('2026-01-20T00:00:00.000Z'), agentPorts({ EUR: 0.9 }, reads))
+    const consumption = await loadProjectBudgetConsumption(scope, 'Asia/Tokyo', new Date('2026-01-20T00:00:00.000Z'), agentPorts('JPY', reads))
 
     expect(reads).toEqual([])
     expect(consumption).toMatchObject({ actualCostMinor: 3_000 })
   })
 
   test('fails instead of counting a partial Work Item scope', async () => {
-    const base = agentPorts({ JPY: 150 }, [])
+    const base = agentPorts('USD', [])
     let page = 0
     await expect(loadProjectBudgetConsumption(scope, 'Asia/Tokyo', new Date('2026-01-20T00:00:00.000Z'), {
       ...base,

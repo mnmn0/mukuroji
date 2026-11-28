@@ -160,21 +160,17 @@ export function readProjectBudgetReport(value: unknown): ProjectBudgetReport | u
  */
 function readAgentCost(value: unknown): ProjectBudgetAgentCost | false {
   if (!isRecord(value)) return false
-  const { status, estimatedCostMicroUsd, amountMinor, usdExchangeRate, runCount, truncated } = value
+  const { status, estimatedCostMicroUsd, amountMinor, runCount, truncated } = value
   if (
     !isNonnegativeSafeInteger(estimatedCostMicroUsd) || !isNonnegativeSafeInteger(runCount) || typeof truncated !== 'boolean'
   ) {
     return false
   }
-  if (status === 'missing-exchange-rate') {
-    return amountMinor === undefined && usdExchangeRate === undefined
-      ? { status, estimatedCostMicroUsd, runCount, truncated }
-      : false
+  if (status === 'separate-currency') {
+    return amountMinor === undefined ? { status, estimatedCostMicroUsd, runCount, truncated } : false
   }
-  if (status !== 'included' || !isNonnegativeSafeInteger(amountMinor) || !isFiniteNumber(usdExchangeRate) || usdExchangeRate <= 0) {
-    return false
-  }
-  return { status, estimatedCostMicroUsd, amountMinor, usdExchangeRate, runCount, truncated }
+  if (status !== 'included' || !isNonnegativeSafeInteger(amountMinor)) return false
+  return { status, estimatedCostMicroUsd, amountMinor, runCount, truncated }
 }
 
 /**

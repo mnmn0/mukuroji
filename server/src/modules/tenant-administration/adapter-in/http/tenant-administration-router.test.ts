@@ -824,7 +824,7 @@ test('accepts coding agent cost settings from an administrator and validates the
     defaultPolicy: { defaultMemberRole: 'member' },
     expectedRevision: 1,
   }
-  const agentCost = { includeInProjectBudgets: true, usdExchangeRates: { JPY: 150.5 } }
+  const agentCost = { includeInProjectBudgets: true }
   const memberUpdates: unknown[] = []
   const member = await createCalendarRouter(createClient(snapshot, []), memberUpdates).request('/api/tenant/profile', {
     body: JSON.stringify({ ...body, agentCost }),
@@ -838,11 +838,9 @@ test('accepts coding agent cost settings from an administrator and validates the
   const admin = createCalendarRouter(createClient(snapshot, []), updates, true)
   for (const rejectedSettings of [
     null,
-    { includeInProjectBudgets: 'yes', usdExchangeRates: {} },
-    { includeInProjectBudgets: true, usdExchangeRates: { USD: 1 } },
-    { includeInProjectBudgets: true, usdExchangeRates: { ZZZ: 1 } },
-    { includeInProjectBudgets: true, usdExchangeRates: { JPY: -1 } },
-    { includeInProjectBudgets: true, usdExchangeRates: { JPY: 150.1234567 } },
+    {},
+    [],
+    { includeInProjectBudgets: 'yes' },
   ]) {
     const rejected = await admin.request('/api/tenant/profile', {
       body: JSON.stringify({ ...body, agentCost: rejectedSettings }),

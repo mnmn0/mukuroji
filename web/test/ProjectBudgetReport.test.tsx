@@ -91,14 +91,15 @@ describe('Project budget report', () => {
   test('reads and shows the coding agent cost the budget counts (ADR 0119)', () => {
     const included = {
       ...projectBudgetReportFixture,
-      agentCost: { status: 'included' as const, estimatedCostMicroUsd: 80_000_000, amountMinor: 12_000, usdExchangeRate: 150, runCount: 14, truncated: true },
+      agentCost: { status: 'included' as const, estimatedCostMicroUsd: 80_000_000, amountMinor: 12_000, runCount: 14, truncated: true },
     }
     expect(readProjectBudgetReport(JSON.parse(JSON.stringify(included)))).toEqual(included)
     expect(readProjectBudgetReport({ ...included, agentCost: { ...included.agentCost, amountMinor: -1 } })).toBeUndefined()
     expect(readProjectBudgetReport({
       ...included,
-      agentCost: { status: 'missing-exchange-rate', estimatedCostMicroUsd: 1, runCount: 1, truncated: false, amountMinor: 1 },
+      agentCost: { status: 'separate-currency', estimatedCostMicroUsd: 1, runCount: 1, truncated: false, amountMinor: 1 },
     })).toBeUndefined()
+    expect(readProjectBudgetReport({ ...included, agentCost: { ...included.agentCost, status: 'missing-exchange-rate' } })).toBeUndefined()
 
     const html = renderToStaticMarkup(
       <ProjectBudgetReportPanel
@@ -113,10 +114,27 @@ describe('Project budget report', () => {
         onRetry={() => undefined}
       />,
     )
-    // Time cost 468,000 plus 12,000 of agent cost.
+    // Time cost 468,000 plus 12,000 of agent cost (the fixture's figures, read as one currency).
     expect(html).toContain('480,000')
     expect(html).toContain('うち coding agent の推定費用')
     expect(html).toContain('下限の値です')
+
+    const separate = renderToStaticMarkup(
+      <ProjectBudgetReportPanel
+        budgetEditPath="/teams/core-team/timesheet?view=report"
+        locale="ja"
+        range={{ from: '2026-11-02', to: '2026-11-29' }}
+        renderLink={(path, children) => <a href={path}>{children}</a>}
+        report={{ ...projectBudgetReportFixture, agentCost: { status: 'separate-currency', estimatedCostMicroUsd: 80_000_000, runCount: 14, truncated: false } }}
+        t={createTranslator('ja')}
+        onChangeRange={() => undefined}
+        onExport={() => undefined}
+        onRetry={() => undefined}
+      />,
+    )
+    expect(separate).toContain('468,000')
+    expect(separate).toContain('$80.00')
+    expect(separate).toContain('USD 以外の予算の実績には足していません')
   })
 
   test('explains why earned value is missing without a baseline', () => {

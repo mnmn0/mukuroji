@@ -372,7 +372,7 @@ export const timeTrackingMessages = {
   'timeTracking.projectBudget.consumed': '{percent}% of the budget used',
   'timeTracking.projectBudget.includesExpenses': 'Includes approved expenses of {amount}',
   'timeTracking.projectBudget.includesAgentCost': 'Includes coding agent estimated cost of {amount}',
-  'timeTracking.projectBudget.agentCostMissingRate': 'Coding agent estimated cost of {amount} is not included because the Workspace settings have no rate for the budget currency.',
+  'timeTracking.projectBudget.agentCostSeparate': 'Coding agent estimated cost: {amount}. It stays in USD, so it is not added to a budget in another currency.',
   'timeTracking.projectBudget.agentCostTruncated': 'The Project has more Agent Runs than one report reads, so the coding agent cost counts the newest runs only and is a lower bound.',
   'timeTracking.projectBudget.pendingExpenses': 'Expenses of {amounts} wait for approval and are not in the actual cost or consumption yet.',
   'timeTracking.projectBudget.actualEffort': 'Actual time',

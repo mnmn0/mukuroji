@@ -21,7 +21,7 @@ import {
 } from '../project-budget-report'
 import {
   MAX_PROJECT_AGENT_COST_RUNS,
-  resolveProjectAgentCostRate,
+  resolveProjectAgentCostMode,
   toProjectAgentRunCosts,
   type ProjectAgentCostInput,
   type ProjectAgentRunCostReader,
@@ -243,8 +243,8 @@ async function readReportInput(
   const { workspaceId, teamId, projectId, timeZone } = request
   // Agent Run cost counts only in money, so only the report reads it, and only when the Workspace
   // counts it and the deployment can read Agent Runs (ADR 0119).
-  const agentCostRate = includeMoneyInputs && budget && ports.listAgentRunCosts && ports.readAgentCostSettings
-    ? resolveProjectAgentCostRate(await ports.readAgentCostSettings(workspaceId), budget.currency)
+  const agentCostMode = includeMoneyInputs && budget && ports.listAgentRunCosts && ports.readAgentCostSettings
+    ? resolveProjectAgentCostMode(await ports.readAgentCostSettings(workspaceId), budget.currency)
     : undefined
   const [progressMode, entries, expenses] = await Promise.all([
     ports.getProgressMode(workspaceId, teamId),
@@ -258,12 +258,12 @@ async function readReportInput(
     includeMoneyInputs ? ports.listExpenses(workspaceId, teamId, projectId) : Promise.resolve([]),
   ])
   const baselineIds = new Set((baseline?.entries ?? []).map((entry) => entry.workItemId))
-  const { progress: workItems, projectWorkItemIds } = baselineIds.size === 0 && agentCostRate === undefined
+  const { progress: workItems, projectWorkItemIds } = baselineIds.size === 0 && agentCostMode === undefined
     ? { progress: new Map<string, ProjectBudgetWorkItemProgress>(), projectWorkItemIds: new Set<string>() }
     : await readWorkItemProgress(request, ports, baselineIds, progressMode, workItemLimit)
   const today = localDateAt(now, timeZone)
   let agentCost: ProjectAgentCostInput | undefined
-  if (agentCostRate !== undefined && ports.listAgentRunCosts) {
+  if (agentCostMode !== undefined && ports.listAgentRunCosts) {
     const asOf = today < request.to ? today : request.to
     // A report period that starts after today has no finished runs yet.
     const read = projectWorkItemIds.size === 0 || today < request.from
@@ -277,7 +277,7 @@ async function readReportInput(
           countsFinishedAt: projectAgentRunFinishDateTest(timeZone, request.from, asOf),
           maxRuns: MAX_PROJECT_AGENT_COST_RUNS,
         })
-    agentCost = { usdExchangeRate: agentCostRate.usdExchangeRate, costs: toProjectAgentRunCosts(read, timeZone) }
+    agentCost = { addToActualCost: agentCostMode.addToActualCost, costs: toProjectAgentRunCosts(read, timeZone) }
   }
   return {
     teamId,
