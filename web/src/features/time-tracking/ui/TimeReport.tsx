@@ -16,6 +16,7 @@ import {
   type TimeTrackingFormatters,
   type TimeTrackingTranslator,
 } from './timeTrackingText'
+import { readWorkPhaseDisplayName } from '../../../workspace/model/workPhases'
 import { useTimeEntryCategories } from './timeEntryCategoryContext'
 
 /** Display names used to label report rows keyed by an identifier. */
@@ -69,6 +70,7 @@ const groupByKeys = {
   project: 'timeTracking.report.groupBy.project',
   'work-item': 'timeTracking.report.groupBy.workItem',
   category: 'timeTracking.report.groupBy.category',
+  phase: 'timeTracking.report.groupBy.phase',
 } as const satisfies Record<TimeTrackingGroupBy, string>
 
 /**
@@ -131,6 +133,9 @@ export function TimeReport({
         const name = describeTimeEntryCategory(t, group.key, categories)
         return name === group.key ? group.label : name
       }
+      case 'phase':
+        // The server labels a phase the Workspace did not name with its key.
+        return group.label === group.key ? readWorkPhaseDisplayName(group.key, undefined, t) : group.label
     }
   }
 

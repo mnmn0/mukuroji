@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import {
   DEFAULT_WORK_ITEM_TYPE,
+  DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS,
   createAnalyticsProjectNames,
   createSearchWorkItemTypeKey,
   type AnalyticsDelivery,
@@ -28,6 +29,7 @@ import { ProjectDataError } from '../../modules/directory'
 import { type AuditEventV1 } from '../../modules/audit/audit'
 import {
   createTeamIssueAuditEntityId,
+  createWorkflowStatusPhaseLookup,
   isTeamIssueNotFoundError,
   type TeamIssueResponseItem,
   type WorkItemListReadOptions,
@@ -39,6 +41,7 @@ import {
   analyticsQueryReadsMilestones,
   analyticsSnapshotReadMilestones,
   analyticsQueryReadsPlanningGroups,
+  analyticsQueryReadsWorkflowStatuses,
   analyticsSnapshotReadPlanningGroups,
   MAX_ANALYTICS_RECIPIENT_DELIVERY_PAGE,
   createAnalyticsCsv,
@@ -57,6 +60,7 @@ import {
   type AnalyticsExportNames,
 } from '../../modules/analytics/analytics'
 import { createAnalyticsMilestoneScopeKey } from '../../modules/analytics/analytics-milestone-trend'
+import type { AnalyticsWorkflowStatusCatalog } from '../../modules/analytics/analytics-status-time'
 import {
   analyticsQueryReadsAgentCost,
   analyticsQueryReadsAgentUsage,
@@ -853,6 +857,9 @@ async function executeNormalizedAnalyticsQuery(
         normalizedQuery.timeZone,
       )
     : undefined
+  const workflowStatuses = analyticsQueryReadsWorkflowStatuses(normalizedQuery)
+    ? await readAnalyticsWorkflowStatusCatalog(principal.directoryId, authorized.workItems)
+    : undefined
   return {
     snapshot: createAnalyticsSnapshot({
       ...authorized,
@@ -860,9 +867,35 @@ async function executeNormalizedAnalyticsQuery(
       ...(planningGroups === undefined ? {} : { planningGroups }),
       ...(agentUsage === undefined ? {} : { agentUsage }),
       ...(earnedValue === undefined ? {} : { earnedValue }),
+      ...(workflowStatuses === undefined ? {} : { workflowStatuses }),
       query: normalizedQuery,
     }),
     query: normalizedQuery,
+  }
+}
+
+/**
+ * Reads the workflow statuses of the Teams whose Work Items a query counts, with the names the
+ * Workspace gave its work phases (ADR 0115). Configurations are read once per Team.
+ *
+ * @param directoryId - Workspace ID.
+ * @param workItems - Authorized Work Items of the query.
+ * @returns The catalog the `status-time` groups are named and phased with.
+ */
+async function readAnalyticsWorkflowStatusCatalog(
+  directoryId: string,
+  workItems: readonly CanonicalWorkItem[],
+): Promise<AnalyticsWorkflowStatusCatalog> {
+  const teamIds = [...new Set(workItems.map((item) => item.teamId))].sort()
+  const [profile, configurations] = await Promise.all([
+    workspaceDependencies.tenantAdministration.getProfile(directoryId),
+    Promise.all(teamIds.map(async (teamId) =>
+      [teamId, await workItemDependencies.workItemConfigurations.getTeamConfiguration(directoryId, teamId)] as const)),
+  ])
+  const phases = profile?.workPhases ?? DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS
+  return {
+    teams: new Map(configurations.map(([teamId, resolved]) => [teamId, createWorkflowStatusPhaseLookup(resolved.configuration)])),
+    phaseLabels: new Map(phases.phases.flatMap((phase) => phase.label === undefined ? [] : [[phase.key, phase.label] as const])),
   }
 }
 

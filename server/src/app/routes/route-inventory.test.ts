@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(700)
-  expect(new Set(inventory).size).toBe(696)
+  expect(inventory).toHaveLength(705)
+  expect(new Set(inventory).size).toBe(701)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -48,6 +48,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/planning/updates/template')
   expect(inventory).toContain('PATCH /api/teams/:teamId/workload/profiles/:memberId/time-off/:timeOffId')
   expect(inventory).toContain('GET /api/workspace/time-entry-categories')
+  expect(inventory).toContain('GET /api/workspace/work-phases')
   expect(inventory).toContain('PATCH /api/teams/:teamId/workload/requests/:requestId')
   expect(inventory).toContain('GET /api/workload')
   expect(inventory).toContain('GET /api/time-tracking/my-timesheet')
@@ -62,6 +63,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/raid-log')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/raid-log/entries')
   expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/raid-log/entries/:entryId')
+  expect(inventory).toContain('GET /api/teams/:teamId/decision-log')
+  expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/decision-log')
+  expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/decision-log/entries')
+  expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/decision-log/entries/:entryId')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/status-report/pdf')
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/status-shares')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/status-shares')
@@ -253,6 +258,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/workspace/github/repositories/:repositoryId')
   expect(inventory).toContain('DELETE /api/workspace/github/logins/:login')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '4021ad9daa41a38c7b32fe1d1cd798ac086ae7131c11efd0026cf84aa9a749c4',
+    'e3f12c6e6a6ad87aa9fa02b126ec2c61d6b65669ea6c386733e967b2a7ed25b6',
   )
 })

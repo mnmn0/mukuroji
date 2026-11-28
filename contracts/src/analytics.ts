@@ -22,6 +22,7 @@ export type AnalyticsMetricKey =
   | 'evm-spi'
   | 'evm-cpi'
   | 'evm-eac'
+  | 'status-time'
 
 /**
  * How throughput, velocity, and forecast count completed and remaining work.
@@ -123,6 +124,8 @@ export type AnalyticsGroupBy =
       /**
        * Calendar bucket または Work Item dimension です。`cycle` と `milestone` は Planning の
        * Work Item link の現在の所属で分け、caller が読めない Cycle / Milestone は未設定に入れます。
+       * `status-time` では `status` と `phase` が、時間を過ごした workflow status とその工程（ADR 0115）で
+       * 分けます。`phase` は `status-time` だけが使えます。
        */
       dimension:
         | 'day'
@@ -136,6 +139,12 @@ export type AnalyticsGroupBy =
         | 'priority'
         | 'cycle'
         | 'milestone'
+        | 'phase'
+        /**
+         * Model that served the Agent Run requests. Only `agent-tokens` and `agent-cost` widgets accept
+         * it; one run's tokens and cost are split by the model of each request (ADR 0117).
+         */
+        | 'model'
       /** Built-in dimension では custom field ID を指定しません。 */
       customFieldId?: never
     }
@@ -652,6 +661,8 @@ export type AnalyticsGroupLabelLookup = {
   statusCategory?: (category: string) => string | undefined
   /** Returns the localized label of a Work Item priority. */
   priority?: (priority: string) => string | undefined
+  /** Returns the localized label of a work phase key the Workspace did not name. */
+  workPhase?: (phaseKey: string) => string | undefined
   /** Localized label of a group whose dimension value is not set, such as an unassigned Work Item. */
   unset: string
 }
@@ -752,6 +763,9 @@ export function resolveAnalyticsGroupLabel(
       return lookup.statusCategory?.(group.key) ?? group.label
     case 'priority':
       return lookup.priority?.(group.key) ?? group.label
+    case 'phase':
+      // The server labels a phase the Workspace did not name with its key.
+      return group.label === group.key ? lookup.workPhase?.(group.key) ?? group.label : group.label
     case 'work-item-type': {
       const name = lookup.workItemType?.(group.key)
       if (name !== undefined) return name

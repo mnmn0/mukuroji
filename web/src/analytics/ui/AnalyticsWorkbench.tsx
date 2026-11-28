@@ -351,6 +351,7 @@ const metricKeys = [
   'evm-spi',
   'evm-cpi',
   'evm-eac',
+  'status-time',
 ] as const satisfies readonly AnalyticsMetricKey[]
 
 const statusCategories = [
@@ -390,6 +391,7 @@ const metricLabelKeys: Record<AnalyticsMetricKey, MessageKey> = {
   'evm-spi': 'analytics.metric.evmSpi',
   'evm-cpi': 'analytics.metric.evmCpi',
   'evm-eac': 'analytics.metric.evmEac',
+  'status-time': 'analytics.metric.statusTime',
 }
 
 const metricDescriptionKeys: Record<AnalyticsMetricKey, MessageKey> = {
@@ -409,6 +411,7 @@ const metricDescriptionKeys: Record<AnalyticsMetricKey, MessageKey> = {
   'evm-spi': 'analytics.metricDescription.evmSpi',
   'evm-cpi': 'analytics.metricDescription.evmCpi',
   'evm-eac': 'analytics.metricDescription.evmEac',
+  'status-time': 'analytics.metricDescription.statusTime',
 }
 
 /** Dimensions an earned value widget may group by; it is measured per Project at the as-of date. */
@@ -422,6 +425,16 @@ const earnedValueGroupDimensions = ['team', 'project'] as const
  */
 function isEarnedValueMetric(metric: AnalyticsMetricKey) {
   return metric === 'evm-spi' || metric === 'evm-cpi' || metric === 'evm-eac'
+}
+
+/**
+ * Checks whether a metric adds up Agent Run telemetry, the only metrics that group by model.
+ *
+ * @param metric - Metric key.
+ * @returns Whether the metric is Agent tokens or Agent estimated cost.
+ */
+function isAgentUsageMetric(metric: AnalyticsMetricKey) {
+  return metric === 'agent-tokens' || metric === 'agent-cost'
 }
 
 /**
@@ -2134,13 +2147,18 @@ function AnalyticsWidgetEditor({
           onChange={(event) => {
             const metric = event.target.value as AnalyticsMetricKey
             // Only throughput, velocity, and remaining scope accept effort weighting, so other metrics drop it.
-            const next = isEffortWeightableMetric(metric) ? { ...widget, metric } : { ...withoutWidgetWeighting(widget), metric }
+            const weighted = isEffortWeightableMetric(metric) ? { ...widget, metric } : { ...withoutWidgetWeighting(widget), metric }
+            // Only Agent usage metrics split by model.
+            const next = weighted.groupBy?.dimension === 'model' && !isAgentUsageMetric(metric) ? { ...weighted, groupBy: undefined } : weighted
             // A Milestone trend groups by Milestone, so it keeps only a calendar bucket.
             onChange(metric === 'milestone-trend' && !isCalendarGroup(next.groupBy)
               ? { ...next, groupBy: next.type === 'chart' ? { dimension: 'week' } : undefined }
               : isEarnedValueMetric(metric)
                 ? withEarnedValueGroupBy(next)
-                : next)
+                : metric !== 'status-time' && next.groupBy?.dimension === 'phase'
+                  // Only time in status groups by work phase.
+                  ? { ...next, groupBy: undefined }
+                  : next)
           }}
         >
           {metricKeys.map((metric) => <option key={metric} value={metric}>{t(metricLabelKeys[metric])}</option>)}
@@ -2179,6 +2197,8 @@ function AnalyticsWidgetEditor({
               'priority',
               'cycle',
               'milestone',
+              ...(widget.metric === 'status-time' ? ['phase'] : []),
+              ...(isAgentUsageMetric(widget.metric) ? ['model'] : []),
               'custom-field',
             ]).map((dimension) => (
               <option key={dimension} value={dimension}>

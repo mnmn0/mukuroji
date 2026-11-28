@@ -14,16 +14,21 @@ import type {
   WorkspaceCalendarSettingsResponse,
   WorkspaceFileTypeSettings,
   WorkspaceTimeEntryCategorySettings,
+  WorkspaceWorkPhaseSettings,
+  WorkspaceAgentCostSettings,
 } from '@mukuroji/contracts'
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS,
   isKnownCurrencyCode,
+  readWorkspaceAgentCostSettings,
   readPlanningUpdateTemplateSettings,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
   readWorkspaceFileTypeSettings,
   readWorkspaceTimeEntryCategorySettings,
+  readWorkspaceWorkPhaseSettings,
 } from '@mukuroji/contracts'
 import {
   TenantAdministrationError,
@@ -163,6 +168,18 @@ export function createTenantAdministrationRouter<
       const profile = await dependencies.client.getProfile(principal.directoryId)
       const settings: WorkspaceTimeEntryCategorySettings =
         profile?.timeEntryCategories ?? DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
+      return context.json(settings)
+    } catch (error) {
+      return dependencies.mapError(context, error)
+    }
+  })
+
+  // Every active member reads phases in reports and workflow settings, so only authentication is required.
+  router.get('/api/workspace/work-phases', async (context) => {
+    try {
+      const principal = await requirePrincipal(context, dependencies)
+      const profile = await dependencies.client.getProfile(principal.directoryId)
+      const settings: WorkspaceWorkPhaseSettings = profile?.workPhases ?? DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS
       return context.json(settings)
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -382,10 +399,14 @@ function readTenantProfileInput(value: unknown): UpdateTenantProfileInput {
     ...(body.timeEntryCategories === undefined
       ? {}
       : { timeEntryCategories: readTenantTimeEntryCategoryInput(body.timeEntryCategories) }),
+    ...(body.workPhases === undefined
+      ? {}
+      : { workPhases: readTenantWorkPhaseInput(body.workPhases) }),
     ...(body.fileTypes === undefined
       ? {}
       : { fileTypes: readTenantFileTypeInput(body.fileTypes) }),
     ...(body.defaultCurrency === undefined ? {} : { defaultCurrency: readTenantDefaultCurrencyInput(body.defaultCurrency) }),
+    ...(body.agentCost === undefined ? {} : { agentCost: readTenantAgentCostInput(body.agentCost) }),
     expectedRevision: validateTenantInteger(body.expectedRevision, 1_000_000, 'InvalidTenantRevision'),
   }
 }
@@ -490,6 +511,26 @@ function readTenantTimeEntryCategoryInput(value: unknown): WorkspaceTimeEntryCat
 }
 
 /**
+ * Validates the work phase settings of a profile update.
+ *
+ * @param value - Untrusted `workPhases` field of the request body.
+ * @returns The validated settings.
+ * @throws TenantAdministrationError When a key, name, or flag is invalid, a key repeats, there are
+ *   too many phases, or a category maps to a phase that is not listed.
+ */
+function readTenantWorkPhaseInput(value: unknown): WorkspaceWorkPhaseSettings {
+  const settings = readWorkspaceWorkPhaseSettings(value)
+  if (!settings) {
+    throw new TenantAdministrationError(
+      400,
+      'InvalidWorkPhaseSettings',
+      'Work phase keys, names, or flags are invalid, a key repeats, or a category maps to a phase that is not listed.',
+    )
+  }
+  return settings
+}
+
+/**
  * Validates the Workspace currency of a profile update.
  *
  * @param value - Untrusted `defaultCurrency` field of the request body.
@@ -501,6 +542,26 @@ function readTenantDefaultCurrencyInput(value: unknown): string {
     throw new TenantAdministrationError(400, 'InvalidTenantDefaultCurrency', 'Default currency must be an ISO 4217 code such as JPY.')
   }
   return value
+}
+
+/**
+ * Validates the coding agent cost settings of a profile update (ADR 0119).
+ *
+ * @param value - Untrusted `agentCost` field of the request body.
+ * @returns The validated settings.
+ * @throws TenantAdministrationError When the settings are not an object with a boolean
+ *   `includeInProjectBudgets`.
+ */
+function readTenantAgentCostInput(value: unknown): WorkspaceAgentCostSettings {
+  const settings = readWorkspaceAgentCostSettings(value)
+  if (!settings) {
+    throw new TenantAdministrationError(
+      400,
+      'InvalidTenantAgentCostSettings',
+      'Agent cost settings need a boolean includeInProjectBudgets.',
+    )
+  }
+  return settings
 }
 
 function readTenantGovernanceInput(value: unknown): UpdateTenantGovernanceInput {

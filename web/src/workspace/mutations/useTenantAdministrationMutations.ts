@@ -21,6 +21,7 @@ import {
 } from '../../shared/api/mutationHeaders'
 import { isWorkspaceCalendarSettingsKey } from '../queries/useWorkspaceCalendarSettings'
 import { isWorkspaceTimeEntryCategoriesKey } from '../queries/useWorkspaceTimeEntryCategories'
+import { isWorkspaceWorkPhasesKey } from '../queries/useWorkspaceWorkPhases'
 
 /** Stable error view returned by tenant administration mutations. */
 export type TenantAdministrationMutationError = {
@@ -94,8 +95,10 @@ export function useTenantAdministrationMutations({
           ...(profile.weeklyReportReminders ? { weeklyReportReminders: profile.weeklyReportReminders } : {}),
           ...(profile.planningUpdateTemplate ? { planningUpdateTemplate: profile.planningUpdateTemplate } : {}),
           ...(profile.timeEntryCategories ? { timeEntryCategories: profile.timeEntryCategories } : {}),
+          ...(profile.workPhases ? { workPhases: profile.workPhases } : {}),
           ...(profile.fileTypes ? { fileTypes: profile.fileTypes } : {}),
           ...(profile.defaultCurrency ? { defaultCurrency: profile.defaultCurrency } : {}),
+          ...(profile.agentCost ? { agentCost: profile.agentCost } : {}),
           expectedRevision: profile.revision,
         }, context)
         // The saved categories reach the timesheets as soon as the server accepts them, even if
@@ -103,6 +106,11 @@ export function useTenantAdministrationMutations({
         const savedCategories = updated.timeEntryCategories ?? profile.timeEntryCategories
         if (savedCategories) {
           await mutateGlobal(isWorkspaceTimeEntryCategoriesKey, savedCategories, { revalidate: false })
+            .catch(() => undefined)
+        }
+        const savedPhases = updated.workPhases ?? profile.workPhases
+        if (savedPhases) {
+          await mutateGlobal(isWorkspaceWorkPhasesKey, savedPhases, { revalidate: false })
             .catch(() => undefined)
         }
         return updated

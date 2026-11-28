@@ -1256,8 +1256,8 @@ function readStatus(value: string | undefined): TimeEntryStatus {
 
 /** Converts a validated group-by query into its contract union. */
 function readGroupBy(value: string): TimeTrackingGroupBy {
-  if (value === 'day' || value === 'week' || value === 'user' || value === 'project' || value === 'work-item' || value === 'category') return value
-  throw new TimeTrackingError(400, 'InvalidGroupBy', 'groupBy must be day, week, project, user, work-item, or category.')
+  if (value === 'day' || value === 'week' || value === 'user' || value === 'project' || value === 'work-item' || value === 'category' || value === 'phase') return value
+  throw new TimeTrackingError(400, 'InvalidGroupBy', 'groupBy must be day, week, project, user, work-item, category, or phase.')
 }
 
 /**

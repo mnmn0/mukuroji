@@ -156,7 +156,7 @@ Group-byの`cycle`と`milestone`はPlanningのWork Item linkの現在の所属�
 scope keyをsnapshotのpermission scope hashへ含めるので、その権限が変わったsnapshotは
 非表示または`403`になります。定期配信はPlanningを読まないため、この widget は
 `Cycle and Milestone membership is not available for this run.` の warning だけを返します。
-Work Item history row（ADR 0042）は`priority`の変更も保持します。Throughput、cycle/lead time、scope changeなどの
+Work Item history row（ADR 0042）は`priority`の変更も保持します。`workflowStatusId`の変更も保持し、それより前の version 1 の row は読まずに entity timeline から読みます（ADR 0115）。Throughput、cycle/lead time、scope changeなどの
 event metricは`asOf`以前かつ指定期間内の有効なeventだけを使います。
 
 ## Metric definitions
@@ -259,6 +259,19 @@ evidence、定期配信の hash に含まれます。
 うち閲覧者が manager である Team の ID を加え、一覧・export の再検証でも同じ規則で比べます。`agent-cost` のない query の
 hash は変わりません。Software factory を deploy していない環境と定期配信の runner は usage を読まず、widget は
 warning だけを返します（hash にも Team を加えません）。
+
+この 2 つの widget だけが `groupBy: { "dimension": "model" }` を受け付けます（[ADR 0117](adr/0117-agent-run-time-breakdown-and-peer-comparison.md)）。
+Run のトークン・推定費用を request の model ごとに分け、model ごとの group にします。1 つの Run が複数の model を
+使った場合は、それぞれの group に 1 Run として数えます。他の metric で `model` を指定すると `AnalyticsGroupByInvalid` です。
+
+### Time in status
+
+[ADR 0115](adr/0115-work-phases.md)。`status-time` は、Work Item の履歴（`workflowStatusId` と `statusCategory` の変更）から
+各ステータスにいた区間を作り、期間と重なる時間のうち `unstarted`・`started` のカテゴリーの時間を足します（時間単位）。
+`groupBy` が `status` なら時間を過ごしたステータス（ステータス ID は Team の中でだけ一意なので key は `<teamId>/<statusId>`。複数の Team にまたがるときは名前に Team ID を添える）、`phase` ならそのステータスの工程（Team の今の Work Item 設定で引く。
+工程のないステータスは `no-phase`）で分けます。`phase` で分けられるのはこの metric だけです。他の dimension は他の metric と同じく
+`asOf` の state で分けます。`phase` で分けるときは query の Team の Work Item 設定と tenant profile の工程名を読み、読めない
+runner では warning だけを返します。日・週・月の bucket では、`asOf` の state から作った区間を各 bucket の期間で切り取って足します。
 
 ### SPI / CPI / EAC（EVM）
 

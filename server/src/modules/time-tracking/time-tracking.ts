@@ -27,7 +27,11 @@ import {
   UNCATEGORIZED_TIME_ENTRY_GROUP_KEY,
   isActiveTimeEntryCategory,
   readTimeEntryCategoryKey,
+  resolveWorkCategoryPhase,
+  DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS,
+  NO_WORK_PHASE_GROUP_KEY,
   type WorkspaceTimeEntryCategorySettings,
+  type WorkspaceWorkPhaseSettings,
   type WorkspaceWeekStartDay,
   workspaceWeekContaining,
   type RunningTimer,
@@ -403,6 +407,13 @@ export type TimeTrackingCategorySource = {
    * @returns The stored categories, or the defaults when the Workspace has not saved any.
    */
   readCategories(workspaceId: string): Promise<WorkspaceTimeEntryCategorySettings>
+  /**
+   * Reads the Workspace work phases, which decide the phase of each category in `groupBy=phase`.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @returns The stored phases, or the defaults when the Workspace has not saved any.
+   */
+  readWorkPhases?(workspaceId: string): Promise<WorkspaceWorkPhaseSettings>
   /**
    * Reads the Workspace time zone, which decides the local dates the daily total is counted on.
    *
@@ -969,6 +980,16 @@ export class TimeTrackingService {
     return this.categories
       ? await this.categories.readCategories(workspaceId)
       : DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
+  }
+
+  /**
+   * Reads the Workspace work phases, or the built-in ones when no source is configured.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @returns Work phase settings in effect.
+   */
+  private async readWorkPhaseSettings(workspaceId: string): Promise<WorkspaceWorkPhaseSettings> {
+    return await this.categories?.readWorkPhases?.(workspaceId) ?? DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS
   }
 
   /**
@@ -2314,11 +2335,12 @@ export class TimeTrackingService {
     const period = normalizePeriod(input.from, input.to, input.timeZone)
     const entries = await this.listReportEntries(input, period)
     const estimateByWorkItem = await this.listPlannedEffort(input.workspaceId, input.teamId)
+    const phaseSettings = input.groupBy === 'phase' ? await this.readWorkPhaseSettings(input.workspaceId) : undefined
     const categoryLabels = input.groupBy === 'category'
       ? readCategoryLabels(await this.readCategorySettings(input.workspaceId))
-      : undefined
+      : phaseSettings === undefined ? undefined : readPhaseLabels(phaseSettings)
     const weekStartDay = input.groupBy === 'week' ? await this.readWeekStartDay(input.workspaceId) : undefined
-    const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds, categoryLabels, weekStartDay)
+    const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds, categoryLabels, weekStartDay, phaseSettings)
     const includeBudget = input.includeCosts && (
       input.budgetScope !== 'project' ||
       input.managedProjectIds === undefined ||
@@ -3873,6 +3895,7 @@ function aggregateEntries(
   managedProjectIds?: ReadonlySet<string>,
   categoryLabels?: ReadonlyMap<string, string>,
   weekStartDay: WorkspaceWeekStartDay = DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
+  phaseSettings: WorkspaceWorkPhaseSettings = DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS,
 ): TimeSummaryGroup[] {
   if (groupBy === 'day' || groupBy === 'week') {
     return aggregateCalendarEntries(entries, groupBy, timeZone, from, to, estimateByWorkItem, includeCosts, managedProjectIds, weekStartDay)
@@ -3887,7 +3910,9 @@ function aggregateEntries(
         ? entry.workItemId ?? NO_WORK_ITEM_TIME_ENTRY_GROUP_KEY
         : groupBy === 'category'
           ? entry.category ?? UNCATEGORIZED_TIME_ENTRY_GROUP_KEY
-          : entry.projectId ?? 'unassigned'
+          : groupBy === 'phase'
+            ? resolveWorkCategoryPhase(phaseSettings, entry.category)
+            : entry.projectId ?? 'unassigned'
     const group = grouped.get(key) ?? createMutableSummaryGroup(key, categoryLabels?.get(key) ?? readFallbackGroupLabel(groupBy, entry))
     group.minutes += minutes
     group.billableMinutes += entry.billable ? minutes : 0
@@ -3915,6 +3940,20 @@ function aggregateEntries(
 function readCategoryLabels(settings: WorkspaceTimeEntryCategorySettings): ReadonlyMap<string, string> {
   return new Map(settings.categories.flatMap((category) =>
     category.label === undefined ? [] : [[category.key, category.label] as const]))
+}
+
+/**
+ * Collects the names the Workspace gave its work phases, for report group labels.
+ *
+ * @param settings - Workspace work phase settings.
+ * @returns Names keyed by phase, with `No phase` for time no phase covers; built-in phases without
+ *   a name are left out and keep their key as the label.
+ */
+function readPhaseLabels(settings: WorkspaceWorkPhaseSettings): ReadonlyMap<string, string> {
+  return new Map([
+    [NO_WORK_PHASE_GROUP_KEY, 'No phase'],
+    ...settings.phases.flatMap((phase) => phase.label === undefined ? [] : [[phase.key, phase.label] as const]),
+  ])
 }
 
 /**

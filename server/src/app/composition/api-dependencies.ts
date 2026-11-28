@@ -17,6 +17,10 @@ import {
   InMemoryProjectRaidLogStore,
 } from '../../modules/project-raid-log'
 import {
+  DynamoDbProjectDecisionLogStore,
+  InMemoryProjectDecisionLogStore,
+} from '../../modules/project-decision-log'
+import {
   DynamoDbProjectExpenseStore,
   InMemoryProjectExpenseStore,
 } from '../../modules/project-budget'
@@ -37,6 +41,7 @@ import {
   AI_ASSISTANCE_SCHEMA_VERSION,
   DEFAULT_WORKSPACE_FILE_TYPE_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS,
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ZONE,
   listJapanesePublicHolidays,
@@ -381,6 +386,26 @@ export function createPlanningClient(): DynamoDbPlanningClient {
   )
 }
 
+
+/**
+ * Builds the decision log store. Every decision write carries its audit event in the same
+ * transaction, so production refuses to start without the audit table (ADR 0114).
+ *
+ * @returns The DynamoDB store.
+ * @throws Error in production when `AUDIT_EVENTS_TABLE_NAME` is not set.
+ */
+function createProjectDecisionLogStore() {
+  const config = loadServerConfig()
+  const auditTableName = getConfiguredAuditTableName()
+  if (config.production && !auditTableName) {
+    throw new Error('AUDIT_EVENTS_TABLE_NAME must be set for decision log audit writes.')
+  }
+  return new DynamoDbProjectDecisionLogStore(
+    config.environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+    createDynamoDbDocumentClient(),
+    auditTableName,
+  )
+}
 /**
  * Creates the configured Analytics repository.
  *
@@ -741,6 +766,7 @@ export function createProductionWorkItemDependencies(
       createDynamoDbDocumentClient(),
       getConfiguredAuditTableName(),
     ),
+    projectDecisionLogs: createProjectDecisionLogStore(),
     projectExpenses: new DynamoDbProjectExpenseStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
@@ -1965,6 +1991,9 @@ export function createProductionAppDependencies(): AppDependencies {
       readCategories: async (workspaceId) =>
         (await workspace.tenantAdministration.getProfile(workspaceId))?.timeEntryCategories ??
           DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+      readWorkPhases: async (workspaceId) =>
+        (await workspace.tenantAdministration.getProfile(workspaceId))?.workPhases ??
+          DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS,
       readTimeZone: async (workspaceId) =>
         (await workspace.tenantAdministration.getProfile(workspaceId))?.calendar?.timeZone ??
           DEFAULT_WORKSPACE_TIME_ZONE,
@@ -2082,6 +2111,7 @@ export function createTestAppDependencies(): AppDependencies {
       updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
       savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
       projectRaidLogs: new InMemoryProjectRaidLogStore(),
+      projectDecisionLogs: new InMemoryProjectDecisionLogStore(),
       projectExpenses: new InMemoryProjectExpenseStore(),
       calendarFeeds: new InMemoryCalendarFeedStore(),
       githubIntegration: createTestGitHubIntegrationDependencies(),
@@ -2231,6 +2261,7 @@ export function overrideAppDependencies(
       ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
       ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
       ...(overrides.projectRaidLogs ? { projectRaidLogs: overrides.projectRaidLogs } : {}),
+      ...(overrides.projectDecisionLogs ? { projectDecisionLogs: overrides.projectDecisionLogs } : {}),
       ...(overrides.projectExpenses ? { projectExpenses: overrides.projectExpenses } : {}),
       ...(overrides.calendarFeeds ? { calendarFeeds: overrides.calendarFeeds } : {}),
       ...(overrides.githubIntegration ? { githubIntegration: overrides.githubIntegration } : {}),

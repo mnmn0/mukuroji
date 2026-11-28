@@ -1,4 +1,4 @@
-import { DEFAULT_WORKSPACE_CALENDAR_SETTINGS } from '@mukuroji/contracts'
+import { DEFAULT_WORKSPACE_CALENDAR_SETTINGS, DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS } from '@mukuroji/contracts'
 import {
   AwsCognitoClient,
   CognitoServiceError,
@@ -7,7 +7,8 @@ import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import {
   DynamoDbDocumentAuthorizationRevisionMutationAdapter,
 } from '../../modules/documents/adapter-out/dynamodb/document-authorization'
-import { DynamoDbTeamIssuesClient } from '../../modules/work-items'
+import { createWorkflowStatusPhaseLookup, DynamoDbTeamIssuesClient } from '../../modules/work-items'
+import { createWorkItemConfigurationClient } from './api-dependencies'
 import {
   createAnalyticsScheduleRenderer,
   DynamoDbAnalyticsRepository,
@@ -54,6 +55,7 @@ export function createProductionAnalyticsScheduleHandler() {
   const cognito = new AwsCognitoClient()
   const tenantFeatureGate = createProductionTenantFeatureGate()
   const tenantAdministration = createProductionTenantAdministrationClient()
+  const workItemConfigurations = createWorkItemConfigurationClient()
   const render = createAnalyticsScheduleRenderer({
     directory: new DynamoDbProjectDirectoryClient(),
     workItems: new DynamoDbTeamIssuesClient(),
@@ -98,6 +100,27 @@ export function createProductionAnalyticsScheduleHandler() {
       async readCalendarSettings(workspaceId) {
         const profile = await tenantAdministration.getProfile(workspaceId)
         return profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
+      },
+    },
+    workflowStatuses: {
+      /**
+       * Reads each Team's workflow statuses once, with the Workspace phase names (ADR 0115).
+       *
+       * @param workspaceId - Workspace that owns the report.
+       * @param teamIds - Teams whose Work Items the report counts.
+       * @returns The catalog that names and phases the `status-time` groups.
+       */
+      async readCatalog(workspaceId, teamIds) {
+        const [profile, configurations] = await Promise.all([
+          tenantAdministration.getProfile(workspaceId),
+          Promise.all(teamIds.map(async (teamId) =>
+            [teamId, await workItemConfigurations.getTeamConfiguration(workspaceId, teamId)] as const)),
+        ])
+        const phases = profile?.workPhases ?? DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS
+        return {
+          teams: new Map(configurations.map(([teamId, resolved]) => [teamId, createWorkflowStatusPhaseLookup(resolved.configuration)])),
+          phaseLabels: new Map(phases.phases.flatMap((phase) => phase.label === undefined ? [] : [[phase.key, phase.label] as const])),
+        }
       },
     },
   })

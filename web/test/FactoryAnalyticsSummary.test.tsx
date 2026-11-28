@@ -127,3 +127,137 @@ describe('Factory analytics summary', () => {
     expect(render({ ...factoryAnalyticsWithUsageFixture, usage: { ...usage, runsHasMore: true } })).toContain('読み込み上限に達したため')
   })
 })
+
+describe('Factory analytics time breakdown and comparison', () => {
+  test('reads them from the response and sends the comparison field', async () => {
+    const urls = respondWith(factoryAnalyticsWithUsageFixture)
+    const analytics = await getTeamFactoryAnalytics('token', 'core', { from: '2026-10-01T00:00:00.000Z', to: '2026-10-31T00:00:00.000Z', compareFieldId: 'points' })
+    expect(analytics.activity).toEqual(factoryAnalyticsWithUsageFixture.activity)
+    expect(analytics.comparison).toEqual(factoryAnalyticsWithUsageFixture.comparison)
+    expect(urls[0]).toContain('compareFieldId=points')
+    respondWith({ ...factoryAnalyticsWithUsageFixture, comparison: { axis: { kind: 'other' }, groups: [], outliers: [], unsizedWorkItems: 0 } })
+    await expect(getTeamFactoryAnalytics('token', 'core', { from: '2026-10-01T00:00:00.000Z', to: '2026-10-31T00:00:00.000Z' })).rejects.toMatchObject({ status: 502 })
+  })
+
+  test('shows the longest tools, the working share, the groups, and the outliers', () => {
+    const html = renderToStaticMarkup(
+      <FactoryAnalyticsSummary
+        analytics={factoryAnalyticsWithUsageFixture}
+        comparisonFields={[{ id: 'points', name: 'Story points' }]}
+        formatNumber={(value) => String(value)}
+        isLoading={false}
+        labels={createFactoryAnalyticsLabels('ja')}
+        onCompareFieldChange={() => undefined}
+        onPeriodDaysChange={() => undefined}
+        onRetry={() => undefined}
+        periodDays={30}
+        workItemTypeNames={{ task: 'タスク' }}
+      />,
+    )
+    expect(html).toContain('data-testid="factory-analytics-activity"')
+    expect(html).toContain('エージェントが作業していた割合 76.5%')
+    expect(html).toContain('MCP github/get_pull_request')
+    expect(html).toContain('Skill mukuroji-review')
+    expect(html).toContain('タスク ・1 日以下: 9 件 ・中央値 42 分 ・310000 トークン')
+    expect(html).toContain('中央値の 4.6 倍')
+    expect(html).toContain('見積もりや値がないタスク 4 件は比べていません。')
+    expect(html).toContain('Story points')
+    expect(html).toMatch(/比べる軸<select[^>]*id="([^"]+)"/u)
+  })
+  test('names an option whose ID is none apart from the group without a value', () => {
+    const group = factoryAnalyticsWithUsageFixture.comparison?.groups[0]
+    if (!group || !factoryAnalyticsWithUsageFixture.comparison) throw new Error('fixture has no group')
+    const analytics = {
+      ...factoryAnalyticsWithUsageFixture,
+      comparison: {
+        ...factoryAnalyticsWithUsageFixture.comparison,
+        axis: { kind: 'custom-field' as const, customFieldId: 'points' },
+        groups: [{ ...group, value: 'none', workItemCount: 3 }, { ...group, value: 'none', missingValue: true as const, workItemCount: 2 }],
+        outliers: [],
+      },
+    }
+    const html = renderToStaticMarkup(
+      <FactoryAnalyticsSummary
+        analytics={analytics}
+        comparisonFields={[{ id: 'points', name: 'Story points', optionNames: { none: 'ポイントなし' } }]}
+        formatNumber={(value) => String(value)}
+        isLoading={false}
+        labels={createFactoryAnalyticsLabels('ja')}
+        onCompareFieldChange={() => undefined}
+        onPeriodDaysChange={() => undefined}
+        onRetry={() => undefined}
+        periodDays={30}
+        workItemTypeNames={{ task: 'タスク' }}
+      />,
+    )
+    expect(html).toContain('タスク ・ポイントなし: 3 件')
+    expect(html).toContain('タスク ・値なし: 2 件')
+    expect(html).not.toContain(`タスク ・${createFactoryAnalyticsLabels('ja').sizeBands.none}: 2 件`)
+  })
+
+  test('names the group without an estimate on the size axis', () => {
+    const group = factoryAnalyticsWithUsageFixture.comparison?.groups[0]
+    if (!group || !factoryAnalyticsWithUsageFixture.comparison) throw new Error('fixture has no group')
+    const analytics = {
+      ...factoryAnalyticsWithUsageFixture,
+      comparison: {
+        ...factoryAnalyticsWithUsageFixture.comparison,
+        axis: { kind: 'size' as const },
+        groups: [{ ...group, value: 'none', missingValue: true as const, workItemCount: 2 }],
+        outliers: [],
+      },
+    }
+    const html = renderToStaticMarkup(
+      <FactoryAnalyticsSummary
+        analytics={analytics}
+        formatNumber={(value) => String(value)}
+        isLoading={false}
+        labels={createFactoryAnalyticsLabels('ja')}
+        onPeriodDaysChange={() => undefined}
+        onRetry={() => undefined}
+        periodDays={30}
+        workItemTypeNames={{ task: 'タスク' }}
+      />,
+    )
+    expect(html).toContain(`タスク ・${createFactoryAnalyticsLabels('ja').sizeBands.none}: 2 件`)
+  })
+
+  test('lets the viewer go back to the size axis when a custom-field comparison failed to load', () => {
+    const html = renderToStaticMarkup(
+      <FactoryAnalyticsSummary
+        compareFieldId="points"
+        errorMessage="読み込めませんでした"
+        formatNumber={(value) => String(value)}
+        isLoading={false}
+        labels={createFactoryAnalyticsLabels('ja')}
+        onCompareFieldChange={() => undefined}
+        onPeriodDaysChange={() => undefined}
+        onRetry={() => undefined}
+        periodDays={30}
+        workItemTypeNames={{}}
+      />,
+    )
+    expect(html).toContain('見積もりの規模で比べる')
+  })
+
+  test('says why the axis selector is missing when the custom fields could not be read, and reads them again', () => {
+    const html = renderToStaticMarkup(
+      <FactoryAnalyticsSummary
+        analytics={factoryAnalyticsWithUsageFixture}
+        comparisonFields={[]}
+        formatNumber={(value) => String(value)}
+        isLoading={false}
+        labels={createFactoryAnalyticsLabels('ja')}
+        onCompareFieldChange={() => undefined}
+        onPeriodDaysChange={() => undefined}
+        onRetry={() => undefined}
+        onRetryComparisonFields={() => undefined}
+        periodDays={30}
+        workItemTypeNames={{ task: 'タスク' }}
+      />,
+    )
+    expect(html).toContain('比べる軸に使う custom field を読み込めませんでした。')
+    expect(html).toContain('role="alert"')
+    expect(html).not.toMatch(/比べる軸<select/u)
+  })
+})

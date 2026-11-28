@@ -10,6 +10,7 @@ import {
   type WorkItemConfigurationScope,
 } from '../api'
 import { useScopedWorkItemConfiguration } from '../queries/useWorkItemConfigurations'
+import { useWorkspaceWorkPhases } from '../../workspace/queries/useWorkspaceWorkPhases'
 import {
   WorkItemConfigurationPanel,
   type WorkItemConfigurationScopeOption,
@@ -72,6 +73,7 @@ export function WorkItemConfigurationPanelContainer({
     isLoading,
     mutate,
   } = useScopedWorkItemConfiguration(accessToken, selectedScope)
+  const { settings: workPhases, error: workPhasesError, retry: retryWorkPhases } = useWorkspaceWorkPhases(accessToken)
   const readOnly = selectedScope.kind === 'workspace'
     ? !canManageWorkspaceConfiguration
     : !canMutateTeamConfiguration
@@ -120,6 +122,9 @@ export function WorkItemConfigurationPanelContainer({
       selectedScopeValue={selectedScopeValue}
       onSave={readOnly ? undefined : handleSave}
       onScopeChange={setSelectedScopeValue}
+      workPhases={workPhases}
+      hasWorkPhasesError={Boolean(workPhasesError) && !workPhases}
+      onRetryWorkPhases={retryWorkPhases}
     />
   )
 }

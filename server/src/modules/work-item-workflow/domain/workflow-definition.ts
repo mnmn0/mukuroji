@@ -1,6 +1,7 @@
 import {
   isWorkflowStatusRequiredField,
   isWorkflowTransitionActorRole,
+  readWorkPhaseKey,
   WORKFLOW_STATUS_REQUIRED_FIELDS,
   WORKFLOW_TRANSITION_ACTOR_ROLES,
   type WorkflowStatusCategory,
@@ -85,7 +86,22 @@ function readWorkflowStatus(value: unknown): WorkflowStatusDefinition {
       color: readDisplayName(value.color, 'Workflow status color'),
     }),
     ...readStatusRequirements(value),
+    ...readStatusPhase(value.phaseKey),
   }
+}
+
+/**
+ * Reads the optional work phase of a status (ADR 0115). Only the key shape is checked: phases are
+ * retired rather than removed, so a status keeps a phase the Workspace later retires.
+ *
+ * @param value - Untrusted `phaseKey` value.
+ * @returns The phase property to spread into the status.
+ */
+function readStatusPhase(value: unknown): Pick<WorkflowStatusDefinition, 'phaseKey'> {
+  if (value === undefined || value === null) return {}
+  const phaseKey = readWorkPhaseKey(value)
+  if (phaseKey === undefined) throw invalidWorkflow('Workflow status phase key is invalid.')
+  return { phaseKey }
 }
 
 /**

@@ -1,9 +1,41 @@
 import {
   MAX_WORKSPACE_TIME_ENTRY_CATEGORIES,
+  isBuiltInTimeEntryCategory,
   readWorkspaceTimeEntryCategorySettings,
+  type BuiltInTimeEntryCategory,
   type TimeEntryCategoryDefinition,
   type WorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
+import type { MessageKey } from '../../shared/i18n/i18n'
+
+/** Translated name of each built-in work category. */
+export const builtInCategoryLabelKeys = {
+  design: 'timeTracking.report.category.design',
+  implementation: 'timeTracking.report.category.implementation',
+  review: 'timeTracking.report.category.review',
+  meeting: 'timeTracking.report.category.meeting',
+  management: 'timeTracking.report.category.management',
+  training: 'timeTracking.report.category.training',
+  leave: 'timeTracking.report.category.leave',
+} as const satisfies Record<BuiltInTimeEntryCategory, MessageKey>
+
+/**
+ * Returns the display name of a work category in the administration screen.
+ *
+ * @param key - Category key.
+ * @param settings - Workspace work categories.
+ * @param t - Translator.
+ * @returns The Workspace name, the translated built-in name, or the key.
+ */
+export function readTimeEntryCategoryDisplayName(
+  key: string,
+  settings: WorkspaceTimeEntryCategorySettings,
+  t: (key: MessageKey) => string,
+): string {
+  const label = settings.categories.find((category) => category.key === key)?.label
+  if (label) return label
+  return isBuiltInTimeEntryCategory(key) ? t(builtInCategoryLabelKeys[key]) : key
+}
 
 /**
  * Reports whether edited work categories would be refused by the server: a new category without a

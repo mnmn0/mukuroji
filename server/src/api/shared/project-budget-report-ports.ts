@@ -1,5 +1,7 @@
+import { readFinishedAgentRunCosts } from '../../modules/agent-runs'
 import type { ProjectBudgetReportPorts, ProjectBudgetWorkItemPage } from '../../modules/project-budget'
-import { requireAppDependencies, workItemDependencies } from './app-dependencies'
+import { isSoftwareFactoryDeployed } from '../../infrastructure/config/software-factory'
+import { requireAppDependencies, workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { WORK_ITEMS_AGGREGATE_READ_PAGE_SIZE } from './constants'
 
 /**
@@ -55,6 +57,22 @@ export function createProjectBudgetReportPorts(options: {
       }
       return page
     },
+    readAgentCostSettings: async (workspaceId) =>
+      (await workspaceDependencies.tenantAdministration.getProfile(workspaceId))?.agentCost,
+    // Agent Runs exist only where the Software factory is deployed (ADR 0029).
+    ...(isSoftwareFactoryDeployed()
+      ? {
+          listAgentRunCosts: async (input: Parameters<NonNullable<ProjectBudgetReportPorts['listAgentRunCosts']>>[0]) =>
+            await readFinishedAgentRunCosts(
+              {
+                listFinishedRunsByTime: (...args) => workItemDependencies.agentRuns.listFinishedRunsByTime(...args),
+                getRun: (...args) => workItemDependencies.agentRuns.getRun(...args),
+                listMemberBuckets: (...args) => workItemDependencies.agentRunUsage.listMemberBuckets(...args),
+              },
+              input,
+            ),
+        }
+      : {}),
     now: () => new Date(),
   }
 }

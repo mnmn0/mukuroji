@@ -7,6 +7,7 @@ import {
   DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
   DEFAULT_WORKSPACE_FILE_TYPE_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS,
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   DEFAULT_WORKSPACE_CURRENCY,
   isWorkspaceWeekStartDay,
@@ -22,9 +23,12 @@ import { WorkspaceWorkingCalendarFields } from './WorkspaceWorkingCalendarFields
 import { PlanningUpdateTemplateFields } from './PlanningUpdateTemplateFields'
 import { WeeklyReportReminderFields } from './WeeklyReportReminderFields'
 import { hasWeeklyReportReminderConflict } from '../model/weeklyReportReminders'
-import { hasTimeEntryCategoryProblem } from '../model/timeEntryCategories'
+import { hasTimeEntryCategoryProblem, readTimeEntryCategoryDisplayName } from '../model/timeEntryCategories'
 import { FileTypeFields } from './FileTypeFields'
+import { AgentCostBudgetFields } from './AgentCostBudgetFields'
 import { TimeEntryCategoryFields } from './TimeEntryCategoryFields'
+import { WorkPhaseFields } from './WorkPhaseFields'
+import { hasWorkPhaseProblem } from '../model/workPhases'
 import { useTenantAdministrationMutations } from '../mutations/useTenantAdministrationMutations'
 import { useTenantAdministration } from '../queries/useTenantAdministration'
 
@@ -291,6 +295,7 @@ export function TenantAdministrationPanel({
   const weeklyReportReminders = profile.weeklyReportReminders ?? DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS
   const planningUpdateTemplate = profile.planningUpdateTemplate ?? DEFAULT_PLANNING_UPDATE_TEMPLATE_SETTINGS
   const timeEntryCategories = profile.timeEntryCategories ?? DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
+  const workPhases = profile.workPhases ?? DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS
   const tenantClosed = profile.status === 'closed'
 
   return (
@@ -393,6 +398,13 @@ export function TenantAdministrationPanel({
                 {t('workspace.tenantAdministration.defaultCurrencyHint')}
               </span>
             </label>
+            <AgentCostBudgetFields
+              currency={profile.defaultCurrency ?? DEFAULT_WORKSPACE_CURRENCY}
+              disabled={isSaving || tenantLifecycleLocked}
+              onChange={(next) => onChangeProfile({ ...profile, agentCost: next })}
+              settings={profile.agentCost}
+              t={t}
+            />
             <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
               {t('workspace.tenantAdministration.fiscalYearStartMonth')}
               <select
@@ -458,6 +470,14 @@ export function TenantAdministrationPanel({
             settings={timeEntryCategories}
             t={t}
           />
+          <WorkPhaseFields
+            categories={timeEntryCategories}
+            categoryName={(key) => readTimeEntryCategoryDisplayName(key, timeEntryCategories, t)}
+            disabled={isSaving || tenantLifecycleLocked}
+            onChange={(next) => onChangeProfile({ ...profile, workPhases: next })}
+            settings={workPhases}
+            t={t}
+          />
           <FileTypeFields
             disabled={isSaving || tenantLifecycleLocked}
             onChange={(next) => onChangeProfile({ ...profile, fileTypes: next })}
@@ -467,7 +487,7 @@ export function TenantAdministrationPanel({
           <button
             className="workbench-button-primary mt-5"
             disabled={isSaving || tenantLifecycleLocked || hasWeeklyReportReminderConflict(weeklyReportReminders) ||
-              hasTimeEntryCategoryProblem(timeEntryCategories)}
+              hasTimeEntryCategoryProblem(timeEntryCategories) || hasWorkPhaseProblem(workPhases)}
             onClick={onSaveProfile}
             type="button"
           >

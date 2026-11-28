@@ -1,7 +1,9 @@
+import type { WorkspaceAgentCostSettings } from './workspace-agent-cost'
 import type { WorkspaceFileTypeSettings } from './file-types'
 import type { PlanningUpdateTemplateSettings } from './planning-update-template'
 import type { WorkspaceTimeEntryCategorySettings } from './time-entry-categories'
 import type { WeeklyReportReminderSettings } from './weekly-report-reminders'
+import type { WorkspaceWorkPhaseSettings } from './work-phases'
 import type { WorkspaceCalendarSettings } from './workspace-calendar'
 
 /**
@@ -44,6 +46,8 @@ export type TenantProfile = {
   planningUpdateTemplate?: PlanningUpdateTemplateSettings
   /** Work categories offered for time entries; absent until an administrator chooses them. */
   timeEntryCategories?: WorkspaceTimeEntryCategorySettings
+  /** Work phases and the category of each phase (ADR 0115); absent until an administrator chooses them. */
+  workPhases?: WorkspaceWorkPhaseSettings
   /** File types accepted for attachments; absent until an administrator changes them. */
   fileTypes?: WorkspaceFileTypeSettings
   /**
@@ -51,6 +55,11 @@ export type TenantProfile = {
    * chooses one, which means `DEFAULT_WORKSPACE_CURRENCY` (JPY).
    */
   defaultCurrency?: string
+  /**
+   * Whether Project budgets show coding agent cost in US dollars (ADR 0119); absent until an
+   * administrator chooses, which means they do not.
+   */
+  agentCost?: WorkspaceAgentCostSettings
   /** Whether normal tenant access remains enabled. */
   status: 'active' | 'closing' | 'closed'
   /** Timestamp at which a verified closure sealed the tenant. */
@@ -261,12 +270,19 @@ export type UpdateTenantProfileInput = {
    */
   timeEntryCategories?: WorkspaceTimeEntryCategorySettings
   /**
+   * Work phases and the phase of each work category; omitted keeps the stored settings. A phase
+   * already offered may be retired but not removed.
+   */
+  workPhases?: WorkspaceWorkPhaseSettings
+  /**
    * File types accepted for attachments; omitted keeps the stored settings. Types outside the
    * catalog, such as executables, cannot be enabled.
    */
   fileTypes?: WorkspaceFileTypeSettings
   /** ISO 4217 currency for time costs and budgets; omitted keeps the stored currency. */
   defaultCurrency?: string
+  /** Coding agent cost in Project budgets; omitted keeps the stored settings. */
+  agentCost?: WorkspaceAgentCostSettings
   /** Revision read before editing the profile. */
   expectedRevision: number
 }

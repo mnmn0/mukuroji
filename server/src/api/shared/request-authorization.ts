@@ -709,6 +709,23 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/projects/:projectId/raid-log*',
     permission: 'projects.write',
   },
+  // The decision log is read and changed like the risk log (ADR 0114).
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/decision-log*',
+    permission: 'projects.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/decision-log*',
+    permission: 'projects.write',
+  },
+  // The Team decision log lists only the Projects the caller may read, checked per Project.
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/decision-log',
+    permission: 'projects.read',
+  },
   // Saving a Team's portfolio snapshot captures every Project of the Team, so it needs the Team
   // manage permission; reading the portfolio falls through to `teams.read` below.
   {

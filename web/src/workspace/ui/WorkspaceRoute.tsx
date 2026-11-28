@@ -281,6 +281,12 @@ const teamTimeTrackingRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'timeTracking.page.title',
   descriptionKey: 'timeTracking.page.description',
 }
+const teamDecisionLogRouteMetadata: WorkspaceRouteMetadata = {
+  activeTeamViewId: 'decisions',
+  eyebrowKey: 'projects.decisionLog.team.eyebrow',
+  titleKey: 'projects.decisionLog.team.title',
+  descriptionKey: 'projects.decisionLog.team.description',
+}
 const projectIssuesRouteMetadata: WorkspaceRouteMetadata = {
   customHeader: true,
   eyebrowKey: 'workspace.myTasks.eyebrow',
@@ -906,6 +912,15 @@ function resolveWorkspaceRouteMetadata(
     return {
       ...teamFactoryBoardRouteMetadata,
       activeTeamId: decodeWorkspaceRouteParameter(teamFactoryBoardMatch.params.teamId),
+    }
+  }
+
+  const teamDecisionLogMatch = matchPath('/teams/:teamId/decisions', pathname)
+
+  if (teamDecisionLogMatch?.params.teamId) {
+    return {
+      ...teamDecisionLogRouteMetadata,
+      activeTeamId: decodeWorkspaceRouteParameter(teamDecisionLogMatch.params.teamId),
     }
   }
 

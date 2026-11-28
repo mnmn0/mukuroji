@@ -181,3 +181,63 @@ describe('sumApprovedProjectExpenses', () => {
     expect(sumApprovedProjectExpenses(expenses, 'JPY', '2026-01-02', '2026-02-01')).toEqual({ amountMinor: 400, hasOtherCurrency: true })
   })
 })
+
+describe('loadProjectBudgetConsumption Agent Run cost (ADR 0119)', () => {
+  /**
+   * Builds ports that count Agent Run cost.
+   *
+   * @param currency - Currency of the budget and of the time cost.
+   * @param reads - Receives each Agent Run cost read.
+   * @returns The ports.
+   */
+  function agentPorts(currency: string, reads: unknown[]): ProjectBudgetConsumptionPorts {
+    return {
+      ...ports(budget({ periodFrom: '2026-01-05', periodTo: '2026-03-31', currency }), [entry('2026-01-05T00:00:00.000Z', 3_000, { currency })], []),
+      readAgentCostSettings: async () => ({ includeInProjectBudgets: true }),
+      listWorkItems: async (_workspaceId, _teamId, startAfterIssueId) => startAfterIssueId === undefined
+        ? { issues: [{ id: 'a', assignedProjectId: 'p' }, { id: 'b', assignedProjectId: 'other' }], nextStartAfterIssueId: 'b' }
+        : { issues: [{ id: 'c', assignedProjectId: 'p' }] },
+      listAgentRunCosts: async (input) => {
+        const counts = ['2026-01-04T14:59:59.999Z', '2026-01-04T15:00:00.000Z', '2026-01-20T14:59:59.999Z', '2026-01-20T15:00:00.000Z']
+          .map((instant) => input.countsFinishedAt?.(instant))
+        reads.push({ workItemIds: [...input.workItemIds].sort(), since: input.since, until: input.until, counts })
+        return {
+          runs: [
+            // $10 is 1,000 cents; a run before the period is left out.
+            { finishedAt: '2026-01-10T00:00:00.000Z', costMicroUsd: 10_000_000 },
+            { finishedAt: '2026-01-04T00:00:00.000Z', costMicroUsd: 10_000_000 },
+          ],
+          truncated: false,
+        }
+      },
+    }
+  }
+
+  test('adds the cost of the Project runs in the period to a USD budget', async () => {
+    const reads: unknown[] = []
+    const consumption = await loadProjectBudgetConsumption(scope, 'Asia/Tokyo', new Date('2026-01-20T00:00:00.000Z'), agentPorts('USD', reads))
+
+    expect(reads).toEqual([{ workItemIds: ['a', 'c'], since: '2026-01-04T15:00:00.000Z', until: '2026-01-20T14:59:59.999Z', counts: [false, true, true, false] }])
+    expect(consumption).toMatchObject({ actualCostMinor: 4_000, consumedPercent: 40 })
+  })
+
+  test('adds nothing and reads no runs for a budget in another currency', async () => {
+    const reads: unknown[] = []
+    const consumption = await loadProjectBudgetConsumption(scope, 'Asia/Tokyo', new Date('2026-01-20T00:00:00.000Z'), agentPorts('JPY', reads))
+
+    expect(reads).toEqual([])
+    expect(consumption).toMatchObject({ actualCostMinor: 3_000 })
+  })
+
+  test('fails instead of counting a partial Work Item scope', async () => {
+    const base = agentPorts('USD', [])
+    let page = 0
+    await expect(loadProjectBudgetConsumption(scope, 'Asia/Tokyo', new Date('2026-01-20T00:00:00.000Z'), {
+      ...base,
+      listWorkItems: async () => {
+        page += 1
+        return { issues: [], nextStartAfterIssueId: `page-${page}` }
+      },
+    })).rejects.toBeInstanceOf(RangeError)
+  })
+})

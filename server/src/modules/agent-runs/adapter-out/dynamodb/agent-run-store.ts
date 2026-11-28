@@ -818,6 +818,7 @@ export function parseRun(
     ...readLastReport(item),
     ...(item.stallTriagedAt === undefined ? {} : { stallTriagedAt: storedTimestamp(item, 'stallTriagedAt') }),
     ...readResumedFromRunId(item, runId),
+    ...(item.startWorkflowStatusId === undefined ? {} : { startWorkflowStatusId: storedString(item, 'startWorkflowStatusId') }),
   }
 }
 

@@ -1,8 +1,15 @@
 import {
+  AGENT_USAGE_BUCKET_SECONDS,
   AgentTelemetryFormatError,
+  AGENT_ACTIVITY_MAX_WAIT_ITEMS,
+  agentSessionKey,
+  createAgentUsageUnavailableError,
+  deriveAgentActivityBatchId,
   deriveAgentTelemetryBatchId,
+  layoutAgentActivityRows,
   layoutAgentUsageBuckets,
   parseAgentTelemetryLogs,
+  type ParsedAgentTelemetry,
 } from '../../modules/agent-runs'
 import type { AuthenticatedDeveloperCredential } from '../../modules/developer-platform/application/ports'
 import {
@@ -12,6 +19,9 @@ import {
 import { workItemDependencies } from '../shared/app-dependencies'
 import { resolveDeveloperCredentialPrincipal } from '../shared/developer-platform-access'
 import { requireWorkspaceBusinessRead } from '../shared/project-access'
+
+/** Times one export measures its waits again after another export moved a cursor, before it fails for a resend. */
+const cursorClaimAttempts = 3
 
 /**
  * Creates the receiver of coding agent OpenTelemetry logs. Usage is kept per credential owner,
@@ -40,17 +50,70 @@ export function createCanonicalPublicAgentTelemetryService(now: () => Date = () 
         }
         throw error
       }
-      if (parsed.events.length === 0) return { rejectedRecords: parsed.rejectedRecords, duplicate: false }
-      const result = await workItemDependencies.agentRunUsage.recordBatch(
-        principal.directoryId,
-        principal.userKey,
-        // The ID and the chunk layout come from the export itself, not from what the receive time
-        // still accepts, so a retry near the age limit finds the first attempt's receipts.
-        deriveAgentTelemetryBatchId(principal.userKey, parsed.wellFormedEvents),
-        layoutAgentUsageBuckets(parsed.wellFormedEvents, parsed.events),
-        receivedAt,
-      )
-      return { rejectedRecords: parsed.rejectedRecords, duplicate: result === 'duplicate' }
+      const usageResult = parsed.events.length === 0
+        ? undefined
+        : await workItemDependencies.agentRunUsage.recordBatch(
+            principal.directoryId,
+            principal.userKey,
+            // The ID and the chunk layout come from the export itself, not from what the receive time
+            // still accepts, so a retry near the age limit finds the first attempt's receipts.
+            deriveAgentTelemetryBatchId(principal.userKey, parsed.wellFormedEvents),
+            layoutAgentUsageBuckets(parsed.wellFormedEvents, parsed.events),
+            receivedAt,
+          )
+      const activityResult = await recordActivity(principal.directoryId, principal.userKey, parsed, receivedAt)
+      const results = [usageResult, activityResult].filter((result) => result !== undefined)
+      return {
+        rejectedRecords: parsed.rejectedRecords,
+        duplicate: results.length > 0 && results.every((result) => result === 'duplicate'),
+      }
     },
   }
+}
+
+/**
+ * Saves the tool time and estimated waits of one export (ADR 0117) and moves the session cursors
+ * forward. Exports with only model requests still move the cursors, so the wait before the next prompt
+ * is measured from the last request.
+ *
+ * @param directoryId - Workspace ID.
+ * @param memberKey - Member that sent the export.
+ * @param parsed - Parsed export.
+ * @param receivedAt - Receive time.
+ * @returns Whether rows were added or were already added, or undefined when the export had no rows.
+ */
+async function recordActivity(
+  directoryId: string,
+  memberKey: string,
+  parsed: ParsedAgentTelemetry,
+  receivedAt: Date,
+): Promise<'recorded' | 'duplicate' | undefined> {
+  if (parsed.activityEvents.length === 0) return undefined
+  const store = workItemDependencies.agentRunUsage
+  const sessionKeys = [...new Set(parsed.activityEvents.flatMap((event) => {
+    const key = agentSessionKey(event)
+    return key === undefined ? [] : [key]
+  }))]
+  const batchId = deriveAgentActivityBatchId(memberKey, parsed.wellFormedActivityEvents)
+  for (let attempt = 0; attempt < cursorClaimAttempts; attempt += 1) {
+    const cursors = sessionKeys.length === 0 ? new Map<string, number>() : await store.readSessionCursors(directoryId, memberKey, sessionKeys)
+    const layout = layoutAgentActivityRows(parsed.wellFormedActivityEvents, parsed.activityEvents, cursors, AGENT_USAGE_BUCKET_SECONDS)
+    const waitSlots = layout.slots.slice(layout.toolSlotCount)
+    // Both counts come from the export alone, so a resent export makes the same choice.
+    const measurable = waitSlots.length + layout.sessionCount <= AGENT_ACTIVITY_MAX_WAIT_ITEMS
+    const claims = measurable
+      ? layout.cursors.map((cursor) => {
+          const previous = cursors.get(cursor.sessionKey)
+          return previous === undefined ? cursor : { ...cursor, previousLastEventAtMs: previous }
+        })
+      : []
+    const activity = { toolSlots: layout.slots.slice(0, layout.toolSlotCount), waitSlots: measurable ? waitSlots : [], claims }
+    const empty = [...activity.toolSlots, ...activity.waitSlots].every((slot) => slot === undefined) && claims.length === 0
+    const result = empty ? undefined : await store.recordActivityBatch(directoryId, memberKey, batchId, activity, receivedAt)
+    // Another export of the same session moved a cursor first: measure the waits again from it.
+    if (result === 'cursor-moved') continue
+    if (!measurable && layout.cursors.length > 0) await store.advanceSessionCursors(directoryId, memberKey, layout.cursors, receivedAt)
+    return result
+  }
+  throw createAgentUsageUnavailableError()
 }
