@@ -27,6 +27,7 @@ const metricLabelKeys: Readonly<Record<AnalyticsMetricKey, MessageKey>> = {
   'evm-spi': 'analytics.metric.evmSpi',
   'evm-cpi': 'analytics.metric.evmCpi',
   'evm-eac': 'analytics.metric.evmEac',
+  'status-time': 'analytics.metric.statusTime',
 }
 
 /**

@@ -123,3 +123,43 @@ test('reads the review history to its end, and refuses to judge one too long to 
   await expect(readGitHubPullRequest(paged(Array.from({ length: 10 }, () => page('APPROVED'))), { repository: 'org/repo', number: 7 }))
     .rejects.toMatchObject({ code: 'ConnectorProviderResponseMalformed' })
 })
+
+test('notes when the pull request opened, was first reviewed by someone else, and approved', async () => {
+  const timed = {
+    ...openResponses,
+    'repos/org/repo/pulls/7': {
+      status: 200,
+      payload: { state: 'open', draft: false, merged: false, created_at: '2026-11-20T00:00:00Z', user: { id: 9 }, head: { sha } },
+    },
+    'repos/org/repo/pulls/7/reviews': {
+      status: 200,
+      payload: [
+        // The author's own comment is not a review someone waited for.
+        { user: { id: 9 }, state: 'COMMENTED', submitted_at: '2026-11-20T01:00:00Z' },
+        { user: { id: 1 }, state: 'CHANGES_REQUESTED', submitted_at: '2026-11-20T05:00:00Z' },
+        { user: { id: 2 }, state: 'APPROVED', submitted_at: '2026-11-21T00:00:00Z' },
+        { user: { id: 1 }, state: 'APPROVED', submitted_at: '2026-11-22T00:00:00Z' },
+      ],
+    },
+  }
+  expect(await readGitHubPullRequest(requester(timed), { repository: 'org/repo', number: 7 })).toEqual({
+    state: 'open', draft: false, headSha: sha, checks: 'success', review: 'approved',
+    createdAt: '2026-11-20T00:00:00.000Z',
+    firstReviewedAt: '2026-11-20T05:00:00.000Z',
+    approvedAt: '2026-11-21T00:00:00.000Z',
+  })
+  const withdrawn = {
+    ...timed,
+    'repos/org/repo/pulls/7/reviews': {
+      status: 200,
+      payload: [
+        { user: { id: 2 }, state: 'APPROVED', submitted_at: '2026-11-21T00:00:00Z' },
+        { user: { id: 2 }, state: 'DISMISSED', submitted_at: '2026-11-21T02:00:00Z' },
+      ],
+    },
+  }
+  const status = await readGitHubPullRequest(requester(withdrawn), { repository: 'org/repo', number: 7 })
+  expect(status.review).toBe('none')
+  expect(status.approvedAt).toBeUndefined()
+  expect(status.firstReviewedAt).toBe('2026-11-21T00:00:00.000Z')
+})

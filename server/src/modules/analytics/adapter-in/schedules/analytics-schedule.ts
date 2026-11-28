@@ -17,6 +17,7 @@ import {
   ANALYTICS_SCHEDULE_SHARD_COUNT,
   AnalyticsError,
   analyticsFilterIncludesWorkItem,
+  analyticsQueryReadsWorkflowStatuses,
   type AnalyticsDeliveryNotifier,
   type AnalyticsDeliveryReceipt,
   type AnalyticsDueReportReference,
@@ -35,6 +36,7 @@ import {
   type AnalyticsWorkItemHistoryReader,
 } from '../../analytics-history-reader'
 import type { AnalyticsHistoryEvent } from '../../analytics-work-item-history'
+import type { AnalyticsWorkflowStatusCatalog } from '../../analytics-status-time'
 
 const ANALYTICS_SCHEDULE_PAGE_SIZE = 100
 const ANALYTICS_SCHEDULE_MAX_PAGES = 100
@@ -179,6 +181,23 @@ export type AnalyticsScheduleRendererDependencies = {
    * Without it reports use the default calendar (Monday weeks, January fiscal years).
    */
   workspaceCalendar?: AnalyticsScheduleWorkspaceCalendarClient
+  /**
+   * Workflow statuses and work phases of the Teams a report counts, for `status-time` widgets
+   * (ADR 0115). Without it those widgets return the workflow-unavailable warning.
+   */
+  workflowStatuses?: AnalyticsScheduleWorkflowStatusClient
+}
+
+/** Reads the workflow statuses of the Teams a scheduled report counts. */
+export type AnalyticsScheduleWorkflowStatusClient = {
+  /**
+   * Reads the status names and phases of Teams, with the names the Workspace gave its phases.
+   *
+   * @param workspaceId - Workspace that owns the report.
+   * @param teamIds - Teams whose Work Items the report counts.
+   * @returns The catalog that names and phases the `status-time` groups.
+   */
+  readCatalog(workspaceId: string, teamIds: readonly string[]): Promise<AnalyticsWorkflowStatusCatalog>
 }
 
 /** Reads the calendar settings of the Workspace that owns a scheduled report. */
@@ -667,10 +686,17 @@ export function createAnalyticsScheduleRenderer(
         : { forecastBaseline: structuredClone(report.forecastBaseline) }),
       ...(report.forecastWeighting === undefined ? {} : { forecastWeighting: report.forecastWeighting }),
     }
+    const workflowStatuses = dependencies.workflowStatuses && analyticsQueryReadsWorkflowStatuses(query)
+      ? await dependencies.workflowStatuses.readCatalog(
+          report.workspaceId,
+          [...new Set(authorized.workItems.map((item) => item.teamId))].sort(),
+        )
+      : undefined
     const snapshot = createAnalyticsSnapshot({
       ...authorized,
       query,
       authorizedProjectIds: currentAuthorization.readableProjectIds,
+      ...(workflowStatuses === undefined ? {} : { workflowStatuses }),
     })
     return {
       workspaceId: report.workspaceId,

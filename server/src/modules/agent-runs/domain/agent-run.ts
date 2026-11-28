@@ -81,6 +81,11 @@ export type StoredAgentRun = {
   stallTriagedAt?: string
   /** Earlier run of the same Work Item that this run resumed, when a resume started it. */
   resumedFromRunId?: string
+  /**
+   * Workflow status the Work Item was in when the run started, which decides the work phase the
+   * run's usage counts toward (ADR 0115); absent for runs saved before phases.
+   */
+  startWorkflowStatusId?: string
 }
 
 /** Persisted claim that fences one Work Item to its single active run. */
@@ -493,6 +498,8 @@ export function createActiveAgentRun(input: {
   runId?: string
   /** Earlier run of the Work Item that the new run resumes. */
   resumedFromRunId?: string
+  /** Workflow status the Work Item is in once the run has started. */
+  workflowStatusId?: string
 }): StoredAgentRun {
   const startedAt = input.now.toISOString()
   return {
@@ -514,6 +521,7 @@ export function createActiveAgentRun(input: {
     leaseExpiresAt: calculateLeaseExpiry(input.now, input.leaseMinutes),
     reportCount: 0,
     ...(input.resumedFromRunId === undefined ? {} : { resumedFromRunId: input.resumedFromRunId }),
+    ...(input.workflowStatusId === undefined ? {} : { startWorkflowStatusId: input.workflowStatusId }),
   }
 }
 

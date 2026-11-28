@@ -219,6 +219,7 @@ export const timeTrackingMessages = {
   'timeTracking.budget.periodBudgetNote': '集計期間がこの期間と同じとき、既定の予算の代わりにこの予算と比べます。同じ期間の予算がすでにあれば置き換えます。ほかの期間の予算と日付を重ねることはできません。',
   'timeTracking.budget.defaultBudgetNote': '既定の予算は、集計期間と同じ期間の予算がないときに比べる予算です。',
   'timeTracking.budget.teamPartial': 'Team 全体の実績コストは、あなたが管理する Project の分だけを集計しています（Project なしの工数は含みません）。そのため残りと消化率は表示していません。Project ごとの予算では表示されます。',
+  'timeTracking.report.groupBy.phase': '工程',
   'timeTracking.report.groupBy.category': '作業区分',
   'timeTracking.report.category.design': '設計',
   'timeTracking.report.category.implementation': '実装',

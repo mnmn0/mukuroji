@@ -3,7 +3,7 @@ import type {
   TenantAdministrationSnapshot,
   TenantOperation,
 } from '@mukuroji/contracts'
-import { DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS } from '@mukuroji/contracts'
+import { DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS, DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS } from '@mukuroji/contracts'
 import { createDefaultTenantAdministrationSnapshot } from '../../domain/tenant-administration'
 import { TenantAdministrationError } from '../../domain/tenant-administration'
 import type { TenantAdministrationClient } from '../../application/ports/tenant-administration-port'
@@ -966,6 +966,31 @@ test('keeps calendar settings changes behind administration and validates them',
       timeZone: 'Asia/Tokyo',
     },
   })
+})
+
+test('lets every member read the work phases', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const client = createClient(snapshot, [])
+  client.getProfile = async () => undefined
+  const defaults = await createCalendarRouter(client).request('/api/workspace/work-phases', {
+    headers: { Authorization: 'Bearer token-1' },
+  })
+  expect(defaults.status).toBe(200)
+  expect(await defaults.json()).toEqual(DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS)
+
+  const settings = {
+    phases: [{ key: 'implementation', label: '実装', active: true }, { key: 'custom-ops', label: '運用', active: true }],
+    categoryPhases: { meeting: 'custom-ops' },
+  }
+  client.getProfile = async () => ({ ...snapshot.profile, workPhases: settings })
+  const stored = await createCalendarRouter(client).request('/api/workspace/work-phases', {
+    headers: { Authorization: 'Bearer token-1' },
+  })
+  expect(await stored.json()).toEqual(settings)
 })
 
 test('lets every member read the work categories and keeps changes behind administration', async () => {

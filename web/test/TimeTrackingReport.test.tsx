@@ -186,6 +186,10 @@ describe('time report API', () => {
     expect(url?.searchParams.get('projectId')).toBe('atlas')
     expect(requests[0]?.headers.get('Authorization')).toBe('Bearer token')
 
+    // A work phase report (ADR 0115) is read like any other grouping.
+    respondWith({ ...timeReportFixtureMemberSummary, groupBy: 'phase' })
+    expect((await getTimeTrackingSummary('token', 'core-team', { ...timeReportFixtureRange, timeZone: 'UTC', groupBy: 'phase' })).groupBy)
+      .toBe('phase')
     respondWith({ ...timeReportFixtureMemberSummary, groupBy: 'team' })
     await expect(getTimeTrackingSummary('token', 'core-team', { ...timeReportFixtureRange, timeZone: 'UTC', groupBy: 'day' }))
       .rejects.toBeInstanceOf(TimeTrackingApiError)

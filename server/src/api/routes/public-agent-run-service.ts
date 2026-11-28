@@ -502,6 +502,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
                 startRevision: current.revision + 1,
                 leaseMinutes: settings.leaseMinutes,
                 now,
+                workflowStatusId: input.workflowStatusId,
               })
               const run = { ...created, startedAt: resumeStartedAt(previous, now) }
               started = run
@@ -868,6 +869,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         startRevision: detail.issue.revision,
         leaseMinutes: settings.leaseMinutes,
         now,
+        ...(detail.issue.workflowStatusId === undefined ? {} : { workflowStatusId: detail.issue.workflowStatusId }),
       })
       // Like a resume, only the history position moves after the stalled run; the lease keeps this clock.
       const successor = { ...created, startedAt: resumeStartedAt(run, now) }
@@ -988,6 +990,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         leaseMinutes: settings.leaseMinutes,
         now,
         ...(previous === undefined ? {} : { resumedFromRunId: previous.runId }),
+        ...(detail.issue.workflowStatusId === undefined ? {} : { workflowStatusId: detail.issue.workflowStatusId }),
       })
       // The new run starts after the run it resumes, so the history, ordered by start time, lists it first.
       const run = { ...created, startedAt: resumeStartedAt(previous, now) }

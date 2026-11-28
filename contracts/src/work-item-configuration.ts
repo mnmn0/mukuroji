@@ -31,6 +31,11 @@ export type WorkflowStatusDefinition = {
   requiredFields?: import('./work-item-workflow-rules').WorkflowStatusRequiredField[]
   /** Custom fields a Work Item must have before it enters this status; absent means none. */
   requiredCustomFieldIds?: string[]
+  /**
+   * Work phase (ADR 0115) the time a Work Item spends in this status and the Agent Runs started in
+   * it count toward; absent means no phase.
+   */
+  phaseKey?: string
 }
 
 /**

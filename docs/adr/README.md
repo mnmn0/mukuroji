@@ -132,5 +132,6 @@
 | [0109](0109-work-item-web-links-in-planning-table.md) | Work Item の URL リンクを Planning table の 1 row に置き、Public API と MCP から work-items scope で読み書きする | 提案 |
 | [0110](0110-analytics-earned-value-metrics.md) | Analytics の EVM（SPI / CPI / EAC）は query のたびに管理する Project の予算レポートの値を読み、その Project の集合を snapshot の scope に固定する | 提案 |
 | [0114](0114-project-decision-log.md) | 意思決定ログを Planning table の1決定1行で持ち、Team の一覧は読み取り時に Project をまたいで集める | 提案 |
+| [0115](0115-work-phases.md) | 工程を Workspace の tenant profile で定義し、作業区分・ワークフローステータス・Agent Run を工程に対応づける | 提案 |
 | [0117](0117-agent-run-time-breakdown-and-peer-comparison.md) | coding agent の所要時間を同じ OTLP logs から tool・待ち時間別に足し込み、同じ種類・規模のタスク同士で比べる | 提案 |
 | [0119](0119-agent-cost-in-project-budgets.md) | coding agent の推定費用は USD のまま Project 予算レポートに出し、USD の予算だけ実績・閾値通知・EVM に足すかを Workspace 設定で選ぶ | 提案 |

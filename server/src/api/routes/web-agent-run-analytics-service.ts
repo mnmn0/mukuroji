@@ -14,17 +14,26 @@ import {
 import {
   AgentRunError,
   calculateFactoryAnalytics,
+  collectPullRequestArtifacts,
   compareFactoryWorkItems,
   createAgentRunIntegrityError,
+  isArtifactRepositoryAllowed,
+  selectLatestVerifiedPullRequests,
   summarizeFactoryActivity,
   summarizeFactoryUsage,
+  summarizePullRequestLeadTimes,
   type AgentRunComparisonEntry,
   toAgentRunReport,
+  type StoredAgentRunReport,
   type AgentRunFinishedGroup,
   type FactoryAnalyticsReportFacts,
   type FactoryAnalyticsWorkItemHistory,
 } from '../../modules/agent-runs'
-import { isTeamIssueNotFoundError } from '../../modules/work-items'
+import {
+  createWorkflowStatusPhaseLookup,
+  isTeamIssueNotFoundError,
+  type WorkflowStatusPhaseEntry,
+} from '../../modules/work-items'
 import { mapInOrderWithConcurrency } from '../shared/agent-run-access'
 import { readAgentRunActivity, readAgentRunUsage } from '../shared/agent-run-usage-access'
 import { workItemDependencies } from '../shared/app-dependencies'
@@ -186,6 +195,12 @@ async function readVisibleWorkItem(
   }
 }
 
+/** Run and report history of one Work Item with the pull request URLs its reports name. */
+type WorkItemHistoryWithPullRequests = FactoryAnalyticsWorkItemHistory & {
+  /** Distinct pull request URLs of the read reports, newest first, at most 20. */
+  pullRequestUrls: string[]
+}
+
 /**
  * Reads a Work Item's newest runs and reports up to the per-Work Item bounds. Reports are read only
  * when a run has any.
@@ -199,11 +214,12 @@ async function readWorkItemHistory(
   principal: WorkspacePrincipal,
   teamId: string,
   workItemId: string,
-): Promise<FactoryAnalyticsWorkItemHistory> {
+): Promise<WorkItemHistoryWithPullRequests> {
   const store = workItemDependencies.agentRuns
   const runPage = await store.listWorkItemRuns(principal.directoryId, teamId, workItemId, undefined, FACTORY_ANALYTICS_MAX_RUNS_PER_WORK_ITEM)
   if (runPage.runs.some((run) => run.workItemId !== workItemId)) throw createAgentRunIntegrityError()
   const reports: FactoryAnalyticsReportFacts[] = []
+  const fullReports: StoredAgentRunReport[] = []
   if (runPage.runs.some((run) => run.reportCount > 0)) {
     let cursor: string | undefined
     do {
@@ -214,11 +230,41 @@ async function readWorkItemHistory(
         // Only the fields analytics uses are kept, so verification text and artifact URLs never pile up across Work Items.
         const { runId, sequence, kind, createdAt } = toAgentRunReport(report)
         reports.push({ runId, sequence, kind, createdAt })
+        fullReports.push(report)
       }
       cursor = page.nextCursor
     } while (cursor !== undefined && reports.length < FACTORY_ANALYTICS_MAX_REPORTS_PER_WORK_ITEM)
   }
-  return { runs: runPage.runs, runsComplete: runPage.nextCursor === undefined, reports }
+  // Reports come newest first, so the newest pull requests are kept when a Work Item names many.
+  const pullRequestUrls = collectPullRequestArtifacts(fullReports).map((reference) => reference.url)
+  return { runs: runPage.runs, runsComplete: runPage.nextCursor === undefined, reports, pullRequestUrls }
+}
+
+/**
+ * Reads the stored verified states of the pull requests the evaluated Work Items' reports name
+ * (ADR 0103) and measures their intervals (ADR 0115). Nothing is read from the provider: only
+ * states a viewer's earlier visit stored count, and a repository the Team no longer allows is left
+ * out like it is on the Work Item.
+ *
+ * @param principal - Viewer.
+ * @param teamId - Team ID.
+ * @param period - Validated period.
+ * @param workItems - Visible Work Items with the pull request URLs their reports name.
+ * @returns Interval medians.
+ */
+async function readPullRequestLeadTimes(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  period: FactoryAnalyticsPeriod,
+  workItems: readonly { workItemId: string; history: { pullRequestUrls: readonly string[] } }[],
+): Promise<TeamFactoryAnalyticsResponse['pullRequestLeadTimes']> {
+  const withUrls = workItems.filter(({ history }) => history.pullRequestUrls.length > 0)
+  if (withUrls.length === 0) return summarizePullRequestLeadTimes([], period.from, period.to)
+  const { artifactRepositories } = await workItemDependencies.agentRuns.getSettings(principal.directoryId, teamId)
+  const statuses = await mapInOrderWithConcurrency(withUrls, analyticsReadConcurrency, ({ workItemId, history }) =>
+    workItemDependencies.agentRunArtifactStatuses.getStatuses(principal.directoryId, teamId, workItemId, history.pullRequestUrls))
+  const allowed = statuses.flat().filter((status) => isArtifactRepositoryAllowed(artifactRepositories, status.repository))
+  return summarizePullRequestLeadTimes(selectLatestVerifiedPullRequests(allowed), period.from, period.to)
 }
 
 /**
@@ -255,7 +301,10 @@ export async function getWebTeamFactoryAnalytics(
     to: period.to,
     histories: visible.map((entry) => entry.history),
   })
-  const { usage, activity, comparison } = await readPeriodUsage(principal, teamId, period, visible)
+  const [{ usage, activity, comparison }, pullRequestLeadTimes] = await Promise.all([
+    readPeriodUsage(principal, teamId, period, visible),
+    readPullRequestLeadTimes(principal, teamId, period, visible),
+  ])
   return {
     generatedAt: now.toISOString(),
     from: new Date(period.from).toISOString(),
@@ -267,6 +316,7 @@ export async function getWebTeamFactoryAnalytics(
     ...(usage === undefined ? {} : { usage }),
     ...(activity === undefined ? {} : { activity }),
     ...(comparison === undefined ? {} : { comparison }),
+    pullRequestLeadTimes,
   }
 }
 
@@ -316,7 +366,10 @@ async function readPeriodUsage(
   if (runs.length === 0) return {}
   const evaluated = runs.slice(0, FACTORY_ANALYTICS_MAX_USAGE_RUNS)
   const runsHasMore = runs.length > evaluated.length
-  const includeCost = await isTeamManager(principal, teamId)
+  const [includeCost, statusPhases] = await Promise.all([
+    isTeamManager(principal, teamId),
+    readTeamStatusPhases(principal, teamId),
+  ])
   const reads = await mapInOrderWithConcurrency(evaluated, analyticsReadConcurrency, async ({ run }) => {
     const [usage, activity] = await Promise.all([
       readAgentRunUsage(principal.directoryId, run, includeCost),
@@ -326,9 +379,20 @@ async function readPeriodUsage(
     return { usage, activity }
   })
   const usage = summarizeFactoryUsage(
-    evaluated.flatMap(({ workItemId, workItem }, index) => {
+    evaluated.flatMap(({ run, workItemId, workItem }, index) => {
       const runUsage = reads[index]?.usage
-      return runUsage ? [{ workItemId, title: workItem.title, ...(workItem.projectId === undefined ? {} : { projectId: workItem.projectId }), usage: runUsage }] : []
+      const phaseKey = run.startWorkflowStatusId === undefined
+        ? undefined
+        : statusPhases.get(run.startWorkflowStatusId)?.phaseKey
+      return runUsage
+        ? [{
+            workItemId,
+            title: workItem.title,
+            ...(workItem.projectId === undefined ? {} : { projectId: workItem.projectId }),
+            usage: runUsage,
+            ...(phaseKey === undefined ? {} : { phaseKey }),
+          }]
+        : []
     }),
     FACTORY_ANALYTICS_USAGE_TOP_WORK_ITEMS,
     runsHasMore,
@@ -364,4 +428,20 @@ async function readPeriodUsage(
     ...(activity === undefined ? {} : { activity }),
     ...(comparison === undefined ? {} : { comparison }),
   }
+}
+
+/**
+ * Reads the work phase of each workflow status of a Team (ADR 0115). Phases are read from the
+ * current configuration, so a status mapped to another phase later moves its runs too.
+ *
+ * @param principal - Viewer.
+ * @param teamId - Team ID.
+ * @returns Status name and phase keyed by status ID.
+ */
+async function readTeamStatusPhases(
+  principal: WorkspacePrincipal,
+  teamId: string,
+): Promise<ReadonlyMap<string, WorkflowStatusPhaseEntry>> {
+  const resolved = await workItemDependencies.workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId)
+  return createWorkflowStatusPhaseLookup(resolved.configuration)
 }

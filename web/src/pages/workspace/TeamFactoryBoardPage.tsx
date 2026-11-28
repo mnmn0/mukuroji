@@ -13,6 +13,7 @@ import { createTranslator } from '../../shared/i18n/i18n'
 import { createProjectIssuesPath, createTeamIssuesPath, createTeamRunHistoryPath } from '../../shared/routing/paths'
 import { useWorkItemConfiguration } from '../../work-items/queries/useWorkItemConfigurations'
 import { SoftwareFactoryGate } from '../../workspace/ui/SoftwareFactoryGate'
+import { useWorkspaceWorkPhases } from '../../workspace/queries/useWorkspaceWorkPhases'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
@@ -75,6 +76,7 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
     () => Object.fromEntries((configuration.data?.configuration.workItemTypes ?? []).map((type) => [type.id, type.name])),
     [configuration.data],
   )
+  const { settings: workPhases, error: workPhasesError, retry: retryWorkPhases } = useWorkspaceWorkPhases(accessToken)
   const onRelease = useReleaseFactoryBoardRun(accessToken, teamId, async (released) => {
     // Show the committed release from the response, so a failed refresh cannot bring back the active run.
     await board.applyRelease(released)
@@ -115,6 +117,9 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
           onRetry={() => { void analytics.mutate() }}
           periodDays={analyticsDays}
           projectNames={projectNames}
+          workPhases={workPhases}
+          hasWorkPhasesError={Boolean(workPhasesError) && !workPhases}
+          onRetryWorkPhases={retryWorkPhases}
           comparisonFields={comparisonFields}
           compareFieldId={compareFieldId}
           onCompareFieldChange={setCompareFieldId}

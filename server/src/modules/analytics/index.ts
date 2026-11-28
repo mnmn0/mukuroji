@@ -24,6 +24,12 @@ export {
   type AnalyticsMilestoneFieldChange,
   type AnalyticsMilestoneHistory,
 } from './analytics-milestone-trend'
+/** Workflow statuses read by the `status-time` metric (ADR 0115). */
+export {
+  ANALYTICS_WORKFLOW_STATUSES_UNAVAILABLE_WARNING,
+  type AnalyticsWorkflowStatusCatalog,
+  type AnalyticsWorkflowStatusEntry,
+} from './analytics-status-time'
 /** Agent Run telemetry usage read by the `agent-tokens` and `agent-cost` metrics (ADR 0061). */
 export {
   ANALYTICS_AGENT_USAGE_UNAVAILABLE_WARNING,
@@ -68,6 +74,7 @@ export {
   createAnalyticsPermissionScopeHash,
   createAnalyticsScheduleShard,
   createAnalyticsSnapshot,
+  analyticsQueryReadsWorkflowStatuses,
   createAnalyticsSnapshotListCursor,
   normalizeAnalyticsEvidenceInput,
   normalizeAnalyticsExportLocale,

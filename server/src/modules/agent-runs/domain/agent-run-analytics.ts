@@ -1,6 +1,11 @@
 import {
   AGENT_RUN_RUNTIMES,
+  FACTORY_ANALYTICS_PULL_REQUEST_INTERVALS,
   FACTORY_ANALYTICS_STAGES,
+  type AgentRunArtifactStatus,
+  type AgentRunPullRequestStatus,
+  type FactoryAnalyticsPullRequestInterval,
+  type FactoryAnalyticsPullRequestLeadTime,
   type AgentRunOutcome,
   type AgentRunReport,
   type AgentRunReportKind,
@@ -254,4 +259,84 @@ export function calculateFactoryAnalytics(input: FactoryAnalyticsInput): Factory
     }),
     historyHasMore,
   }
+}
+
+/** Start and end field of each pull request interval. */
+const pullRequestIntervalBounds: Record<
+  FactoryAnalyticsPullRequestInterval,
+  readonly [keyof AgentRunPullRequestStatus, keyof AgentRunPullRequestStatus]
+> = {
+  'review-wait': ['createdAt', 'firstReviewedAt'],
+  review: ['firstReviewedAt', 'approvedAt'],
+  'merge-wait': ['approvedAt', 'mergedAt'],
+  total: ['createdAt', 'mergedAt'],
+}
+
+/**
+ * Takes the median of hour samples, rounded to two decimals.
+ *
+ * @param samples - Hours.
+ * @returns The median, or null without samples.
+ */
+function medianOfHours(samples: readonly number[]): number | null {
+  if (samples.length === 0) return null
+  const sorted = [...samples].sort((left, right) => left - right)
+  const middle = Math.floor(sorted.length / 2)
+  const median = sorted.length % 2 === 1
+    ? sorted[middle] ?? 0
+    : ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2
+  return Math.round(median * 100) / 100
+}
+
+/**
+ * Picks one state per verified pull request. Several Work Items may name the same pull request,
+ * each with its own cached state, so the state checked last wins.
+ *
+ * @param statuses - Artifact states of every Work Item, in any order.
+ * @returns The latest verified state of each distinct pull request.
+ */
+export function selectLatestVerifiedPullRequests(statuses: readonly AgentRunArtifactStatus[]): AgentRunPullRequestStatus[] {
+  const latest = new Map<string, { checkedAt: number; pullRequest: AgentRunPullRequestStatus }>()
+  for (const status of statuses) {
+    if (status.verification !== 'verified' || status.pullRequest === undefined) continue
+    const key = `${status.provider}:${status.repository}#${status.number}`
+    const parsed = Date.parse(status.checkedAt)
+    const checkedAt = Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY
+    const known = latest.get(key)
+    if (known !== undefined && checkedAt <= known.checkedAt) continue
+    latest.set(key, { checkedAt, pullRequest: status.pullRequest })
+  }
+  return [...latest.values()].map((entry) => entry.pullRequest)
+}
+
+/**
+ * Measures the intervals of verified pull requests (ADR 0115): opened to first review, first
+ * review to approval, approval to merge, and opened to merge. A pull request counts toward an
+ * interval when both ends are known, the end falls in the period, and the end is not before the
+ * start.
+ *
+ * @param pullRequests - Distinct verified pull request states.
+ * @param from - Period start in epoch milliseconds, inclusive.
+ * @param to - Period end in epoch milliseconds, inclusive.
+ * @returns Median hours and sample size per interval, in
+ *   {@link FACTORY_ANALYTICS_PULL_REQUEST_INTERVALS} order.
+ */
+export function summarizePullRequestLeadTimes(
+  pullRequests: readonly AgentRunPullRequestStatus[],
+  from: number,
+  to: number,
+): FactoryAnalyticsPullRequestLeadTime[] {
+  return FACTORY_ANALYTICS_PULL_REQUEST_INTERVALS.map((interval) => {
+    const [startField, endField] = pullRequestIntervalBounds[interval]
+    const samples = pullRequests.flatMap((pullRequest) => {
+      const startValue = pullRequest[startField]
+      const endValue = pullRequest[endField]
+      if (typeof startValue !== 'string' || typeof endValue !== 'string') return []
+      const start = Date.parse(startValue)
+      const end = Date.parse(endValue)
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end < start || end < from || end > to) return []
+      return [(end - start) / millisecondsPerHour]
+    })
+    return { interval, medianHours: medianOfHours(samples), sampleSize: samples.length }
+  })
 }

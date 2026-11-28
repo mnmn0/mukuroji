@@ -8,6 +8,7 @@ import {
   type AgentModelUsage,
   type AgentRunUsage,
   type FactoryAnalyticsUsage,
+  NO_WORK_PHASE_GROUP_KEY,
 } from '@mukuroji/contracts'
 import { hashAgentInstanceId } from './agent-run'
 import {
@@ -776,6 +777,8 @@ export type AgentRunUsageEntry = {
   projectId?: string
   /** Usage of the run. */
   usage: AgentRunUsage
+  /** Work phase of the run (ADR 0115), or `no-phase`; absent counts as `no-phase`. */
+  phaseKey?: string
 }
 
 /**
@@ -815,7 +818,10 @@ export function summarizeFactoryUsage(entries: readonly AgentRunUsageEntry[], to
   if (!total) return undefined
   const projects = new Map<string, { projectId?: string; usages: AgentRunUsage[] }>()
   const workItems = new Map<string, { entry: AgentRunUsageEntry; usages: AgentRunUsage[] }>()
+  const phases = new Map<string, AgentRunUsage[]>()
   for (const entry of entries) {
+    const phaseKey = entry.phaseKey ?? NO_WORK_PHASE_GROUP_KEY
+    phases.set(phaseKey, [...phases.get(phaseKey) ?? [], entry.usage])
     const projectKey = entry.projectId ?? ''
     const project = projects.get(projectKey) ?? { ...(entry.projectId === undefined ? {} : { projectId: entry.projectId }), usages: [] }
     project.usages.push(entry.usage)
@@ -832,6 +838,10 @@ export function summarizeFactoryUsage(entries: readonly AgentRunUsageEntry[], to
     const usage = combineAgentRunUsage(workItem.usages)
     return usage ? [{ key, usage, entry: workItem.entry }] : []
   }).sort(byTokensThenKey)
+  const phaseUsage = [...phases.entries()].flatMap(([key, usages]) => {
+    const usage = combineAgentRunUsage(usages)
+    return usage ? [{ key, usage }] : []
+  }).sort(byTokensThenKey)
   return {
     total,
     projects: projectUsage.map(({ projectId, usage }) => ({ ...(projectId === undefined ? {} : { projectId }), usage })),
@@ -841,6 +851,7 @@ export function summarizeFactoryUsage(entries: readonly AgentRunUsageEntry[], to
       ...(entry.projectId === undefined ? {} : { projectId: entry.projectId }),
       usage,
     })),
+    phases: phaseUsage.map(({ key, usage }) => ({ phaseKey: key, usage })),
     runsHasMore,
   }
 }

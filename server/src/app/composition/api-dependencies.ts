@@ -37,6 +37,7 @@ import {
   AI_ASSISTANCE_SCHEMA_VERSION,
   DEFAULT_WORKSPACE_FILE_TYPE_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS,
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ZONE,
   listJapanesePublicHolidays,
@@ -1985,6 +1986,9 @@ export function createProductionAppDependencies(): AppDependencies {
       readCategories: async (workspaceId) =>
         (await workspace.tenantAdministration.getProfile(workspaceId))?.timeEntryCategories ??
           DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+      readWorkPhases: async (workspaceId) =>
+        (await workspace.tenantAdministration.getProfile(workspaceId))?.workPhases ??
+          DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS,
       readTimeZone: async (workspaceId) =>
         (await workspace.tenantAdministration.getProfile(workspaceId))?.calendar?.timeZone ??
           DEFAULT_WORKSPACE_TIME_ZONE,

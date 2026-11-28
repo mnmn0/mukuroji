@@ -5,6 +5,7 @@ import {
 } from '@mukuroji/contracts'
 import type { createTranslator, MessageKey } from '../../shared/i18n/i18n'
 import type { ProjectDirectoryTeam } from '../../projects/api'
+import { readWorkPhaseDisplayName } from '../../workspace/model/workPhases'
 
 /** Display names that replace internal IDs in Analytics results. */
 export type AnalyticsDisplayNames = {
@@ -84,6 +85,7 @@ export function createAnalyticsGroupLabelLookup(
       const key = Object.hasOwn(PRIORITY_MESSAGE_KEYS, priority) ? PRIORITY_MESSAGE_KEYS[priority] : undefined
       return key === undefined ? undefined : t(key)
     },
+    workPhase: (phaseKey) => readWorkPhaseDisplayName(phaseKey, undefined, t),
     unset: t('analytics.group.unset'),
   }
 }

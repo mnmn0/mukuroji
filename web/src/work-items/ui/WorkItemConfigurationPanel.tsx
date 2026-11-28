@@ -8,6 +8,7 @@ import type {
   WorkflowStatusCategory,
   WorkflowStatusDefinition,
   WorkItemConfiguration,
+  WorkspaceWorkPhaseSettings,
 } from '@mukuroji/contracts'
 import { DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
 import {
@@ -34,6 +35,7 @@ import {
   sortCustomFieldOptions,
 } from '../model/workItemConfigurationEditor'
 import { pruneWorkflowStatusRequiredCustomFields } from '../model/workflowRules'
+import { readWorkPhaseDisplayName } from '../../workspace/model/workPhases'
 import { WorkItemTypeIcon } from './WorkItemTypeIcon'
 import { JobRolesConfigurationSection } from './JobRolesConfigurationSection'
 import { CompletionGateConfigurationSection } from './CompletionGateConfigurationSection'
@@ -103,6 +105,14 @@ export type WorkItemConfigurationPanelProps = {
    * Configuration 全体を保存する callback です。
    */
   onSave?: (configuration: WorkItemConfiguration) => Promise<void>
+  /**
+   * Workspace work phases (ADR 0115) a status can count toward; without them the phase select is hidden.
+   */
+  workPhases?: WorkspaceWorkPhaseSettings
+  /** Whether reading the Workspace work phases failed, which hides the phase selects until a retry. */
+  hasWorkPhasesError?: boolean
+  /** Reads the Workspace work phases again. */
+  onRetryWorkPhases?: () => void
 }
 
 const workflowStatusCategories = [
@@ -167,6 +177,9 @@ function WorkItemConfigurationPanelContent({
   readOnly = false,
   scopeOptions,
   selectedScopeValue,
+  workPhases,
+  hasWorkPhasesError = false,
+  onRetryWorkPhases,
 }: WorkItemConfigurationPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [draft, setDraft] = useState<WorkItemConfiguration | undefined>(() =>
@@ -255,6 +268,7 @@ function WorkItemConfigurationPanelContent({
               configuration={draft}
               locale={locale}
               onChange={setDraft}
+              workPhases={workPhases}
             />
             <CustomFieldsConfigurationSection
               configuration={draft}
@@ -310,6 +324,16 @@ function WorkItemConfigurationPanelContent({
         </form>
       )}
 
+      {hasWorkPhasesError ? (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
+          <span>{t('workItems.configuration.workPhasesLoadError')}</span>
+          {onRetryWorkPhases ? (
+            <button className="workbench-button-secondary min-h-8 px-3" onClick={onRetryWorkPhases} type="button">
+              {t('workItems.configuration.retryWorkPhases')}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {errorMessage || localErrorMessage ? (
         <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
           {localErrorMessage ?? errorMessage}
@@ -325,6 +349,7 @@ export function WorkflowConfigurationSection({
   configuration,
   locale,
   onChange,
+  workPhases,
 }: {
   /** Whether the editor should expose additional reusable workflows. */
   allowMultipleWorkflows?: boolean
@@ -334,6 +359,8 @@ export function WorkflowConfigurationSection({
   locale: Locale
   /** Draft 全体を更新する callback です。 */
   onChange: (configuration: WorkItemConfiguration) => void
+  /** Workspace work phases a status can count toward; without them the phase select is hidden. */
+  workPhases?: WorkspaceWorkPhaseSettings
 }) {
   const t = createTranslator(locale)
   const workflows = [
@@ -640,6 +667,32 @@ export function WorkflowConfigurationSection({
                   />
                   {t('workItems.configuration.initialStatus')}
                 </label>
+                {workPhases ? (
+                  <label className="col-start-2 col-end-4 flex min-h-8 items-center gap-2 text-xs font-semibold text-[var(--workbench-muted)] max-[680px]:col-end-3">
+                    {t('workItems.configuration.statusPhase')}
+                    <select
+                      aria-label={t('workItems.configuration.statusPhaseFor').replace('{status}', status.name)}
+                      className="workbench-input min-h-8 min-w-0 flex-1 px-2"
+                      value={status.phaseKey ?? ''}
+                      onChange={(event) => updateStatus(status.id, {
+                        phaseKey: event.target.value === '' ? undefined : event.target.value,
+                      })}
+                    >
+                      <option value="">{t('workspace.workPhase.none')}</option>
+                      {workPhases.phases
+                        // A retired phase stays selectable only for the statuses that still use it.
+                        .filter((phase) => phase.active || phase.key === status.phaseKey)
+                        .map((phase) => (
+                          <option key={phase.key} value={phase.key}>
+                            {readWorkPhaseDisplayName(phase.key, workPhases, t)}
+                          </option>
+                        ))}
+                      {status.phaseKey !== undefined && !workPhases.phases.some((phase) => phase.key === status.phaseKey)
+                        ? <option value={status.phaseKey}>{status.phaseKey}</option>
+                        : null}
+                    </select>
+                  </label>
+                ) : null}
               </li>
             ))}
           </ol>

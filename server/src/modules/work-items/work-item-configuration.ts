@@ -1095,8 +1095,8 @@ export const DEFAULT_WORK_ITEM_CONFIGURATION: WorkItemConfiguration = {
     initialStatusId: 'todo',
     statuses: [
       { id: 'todo', name: 'Todo', category: 'unstarted', sortOrder: 10, color: 'slate' },
-      { id: 'in-progress', name: 'In progress', category: 'started', sortOrder: 20, color: 'teal' },
-      { id: 'review', name: 'Review', category: 'started', sortOrder: 30, color: 'amber' },
+      { id: 'in-progress', name: 'In progress', category: 'started', sortOrder: 20, color: 'teal', phaseKey: 'implementation' },
+      { id: 'review', name: 'Review', category: 'started', sortOrder: 30, color: 'amber', phaseKey: 'review' },
       { id: 'done', name: 'Done', category: 'completed', sortOrder: 40, color: 'emerald' },
     ],
     transitions: createAllDefaultTransitions(['todo', 'in-progress', 'review', 'done']),
@@ -1332,6 +1332,34 @@ export function getWorkItemConfigurationWorkflows(
     : [configuration.workflow, ...configuration.workflows.filter((workflow) =>
         workflow.id !== configuration.workflow.id,
       )]
+}
+
+/** Name and work phase of one workflow status, as reports show it. */
+export type WorkflowStatusPhaseEntry = {
+  /** Status display name. */
+  name: string
+  /** Work phase the status counts toward (ADR 0115); absent when it has none. */
+  phaseKey?: string
+}
+
+/**
+ * Collects the name and work phase of every status across a configuration's workflows. A status ID
+ * that several workflows share keeps the first workflow's definition, the primary workflow first.
+ *
+ * @param configuration - Work Item configuration.
+ * @returns Status name and phase keyed by status ID.
+ */
+export function createWorkflowStatusPhaseLookup(
+  configuration: WorkItemConfiguration,
+): ReadonlyMap<string, WorkflowStatusPhaseEntry> {
+  const lookup = new Map<string, WorkflowStatusPhaseEntry>()
+  for (const workflow of getWorkItemConfigurationWorkflows(configuration)) {
+    for (const status of workflow.statuses) {
+      if (lookup.has(status.id)) continue
+      lookup.set(status.id, { name: status.name, ...(status.phaseKey === undefined ? {} : { phaseKey: status.phaseKey }) })
+    }
+  }
+  return lookup
 }
 
 /**

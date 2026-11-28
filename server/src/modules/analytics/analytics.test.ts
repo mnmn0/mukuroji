@@ -581,11 +581,106 @@ describe('Analytics metric engine', () => {
       'evm-spi': null,
       'evm-cpi': null,
       'evm-eac': null,
+      // 96 unstarted and started hours of the completed Item and 144 started hours of the active one.
+      'status-time': 240,
     })
     expect(snapshot.generatedAt).toBe(period.to)
     expect(snapshot.queryHash).toHaveLength(64)
     expect(snapshot.permissionScopeHash).toHaveLength(64)
     expect(snapshot.evidenceCount).toBeGreaterThan(0)
+  })
+
+  test('splits time in status by the status and phase the hours were spent in', () => {
+    const item = createWorkItem('review-item', {
+      statusCategory: 'started',
+      workflowStatusId: 'review',
+      updatedAt: '2026-01-04T00:00:00.000Z',
+    })
+    const events = [
+      createAuditEvent('event-start', item, '2026-01-02T00:00:00.000Z', [
+        { field: 'statusCategory', before: 'unstarted', after: 'started' },
+        { field: 'workflowStatusId', before: 'todo', after: 'in-progress' },
+      ]),
+      createAuditEvent('event-review', item, '2026-01-04T00:00:00.000Z', [
+        { field: 'workflowStatusId', before: 'in-progress', after: 'review' },
+      ]),
+    ]
+    const widgets: AnalyticsQueryInput['widgets'] = [
+      { id: 'by-status', title: 'By status', type: 'table', metric: 'status-time', groupBy: { dimension: 'status' } },
+      { id: 'by-phase', title: 'By phase', type: 'table', metric: 'status-time', groupBy: { dimension: 'phase' } },
+    ]
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [item],
+      events,
+      workflowStatuses: {
+        teams: new Map([['core', new Map([
+          ['todo', { name: 'Todo' }],
+          ['in-progress', { name: 'In progress', phaseKey: 'implementation' }],
+          ['review', { name: 'Review', phaseKey: 'review' }],
+        ])]]),
+        phaseLabels: new Map([['review', 'Code review']]),
+      },
+      query: createQuery(widgets),
+    })
+    const [byStatus, byPhase] = snapshot.widgets
+
+    expect(byStatus?.value).toBe(144)
+    expect(byStatus?.groups).toEqual([
+      { key: 'core/in-progress', label: 'In progress', value: 48, sampleSize: 1 },
+      { key: 'core/review', label: 'Review', value: 72, sampleSize: 1 },
+      { key: 'core/todo', label: 'Todo', value: 24, sampleSize: 1 },
+    ])
+    expect(byPhase?.groups).toEqual([
+      { key: 'implementation', label: 'implementation', value: 48, sampleSize: 1 },
+      { key: 'no-phase', label: 'no-phase', value: 24, sampleSize: 1 },
+      { key: 'review', label: 'Code review', value: 72, sampleSize: 1 },
+    ])
+
+    const withoutCatalog = createTestAnalyticsSnapshot({ workItems: [item], events, query: createQuery(widgets) })
+    expect(withoutCatalog.widgets[0]?.groups.map((group) => group.label)).toEqual(['in-progress', 'review', 'todo'])
+    expect(withoutCatalog.widgets[1]?.groups).toEqual([])
+    expect(withoutCatalog.widgets[1]?.warnings).toContain('Workflow statuses are not available for this run.')
+  })
+
+  test('keeps the statuses of Teams apart and counts earlier buckets from the later state', () => {
+    // Unstarted on Jan 1, completed on Jan 2: the Jan 1 bucket still holds its 24 hours.
+    const done = createWorkItem('done-item', {
+      statusCategory: 'completed',
+      workflowStatusId: 'review',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    })
+    const other = createWorkItem('other-item', {
+      teamId: 'ops',
+      statusCategory: 'started',
+      workflowStatusId: 'review',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    })
+    const events = [
+      createAuditEvent('event-done', done, '2026-01-02T00:00:00.000Z', [
+        { field: 'statusCategory', before: 'unstarted', after: 'completed' },
+      ]),
+    ]
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [done, other],
+      events,
+      query: createQuery([
+        { id: 'by-day', title: 'By day', type: 'table', metric: 'status-time', groupBy: { dimension: 'day' } },
+        { id: 'by-status', title: 'By status', type: 'table', metric: 'status-time', groupBy: { dimension: 'status' } },
+      ]),
+    })
+    const [byDay, byStatus] = snapshot.widgets
+    expect(byDay?.groups.find((group) => group.key === '2026-01-01')?.value).toBe(48)
+    expect(byDay?.groups.find((group) => group.key === '2026-01-02')?.value).toBe(24)
+    expect(byStatus?.groups.map((group) => [group.key, group.label])).toEqual([
+      ['core/review', 'review (core)'],
+      ['ops/review', 'review (ops)'],
+    ])
+  })
+
+  test('accepts phase groups only for time in status', () => {
+    expect(() => normalizeAnalyticsQueryInput(createQuery([
+      { id: 'wip', title: 'WIP', type: 'table', metric: 'wip', groupBy: { dimension: 'phase' } },
+    ]))).toThrow('Only time in status widgets group by work phase.')
   })
 
   test('does not invent a completion when immutable completion history is absent', () => {

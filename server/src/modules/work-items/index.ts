@@ -101,6 +101,8 @@ export {
   createWorkItemConfigurationScopeKey,
   createWorkItemRelationIds,
   getWorkItemConfigurationWorkflows,
+  createWorkflowStatusPhaseLookup,
+  type WorkflowStatusPhaseEntry,
   getWorkItemTypeCustomFieldDefinitions,
   hasSupportedCurrencyPrecision,
   isWorkflowTransitionAllowed,

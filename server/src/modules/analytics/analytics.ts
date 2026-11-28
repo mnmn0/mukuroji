@@ -65,6 +65,14 @@ import {
 } from './analytics-work-item-history'
 import { analyticsPdfFont } from './analytics-pdf-font'
 import {
+  ANALYTICS_WORKFLOW_STATUSES_UNAVAILABLE_WARNING,
+  createAnalyticsStatusSegments,
+  groupAnalyticsStatusHours,
+  sumAnalyticsStatusHours,
+  type AnalyticsStatusSegment,
+  type AnalyticsWorkflowStatusCatalog,
+} from './analytics-status-time'
+import {
   ANALYTICS_MILESTONE_HISTORY_UNAVAILABLE_WARNING,
   createAnalyticsMilestoneScopeKey,
   createAnalyticsMilestoneTrend,
@@ -180,6 +188,7 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       'evm-spi': 'Schedule performance index (SPI)',
       'evm-cpi': 'Cost performance index (CPI)',
       'evm-eac': 'Estimate at completion (EAC)',
+      'status-time': 'Time in status',
     }),
     unitLabels: Object.freeze({
       count: 'items',
@@ -291,6 +300,7 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       'evm-spi': 'スケジュール効率指数（SPI）',
       'evm-cpi': 'コスト効率指数（CPI）',
       'evm-eac': '完了時総見積（EAC）',
+      'status-time': 'ステータス滞在時間',
     }),
     unitLabels: Object.freeze({
       count: '件',
@@ -452,6 +462,11 @@ export type AnalyticsEngineInput = {
    * Earned value widget を含む query で渡します。省略時、その widget は warning だけを返します。
    */
   earnedValue?: AnalyticsEarnedValue
+  /**
+   * Workflow statuses of the Teams in the query (ADR 0115). `status-time` widget を含む query で渡します。
+   * 省略時、status で分けた group は status ID を label にし、phase で分けた widget は warning を返します。
+   */
+  workflowStatuses?: AnalyticsWorkflowStatusCatalog
   /** Snapshot を再現する query です。 */
   query: AnalyticsQueryInput
 }
@@ -831,6 +846,14 @@ export const ANALYTICS_METRIC_DEFINITIONS: Readonly<Record<
     description:
       'Baseline effort divided by the cost performance index, in hours, over the Projects the viewer manages that have a baseline with planned effort.',
   }),
+  'status-time': Object.freeze({
+    key: 'status-time',
+    version: 1,
+    label: 'Time in status',
+    unit: 'hours',
+    description:
+      'Adds up the hours Work Items spent in unstarted and started workflow statuses within the period. Grouped by status or phase, the hours are split by the status they were spent in and its work phase.',
+  }),
 })
 
 /** Status category order of cumulative flow segments, from the bottom of the stack. */
@@ -861,6 +884,8 @@ type AnalyticsWorkItemState = {
   workItemTypeId: string
   /** Workflow status category です。 */
   statusCategory: string
+  /** Workflow status ID です。 */
+  workflowStatusId: string
   /** Work Item priority です。 */
   priority: string
   /** Readable Cycle of the current Planning link. */
@@ -911,6 +936,8 @@ type AnalyticsScopeChange = {
 type AnalyticsWorkItemFact = {
   /** `asOf` 時点の state です。 */
   state: AnalyticsWorkItemState
+  /** Instant the state was rebuilt at, in epoch milliseconds; a bucket may reuse facts of a later `asOf`. */
+  stateAsOf: number
   /** Work Item に対応する event です。 */
   events: AnalyticsHistoryEvent[]
   /** Creation instant の epoch milliseconds です。 */
@@ -937,6 +964,8 @@ type NormalizedAnalyticsQuery = {
   asOf: number
   /** Authorized Agent Run usage the `agent-tokens` / `agent-cost` metrics add up. */
   agentUsage?: AnalyticsAgentUsage
+  /** Workflow statuses that name and phase the `status-time` groups. */
+  workflowStatuses?: AnalyticsWorkflowStatusCatalog
 }
 
 /** Metric の scalar result と evidence です。 */
@@ -1240,7 +1269,10 @@ export function normalizeAnalyticsEvidenceInput(
  * @returns Query の `asOf` に固定した snapshot です。
  */
 export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsSnapshot {
-  const normalized = withAnalyticsAgentUsage(normalizeAnalyticsQuery(input.query), input.agentUsage)
+  const normalized = withAnalyticsWorkflowStatuses(
+    withAnalyticsAgentUsage(normalizeAnalyticsQuery(input.query), input.agentUsage),
+    input.workflowStatuses,
+  )
   const authorizedProjectIds = normalizeAuthorizedProjectIds(input.authorizedProjectIds)
   const eventsByWorkItem = indexAuthorizedEvents(input.workItems, input.events)
   const facts = createFilteredFacts(
@@ -2423,6 +2455,12 @@ function normalizeWidgets(value: unknown): AnalyticsWidget[] {
         'Earned value widgets are measured at the as-of date, so they group only by Team or Project and a chart must group by one of them.',
       )
     }
+    if (groupBy?.dimension === 'phase' && metric !== 'status-time') {
+      throw invalid(
+        'AnalyticsGroupByInvalid',
+        'Only time in status widgets group by work phase.',
+      )
+    }
     if (groupBy?.dimension === 'model' && !isAnalyticsAgentUsageMetric(metric)) {
       throw invalid(
         'AnalyticsGroupByInvalid',
@@ -2491,6 +2529,7 @@ function normalizeGroupBy(value: unknown): AnalyticsGroupBy {
     dimension !== 'priority' &&
     dimension !== 'cycle' &&
     dimension !== 'milestone' &&
+    dimension !== 'phase' &&
     dimension !== 'model' &&
     dimension !== 'custom-field'
   ) {
@@ -2701,6 +2740,7 @@ function createFact(
   }
   return {
     state,
+    stateAsOf: asOf,
     events: [...events],
     createdAt,
     ...(completionAt === undefined ? {} : { completionAt }),
@@ -2721,6 +2761,7 @@ function createCurrentAnalyticsState(item: CanonicalWorkItem): AnalyticsWorkItem
     assigneeUserId: item.assigneeUserId,
     workItemTypeId: item.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
     statusCategory: item.statusCategory,
+    workflowStatusId: item.workflowStatusId,
     priority: item.priority,
     customFieldValues: structuredClone(item.customFieldValues),
     dueDate: item.dueDate,
@@ -2836,6 +2877,7 @@ function setAnalyticsStateField(
     field === 'title' ||
     field === 'assigneeUserId' ||
     field === 'statusCategory' ||
+    field === 'workflowStatusId' ||
     field === 'priority' ||
     field === 'dueDate' ||
     field === 'createdAt' ||
@@ -3125,6 +3167,93 @@ function calculateAgentUsageMetric(
 }
 
 /**
+ * Status stretches already built per fact. A fact never changes after it is built and carries its
+ * own `stateAsOf`, so buckets that share a fact reuse one walk of its history.
+ */
+const factStatusSegments = new WeakMap<AnalyticsWorkItemFact, readonly AnalyticsStatusSegment[]>()
+
+/**
+ * Builds the workflow status stretches of a fact up to the instant its state was rebuilt at.
+ *
+ * The walk starts from the fact's own state, so it must start at the fact's own `asOf`; an earlier
+ * bucket clips the stretches to its window instead of starting the walk earlier. The stretches are
+ * built once per fact and must not be changed by callers.
+ *
+ * @param fact - Work Item fact.
+ * @returns Stretches in time order.
+ */
+function createFactStatusSegments(fact: AnalyticsWorkItemFact) {
+  const cached = factStatusSegments.get(fact)
+  if (cached !== undefined) return cached
+  const segments = createAnalyticsStatusSegments({
+    createdAt: fact.createdAt,
+    statusId: fact.state.workflowStatusId,
+    statusCategory: fact.state.statusCategory,
+    events: fact.events,
+    asOf: fact.stateAsOf,
+  })
+  factStatusSegments.set(fact, segments)
+  return segments
+}
+
+/**
+ * Adds up the hours Work Items spent in unstarted and started statuses in a window (ADR 0115).
+ * Hours keep full precision until the total, so many short stretches still add up.
+ *
+ * @param facts - Filtered Work Item facts of the group or bucket.
+ * @param from - Window start, inclusive.
+ * @param to - Window end, exclusive; no later than the bucket's evaluation instant.
+ * @returns Total hours, the Work Items with time, and one evidence item per Work Item.
+ */
+function calculateStatusTimeMetric(
+  facts: readonly AnalyticsWorkItemFact[],
+  from: number,
+  to: number,
+): MetricComputation {
+  const samples = facts.flatMap((fact) => {
+    const hours = sumAnalyticsStatusHours(createFactStatusSegments(fact), from, to)
+    return hours > 0 ? [{ fact, hours }] : []
+  })
+  return {
+    value: roundMetric(samples.reduce((sum, sample) => sum + sample.hours, 0)),
+    sampleSize: samples.length,
+    evidence: samples.map(({ fact, hours }) => {
+      const item = createFactEvidence(fact, 'status-time', Math.max(from, fact.createdAt), roundMetric(hours))
+      return { ...item, id: hashCanonical({ metric: 'status-time', teamId: fact.state.teamId, workItemId: fact.state.id }) }
+    }),
+    warnings: samples.length === 0 ? ['No Work Items spent time in unstarted or started statuses in this period.'] : [],
+  }
+}
+
+/**
+ * Splits `status-time` by the workflow status or work phase the hours were spent in, instead of by
+ * the Work Item's state at `asOf` like other groups.
+ *
+ * @param facts - Filtered Work Item facts.
+ * @param dimension - `status` or `phase`.
+ * @param normalized - Normalized query with the workflow status catalog, when the run read it.
+ * @returns Groups by status ID or phase key.
+ */
+function createStatusTimeGroups(
+  facts: readonly AnalyticsWorkItemFact[],
+  dimension: 'status' | 'phase',
+  normalized: NormalizedAnalyticsQuery,
+): AnalyticsGroup[] {
+  return groupAnalyticsStatusHours(
+    facts.map((fact) => ({ teamId: fact.state.teamId, segments: createFactStatusSegments(fact) })),
+    dimension,
+    normalized.workflowStatuses,
+    normalized.periodFrom,
+    Math.min(normalized.periodTo, normalized.asOf),
+  ).map((group) => ({
+    key: group.key,
+    label: group.label,
+    value: roundMetric(group.hours),
+    sampleSize: group.workItemCount,
+  }))
+}
+
+/**
  * Creates the result of a Cycle or Milestone grouped widget for a run that cannot read Planning.
  *
  * @param widget - Widget that groups by Cycle or Milestone.
@@ -3268,6 +3397,9 @@ function createWidgetResult(
         },
       }))
     : []
+  const statusCatalogMissing = widget.metric === 'status-time' &&
+    widget.groupBy?.dimension === 'phase' &&
+    normalized.workflowStatuses === undefined
   return {
     widgetId: widget.id,
     metric: widget.metric,
@@ -3275,10 +3407,36 @@ function createWidgetResult(
     value: total.value,
     sampleSize: total.sampleSize,
     series,
-    groups,
+    groups: statusCatalogMissing ? [] : groups,
     rows,
-    warnings: total.warnings,
+    warnings: statusCatalogMissing
+      ? [...total.warnings, ANALYTICS_WORKFLOW_STATUSES_UNAVAILABLE_WARNING]
+      : total.warnings,
   }
+}
+
+/**
+ * Adds the workflow status catalog to a normalized query.
+ *
+ * @param normalized - Normalized query.
+ * @param workflowStatuses - Catalog the API read, if any.
+ * @returns The query with the catalog.
+ */
+function withAnalyticsWorkflowStatuses(
+  normalized: NormalizedAnalyticsQuery,
+  workflowStatuses: AnalyticsWorkflowStatusCatalog | undefined,
+): NormalizedAnalyticsQuery {
+  return workflowStatuses === undefined ? normalized : { ...normalized, workflowStatuses }
+}
+
+/**
+ * Reports whether a query has a `status-time` widget, which reads the Teams' workflow statuses.
+ *
+ * @param query - Normalized query.
+ * @returns True when a widget measures time in status.
+ */
+export function analyticsQueryReadsWorkflowStatuses(query: AnalyticsQueryInput): boolean {
+  return query.widgets.some((widget) => widget.metric === 'status-time')
 }
 
 function createMetricSeries(
@@ -3437,6 +3595,9 @@ function createMetricGroups(
         sampleSize: result.sampleSize,
       }
     })
+  }
+  if (widget.metric === 'status-time' && (groupBy.dimension === 'status' || groupBy.dimension === 'phase')) {
+    return createStatusTimeGroups(facts, groupBy.dimension, normalized)
   }
   if (groupBy.dimension === 'model') return createModelGroups(widget, facts, normalized)
   const grouped = new Map<string, {
@@ -3690,6 +3851,9 @@ function calculateMetric(
   }
   if (isAnalyticsAgentUsageMetric(metric)) {
     return calculateAgentUsageMetric(metric, facts, normalized.agentUsage, from, Math.min(to, evaluationAt))
+  }
+  if (metric === 'status-time') {
+    return calculateStatusTimeMetric(facts, from, Math.min(to, evaluationAt))
   }
   if (metric === 'throughput' || metric === 'velocity') {
     const completed = facts.filter((fact) =>
@@ -6743,7 +6907,8 @@ function readMetricKey(value: unknown): AnalyticsMetricKey {
     value === 'agent-cost' ||
     value === 'evm-spi' ||
     value === 'evm-cpi' ||
-    value === 'evm-eac'
+    value === 'evm-eac' ||
+    value === 'status-time'
   ) return value
   throw invalid('AnalyticsMetricInvalid', 'Analytics metric key is invalid.')
 }

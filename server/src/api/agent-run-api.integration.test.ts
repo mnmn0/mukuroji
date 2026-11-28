@@ -2766,6 +2766,7 @@ describe('Factory board route', () => {
       startRevision: 2,
       leaseMinutes: 30,
       now: startedAt,
+      workflowStatusId: 'in-progress',
     })
   }
 
@@ -3259,6 +3260,8 @@ describe('Factory board route', () => {
         { workItemId: 'task-refero', title: 'Title of task-refero', projectId: 'refero', usage: expect.objectContaining({ inputTokens: 500 }) },
         { workItemId: 'task-loose', title: 'Title of task-loose', usage: expect.objectContaining({ inputTokens: 200 }) },
       ],
+      // The runs started in the default workflow's In progress status, which counts toward implementation.
+      phases: [{ phaseKey: 'implementation', usage: expect.objectContaining({ inputTokens: 700 }) }],
       runsHasMore: false,
     })
     expect(JSON.stringify(body)).not.toContain('estimatedCostMicroUsd')
