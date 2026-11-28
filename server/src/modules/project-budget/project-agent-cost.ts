@@ -105,6 +105,14 @@ function localDateStartMs(date: string, timeZone: string): number {
   return low
 }
 
+/** Inclusive finish instants of the Agent Runs a Project budget measurement reads. */
+export type ProjectAgentRunFinishRange = {
+  /** ISO 8601 start of the first local date; absent without a lower bound. */
+  since?: string
+  /** ISO 8601 last millisecond of the last local date. */
+  until: string
+}
+
 /**
  * Builds the finish instants of the Agent Runs whose local finish date, in the budget's time
  * zone, falls within a date range (ADR 0119). The bounds are exact so that runs of the days just
@@ -119,7 +127,7 @@ export function projectAgentRunFinishRange(
   timeZone: string,
   from: string | undefined,
   to: string,
-): { since?: string; until: string } {
+): ProjectAgentRunFinishRange {
   const nextDay = new Date(Date.parse(`${to}T00:00:00Z`) + DAY_MS).toISOString().slice(0, 10)
   const until = new Date(localDateStartMs(nextDay, timeZone) - 1).toISOString()
   return from === undefined ? { until } : { since: new Date(localDateStartMs(from, timeZone)).toISOString(), until }

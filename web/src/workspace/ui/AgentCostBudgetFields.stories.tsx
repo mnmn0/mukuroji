@@ -23,6 +23,7 @@ function EditableAgentCost() {
   )
 }
 
+/** Metadata of the agent cost settings stories. */
 const meta = {
   title: 'Application/Workspace/Agent Cost Budget Fields',
   component: AgentCostBudgetFields,
@@ -35,6 +36,7 @@ const meta = {
   },
 } satisfies Meta<typeof AgentCostBudgetFields>
 
+/** The agent cost settings stories. */
 export default meta
 
 /** Story type of the agent cost settings stories. */
