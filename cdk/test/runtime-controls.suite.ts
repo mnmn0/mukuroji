@@ -31,6 +31,8 @@ const controlledFunctionScopes = new Map([
     'enterprise-identity-maintenance',
   ],
   ['EnterpriseScimGroupJobFunction351DCF72', 'enterprise-scim-group-job'],
+  ['GitHubReconcileFunction80F8A0D5', 'connector-poll'],
+  ['GitHubSyncFunctionE4E5F3FC', 'connector-sync'],
   ['RealtimeHandlerFunction8A4BF05B', 'realtime'],
   // One Lambda runs every periodic job, each behind its own runtime-control scope.
   [
@@ -525,13 +527,13 @@ test('grants every controlled data-plane role only the exact configuration ARN',
     }],
     Version: '2012-10-17',
   });
-  expect(readPolicy.Roles).toHaveLength(20);
+  expect(readPolicy.Roles).toHaveLength(22);
   expect(readPolicy.Roles).toEqual(
     expect.arrayContaining(controlledRoleReferences),
   );
 });
 
-test('binds exact runtime-control settings through API config and nineteen direct environments', () => {
+test('binds exact runtime-control settings through API config and twenty-one direct environments', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
   const lambdaEntries = Object.entries(
     synthesizedTemplate.findResources('AWS::Lambda::Function'),

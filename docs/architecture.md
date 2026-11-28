@@ -148,6 +148,7 @@ AuditEventsTable の stream が outbox を兼ねます。業務 table の更新�
 | WorkItemImportQueue | WorkItemImportFunction | API（import の確定） |
 | AuditExportQueue | AuditExportWorkerFunction | API（監査ログの非同期 export） |
 | ConnectorSyncQueue（任意） | ConnectorSyncFunction | audit の投影、Connector の定期 poll |
+| GitHubSyncQueue（任意） | GitHubSyncFunction | API（GitHub App の webhook、repository の link）、GitHubReconcileFunction（[ADR 0079](adr/0079-github-app-pull-request-review-inbox.md)） |
 | Tenant*ExecutionQueue ×6（任意） | テナント操作の各 capability Lambda | TenantOperationFunction |
 
 リクエストへのメール返信は queue を通さず、Provider / SES adapter が署名付き envelope で RequestEmailIngestionFunction
@@ -175,7 +176,7 @@ EventBridge が毎分 ScheduledJobsFunction（`scheduled-jobs-handler.ts`）を�
 
 Software factory を deploy しない構成では agent-run-triage を実行しません。
 
-ほかに Connector の poll（5分、任意）と restore drill（日次で判定し90日ごとに実行、任意）があります。
+ほかに Connector の poll（5分、任意）、GitHub の pull request の reconcile（60分、任意、ADR 0079）、restore drill（日次で判定し90日ごとに実行、任意）があります。
 
 ローカルの `workers:dev` は schedule・SQS・audit stream を1プロセスで再現しますが、WebSocket、SCIM stream、
 テナント操作、restore drill、GuardDuty scan などは対象外です（README の「ローカルの補助サービスとworker」）。

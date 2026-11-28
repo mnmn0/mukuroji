@@ -39,6 +39,7 @@ import {
 } from '../subsystems/workers/automation';
 import { buildWorkerChannels } from '../subsystems/workers/channels';
 import { buildConnectorWorkers } from '../subsystems/workers/connectors';
+import { buildGitHubAppWorkers } from '../subsystems/workers/github-app';
 import { buildEnterpriseIdentityWorkers } from '../subsystems/workers/enterprise-identity';
 import { buildRequestEmailWorker } from '../subsystems/workers/request-email';
 import { buildScheduledJobsWorker } from '../subsystems/workers/scheduled-jobs';
@@ -75,6 +76,13 @@ export type MukurojiStackProps = cdk.StackProps & Readonly<{
    * composition root turns it on.
    */
   readonly connectorsEnabled?: boolean;
+  /**
+   * Deploys the GitHub App module of the pull request review inbox (ADR 0079): the App secret,
+   * the sync queue, its worker, and the hourly reconcile. The secret starts as a placeholder, so
+   * the webhook answers 404 until the operator stores the App credentials. Off unless the
+   * composition root turns it on.
+   */
+  readonly githubAppEnabled?: boolean;
   /**
    * Deploys the request email ingestion Lambda that an external mail relay invokes. Off unless the
    * composition root turns it on.
@@ -123,6 +131,7 @@ export class MukurojiStack extends cdk.Stack {
     super(scope, id, props);
     const restoreDrillEnabled = props?.restoreDrillEnabled ?? false;
     const connectorsEnabled = props?.connectorsEnabled ?? false;
+    const githubAppEnabled = props?.githubAppEnabled ?? false;
     const requestEmailEnabled = props?.requestEmailEnabled ?? false;
     const tenantLifecycleEnabled = props?.tenantLifecycleEnabled ?? false;
     const softwareFactoryEnabled = props?.softwareFactoryEnabled ?? false;
@@ -307,6 +316,16 @@ export class MukurojiStack extends cdk.Stack {
         parameters,
         runtimeControls,
         workerChannels,
+      });
+    }
+    if (githubAppEnabled) {
+      buildGitHubAppWorkers(this, {
+        apiFunction: apiRuntime.apiFunction,
+        dataStores,
+        lambdaBuildPaths,
+        parameters,
+        runtimeControls,
+        webOrigin: webDistribution.webOrigin,
       });
     }
     const requestEmailWorker = requestEmailEnabled

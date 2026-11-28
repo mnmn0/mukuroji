@@ -105,6 +105,7 @@ import type {
   RuntimeControlProvider,
 } from '../../infrastructure/runtime/runtime-control'
 import type { AuditExportService } from '../../modules/audit/audit-export'
+import type { GitHubIntegrationDependencies } from './github-integration'
 
 /** DynamoDB transaction item shared only by adapters assembled at the API composition boundary. */
 type AutomationCompositionTransactionItem =
@@ -238,6 +239,8 @@ export interface WorkItemDependencies {
   projectExpenses: ProjectExpenseStore
   /** Provides members' signed calendar feeds and their token lookup rows. */
   calendarFeeds: CalendarFeedStore<MutationAuditContext, AutomationCompositionTransactionItem>
+  /** Provides the GitHub App integration behind the pull request review inbox (ADR 0079). */
+  githubIntegration: GitHubIntegrationDependencies
   /** Provides each Project's read-only status report share links. */
   projectStatusShares: ProjectStatusShareStore
   /** Provides members' saved and submitted weekly reports. */

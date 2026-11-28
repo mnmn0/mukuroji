@@ -7,6 +7,7 @@ const secretPaths = [
   'ConnectorRuntimeSecret/Resource',
   'DocumentPublicShareTokenSecret/Resource',
   'EnterpriseIdentityTokenHashKeySecret/Resource',
+  'GitHubAppSecret/Resource',
   'RequestEmailWebhookKeySecret/Resource',
   'RequestTokenHashKeySecret/Resource',
 ] as const;
@@ -37,6 +38,8 @@ const lambdaPaths = [
   'WebhookDeliveryFunction/Resource',
   'ConnectorSyncFunction/Resource',
   'ConnectorPollFunction/Resource',
+  'GitHubSyncFunction/Resource',
+  'GitHubReconcileFunction/Resource',
   'RequestEmailIngestionFunction/Resource',
 ] as const;
 const managedPolicyRolePaths = [
@@ -61,6 +64,8 @@ const managedPolicyRolePaths = [
   'WebhookDeliveryFunction/ServiceRole/Resource',
   'ConnectorSyncFunction/ServiceRole/Resource',
   'ConnectorPollFunction/ServiceRole/Resource',
+  'GitHubSyncFunction/ServiceRole/Resource',
+  'GitHubReconcileFunction/ServiceRole/Resource',
   'RequestEmailIngestionFunction/ServiceRole/Resource',
   'AWS679f53fac002430cb0da5b7982bd2287/ServiceRole/Resource',
 ] as const;

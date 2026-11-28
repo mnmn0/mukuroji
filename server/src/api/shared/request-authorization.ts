@@ -316,6 +316,8 @@ const enterpriseRoutePermissionRules = [
   },
   // Workspace agent defaults are Workspace administration.
   { method: '*', pathPattern: '/api/workspace/agent-defaults', permission: 'workspace.manage' },
+  // Linking GitHub repositories and removing members' GitHub logins is Workspace administration.
+  { method: '*', pathPattern: '/api/workspace/github/*', permission: 'workspace.manage' },
   { method: 'GET', pathPattern: '/api/workspace/*', permission: 'members.read' },
   { method: '*', pathPattern: '/api/workspace/*', permission: 'members.manage' },
   // Closing or reopening a month for every Team is Workspace administration (ADR 0076).
@@ -882,6 +884,17 @@ const enterpriseRoutePermissionRules = [
   {
     method: '*',
     pathPattern: '/api/me/preferences',
+    permission: 'workspace.read',
+  },
+  // A member's own GitHub login and review inbox; the inbox re-checks Team read access (ADR 0079).
+  {
+    method: '*',
+    pathPattern: '/api/me/github-login',
+    permission: 'workspace.read',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/me/pull-requests',
     permission: 'workspace.read',
   },
   // A member's own calendar feeds; each feed read re-checks `work-items.read` for its owner.

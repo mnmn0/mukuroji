@@ -148,6 +148,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get calendarFeeds() {
     return requireAppDependencies().workItems.calendarFeeds
   },
+  get githubIntegration() {
+    return requireAppDependencies().workItems.githubIntegration
+  },
   get projectStatusShares() {
     return requireAppDependencies().workItems.projectStatusShares
   },

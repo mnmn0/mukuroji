@@ -574,6 +574,10 @@ function resolveApiEnvironmentValue(
   if (referencedResource.Type === 'AWS::DynamoDB::Table') {
     return resolveMaximumString(value, parameters, resources);
   }
+  if (referencedResource.Type === 'AWS::SQS::Queue') {
+    // A queue Ref is its URL; generated queue names are at most 80 characters.
+    return `https://sqs.${'X'.repeat(32)}.amazonaws.com/${'0'.repeat(12)}/${'X'.repeat(80)}`;
+  }
   const secret = requireRecord(
     referencedResource,
     `API configuration secret ${expression.Ref}`,
@@ -760,6 +764,7 @@ describe('API runtime configuration externalization', () => {
 
     // Four API secrets plus one stable secret per NoEcho value a worker reads
     // (#494), none named after the configuration revision.
+    // The optional GitHub App module adds the operator-filled App secret (ADR 0079).
     const secrets = Object.entries(resources)
       .filter(([, resource]) =>
         isRecord(resource) &&
@@ -769,6 +774,7 @@ describe('API runtime configuration externalization', () => {
       'ConnectorRuntimeSecret7993B96D',
       DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET_LOGICAL_ID,
       'EnterpriseIdentityTokenHashKeySecretB442F5F9',
+      'GitHubAppSecret545D19D5',
       'RequestEmailWebhookKeySecretCA8DB054',
       'RequestTokenHashKeySecretCABB3465',
       WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID,
@@ -842,6 +848,8 @@ describe('API runtime configuration externalization', () => {
       AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE: '32',
       AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE: '32000000',
       AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION: '1000000',
+      GITHUB_APP_SECRET_ARN: ref('GitHubAppSecret545D19D5'),
+      GITHUB_SYNC_QUEUE_URL: ref('GitHubSyncQueueC6099B0A'),
       MUKUROJI_APPLICATION_COMMIT_SHA: ref('ApplicationCommitSha'),
       MUKUROJI_API_RUNTIME_CONFIG_REVISION:
         ref('ApiRuntimeConfigurationRevision'),

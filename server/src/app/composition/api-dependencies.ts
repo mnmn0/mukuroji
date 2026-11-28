@@ -9,6 +9,10 @@ import type {
   WorkItemRelationType,
 } from '@mukuroji/contracts'
 import {
+  createProductionGitHubIntegrationDependencies,
+  createTestGitHubIntegrationDependencies,
+} from './github-integration'
+import {
   DynamoDbProjectRaidLogStore,
   InMemoryProjectRaidLogStore,
 } from '../../modules/project-raid-log'
@@ -748,6 +752,7 @@ export function createProductionWorkItemDependencies(
       getConfiguredAuditTableName(),
       loadServerConfig().environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY || undefined,
     ),
+    githubIntegration: createProductionGitHubIntegrationDependencies(),
     projectStatusShares: new DynamoDbProjectStatusShareStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
@@ -2079,6 +2084,7 @@ export function createTestAppDependencies(): AppDependencies {
       projectRaidLogs: new InMemoryProjectRaidLogStore(),
       projectExpenses: new InMemoryProjectExpenseStore(),
       calendarFeeds: new InMemoryCalendarFeedStore(),
+      githubIntegration: createTestGitHubIntegrationDependencies(),
       projectStatusShares: new InMemoryProjectStatusShareStore(),
       weeklyReports: new InMemoryWeeklyReportStore(),
       scheduleBaselines: new InMemoryProjectScheduleBaselineStore(),
@@ -2227,6 +2233,7 @@ export function overrideAppDependencies(
       ...(overrides.projectRaidLogs ? { projectRaidLogs: overrides.projectRaidLogs } : {}),
       ...(overrides.projectExpenses ? { projectExpenses: overrides.projectExpenses } : {}),
       ...(overrides.calendarFeeds ? { calendarFeeds: overrides.calendarFeeds } : {}),
+      ...(overrides.githubIntegration ? { githubIntegration: overrides.githubIntegration } : {}),
       ...(overrides.projectStatusShares ? { projectStatusShares: overrides.projectStatusShares } : {}),
       ...(overrides.weeklyReports ? { weeklyReports: overrides.weeklyReports } : {}),
       ...(overrides.scheduleBaselines ? { scheduleBaselines: overrides.scheduleBaselines } : {}),

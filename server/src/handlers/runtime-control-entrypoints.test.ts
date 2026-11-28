@@ -57,6 +57,16 @@ const runtimeControlledEntrypoints: readonly RuntimeControlledEntrypoint[] = [
     surface: 'connector-poll',
   },
   {
+    filename: 'github-sync-handler.ts',
+    exportName: 'queueHandler',
+    surface: 'connector-sync',
+  },
+  {
+    filename: 'github-sync-handler.ts',
+    exportName: 'reconcileHandler',
+    surface: 'connector-poll',
+  },
+  {
     filename: 'enterprise-identity-maintenance-handler.ts',
     exportName: 'handler',
     surface: 'enterprise-identity-maintenance',
