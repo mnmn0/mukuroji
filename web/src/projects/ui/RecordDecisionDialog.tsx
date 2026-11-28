@@ -8,7 +8,7 @@ import {
   type ProjectDecisionFormPrefill,
 } from '../model/projectDecisionForm'
 import { describeProjectDecisionSaveError } from '../model/projectDecisionMessages'
-import { useSaveProjectDecision } from '../mutations/useSaveProjectDecision'
+import type { useSaveProjectDecision } from '../mutations/useSaveProjectDecision'
 import { isActiveProjectAssignmentCandidate } from '../api/members'
 import { useProjectMembers } from '../queries/useProjectMembers'
 import { ProjectDecisionForm, type ProjectDecisionReferenceOption } from './ProjectDecisionForm'
@@ -37,6 +37,8 @@ function projectKey(project: Pick<RecordDecisionProjectOption, 'teamId' | 'id'>)
 export type RecordDecisionDialogProps = {
   /** Cognito access token. */
   accessToken?: string
+  /** Saves the decision; owned by the opener so a retry keeps its Idempotency-Key. */
+  save: ReturnType<typeof useSaveProjectDecision>
   /** Projects the decision may belong to. */
   projects: readonly RecordDecisionProjectOption[]
   /** Project chosen first, such as the Work Item's Project. */
@@ -69,6 +71,7 @@ export type RecordDecisionDialogProps = {
  */
 export function RecordDecisionDialog({
   accessToken,
+  save,
   projects,
   defaultProject,
   lockProject = false,
@@ -80,7 +83,12 @@ export function RecordDecisionDialog({
   onRecorded,
 }: RecordDecisionDialogProps) {
   const titleId = useId()
-  const dialogRef = useModalFocus<HTMLElement>(onClose)
+  const [isSaving, setIsSaving] = useState(false)
+  // A save in flight keeps the dialog open, so its result is shown where it was started.
+  const closeUnlessSaving = () => {
+    if (!isSaving) onClose()
+  }
+  const dialogRef = useModalFocus<HTMLElement>(closeUnlessSaving)
   const [selectedKey, setSelectedKey] = useState(() => {
     const initial = defaultProject ?? (projects.length === 1 ? projects[0] : undefined)
     return initial ? projectKey(initial) : ''
@@ -88,7 +96,6 @@ export function RecordDecisionDialog({
   const selected = projects.find((project) => projectKey(project) === selectedKey)
   const projectId = selected?.id ?? ''
   const [values, setValues] = useState(() => toProjectDecisionFormValues(undefined, prefill))
-  const [isSaving, setIsSaving] = useState(false)
   const [saveError, setSaveError] = useState<string>()
   // A Team-qualified lookup resolves a Project ID that several Teams share.
   const members = useProjectMembers(accessToken, projectId || undefined, Boolean(projectId), selected?.teamId)
@@ -98,7 +105,6 @@ export function RecordDecisionDialog({
       .map((member) => ({ id: member.id, label: member.name || member.email })),
     [members.data],
   )
-  const save = useSaveProjectDecision({ accessToken })
 
   /** Records the decision in the chosen Project. */
   async function handleSubmit() {
@@ -106,11 +112,16 @@ export function RecordDecisionDialog({
       setSaveError(t('projects.decisionLog.record.noProject'))
       return
     }
+    if (!accessToken) {
+      setSaveError(t('projects.decisionLog.record.noSession'))
+      return
+    }
     setIsSaving(true)
     setSaveError(undefined)
     try {
-      await save(selected.teamId, selected.id, undefined, toProjectDecisionEntryInput(values, origin))
-      onRecorded(selected)
+      const stored = await save(selected.teamId, selected.id, undefined, toProjectDecisionEntryInput(values, origin))
+      if (stored) onRecorded(selected)
+      else setSaveError(t('projects.decisionLog.record.noSession'))
     } catch (error) {
       setSaveError(describeProjectDecisionSaveError(error, t))
     } finally {
@@ -119,7 +130,7 @@ export function RecordDecisionDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 px-4 py-6 backdrop-blur-sm" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 px-4 py-6 backdrop-blur-sm" onMouseDown={closeUnlessSaving}>
       <section
         aria-labelledby={titleId}
         aria-modal="true"
@@ -156,6 +167,14 @@ export function RecordDecisionDialog({
               ))}
             </select>
           </label>
+          {members.error ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <p className="text-sm font-semibold text-fg-red-700" role="alert">{t('projects.decisionLog.record.membersError')}</p>
+              <button className="workbench-button-secondary min-h-9 px-3" type="button" onClick={() => void members.mutate()}>
+                {t('projects.decisionLog.reload')}
+              </button>
+            </div>
+          ) : null}
           <ProjectDecisionForm
             isSaving={isSaving}
             memberOptions={memberOptions}
@@ -165,7 +184,7 @@ export function RecordDecisionDialog({
             testId="record-decision-form"
             values={values}
             {...(workItemOptions ? { workItemOptions } : {})}
-            onCancel={onClose}
+            onCancel={closeUnlessSaving}
             onChange={setValues}
             onSubmit={() => void handleSubmit()}
           />

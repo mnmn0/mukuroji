@@ -8,6 +8,7 @@ import {
   toProjectDecisionEntryInput,
   toProjectDecisionFormValues,
 } from '../src/projects/model/projectDecisionForm'
+import { loadTeamDecisionNotes } from '../src/projects/queries/useTeamDecisionNotes'
 import { ProjectDecisionLogPanel } from '../src/projects/ui/ProjectDecisionLogPanel'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
@@ -156,5 +157,25 @@ describe('Team decision log API', () => {
     expect(response.items).toHaveLength(1)
     expect(requested[0]).toContain('/teams/core-team/decision-log?q=S3&projectId=atlas')
     await expect(getTeamDecisionLog('token', 'other-team', {})).rejects.toThrow()
+  })
+})
+
+describe('Team decision notes', () => {
+  test('marks the list as cut short when search repeats a cursor', async () => {
+    let calls = 0
+    globalThis.fetch = Object.assign(async () => {
+      calls += 1
+      return new Response(JSON.stringify({ schemaVersion: 1, results: [], nextCursor: 'same' }), { status: 200 })
+    }, { preconnect: originalFetch.preconnect })
+    const notes = await loadTeamDecisionNotes('token', 'core-team', { keyword: '', projectId: '' })
+    expect(notes).toEqual({ notes: [], truncated: true })
+    expect(calls).toBe(2)
+  })
+
+  test('ends normally when search has no next page', async () => {
+    globalThis.fetch = Object.assign(async () => new Response(JSON.stringify({ schemaVersion: 1, results: [] }), { status: 200 }), {
+      preconnect: originalFetch.preconnect,
+    })
+    expect(await loadTeamDecisionNotes('token', 'core-team', { keyword: '', projectId: '' })).toEqual({ notes: [], truncated: false })
   })
 })

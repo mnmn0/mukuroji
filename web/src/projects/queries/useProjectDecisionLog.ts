@@ -70,6 +70,6 @@ export function useTeamDecisionLog(
       ...(keyword ? { keyword } : {}),
       ...(projectId ? { projectId } : {}),
     }),
-    { shouldRetryOnError: false, keepPreviousData: true },
+    { shouldRetryOnError: false },
   )
 }

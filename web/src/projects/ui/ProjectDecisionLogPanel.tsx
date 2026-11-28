@@ -126,6 +126,10 @@ export type ProjectDecisionLogPanelProps = {
   memberOptions: readonly ProjectDecisionReferenceOption[]
   /** Work Items of the Project that may be named as related. */
   workItemOptions?: readonly ProjectDecisionReferenceOption[]
+  /** Whether loading the Project's Work Items failed. */
+  hasWorkItemLoadError?: boolean
+  /** Loads the Project's Work Items again. */
+  onReloadWorkItems?: () => void
   /** Formats a timestamp for the viewer. */
   formatDateTime: (value: string) => string
   /** Translator. */
@@ -160,6 +164,8 @@ export function ProjectDecisionLogPanel({
   canEdit,
   memberOptions,
   workItemOptions,
+  hasWorkItemLoadError = false,
+  onReloadWorkItems,
   formatDateTime,
   t,
   onSave,
@@ -232,6 +238,16 @@ export function ProjectDecisionLogPanel({
       ) : null}
       {isLoading && !entries ? (
         <p className="text-sm font-medium text-fg-505967" role="status">{t('projects.decisionLog.loading')}</p>
+      ) : null}
+      {hasWorkItemLoadError ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <p className="text-sm font-semibold text-fg-red-700" role="alert">{t('projects.decisionLog.error.workItems')}</p>
+          {onReloadWorkItems ? (
+            <button className="workbench-button-secondary min-h-10 px-4" type="button" onClick={onReloadWorkItems}>
+              {t('projects.decisionLog.reload')}
+            </button>
+          ) : null}
+        </div>
       ) : null}
 
       {editor.mode !== 'closed' ? (

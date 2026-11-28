@@ -116,6 +116,13 @@ test('records, retries, edits, supersedes, and lists decisions', async () => {
   const stale = await request(`${path}/entries/${first.id}`, 'PUT', { ...supersedeBody, expectedRevision: 1 })
   expect(stale.status).toBe(409)
 
+  // A later update does not hide an earlier one, so its retry still succeeds.
+  const reinstated = await request(`${path}/entries/${first.id}`, 'PUT', { expectedRevision: 2, entry: baseEntry }, 'reinstate-1')
+  expect(reinstated.status).toBe(200)
+  const lateRetry = await request(`${path}/entries/${first.id}`, 'PUT', supersedeBody, 'supersede-1')
+  expect(lateRetry.status).toBe(200)
+  expect((await lateRetry.json() as ProjectDecisionEntryResponse).entry.revision).toBe(3)
+
   const listed = await request(path)
   expect((await listed.json() as ProjectDecisionLogResponse).entries.map((entry) => entry.id)).toEqual([second.id, first.id])
 })

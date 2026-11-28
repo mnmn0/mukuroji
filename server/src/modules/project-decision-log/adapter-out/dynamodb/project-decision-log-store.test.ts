@@ -143,11 +143,18 @@ function createWith(client: DynamoDBDocumentClient, fingerprint = 'f1') {
 test('writes the decision, the counter, the caller fence, and a redacted audit event in one transaction', async () => {
   const sent: SentCommand[] = []
   expect(await createWith(fakeClient({ sent }))).toEqual(entry)
-  const items = sent[0]?.input.TransactItems
-  expect(sent[0]?.input).toMatchObject({
+  const write = sent.find((command) => command.constructor.name === 'TransactWriteCommand')
+  const items = write?.input.TransactItems
+  expect(write?.input).toMatchObject({
     TransactItems: [
       { Put: { Item: { recordKey: 'PROJECT_DECISION#t#p#ENTRY#e1', entryType: 'project-decision-entry', creationFingerprint: 'f1' } } },
-      { Update: { Key: { workspaceId: 'w', recordKey: 'PROJECT_DECISION#t#p' } } },
+      {
+        Update: {
+          Key: { workspaceId: 'w', recordKey: 'PROJECT_DECISION#t#p' },
+          ConditionExpression: 'attribute_not_exists(recordKey)',
+          ExpressionAttributeValues: { ':next': 1 },
+        },
+      },
       callerAuthorization[0],
       { Put: { TableName: 'audit' } },
     ],
@@ -166,26 +173,51 @@ test('returns the stored decision when the same request is retried, and refuses 
     .toMatchObject({ status: 409, code: 'ProjectDecisionEntryIdempotencyConflict' })
 })
 
-test('reports a full log only for a valid counter of this Project', async () => {
-  const writeError = cancellation(['None', 'ConditionalCheckFailed', 'None', 'None'])
-  const counter = { workspaceId: 'w', recordKey: 'PROJECT_DECISION#t#p', entryType: 'project-decision-log', schemaVersion: 1, teamId: 't', projectId: 'p', entryCount: 200 }
-  expect(await createWith(fakeClient({ counter, writeError })))
+test('reports a full log only for a valid counter of this Project, and fails closed on a fractional count', async () => {
+  const counter = { workspaceId: 'w', recordKey: 'PROJECT_DECISION#t#p', entryType: 'project-decision-log', schemaVersion: 1, teamId: 't', projectId: 'p', entryCount: 100 }
+  expect(await createWith(fakeClient({ counter })))
     .toMatchObject({ status: 413, code: 'ProjectDecisionLogFull' })
-  expect(await createWith(fakeClient({ counter: { ...counter, projectId: 'other' }, writeError })))
+  expect(await createWith(fakeClient({ counter: { ...counter, projectId: 'other' } })))
     .toMatchObject({ status: 502, code: 'ProjectDecisionLogCorruptState' })
+  expect(await createWith(fakeClient({ counter: { ...counter, entryCount: 99.5 } })))
+    .toMatchObject({ status: 502, code: 'ProjectDecisionLogCorruptState' })
+})
+
+test('requires the exact count it read, and answers a concurrent add as retryable', async () => {
+  const sent: SentCommand[] = []
+  const counter = { workspaceId: 'w', recordKey: 'PROJECT_DECISION#t#p', entryType: 'project-decision-log', schemaVersion: 1, teamId: 't', projectId: 'p', entryCount: 5 }
+  await createWith(fakeClient({ counter, sent }))
+  const write = sent.find((command) => command.constructor.name === 'TransactWriteCommand')
+  const items = write?.input.TransactItems
+  expect(Array.isArray(items) ? items[1] : undefined).toMatchObject({
+    Update: { ExpressionAttributeValues: { ':count': 5, ':next': 6 } },
+  })
+  expect(await createWith(fakeClient({ counter, writeError: cancellation(['None', 'ConditionalCheckFailed', 'None', 'None']) })))
+    .toMatchObject({ status: 503 })
 })
 
 test('names the audit action of a status change', async () => {
   const sent: SentCommand[] = []
   const next: ProjectDecisionEntry = { ...entry, status: 'withdrawn', revision: 2, updatedAt: '2026-11-20T00:00:00.000Z' }
   const store = new DynamoDbProjectDecisionLogStore('planning', fakeClient({ row: entryRow(entry), sent }), 'audit')
-  await store.update({ ...scope, now: next.updatedAt, callerAuthorization, auditContext, previous: entry, next, updateReceipt: 'r1', updateKey: 'k1' })
+  await store.update({ ...scope, now: next.updatedAt, callerAuthorization, auditContext, previous: entry, previousReceipts: [], next, updateReceipt: 'r1', updateKey: 'k1' })
   const write = sent.find((command) => command.constructor.name === 'TransactWriteCommand')
   const items = write?.input.TransactItems
   expect(JSON.stringify(Array.isArray(items) ? items.at(-1) : undefined)).toContain('project.decision_withdrawn')
   expect(Array.isArray(items) ? items[0] : undefined).toMatchObject({
     Put: { ConditionExpression: '#type = :type AND #revision = :revision', ExpressionAttributeValues: { ':revision': 1 } },
   })
+})
+
+test('recognizes a concurrent attempt of the same update after the revision moved on', async () => {
+  const next: ProjectDecisionEntry = { ...entry, title: 'Renamed', revision: 2, updatedAt: '2026-11-20T00:00:00.000Z' }
+  const row = { ...entryRow(next), updateReceipts: [{ updateKey: 'k1', receipt: 'r1' }] }
+  const writeError = cancellation(['ConditionalCheckFailed', 'None', 'None'])
+  const update = (updateReceipt: string) => new DynamoDbProjectDecisionLogStore('planning', fakeClient({ row, writeError }), 'audit')
+    .update({ ...scope, now: next.updatedAt, callerAuthorization, auditContext, previous: entry, previousReceipts: [], next, updateReceipt, updateKey: 'k1' })
+    .then((value) => value, (error: unknown) => error)
+  expect(await update('r1')).toEqual(next)
+  expect(await update('r2')).toMatchObject({ status: 409, code: 'ProjectDecisionEntryIdempotencyConflict' })
 })
 
 test('reads every decision of a Team on the server-side filter, across pages', async () => {

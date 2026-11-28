@@ -126,7 +126,15 @@ export function TeamDecisionLogView({ accessToken, locale, team }: TeamDecisionL
           <p className="mt-1 text-sm font-medium text-fg-505967">{t('projects.decisionLog.team.memos.description')}</p>
         </div>
         {notes.error ? (
-          <p className="text-sm font-semibold text-fg-red-700" role="alert">{t('projects.decisionLog.team.memos.error')}</p>
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="text-sm font-semibold text-fg-red-700" role="alert">{t('projects.decisionLog.team.memos.error')}</p>
+            <button className="workbench-button-secondary min-h-10 px-4" type="button" onClick={() => void notes.mutate()}>
+              {t('projects.decisionLog.reload')}
+            </button>
+          </div>
+        ) : null}
+        {notes.isLoading && !notes.data ? (
+          <p className="text-sm font-medium text-fg-505967" role="status">{t('projects.decisionLog.loading')}</p>
         ) : null}
         {notes.data && notes.data.notes.length === 0 ? (
           <p className="text-sm font-medium text-fg-505967">{t('projects.decisionLog.team.memos.empty')}</p>

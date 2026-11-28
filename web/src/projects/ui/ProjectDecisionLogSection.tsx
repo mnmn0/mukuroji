@@ -45,12 +45,12 @@ export function ProjectDecisionLogSection({
 }: ProjectDecisionLogSectionProps) {
   const log = useProjectDecisionLog(accessToken, teamId, projectId, enabled)
   // Every Work Item of the Project, so related Work Items outside the shown period keep their labels.
-  const { data: projectIssues } = useProjectIssues(accessToken, projectId, enabled, true)
+  const issues = useProjectIssues(accessToken, projectId, enabled, true)
   const workItemOptions = useMemo<ProjectDecisionReferenceOption[] | undefined>(
-    () => projectIssues
+    () => issues.data
       ?.filter((issue) => issue.teamId === teamId)
       .map((issue) => ({ id: issue.id, label: issue.key ? `${issue.key} ${issue.title}` : issue.title })),
-    [projectIssues, teamId],
+    [issues.data, teamId],
   )
   const formatDateTime = useMemo(() => createDecisionDateTimeFormatter(locale), [locale])
   const save = useSaveProjectDecision({ accessToken })
@@ -62,11 +62,13 @@ export function ProjectDecisionLogSection({
       entries={log.data?.entries}
       formatDateTime={formatDateTime}
       hasLoadError={Boolean(log.error)}
+      hasWorkItemLoadError={Boolean(issues.error)}
       isLoading={log.isLoading}
       memberOptions={memberOptions ?? []}
       t={t}
       workItemOptions={workItemOptions}
       onReload={() => void log.mutate()}
+      onReloadWorkItems={() => void issues.mutate()}
       onSave={(entry, input) => save(teamId, projectId, entry, input)}
     />
   )

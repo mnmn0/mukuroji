@@ -74,6 +74,8 @@ export type UpdateProjectDecisionEntryStoreInput<TCallerCheck, TAudit> = Project
   ProjectDecisionLogMutation<TCallerCheck, TAudit> & {
     /** Decision read before the change; its revision guards the write. */
     previous: ProjectDecisionEntry
+    /** Receipts kept on the decision read before the change. */
+    previousReceipts: readonly ProjectDecisionUpdateReceipt[]
     /** Decision to store. */
     next: ProjectDecisionEntry
     /** Receipt of this update request, stored so a retried request is recognized. */
@@ -82,14 +84,42 @@ export type UpdateProjectDecisionEntryStoreInput<TCallerCheck, TAudit> = Project
     updateKey: string
   }
 
-/** One stored decision with the receipt of the update that produced its current revision. */
+/** Receipt of one applied update, kept on the decision so a retry of it is recognized later. */
+export type ProjectDecisionUpdateReceipt = {
+  /** Key of the update request without its content. */
+  updateKey: string
+  /** Receipt of the update request with its content. */
+  receipt: string
+}
+
+/** Most update receipts one decision keeps, newest last. */
+export const PROJECT_DECISION_UPDATE_RECEIPTS_MAX = 20
+
+/** One stored decision with the receipts of its latest updates. */
 export type ProjectDecisionEntryRecord = {
   /** The decision. */
   entry: ProjectDecisionEntry
-  /** Receipt of the update that produced this revision; absent until the first update. */
-  lastUpdateReceipt?: string
-  /** Key of the update that produced this revision; absent until the first update. */
-  lastUpdateKey?: string
+  /** Receipts of the latest updates, oldest first; empty until the first update. */
+  updateReceipts: ProjectDecisionUpdateReceipt[]
+}
+
+/**
+ * Finds what an earlier attempt of an update request left on a decision.
+ *
+ * @param receipts - Receipts kept on the decision.
+ * @param updateKey - Key of the request without its content.
+ * @param updateReceipt - Receipt of the request with its content.
+ * @returns `applied` when the same request was applied, `reused` when the key was used for other
+ * content, or `none`.
+ */
+export function findProjectDecisionUpdateReceipt(
+  receipts: readonly ProjectDecisionUpdateReceipt[],
+  updateKey: string,
+  updateReceipt: string,
+): 'applied' | 'reused' | 'none' {
+  const match = receipts.find((receipt) => receipt.updateKey === updateKey)
+  if (!match) return 'none'
+  return match.receipt === updateReceipt ? 'applied' : 'reused'
 }
 
 /** One decision read across a Team, with the Project it belongs to. */
@@ -261,11 +291,13 @@ export async function updateProjectDecisionEntryUseCase<TCallerCheck, TAudit>(
   const previous = record.entry
   // The stored origin is kept, so the body's origin is checked as if it were that one.
   const input = readEntryInput(isRecord(body) ? body.entry : undefined, mutation.now, previous.origin)
-  if (previous.revision === expectedRevision + 1 && record.lastUpdateReceipt === mutation.updateReceipt) {
-    // The same request already produced the current revision, and only its response was lost.
+  // Receipts are checked before the revision, so a retry is recognized even after later updates.
+  const earlier = findProjectDecisionUpdateReceipt(record.updateReceipts, mutation.updateKey, mutation.updateReceipt)
+  if (earlier === 'applied') {
+    // The same request was already applied, and only its response was lost.
     return { teamId: scope.teamId, projectId: scope.projectId, entry: previous }
   }
-  if (record.lastUpdateKey === mutation.updateKey && record.lastUpdateReceipt !== mutation.updateReceipt) {
+  if (earlier === 'reused') {
     throw new ProjectDataError(409, 'ProjectDecisionEntryIdempotencyConflict', 'This Idempotency-Key was already used for another change.')
   }
   if (previous.revision !== expectedRevision) {
@@ -297,6 +329,7 @@ export async function updateProjectDecisionEntryUseCase<TCallerCheck, TAudit>(
     updateReceipt: mutation.updateReceipt,
     updateKey: mutation.updateKey,
     previous,
+    previousReceipts: record.updateReceipts,
     next,
   })
   return { teamId: scope.teamId, projectId: scope.projectId, entry: stored }
@@ -339,7 +372,13 @@ export async function readTeamDecisionLogUseCase<TCallerCheck, TAudit>(
     : scope.visibleProjectIds.filter((id) => id === filters.projectId))
   const items: TeamDecisionLogItem[] = []
   if (visible.size > 0) {
-    for (const { projectId, entry } of await store.listTeam(scope.workspaceId, scope.teamId)) {
+    // One chosen Project is read on its own, so its size does not depend on the Team's other Projects.
+    const chosen = filters.projectId
+    const decisions = chosen === undefined
+      ? await store.listTeam(scope.workspaceId, scope.teamId)
+      : (await store.list({ workspaceId: scope.workspaceId, teamId: scope.teamId, projectId: chosen }))
+          .map((entry) => ({ projectId: chosen, entry }))
+    for (const { projectId, entry } of decisions) {
       if (visible.has(projectId)) items.push({ kind: 'decision', projectId, decidedAt: entry.decidedAt, entry })
     }
     const changeRequests = await Promise.all([...visible].map(async (projectId) => ({

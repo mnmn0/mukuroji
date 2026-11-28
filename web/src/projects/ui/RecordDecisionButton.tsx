@@ -1,7 +1,8 @@
 import type { ProjectDecisionOrigin } from '@mukuroji/contracts'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { ProjectDecisionFormPrefill } from '../model/projectDecisionForm'
+import { useSaveProjectDecision } from '../mutations/useSaveProjectDecision'
 import type { ProjectDecisionReferenceOption } from './ProjectDecisionForm'
 import { RecordDecisionDialog, type RecordDecisionProjectOption } from './RecordDecisionDialog'
 
@@ -49,6 +50,12 @@ export function RecordDecisionButton({
 }: RecordDecisionButtonProps) {
   const [prefill, setPrefill] = useState<ProjectDecisionFormPrefill>()
   const [recordedProjectName, setRecordedProjectName] = useState<string>()
+  // The save hook lives here rather than in the dialog, so a retry after reopening the dialog
+  // reuses the Idempotency-Key of the attempt that may already have been stored.
+  const save = useSaveProjectDecision({ accessToken })
+  // Each opening gets its own number, so only the dialog that saved can close itself.
+  const openCount = useRef(0)
+  const [openedAs, setOpenedAs] = useState(0)
   return (
     <>
       <button
@@ -58,6 +65,8 @@ export function RecordDecisionButton({
         type="button"
         onClick={() => {
           setRecordedProjectName(undefined)
+          openCount.current += 1
+          setOpenedAs(openCount.current)
           setPrefill(createPrefill())
         }}
       >
@@ -71,6 +80,8 @@ export function RecordDecisionButton({
       {prefill ? (
         <RecordDecisionDialog
           accessToken={accessToken}
+          key={openedAs}
+          save={save}
           {...(defaultProject ? { defaultProject } : {})}
           lockProject={lockProject}
           origin={origin}
@@ -80,6 +91,7 @@ export function RecordDecisionButton({
           {...(workItemOptions ? { workItemOptions } : {})}
           onClose={() => setPrefill(undefined)}
           onRecorded={(project) => {
+            if (openCount.current !== openedAs) return
             setPrefill(undefined)
             setRecordedProjectName(project.name)
           }}

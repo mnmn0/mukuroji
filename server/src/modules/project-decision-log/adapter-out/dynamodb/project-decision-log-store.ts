@@ -12,11 +12,14 @@ import {
 } from '@mukuroji/contracts'
 import { createAuditFieldChanges, createMutationAuditEventPut, type MutationAuditContext } from '../../../audit'
 import { ProjectDataError } from '../../../directory'
-import type {
-  CreateProjectDecisionEntryStoreInput,
+import {
+  findProjectDecisionUpdateReceipt,
+  PROJECT_DECISION_UPDATE_RECEIPTS_MAX,
+  type CreateProjectDecisionEntryStoreInput,
   ProjectDecisionEntryRecord,
   ProjectDecisionLogScope,
   ProjectDecisionLogStore as LogStore,
+  ProjectDecisionUpdateReceipt,
   TeamProjectDecisionEntry,
   UpdateProjectDecisionEntryStoreInput,
 } from '../../application/project-decision-log-use-cases'
@@ -155,16 +158,7 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
   async get(scope: ProjectDecisionLogScope, entryId: string): Promise<ProjectDecisionEntryRecord | null> {
     const row = await this.readRow(scope, entryId)
     if (!row) return null
-    const entry = parseStoredEntry(row, scope)
-    const receipt = row.lastUpdateReceipt
-    const updateKey = row.lastUpdateKey
-    if (receipt !== undefined && typeof receipt !== 'string') throw corruptLog()
-    if (updateKey !== undefined && typeof updateKey !== 'string') throw corruptLog()
-    return {
-      entry,
-      ...(receipt === undefined ? {} : { lastUpdateReceipt: receipt }),
-      ...(updateKey === undefined ? {} : { lastUpdateKey: updateKey }),
-    }
+    return { entry: parseStoredEntry(row, scope), updateReceipts: parseUpdateReceipts(row) }
   }
 
   /**
@@ -186,6 +180,14 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
       changes: createAuditFieldChanges(undefined, { ...input.entry }, AUDIT_FIELDS, AUDIT_REDACTED_FIELDS),
       metadata: { origin: input.entry.origin, projectId: input.projectId, teamId: input.teamId },
     })
+    // DynamoDB numbers may hold fractions, so the count is checked to be a whole number here and
+    // the transaction then requires that exact count.
+    const count = readCounterCount(await this.readCounter(input), input)
+    if (count !== undefined && count >= PROJECT_DECISION_LOG_MAX_ENTRIES) {
+      const row = await this.readRow(input, input.entry.id)
+      if (row && row.creationFingerprint === input.creationFingerprint) return parseStoredEntry(row, input)
+      throw logFull()
+    }
     try {
       await this.client.send(new TransactWriteCommand({
         TransactItems: [
@@ -204,10 +206,11 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
             Update: {
               TableName: this.tableName,
               Key: { workspaceId: input.workspaceId, recordKey: counterKey(input) },
-              UpdateExpression: 'SET #count = if_not_exists(#count, :zero) + :one, #type = if_not_exists(#type, :type), #teamId = if_not_exists(#teamId, :teamId), #projectId = if_not_exists(#projectId, :projectId), #schemaVersion = if_not_exists(#schemaVersion, :schemaVersion)',
-              // An existing counter must be this Project's, in the known schema, not negative, and
-              // below the limit.
-              ConditionExpression: 'attribute_not_exists(recordKey) OR (#type = :type AND #schemaVersion = :schemaVersion AND #teamId = :teamId AND #projectId = :projectId AND #count >= :zero AND #count < :max)',
+              UpdateExpression: 'SET #count = :next, #type = :type, #teamId = :teamId, #projectId = :projectId, #schemaVersion = :schemaVersion',
+              // The counter must still be missing, or still be this Project's with the count read above.
+              ConditionExpression: count === undefined
+                ? 'attribute_not_exists(recordKey)'
+                : '#type = :type AND #schemaVersion = :schemaVersion AND #teamId = :teamId AND #projectId = :projectId AND #count = :count',
               ExpressionAttributeNames: {
                 '#count': 'entryCount',
                 '#type': 'entryType',
@@ -216,9 +219,8 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
                 '#schemaVersion': 'schemaVersion',
               },
               ExpressionAttributeValues: {
-                ':zero': 0,
-                ':one': 1,
-                ':max': PROJECT_DECISION_LOG_MAX_ENTRIES,
+                ...(count === undefined ? {} : { ':count': count }),
+                ':next': (count ?? 0) + 1,
                 ':type': COUNTER_TYPE,
                 ':teamId': input.teamId,
                 ':projectId': input.projectId,
@@ -247,9 +249,12 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
         throw new ProjectDataError(409, 'ProjectDecisionEntryIdempotencyConflict', 'This Idempotency-Key was already used for another decision.')
       }
       if (reasons?.[1] === 'ConditionalCheckFailed') {
-        // Only a valid counter at the limit means the log is full; any other counter is corrupt.
-        if (isCounterAtLimit(await this.readCounter(input), input)) throw logFull()
-        throw corruptLog()
+        // A valid counter at the limit means the log is full, and a valid counter below it means
+        // another decision was added meanwhile; any other counter is corrupt.
+        const current = await this.readCounter(input)
+        if (isCounterAtLimit(current, input)) throw logFull()
+        readCounterCount(current, input)
+        throw retryableFailure()
       }
       return storageFailure(error, transactionSize)
     }
@@ -290,8 +295,7 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
               Item: {
                 ...rowIdentity(input, input.next.id),
                 creationFingerprint,
-                lastUpdateReceipt: input.updateReceipt,
-                lastUpdateKey: input.updateKey,
+                updateReceipts: nextUpdateReceipts(input),
                 ...input.next,
               },
               ConditionExpression: '#type = :type AND #revision = :revision',
@@ -304,7 +308,23 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
         ],
       }))
     } catch (error) {
-      return storageFailure(error, 1 + input.callerAuthorization.length + (audit ? 1 : 0))
+      const transactionSize = 1 + input.callerAuthorization.length + (audit ? 1 : 0)
+      const reasons = readCancellationCodes(error)
+      const callerAuthorizationFailed = reasons
+        ?.slice(1, 1 + input.callerAuthorization.length)
+        .includes('ConditionalCheckFailed') ?? false
+      if (!callerAuthorizationFailed && reasons?.[0] === 'ConditionalCheckFailed') {
+        // A concurrent attempt of this same request may have taken the revision first.
+        const current = await this.readRow(input, input.next.id)
+        if (current) {
+          const earlier = findProjectDecisionUpdateReceipt(parseUpdateReceipts(current), input.updateKey, input.updateReceipt)
+          if (earlier === 'applied') return parseStoredEntry(current, input)
+          if (earlier === 'reused') {
+            throw new ProjectDataError(409, 'ProjectDecisionEntryIdempotencyConflict', 'This Idempotency-Key was already used for another change.')
+          }
+        }
+      }
+      return storageFailure(error, transactionSize)
     }
     return input.next
   }
@@ -391,8 +411,7 @@ export class InMemoryProjectDecisionLogStore implements ProjectDecisionLogStore 
     scope: ProjectDecisionLogScope
     entry: ProjectDecisionEntry
     creationFingerprint: string
-    lastUpdateReceipt?: string
-    lastUpdateKey?: string
+    updateReceipts: ProjectDecisionUpdateReceipt[]
   }>()
 
   /**
@@ -441,11 +460,7 @@ export class InMemoryProjectDecisionLogStore implements ProjectDecisionLogStore 
   async get(scope: ProjectDecisionLogScope, entryId: string): Promise<ProjectDecisionEntryRecord | null> {
     const row = this.rows.get(memoryKey(scope, entryId))
     if (!row) return null
-    return {
-      entry: structuredClone(row.entry),
-      ...(row.lastUpdateReceipt === undefined ? {} : { lastUpdateReceipt: row.lastUpdateReceipt }),
-      ...(row.lastUpdateKey === undefined ? {} : { lastUpdateKey: row.lastUpdateKey }),
-    }
+    return { entry: structuredClone(row.entry), updateReceipts: structuredClone(row.updateReceipts) }
   }
 
   /**
@@ -469,6 +484,7 @@ export class InMemoryProjectDecisionLogStore implements ProjectDecisionLogStore 
       scope: { workspaceId: input.workspaceId, teamId: input.teamId, projectId: input.projectId },
       entry: structuredClone(input.entry),
       creationFingerprint: input.creationFingerprint,
+      updateReceipts: [],
     })
     return input.entry
   }
@@ -483,6 +499,10 @@ export class InMemoryProjectDecisionLogStore implements ProjectDecisionLogStore 
     requireCallerAuthorization(input.callerAuthorization)
     const key = memoryKey(input, input.next.id)
     const existing = this.rows.get(key)
+    if (existing && existing.entry.revision !== input.previous.revision) {
+      const earlier = findProjectDecisionUpdateReceipt(existing.updateReceipts, input.updateKey, input.updateReceipt)
+      if (earlier === 'applied') return structuredClone(existing.entry)
+    }
     if (!existing || existing.entry.revision !== input.previous.revision) {
       throw new ProjectDataError(409, 'ProjectDecisionEntryConflict', 'The decision changed. Reload and try again.')
     }
@@ -490,11 +510,44 @@ export class InMemoryProjectDecisionLogStore implements ProjectDecisionLogStore 
       scope: existing.scope,
       entry: structuredClone(input.next),
       creationFingerprint: existing.creationFingerprint,
-      lastUpdateReceipt: input.updateReceipt,
-      lastUpdateKey: input.updateKey,
+      updateReceipts: nextUpdateReceipts(input),
     })
     return input.next
   }
+}
+
+/**
+ * Reads the update receipts kept on a stored decision row.
+ *
+ * @param row - Raw decision row.
+ * @returns The receipts, oldest first.
+ * @throws ProjectDataError 502 when the receipts are malformed.
+ */
+function parseUpdateReceipts(row: Record<string, unknown>): ProjectDecisionUpdateReceipt[] {
+  const value = row.updateReceipts
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > PROJECT_DECISION_UPDATE_RECEIPTS_MAX) throw corruptLog()
+  return value.map((item: unknown) => {
+    if (
+      typeof item !== 'object' || item === null ||
+      !('updateKey' in item) || typeof item.updateKey !== 'string' ||
+      !('receipt' in item) || typeof item.receipt !== 'string'
+    ) {
+      throw corruptLog()
+    }
+    return { updateKey: item.updateKey, receipt: item.receipt }
+  })
+}
+
+/**
+ * Appends this update's receipt to the receipts read before it, keeping only the latest ones.
+ *
+ * @param input - Replacement input.
+ * @returns The receipts to store, oldest first.
+ */
+function nextUpdateReceipts(input: Pick<UpdateInput, 'previousReceipts' | 'updateKey' | 'updateReceipt'>): ProjectDecisionUpdateReceipt[] {
+  return [...input.previousReceipts, { updateKey: input.updateKey, receipt: input.updateReceipt }]
+    .slice(-PROJECT_DECISION_UPDATE_RECEIPTS_MAX)
 }
 
 /**
@@ -576,6 +629,30 @@ function parseStoredEntry(row: Record<string, unknown>, scope: ProjectDecisionLo
     throw corruptLog()
   }
   return entry
+}
+
+/**
+ * Reads the count of a counter row that belongs to the Project and has the known schema.
+ *
+ * @param row - Raw counter row, or `undefined` when it is missing.
+ * @param scope - Team and Project the counter must belong to.
+ * @returns The whole, non-negative count, or `undefined` when the counter is missing.
+ * @throws ProjectDataError 502 when the counter is malformed.
+ */
+function readCounterCount(row: Record<string, unknown> | undefined, scope: ProjectDecisionLogScope): number | undefined {
+  if (row === undefined) return undefined
+  if (
+    row.entryType !== COUNTER_TYPE ||
+    row.schemaVersion !== SCHEMA_VERSION ||
+    row.teamId !== scope.teamId ||
+    row.projectId !== scope.projectId ||
+    typeof row.entryCount !== 'number' ||
+    !Number.isSafeInteger(row.entryCount) ||
+    row.entryCount < 0
+  ) {
+    throw corruptLog()
+  }
+  return row.entryCount
 }
 
 /**

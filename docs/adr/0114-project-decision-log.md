@@ -20,7 +20,7 @@
    追加の transaction で `entryCount < 200` を条件に1増やす。決定・counter・呼び出し元の認可 fence・audit event を
    1つの transaction で書く。更新は決定ごとの `revision` を CAS にする。削除はなく、状態（有効・置き換え済み・取り消し）で表す。
 2. 決定は要約（200 文字）、決めた内容と理由（各 2,000 文字）、決めた人（Project member の member key、10 人まで）、
-   Project 外の決めた人の自由記述（200 文字）、決めた日時（UTC、server 時刻より1日以上先は不可）、関連 Work Item（同じ
+   Project 外の決めた人の自由記述（200 文字）、決めた日時（UTC、server 時刻より24時間を超えて先は不可、秒の小数はミリ秒まで）、関連 Work Item（同じ
    Project の Work Item、10 件まで）、出典（`https` / `http` の URL、認証情報を含まない 1,000 文字まで、5 件まで、表示名付き）、
    置き換えた決定（同じ Project の決定）、記録元（`project` / `work-item` / `document` / `slack`）、記録した人を持つ。
    記録元と記録した人は最初の記録のまま変えない。`slack` は Slack の shortcut だけが server 側で付け、HTTP の body からは受けない。
@@ -50,8 +50,9 @@
 
 ## 結果
 
-- 1 Project 200 件まで保存できる。上限は、全件を返す Project の一覧が自由記述と出典を最大まで使っても Lambda の 6 MB
-  応答上限に収まるように決めた（1 件およそ 25 KB）。Team の一覧は 100 件までで、件数と同じく応答上限に収まる。
+- 1 Project 100 件まで保存できる。上限は、全件を返す Project の一覧が自由記述と出典を最大まで使っても Lambda の 6 MB
+  応答上限に収まるように決めた。1 件は各項目の上限で約 14,000 文字になる。引用符やバックスラッシュは JSON で 2 バイト、
+  Lambda の応答が本文をさらに JSON 文字列に入れると 4 バイトになるので、1 件は最大でおよそ 58 KB、100 件で約 5.8 MB になる。Team の一覧は 100 件までで、件数と同じく応答上限に収まる。
 - Team の一覧は Team の決定を全件読むので、決定が増えると読み取り単位と応答時間が伸びる。数千件を超えるようなら、
   日時順の index か検索 index を足す新しい ADR を作る。
 - Slack の message shortcut「決定として記録」は、ADR 0113 の Slack app に interactivity の受け口と Slack 利用者と

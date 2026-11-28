@@ -381,6 +381,26 @@ export function createPlanningClient(): DynamoDbPlanningClient {
   )
 }
 
+
+/**
+ * Builds the decision log store. Every decision write carries its audit event in the same
+ * transaction, so production refuses to start without the audit table (ADR 0114).
+ *
+ * @returns The DynamoDB store.
+ * @throws Error in production when `AUDIT_EVENTS_TABLE_NAME` is not set.
+ */
+function createProjectDecisionLogStore() {
+  const config = loadServerConfig()
+  const auditTableName = getConfiguredAuditTableName()
+  if (config.production && !auditTableName) {
+    throw new Error('AUDIT_EVENTS_TABLE_NAME must be set for decision log audit writes.')
+  }
+  return new DynamoDbProjectDecisionLogStore(
+    config.environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+    createDynamoDbDocumentClient(),
+    auditTableName,
+  )
+}
 /**
  * Creates the configured Analytics repository.
  *
@@ -741,11 +761,7 @@ export function createProductionWorkItemDependencies(
       createDynamoDbDocumentClient(),
       getConfiguredAuditTableName(),
     ),
-    projectDecisionLogs: new DynamoDbProjectDecisionLogStore(
-      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
-      createDynamoDbDocumentClient(),
-      getConfiguredAuditTableName(),
-    ),
+    projectDecisionLogs: createProjectDecisionLogStore(),
     projectExpenses: new DynamoDbProjectExpenseStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),

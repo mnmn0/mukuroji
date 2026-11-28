@@ -38,17 +38,22 @@ export const PROJECT_DECISION_SOURCE_LABEL_MAX_LENGTH = 200
 /** Longest entry ID a decision may name as the one replacing it. */
 export const PROJECT_DECISION_ENTRY_ID_MAX_LENGTH = 64
 /**
- * Most decisions one Project log may hold. With the limits above, every entry of a full log fits
- * one read response below the Lambda 6 MB response limit (ADR 0114).
+ * Most decisions one Project log may hold. An entry at every field limit is about 14,000
+ * characters; JSON escapes a quote or backslash to two bytes, and the Lambda response wraps the
+ * JSON body in another JSON string, so each such character can take four bytes. 100 entries stay
+ * below the 6 MB Lambda response limit even then (ADR 0114).
  */
-export const PROJECT_DECISION_LOG_MAX_ENTRIES = 200
+export const PROJECT_DECISION_LOG_MAX_ENTRIES = 100
 /** Most items the Team decision log returns in one response, newest decision first. */
 export const TEAM_DECISION_LOG_MAX_ITEMS = 100
 /** Longest keyword the Team decision log filters by. */
 export const TEAM_DECISION_LOG_QUERY_MAX_LENGTH = 100
 
-/** UTC ISO 8601 timestamp, such as `2026-11-20T08:00:00.000Z`, split into date and time parts. */
-const TIMESTAMP_PATTERN = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/u
+/**
+ * UTC ISO 8601 timestamp, such as `2026-11-20T08:00:00.000Z`, split into date and time parts.
+ * Fractions stop at milliseconds, the precision timestamps are stored and compared at.
+ */
+const TIMESTAMP_PATTERN = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?Z$/u
 /** Control characters other than tab, line feed, and carriage return. */
 // eslint-disable-next-line no-control-regex -- these control characters are what the check rejects.
 const DISALLOWED_CONTROL_CHARACTER = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u
@@ -268,9 +273,10 @@ function readIds(value: unknown, maxItems: number, maxLength: number): string[] 
   for (const item of value) {
     const id = readOptionalText(item, maxLength)
     if (id === undefined || id === null) return null
-    if (!ids.includes(id)) ids.push(id)
+    if (ids.includes(id)) continue
+    ids.push(id)
+    if (ids.length > maxItems) return null
   }
-  if (ids.length > maxItems) return null
   return ids.length === 0 ? undefined : ids
 }
 
@@ -284,6 +290,9 @@ export function normalizeProjectDecisionSourceUrl(value: unknown): string | unde
   if (typeof value !== 'string') return undefined
   const text = value.trim()
   if (text.length === 0 || text.length > PROJECT_DECISION_SOURCE_URL_MAX_LENGTH || !URL_CHARACTERS.test(text)) return undefined
+  // Without `//` a browser resolves `https:host/path` against the current page, so only the
+  // authority form is a link to another site.
+  if (!/^https?:\/\//iu.test(text)) return undefined
   let url: URL
   try {
     url = new URL(text)
@@ -314,8 +323,8 @@ function readSources(value: unknown): ProjectDecisionSource[] | undefined | null
     if (label === null) return null
     if (sources.some((source) => source.url === url)) continue
     sources.push({ url, ...(label === undefined ? {} : { label }) })
+    if (sources.length > PROJECT_DECISION_SOURCES_MAX) return null
   }
-  if (sources.length > PROJECT_DECISION_SOURCES_MAX) return null
   return sources.length === 0 ? undefined : sources
 }
 
@@ -432,6 +441,7 @@ export function parseProjectDecisionEntry(value: unknown): ProjectDecisionEntry 
   if (
     input.value.title !== value.title ||
     input.value.content !== value.content ||
+    input.value.decidedAt !== value.decidedAt ||
     input.value.rationale !== value.rationale ||
     input.value.deciderNote !== value.deciderNote ||
     input.value.supersededByEntryId !== value.supersededByEntryId ||

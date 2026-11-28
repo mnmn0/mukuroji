@@ -55,8 +55,12 @@ export async function loadTeamDecisionNotes(
     // Curated context items carry their kind as the subtitle.
     notes.push(...response.results.filter((result) => result.subtitle === 'decision'))
     const nextCursor = response.nextCursor
-    if (!nextCursor || seenCursors.has(nextCursor)) {
+    if (!nextCursor) {
       return { notes: notes.slice(0, DECISION_NOTE_LIMIT), truncated: notes.length > DECISION_NOTE_LIMIT }
+    }
+    // A repeated cursor means the search did not end normally, so more notes may exist.
+    if (seenCursors.has(nextCursor)) {
+      return { notes: notes.slice(0, DECISION_NOTE_LIMIT), truncated: true }
     }
     if (notes.length >= DECISION_NOTE_LIMIT) {
       return { notes: notes.slice(0, DECISION_NOTE_LIMIT), truncated: true }
@@ -83,6 +87,6 @@ export function useTeamDecisionNotes(
   return useSWR(
     accessToken ? ['team-decision-notes', accessToken, teamId, filters.keyword, filters.projectId] as const : null,
     ([, token, currentTeamId, keyword, projectId]) => loadTeamDecisionNotes(token, currentTeamId, { keyword, projectId }),
-    { shouldRetryOnError: false, keepPreviousData: true },
+    { shouldRetryOnError: false },
   )
 }

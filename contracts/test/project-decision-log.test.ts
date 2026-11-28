@@ -102,6 +102,7 @@ describe('normalizeProjectDecisionSourceUrl', () => {
     expect(normalizeProjectDecisionSourceUrl('https://user:secret@example.com/')).toBeUndefined()
     expect(normalizeProjectDecisionSourceUrl('https://example.com/a b')).toBeUndefined()
     expect(normalizeProjectDecisionSourceUrl('/relative')).toBeUndefined()
+    expect(normalizeProjectDecisionSourceUrl('https:example.com')).toBeUndefined()
     expect(normalizeProjectDecisionSourceUrl(`https://example.com/${'a'.repeat(1_000)}`)).toBeUndefined()
   })
 })
@@ -177,5 +178,10 @@ describe('decision timestamps', () => {
   test('stores decidedAt in one representation', () => {
     const parsed = parseProjectDecisionEntryInput({ title: 't', content: 'c', decidedAt: '2026-11-28T10:00:00Z', status: 'active', origin: 'project' })
     expect(parsed.ok && parsed.value.decidedAt).toBe('2026-11-28T10:00:00.000Z')
+  })
+
+  test('refuses fractions of a second beyond milliseconds', () => {
+    const parsed = parseProjectDecisionEntryInput({ title: 't', content: 'c', decidedAt: '2026-11-28T10:00:00.1234Z', status: 'active', origin: 'project' })
+    expect(parsed.ok).toBe(false)
   })
 })
