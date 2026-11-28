@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import type { EnterpriseIdentitySnapshot, EnterpriseRoleAssignment, TimeBudget } from '@mukuroji/contracts'
+import { BudgetThresholdPartialReadError } from '../../modules/notifications'
 import { createBudgetThresholdReader, type BudgetThresholdReaderSources } from './budget-threshold-alerts'
 
 /** Budget of the test Project, half used by its approved expense. */
@@ -139,4 +140,24 @@ test('counts Agent Run cost of a USD budget when the Workspace profile includes 
   // The cost is not converted, so a yen budget leaves it out.
   const [yen] = await createBudgetThresholdReader(withAgentCost(true, 'JPY')).listProjectBudgetStatuses('w', now)
   expect(yen).toMatchObject({ actualCostMinor: 5_000, consumedPercent: 50 })
+})
+
+test('reads the other Projects when one cannot be read, then fails with their statuses (ADR 0119)', async () => {
+  const now = new Date('2026-01-10T00:00:00.000Z')
+  const reader = createBudgetThresholdReader(sources({
+    readProjects: async () => [
+      { teamId: 't', projectId: 'broken', managerMemberKeys: ['lead@example.com'] },
+      { teamId: 't', projectId: 'p', ownerMemberKey: 'owner@example.com', managerMemberKeys: ['lead@example.com'] },
+    ],
+    getBudget: async (_workspaceId, _teamId, projectId) => {
+      if (projectId === 'broken') throw new RangeError('Too many Work Item pages.')
+      return budget
+    },
+  }))
+
+  const failure = await reader.listProjectBudgetStatuses('w', now).then(() => undefined, (error: unknown) => error)
+  expect(failure).toBeInstanceOf(BudgetThresholdPartialReadError)
+  if (!(failure instanceof BudgetThresholdPartialReadError)) return
+  expect(failure.statuses.map((status) => status.projectId)).toEqual(['p'])
+  expect(failure.firstFailure).toBeInstanceOf(RangeError)
 })

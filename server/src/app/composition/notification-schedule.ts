@@ -187,6 +187,8 @@ export function createProductionNotificationScheduleHandler() {
                 limit: 100,
                 includeArchived: true,
                 limitEvaluatedRows: true,
+                // Evaluated-row pages read the base table, which needs a strongly consistent read.
+                consistentRead: true,
                 ...(startAfterIssueId ? { startAfterIssueId } : {}),
               }),
             listAgentRunCosts: async (input: Parameters<typeof readFinishedAgentRunCosts>[1]) =>

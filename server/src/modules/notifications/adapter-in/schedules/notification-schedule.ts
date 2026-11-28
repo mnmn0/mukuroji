@@ -49,9 +49,11 @@ import {
 } from '../../application/timesheet-reminders'
 import type { ScheduledWeeklyReportReader } from '../../application/ports/weekly-report-reminder-reader'
 import {
+  BudgetThresholdPartialReadError,
   evaluateBudgetThresholdAlerts,
   type BudgetThresholdAlertCandidate,
   type ScheduledBudgetThresholdReader,
+  type ScheduledProjectBudgetStatus,
 } from '../../application/budget-threshold-alerts'
 import {
   evaluateMemberAccessExpiryNotices,
@@ -746,7 +748,16 @@ export async function runNotificationSchedule(
     let failure: unknown
     for (const workspaceId of workspaceIds) {
       try {
-        const statuses = await budgetThresholdReader.listProjectBudgetStatuses(workspaceId, now)
+        let statuses: readonly ScheduledProjectBudgetStatus[]
+        let partialFailure: BudgetThresholdPartialReadError | undefined
+        try {
+          statuses = await budgetThresholdReader.listProjectBudgetStatuses(workspaceId, now)
+        } catch (error) {
+          // Projects that were read still get their alerts when others of the Workspace failed.
+          if (!(error instanceof BudgetThresholdPartialReadError)) throw error
+          statuses = error.statuses
+          partialFailure = error
+        }
         for (const candidate of evaluateBudgetThresholdAlerts(workspaceId, statuses)) {
           await putScheduledAuditEvent(
             options.documentClient,
@@ -755,6 +766,7 @@ export async function runNotificationSchedule(
             result,
           )
         }
+        if (partialFailure) throw partialFailure
       } catch (error) {
         console.error('Budget threshold check failed for a Workspace.', error instanceof Error ? error.name : 'unknown error')
         failure ??= error

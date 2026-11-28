@@ -295,7 +295,19 @@ describe('optional modules selected through CDK context', () => {
     const notificationPolicies = Object.entries(template.toJSON().Resources)
       .filter(([id]) => id.startsWith('NotificationScheduleJobPolicy'));
     expect(notificationPolicies.length).toBeGreaterThan(0);
-    expect(JSON.stringify(notificationPolicies)).toContain('FinishedRunIndex');
+    const indexStatements = notificationPolicies
+      .flatMap(([, policy]) => readStatementList(policy))
+      .filter((statement) => JSON.stringify(readField(statement, 'Resource')).includes('/index/FinishedRunIndex'));
+    // One read-only statement covers the Agent Runs table and its finished-run index. CDK may merge
+    // it with other read-only statements of the same actions, so the resources are checked by item.
+    expect(indexStatements).toHaveLength(1);
+    expect(readField(indexStatements[0], 'Effect')).toBe('Allow');
+    expect(readField(indexStatements[0], 'Action')).toEqual(['dynamodb:GetItem', 'dynamodb:Query']);
+    const resources = readField(indexStatements[0], 'Resource');
+    expect(resources).toEqual(expect.arrayContaining([
+      { 'Fn::GetAtt': [expect.stringMatching(/^AgentRunsTable/), 'Arn'] },
+      { 'Fn::Join': ['', [{ 'Fn::GetAtt': [expect.stringMatching(/^AgentRunsTable/), 'Arn'] }, '/index/FinishedRunIndex']] },
+    ]));
   });
 
   test('turns the demo data on', () => {
@@ -339,3 +351,25 @@ describe('optional modules selected through CDK context', () => {
     });
   });
 });
+
+/**
+ * Reads one field of an untrusted synthesized object.
+ *
+ * @param value - Synthesized value.
+ * @param key - Field name.
+ * @returns The field, or undefined when the value is not an object.
+ */
+function readField(value: unknown, key: string): unknown {
+  return typeof value === 'object' && value !== null ? Reflect.get(value, key) : undefined;
+}
+
+/**
+ * Reads the statements of a synthesized IAM policy resource.
+ *
+ * @param resource - Synthesized `AWS::IAM::Policy` resource.
+ * @returns The statements, or none when the resource has no statement list.
+ */
+function readStatementList(resource: unknown): readonly unknown[] {
+  const statements = readField(readField(readField(resource, 'Properties'), 'PolicyDocument'), 'Statement');
+  return Array.isArray(statements) ? statements : [];
+}

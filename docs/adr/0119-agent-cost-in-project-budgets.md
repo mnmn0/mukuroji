@@ -36,8 +36,8 @@ Shinji の方針は「なるべく安く」で、2026-11-28 に「円に換算�
    終了済み Run index を 100 page まで読む。index は新しい Run から返すので、超えたときは新しい Run の分だけを数えて
    `agentCost.truncated = true` にし、値は下限として表示する（閾値通知も下限で判定する）。失敗した Run とそれ以外の Run の
    index は交互に読んで終了時刻で混ぜ、新しい順の約束を結果で守る。閾値通知が Project の Work Item を探す Team の Work Item
-   読み取りは 200 page までで、超えたら一部だけで数えずにその Workspace の判定を失敗にする（既存の Workspace ごとの失敗処理に
-   乗る）。報告期間が今日より後なら読まない。Software factory を deploy していない環境では読まない。
+   読み取りは 200 page まで（強整合の base table 読み取り）で、超えたら一部だけで数えずにその Project の判定を失敗にする。
+   同じ Workspace の他の Project は判定して通知を出し、run は既存の Workspace ごとの失敗処理で失敗として残す。報告期間が今日より後なら読まない。Software factory を deploy していない環境では読まない。
 6. **通知の schedule job**：Software factory を deploy した stack では、notification schedule job に Agent Runs table の
    `GetItem` / `Query`（table と `FinishedRunIndex`）の読み取り権限と `AGENT_RUNS_TABLE_NAME` を足す。Work Items table は
    既に読める。
