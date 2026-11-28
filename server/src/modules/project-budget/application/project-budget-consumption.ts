@@ -1,5 +1,23 @@
-import { toWorkspaceLocalDate, type ProjectExpense, type TimeBudget, type TimeEntry } from '@mukuroji/contracts'
+import {
+  toWorkspaceLocalDate,
+  type ProjectExpense,
+  type TimeBudget,
+  type TimeEntry,
+  type WorkspaceAgentCostSettings,
+} from '@mukuroji/contracts'
 import { splitTimeEntryByLocalDate } from '../../time-tracking'
+import {
+  MAX_PROJECT_AGENT_COST_RUNS,
+  resolveProjectAgentCostMode,
+  sumProjectAgentCost,
+  toProjectAgentRunCosts,
+  type ProjectAgentRunCostReader,
+  projectAgentRunFinishDateTest,
+  projectAgentRunFinishRange,
+} from '../project-agent-cost'
+
+/** Most Team Work Item pages one Project's Agent Run cost reads to find the Project's Work Items. */
+const MAX_AGENT_COST_WORK_ITEM_PAGES = 200
 
 /** Milliseconds in one UTC day. */
 const DAY_MS = 86_400_000
@@ -62,6 +80,25 @@ export type ProjectBudgetConsumptionPorts = {
   }): Promise<readonly TimeEntry[]>
   /** Reads every expense of the Project. */
   listExpenses(workspaceId: string, teamId: string, projectId: string): Promise<readonly ProjectExpense[]>
+  /** Reads how the Workspace counts coding agent cost (ADR 0119); undefined when never saved. */
+  readAgentCostSettings?(workspaceId: string): Promise<WorkspaceAgentCostSettings | undefined>
+  /**
+   * Reads one page of the Team's Work Items with their current Project, archived ones included;
+   * needed with `listAgentRunCosts`.
+   */
+  listWorkItems?(workspaceId: string, teamId: string, startAfterIssueId: string | undefined): Promise<{
+    /** Work Items on the page. */
+    issues: readonly {
+      /** Work Item ID. */
+      id: string
+      /** Project the Work Item belongs to now, if any. */
+      assignedProjectId?: string
+    }[]
+    /** Cursor of the next page; absent on the last page. */
+    nextStartAfterIssueId?: string
+  }>
+  /** Reads Agent Run cost; absent when the deployment has no Software factory. */
+  listAgentRunCosts?: ProjectAgentRunCostReader
 }
 
 /** How much of a Project budget is used up to today. */
@@ -70,7 +107,10 @@ export type ProjectBudgetConsumption = {
   budget: TimeBudget
   /** Last local date counted: today, or the period end when the period is over. */
   asOf: string
-  /** Time cost plus approved expenses in the budget currency within the period up to `asOf`. */
+  /**
+   * Time cost plus approved expenses, plus Agent Run cost when the Workspace counts it and has a
+   * rate for the budget currency, in the budget currency within the period up to `asOf`.
+   */
   actualCostMinor: number
   /** `actualCostMinor` as a percentage of the budget amount, rounded to one decimal. */
   consumedPercent: number
@@ -79,7 +119,8 @@ export type ProjectBudgetConsumption = {
 /**
  * Measures how much of a Project's default budget is used, counting the same cost as the Project
  * budget report: the cost of the time recorded on the Project plus its approved expenses, both in
- * the budget currency (ADR 0104, ADR 0105).
+ * the budget currency, plus the Agent Run cost when the Workspace counts it (ADR 0104, ADR 0105,
+ * ADR 0119).
  *
  * The cost is counted from the budget period start, or from the first record when the budget has
  * no period, through today or the period end when it is over.
@@ -125,6 +166,7 @@ export async function loadProjectBudgetConsumption(
     ports.listExpenses(workspaceId, teamId, projectId),
   ])
   let actualCostMinor = sumApprovedProjectExpenses(expenses, budget.currency, budget.periodFrom, asOf).amountMinor
+  actualCostMinor += await loadAgentCostMinor(scope, budget, asOf, timeZone, ports)
   for (const entry of entries) {
     if (entry.projectId !== projectId || entry.currency !== budget.currency || entry.actualCostMinor === undefined) continue
     for (const segment of splitTimeEntryByLocalDate(entry, timeZone)) {
@@ -144,4 +186,71 @@ export async function loadProjectBudgetConsumption(
     actualCostMinor,
     consumedPercent: Math.round(((actualCostMinor * 100) / budget.amountMinor) * 10) / 10,
   }
+}
+
+/**
+ * Reads the Agent Run cost of a Project's budget period in the budget currency, the same runs the
+ * budget report counts (ADR 0119): runs that finished in the period on Work Items the Project
+ * holds now. A read cut at its limit counts the runs it read.
+ *
+ * @param scope - Workspace, Team, and Project.
+ * @param budget - The Project's default budget.
+ * @param asOf - Last local date counted.
+ * @param timeZone - IANA timezone of the period.
+ * @param ports - Project-scoped reads.
+ * @returns The cost in minor units, or 0 when the Workspace does not count it or has no rate.
+ * @throws Error when a Team Work Item page read does not advance.
+ * @throws RangeError when the Team has more Work Item pages than one check reads.
+ */
+async function loadAgentCostMinor(
+  scope: {
+    /** Workspace directory ID. */
+    workspaceId: string
+    /** Team that owns the Project. */
+    teamId: string
+    /** Project ID. */
+    projectId: string
+  },
+  budget: TimeBudget,
+  asOf: string,
+  timeZone: string,
+  ports: ProjectBudgetConsumptionPorts,
+): Promise<number> {
+  const { listAgentRunCosts, listWorkItems, readAgentCostSettings } = ports
+  if (!listAgentRunCosts || !listWorkItems || !readAgentCostSettings) return 0
+  // The cost stays in US dollars, so only a USD budget adds it, and other budgets read no runs.
+  const mode = resolveProjectAgentCostMode(await readAgentCostSettings(scope.workspaceId), budget.currency)
+  if (!mode?.addToActualCost) return 0
+  const workItemIds = new Set<string>()
+  let startAfterIssueId: string | undefined
+  let pages = 0
+  do {
+    pages += 1
+    const page = await listWorkItems(scope.workspaceId, scope.teamId, startAfterIssueId)
+    for (const issue of page.issues) {
+      if (issue.assignedProjectId === scope.projectId) workItemIds.add(issue.id)
+    }
+    if (page.nextStartAfterIssueId !== undefined && page.nextStartAfterIssueId === startAfterIssueId) {
+      throw new Error(`Team "${scope.teamId}" Work Item read did not advance.`)
+    }
+    startAfterIssueId = page.nextStartAfterIssueId
+    if (startAfterIssueId !== undefined && pages >= MAX_AGENT_COST_WORK_ITEM_PAGES) {
+      // A partial Work Item scope would silently leave runs out and could hold an alert back.
+      throw new RangeError(`Team "${scope.teamId}" has more Work Item pages than one budget check reads (${MAX_AGENT_COST_WORK_ITEM_PAGES}).`)
+    }
+  } while (startAfterIssueId !== undefined)
+  if (workItemIds.size === 0) return 0
+  const read = await listAgentRunCosts({
+    workspaceId: scope.workspaceId,
+    teamId: scope.teamId,
+    workItemIds,
+    ...projectAgentRunFinishRange(timeZone, budget.periodFrom, asOf),
+    countsFinishedAt: projectAgentRunFinishDateTest(timeZone, budget.periodFrom, asOf),
+    maxRuns: MAX_PROJECT_AGENT_COST_RUNS,
+  })
+  return sumProjectAgentCost(
+    { addToActualCost: true, costs: toProjectAgentRunCosts(read, timeZone) },
+    budget.periodFrom,
+    asOf,
+  ).amountMinor
 }

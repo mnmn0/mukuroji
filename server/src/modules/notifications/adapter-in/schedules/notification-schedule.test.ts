@@ -5,6 +5,7 @@ import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
+import { BudgetThresholdPartialReadError } from '../../application/budget-threshold-alerts'
 import {
   createNotificationScheduleHandler,
   createPlanningScheduledNotificationCandidates,
@@ -2200,5 +2201,38 @@ describe('budget threshold check failures', () => {
       .map(({ input }) => readPutItem(input))
       .filter((event) => event.eventType === 'project-budget.threshold-reached')
     expect(alerts.map((alert) => alert.workspaceId ?? alert.directoryId)).toEqual(['workspace-b'])
+  })
+
+  test('alerts the Projects that were read when others of the Workspace failed, then fails the run', async () => {
+    const status = {
+      teamId: 'core-team',
+      projectId: 'api',
+      amountMinor: 1_000,
+      currency: 'JPY',
+      alertPercent: 90,
+      actualCostMinor: 950,
+      consumedPercent: 95,
+      managerMemberKeys: ['pm@example.com'],
+    }
+    const budgetThresholdReader = {
+      async listProjectBudgetStatuses(): Promise<never> {
+        throw new BudgetThresholdPartialReadError([status], 1, new RangeError('Too many Work Item pages.'))
+      },
+    }
+    const recording = createRecordingDocumentClient((name, input) => {
+      if (name !== 'ScanCommand') return {}
+      return input.TableName === 'ProjectDirectoryTable'
+        ? { Items: [{ directoryId: 'workspace-a', entryType: 'team', teamId: 'core-team' }] }
+        : { Items: [] }
+    })
+    await expect(runNotificationSchedule(createRunOptions(recording.client, {
+      now: new Date('2026-11-24T00:00:00.000Z'),
+      budgetThresholdReader,
+    }))).rejects.toBeInstanceOf(BudgetThresholdPartialReadError)
+    const alerts = recording.commands
+      .filter(({ name }) => name === 'PutCommand')
+      .map(({ input }) => readPutItem(input))
+      .filter((event) => event.eventType === 'project-budget.threshold-reached')
+    expect(alerts).toHaveLength(1)
   })
 })
