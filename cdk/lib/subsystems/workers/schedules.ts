@@ -93,14 +93,24 @@ export function defineAnalyticsScheduleJob(input: ScheduleWorkerInput): Schedule
   };
 }
 
+/** Inputs of the notification schedule job. */
+export interface NotificationScheduleJobInput extends ScheduleWorkerInput {
+  /**
+   * Whether the stack deploys the Software factory, so a budget threshold alert may count Agent
+   * Run cost (ADR 0119) and the job reads the Agent Runs table.
+   */
+  readonly softwareFactoryEnabled?: boolean;
+}
+
 /**
  * Defines the hourly job that emits scheduled notifications and applies Customer retention.
  *
- * @param input Shared data stores and parameters.
+ * @param input Shared data stores, parameters, and whether the Software factory is deployed.
  * @returns Environment and grants the job adds to the scheduled-jobs Lambda.
  */
-export function defineNotificationScheduleJob(input: ScheduleWorkerInput): ScheduledJobGrant {
+export function defineNotificationScheduleJob(input: NotificationScheduleJobInput): ScheduledJobGrant {
   const {
+    agentRunsTable,
     analyticsTable,
     auditEventsTable,
     customersTable,
@@ -119,6 +129,8 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
     id: 'NotificationSchedule',
     runtimeScope: 'notification-schedule',
     environment: {
+      // Agent Run cost a budget threshold alert counts when the Workspace includes it (ADR 0119).
+      ...(input.softwareFactoryEnabled ? { AGENT_RUNS_TABLE_NAME: agentRunsTable.tableName } : {}),
       ANALYTICS_TABLE_NAME: analyticsTable.tableName,
       AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
       AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
@@ -227,6 +239,14 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
         actions: ['dynamodb:Query'],
         resources: [planningTable.tableArn],
       }));
+      if (input.softwareFactoryEnabled) {
+        // Read-only: finished runs, the run rows, and their usage buckets for the Agent Run cost a
+        // budget threshold alert counts (ADR 0119).
+        grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+          actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+          resources: [agentRunsTable.tableArn, `${agentRunsTable.tableArn}/index/FinishedRunIndex`],
+        }));
+      }
     },
   };
 }

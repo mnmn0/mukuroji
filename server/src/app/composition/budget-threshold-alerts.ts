@@ -8,12 +8,13 @@ import {
   type EnterpriseIdentitySnapshot,
 } from '@mukuroji/contracts'
 import { evaluateEnterpriseProjectManager, listEnterpriseProjectManagerKeys } from '../../modules/enterprise-identity'
-import type {
-  BudgetAlertProject,
-  ScheduledBudgetThresholdReader,
-  ScheduledProjectBudgetStatus,
+import {
+  BudgetThresholdPartialReadError,
+  type BudgetAlertProject,
+  type ScheduledBudgetThresholdReader,
+  type ScheduledProjectBudgetStatus,
 } from '../../modules/notifications'
-import { loadProjectBudgetConsumption } from '../../modules/project-budget'
+import { loadProjectBudgetConsumption, type ProjectBudgetConsumptionPorts } from '../../modules/project-budget'
 import { isWorkspaceMemberRowActive } from '../../modules/workspace-access'
 
 /** Reads the budget threshold reader needs (ADR 0105). */
@@ -21,7 +22,7 @@ export type BudgetThresholdReaderSources = {
   /** Lists a Workspace's active Projects with their charter owner and managers. */
   readProjects(workspaceId: string): Promise<readonly BudgetAlertProject[]>
   /** Reads the Workspace profile for its time zone and status. */
-  readProfile(workspaceId: string): Promise<Pick<TenantProfile, 'calendar' | 'status'> | undefined>
+  readProfile(workspaceId: string): Promise<Pick<TenantProfile, 'calendar' | 'status' | 'agentCost'> | undefined>
   /** Reads the default budget of a Project. */
   getBudget(workspaceId: string, teamId: string, projectId: string): Promise<TimeBudget | undefined>
   /** Lists the time entries of a Project that start within the UTC instants. */
@@ -39,6 +40,10 @@ export type BudgetThresholdReaderSources = {
   }): Promise<readonly TimeEntry[]>
   /** Reads every expense of a Project. */
   listExpenses(workspaceId: string, teamId: string, projectId: string): Promise<readonly ProjectExpense[]>
+  /** Reads one page of a Team's Work Items to find a Project's Work Items (ADR 0119). */
+  listWorkItems?: ProjectBudgetConsumptionPorts['listWorkItems']
+  /** Reads Agent Run cost; absent when the deployment has no Software factory (ADR 0119). */
+  listAgentRunCosts?: ProjectBudgetConsumptionPorts['listAgentRunCosts']
   /** Reads the Workspace's Enterprise roles, when the deployment has them. */
   readEnterpriseSnapshot?(workspaceId: string): Promise<EnterpriseIdentitySnapshot>
   /** Lists every member row of the Workspace, deactivated and expired members included. */
@@ -88,7 +93,8 @@ function selectEffectiveManagers(
  * threshold reader.
  *
  * Each Project's use is measured in the Workspace time zone the same way as the Project budget
- * report: time cost plus approved expenses in the budget currency. A Workspace being closed is
+ * report: time cost plus approved expenses in the budget currency, plus Agent Run cost when the
+ * Workspace counts it (ADR 0119). A Workspace being closed is
  * not checked. The managers are the Project's manager members and the members an Enterprise role
  * makes managers of the Project or its Team.
  *
@@ -104,13 +110,32 @@ export function createBudgetThresholdReader(sources: BudgetThresholdReaderSource
       const statuses: ScheduledProjectBudgetStatus[] = []
       let enterprise: EnterpriseIdentitySnapshot | undefined
       let activeMembers: ReadonlySet<string> | undefined
+      let failedProjects = 0
+      let firstFailure: unknown
       for (const project of await sources.readProjects(workspaceId)) {
-        const consumption = await loadProjectBudgetConsumption(
-          { workspaceId, teamId: project.teamId, projectId: project.projectId },
-          timeZone,
-          now,
-          sources,
-        )
+        let consumption: Awaited<ReturnType<typeof loadProjectBudgetConsumption>>
+        try {
+          consumption = await loadProjectBudgetConsumption(
+            { workspaceId, teamId: project.teamId, projectId: project.projectId },
+            timeZone,
+            now,
+            {
+              getBudget: sources.getBudget,
+              listEntries: sources.listEntries,
+              listExpenses: sources.listExpenses,
+              // The profile was read above, so the agent cost settings come from it.
+              readAgentCostSettings: async () => profile?.agentCost,
+              ...(sources.listWorkItems ? { listWorkItems: sources.listWorkItems } : {}),
+              ...(sources.listAgentRunCosts ? { listAgentRunCosts: sources.listAgentRunCosts } : {}),
+            },
+          )
+        } catch (error) {
+          // One Project that cannot be read, such as a Team past the Work Item page limit
+          // (ADR 0119), must not hold back the alerts of the others; the run still fails.
+          failedProjects += 1
+          firstFailure ??= error
+          continue
+        }
         if (!consumption) continue
         const { budget } = consumption
         enterprise ??= await sources.readEnterpriseSnapshot?.(workspaceId)
@@ -136,6 +161,7 @@ export function createBudgetThresholdReader(sources: BudgetThresholdReaderSource
           managerMemberKeys,
         })
       }
+      if (failedProjects > 0) throw new BudgetThresholdPartialReadError(statuses, failedProjects, firstFailure)
       return statuses
     },
   }

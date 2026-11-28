@@ -142,6 +142,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get projectRaidLogs() {
     return requireAppDependencies().workItems.projectRaidLogs
   },
+  get projectDecisionLogs() {
+    return requireAppDependencies().workItems.projectDecisionLogs
+  },
   get projectExpenses() {
     return requireAppDependencies().workItems.projectExpenses
   },

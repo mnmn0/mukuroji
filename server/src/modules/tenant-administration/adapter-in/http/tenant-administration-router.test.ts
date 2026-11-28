@@ -812,6 +812,55 @@ test('accepts an ISO 4217 Workspace currency from an administrator only', async 
   expect(updates).toEqual([{ ...body, defaultCurrency: 'USD' }])
 })
 
+test('accepts coding agent cost settings from an administrator and validates them (ADR 0119)', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const body = {
+    region: snapshot.profile.region,
+    locale: 'ja',
+    defaultPolicy: { defaultMemberRole: 'member' },
+    expectedRevision: 1,
+  }
+  const agentCost = { includeInProjectBudgets: true }
+  const memberUpdates: unknown[] = []
+  const member = await createCalendarRouter(createClient(snapshot, []), memberUpdates).request('/api/tenant/profile', {
+    body: JSON.stringify({ ...body, agentCost }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(member.status).toBe(403)
+  expect(memberUpdates).toEqual([])
+
+  const updates: unknown[] = []
+  const admin = createCalendarRouter(createClient(snapshot, []), updates, true)
+  for (const rejectedSettings of [
+    null,
+    {},
+    [],
+    { includeInProjectBudgets: 'yes' },
+  ]) {
+    const rejected = await admin.request('/api/tenant/profile', {
+      body: JSON.stringify({ ...body, agentCost: rejectedSettings }),
+      headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+      method: 'PATCH',
+    })
+    expect(rejected.status).toBe(400)
+    expect(await rejected.json()).toEqual({ code: 'InvalidTenantAgentCostSettings' })
+  }
+  expect(updates).toEqual([])
+
+  const accepted = await admin.request('/api/tenant/profile', {
+    body: JSON.stringify({ ...body, agentCost }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(accepted.status).toBe(200)
+  expect(updates).toEqual([{ ...body, agentCost }])
+})
+
 test('keeps calendar settings changes behind administration and validates them', async () => {
   const snapshot = createDefaultTenantAdministrationSnapshot(
     'workspace-1',

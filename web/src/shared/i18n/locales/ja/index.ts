@@ -14,6 +14,7 @@ import { requestsMessages } from './requests'
 import { publicMessages } from './public'
 import { securityMessages } from './security'
 import { projectsMessages } from './projects'
+import { decisionLogMessages } from './decision-log'
 import { capacityPlanningMessages } from './capacity-planning'
 import { triageMessages } from './triage'
 import { aiAssistanceMessages } from './ai-assistance'
@@ -54,6 +55,7 @@ export const jaMessages = {
   ...publicMessages,
   ...securityMessages,
   ...projectsMessages,
+  ...decisionLogMessages,
   ...capacityPlanningMessages,
   ...triageMessages,
   ...aiAssistanceMessages,

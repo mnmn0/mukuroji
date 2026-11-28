@@ -1,4 +1,5 @@
 export * from './account-security'
+export * from './workspace-agent-cost'
 export * from './analytics'
 /** Re-exports AI assistance contracts for server and Web consumers. */
 export * from './ai-assistance'
@@ -40,6 +41,7 @@ export * from './planning-update-template'
 export * from './project-budget'
 export * from './project-charter'
 export * from './portfolio-dashboard'
+export * from './project-decision-log'
 export * from './project-raid-log'
 export * from './project-expenses'
 export * from './project-status-reports'
