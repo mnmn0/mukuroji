@@ -103,7 +103,7 @@ export function GitHubLoginPanel({
                 autoComplete="off"
                 className="workbench-input min-h-10 w-64 max-w-full px-3 font-mono"
                 data-testid="github-login-input"
-                maxLength={39}
+                maxLength={79}
                 onChange={(event) => setDraft(event.currentTarget.value)}
                 spellCheck={false}
                 value={value}
