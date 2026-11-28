@@ -224,7 +224,10 @@ export class GitHubAppHttpGateway implements GitHubAppGateway {
     )
     const repository = requireRecord(data.repository, 'repository')
     const object = isRecord(repository.object) ? repository.object : {}
+    // A commit pushed to a fork is also associated with pull requests of other repositories; only
+    // this repository's pull requests are read, so one foreign node does not fail the whole job.
     return readNodes(object.associatedPullRequests)
+      .filter((node) => isBaseRepository(node, reference.repositoryId))
       .map((node) => parseNode(node, reference, syncedAt))
       .filter((snapshot) => snapshot.state === 'open' && snapshot.headSha === sha)
   }
@@ -475,6 +478,17 @@ function parseNode(node: unknown, reference: GitHubRepositoryReference, syncedAt
       retryable: false,
     })
   }
+}
+
+/**
+ * Tells whether a GraphQL pull request node belongs to the given repository.
+ *
+ * @param node - Untrusted node.
+ * @param repositoryId - Numeric repository ID.
+ * @returns Whether its base repository has that ID.
+ */
+function isBaseRepository(node: unknown, repositoryId: string): boolean {
+  return isRecord(node) && isRecord(node.baseRepository) && readNumericId(node.baseRepository.databaseId) === repositoryId
 }
 
 /**

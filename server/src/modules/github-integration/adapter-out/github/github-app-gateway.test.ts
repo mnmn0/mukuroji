@@ -135,3 +135,39 @@ test('refuses to call GitHub without a configured App', async () => {
   const gateway = new GitHubAppHttpGateway(new CachedGitHubAppCredentialSource(async () => undefined), async () => json(200, {}))
   await expect(gateway.listRepositories()).rejects.toMatchObject({ code: 'GitHubAppNotConfigured' })
 })
+
+test('reads only this repository\'s pull requests among those associated with a commit', async () => {
+  const sha = 'b'.repeat(40)
+  /**
+   * Builds an open pull request node of a repository.
+   *
+   * @param number - Pull request number.
+   * @param repositoryId - Base repository ID.
+   * @returns The node.
+   */
+  const pullRequest = (number: number, repositoryId: number) => ({
+    number,
+    title: 'Title',
+    url: `https://github.com/acme/app/pull/${number}`,
+    state: 'OPEN',
+    isDraft: false,
+    createdAt: '2026-11-27T00:00:00Z',
+    updatedAt: '2026-11-28T00:00:00Z',
+    headRefName: 'feature',
+    baseRefName: 'main',
+    headRefOid: sha,
+    mergeable: 'MERGEABLE',
+    reviewDecision: null,
+    baseRepository: { databaseId: repositoryId, nameWithOwner: repositoryId === 42 ? 'acme/app' : 'fork/app' },
+    author: { login: 'alice' },
+    reviewRequests: { nodes: [] },
+    latestOpinionatedReviews: { nodes: [] },
+    commits: { nodes: [] },
+  })
+  const fetchImplementation: GitHubFetch = async (url) => url.endsWith('/access_tokens')
+    ? json(201, { token: 'ghs_installation', expires_at: '2026-11-28T02:00:00Z' })
+    : json(200, { data: { repository: { object: { associatedPullRequests: { nodes: [pullRequest(9, 43), pullRequest(5, 42)] } } } } })
+  const gateway = new GitHubAppHttpGateway(new CachedGitHubAppCredentialSource(async () => secret), fetchImplementation, () => Date.parse('2026-11-28T01:00:00Z'))
+  const snapshots = await gateway.readCommitPullRequests({ installationId: '7', repositoryId: '42', repository: 'acme/app' }, sha, 'now')
+  expect(snapshots.map((snapshot) => snapshot.number)).toEqual([5])
+})
