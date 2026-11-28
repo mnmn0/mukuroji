@@ -58,7 +58,8 @@ Workspace の export と削除は既存の developer-platform の対象に入る
 | 発言者 | `slack-ingest#user#<userId>` | 表示名の cache（7 日で TTL） |
 
 - 編集は版（`edited.ts`、なければ `ts`）が新しいときだけ上書きする条件付き書き込みにし、順不同に届いても戻らない。
-- 削除は本文を消した tombstone に置き換え（1 日で TTL）、後から古い版が届いても復活させない。key 索引も消す。
+- 削除は本文を消した tombstone に置き換え（15 日で TTL。queue の DLQ 保持 14 日より長くし、DLQ から戻した古い job でも復活させない）、後から古い版が届いても復活させない。key 索引も消す。
+- 発言の書き込みは、job が読んだ channel の mapping revision と対応先がまだ残っていることを同じ transaction で確かめる。対応づけの解除・変更のあとに終わる古い job は、消した発言を書き戻さない。
 - bot の発言（`bot_id` 付き、`bot_message`）と参加・退出などの system message は保存しない。
   Mukuroji 自身の通知を写し直さないため。
 
@@ -73,6 +74,11 @@ Workspace の export と削除は既存の developer-platform の対象に入る
   取り込みを止め、保存済みの発言は保持期間まで残す。
 - 対応づけたとき（bot が後から招待されたときも）、保持期間内の過去の発言を 1 channel につき最大 2,000 件まで、
   thread の返信は 1 thread 200 件まで読み込む。1 job で 1 ページ（200 件）だけ読み、次のページは job を入れ直す。
+  ページの途中で Slack の rate limit に当たったら、読み終えた位置を job に残して同じページを入れ直し、続きから読む。
+- 過去分は保持期間内に親の発言がある thread だけを読む。保持期間より前に始まった thread の返信は過去分では取り込まない
+  （親を探すために保持期間より前の履歴を読み続けると、静かな channel でも全履歴を読むことになるため）。
+  対応づけたあとに届いた返信は、親の古さにかかわらず event で取り込む。
+- 掃除（prune）は Slack の credential を使わないので、secret を消したあとも実行する。
 - 対応づけの変更と保持日数の変更は監査ログに残す。
 
 ### Work Item との紐付け

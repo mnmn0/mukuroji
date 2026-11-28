@@ -128,6 +128,8 @@ export async function updateSlackChannelTarget<AuditContext>(
 
 /**
  * Saves the retention. A shorter retention deletes the stored messages that fall out of it.
+ * Saving the same retention again queues that deletion again, so an administrator can retry
+ * after a failure that left it unqueued.
  *
  * @param workspaceId - Workspace ID.
  * @param request - New retention and the revision read.
@@ -143,7 +145,7 @@ export async function updateSlackIngestSettings<AuditContext>(
 ): Promise<{ retentionDays: number, settingsRevision: number }> {
   const previous = await ports.store.getSettings(workspaceId)
   const saved = await ports.store.saveSettings(workspaceId, request.retentionDays, request.expectedRevision, audit)
-  if (saved.retentionDays < previous.retentionDays) {
+  if (saved.retentionDays <= previous.retentionDays) {
     const channels = await ports.store.listChannels(workspaceId)
     for (const channel of channels) {
       if (!channel.target) continue

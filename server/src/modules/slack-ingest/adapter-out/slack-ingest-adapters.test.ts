@@ -65,11 +65,18 @@ test('a message write is conditional on the version read and replaces its key ro
     channelId: 'C012345678', ts: '1700000000.000100', userId: 'U012345678', text: 'MK-2 MK-3',
     version: '1700000100.000000', editedTs: '1700000100.000000', keys: ['MK-2', 'MK-3'],
     permalink: messageRow.permalink, expiresAt: 1800000000,
-  })
+  }, 2)
   expect(outcome).toBe('written')
   const transaction = sent.find((command) => command.name === 'TransactWriteCommand')
   const items = transaction?.input.TransactItems
   expect(items).toEqual([
+    {
+      ConditionCheck: expect.objectContaining({
+        Key: { workspaceId: 'w', recordKey: 'slack-ingest#channel#C012345678' },
+        ConditionExpression: 'mappingRevision = :revision AND attribute_exists(#target)',
+        ExpressionAttributeValues: { ':revision': 2 },
+      }),
+    },
     {
       Put: expect.objectContaining({
         ConditionExpression: '#version = :previousVersion',
@@ -92,9 +99,22 @@ test('an older version or a tombstone is not written', async () => {
   })
   const store = new DynamoDbSlackIngestStore('dev-platform', client)
   const base = { userId: 'U012345678', text: 'x', keys: [], permalink: 'https://example.slack.com/x', expiresAt: 1800000000, channelId: 'C012345678' }
-  expect(await store.putMessage('w', { ...base, ts: '1700000000.000100', version: '1700000100.000000' })).toBe('stale')
-  expect(await store.putMessage('w', { ...base, ts: '1700000001.000100', version: '1700000002.000000' })).toBe('stale')
+  expect(await store.putMessage('w', { ...base, ts: '1700000000.000100', version: '1700000100.000000' }, 1)).toBe('stale')
+  expect(await store.putMessage('w', { ...base, ts: '1700000001.000100', version: '1700000002.000000' }, 1)).toBe('stale')
   expect(sent.some((command) => command.name === 'TransactWriteCommand')).toBe(false)
+})
+
+test('a message write fenced out by a mapping change reports unmapped', async () => {
+  const fenced = Object.assign(new Error('cancelled'), {
+    name: 'TransactionCanceledException',
+    CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+  })
+  const { client } = createClient({}, fenced)
+  const store = new DynamoDbSlackIngestStore('dev-platform', client)
+  expect(await store.putMessage('w', {
+    channelId: 'C012345678', ts: '1700000000.000100', userId: 'U012345678', text: 'MK-1',
+    version: '1700000000.000100', keys: ['MK-1'], permalink: messageRow.permalink, expiresAt: 1800000000,
+  }, 1)).toBe('unmapped')
 })
 
 test('a malformed stored row fails closed', async () => {

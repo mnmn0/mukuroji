@@ -212,7 +212,9 @@ export class InMemorySlackIngestStore implements SlackIngestStore {
    * @param message - Message.
    * @returns The outcome.
    */
-  async putMessage(workspaceId: string, message: StoredSlackMessage): Promise<SlackMessageWriteOutcome> {
+  async putMessage(workspaceId: string, message: StoredSlackMessage, mappingRevision: number): Promise<SlackMessageWriteOutcome> {
+    const channel = this.channels.get(`${workspaceId}#${message.channelId}`)
+    if (!channel?.target || channel.mappingRevision !== mappingRevision) return 'unmapped'
     const key = `${workspaceId}#${refKey(message)}`
     const existing = this.messages.get(key)
     if (existing && (!existing.message || existing.version >= message.version)) return 'stale'

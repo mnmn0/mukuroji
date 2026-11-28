@@ -100,12 +100,16 @@ export function parseSlackIngestJob(body: string | undefined): SlackIngestJob {
     if (value.cursor !== undefined && (typeof value.cursor !== 'string' || value.cursor.length > 512)) {
       throw new TypeError('cursor is invalid.')
     }
+    if (value.resumeBeforeTs !== undefined && !isSlackTs(value.resumeBeforeTs)) {
+      throw new TypeError('resumeBeforeTs is invalid.')
+    }
     return {
       kind: 'backfill',
       workspaceId,
       channelId: value.channelId,
       mappingRevision: value.mappingRevision,
       ...(typeof value.cursor === 'string' ? { cursor: value.cursor } : {}),
+      ...(isSlackTs(value.resumeBeforeTs) ? { resumeBeforeTs: value.resumeBeforeTs } : {}),
     }
   }
   if (value.kind === 'prune' && (value.mode === 'all' || value.mode === 'expired')) {

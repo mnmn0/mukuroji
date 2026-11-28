@@ -18,6 +18,7 @@ import type {
   SlackIngestQueue,
   SlackIngestStore,
   SlackInstallation,
+  SlackMessageWriteOutcome,
   SlackWebApi,
 } from './ports/slack-ingest-ports'
 
@@ -31,7 +32,7 @@ export const SLACK_BACKFILL_REPLY_LIMIT = 200
 const PRUNE_BATCH_LIMIT = 1_000
 
 /** Seconds a deletion tombstone is kept, longer than Slack redelivers an event. */
-const TOMBSTONE_SECONDS = 86_400
+const TOMBSTONE_SECONDS = 15 * 86_400
 
 /** Seconds an author name is cached. */
 const USER_NAME_CACHE_SECONDS = 7 * 86_400
@@ -88,6 +89,8 @@ type JobContext = {
  * @throws Error for failures the queue should retry.
  */
 export async function runSlackIngestJob(job: SlackIngestJob, ports: SlackIngestWorkerPorts): Promise<string> {
+  // Deleting stored messages needs no Slack credentials, so it also runs after the app is removed.
+  if (job.kind === 'prune') return await runPrune(ports, job, ports.now())
   const config = await ports.config.read()
   // The operator removed the app or tied it to another Workspace; queued work for this one ends.
   if (!config || config.workspaceId !== job.workspaceId) return 'not-configured'
@@ -99,8 +102,7 @@ export async function runSlackIngestJob(job: SlackIngestJob, ports: SlackIngestW
   }
   try {
     if (job.kind === 'event') return await applyEvent(context, job)
-    if (job.kind === 'backfill') return await runBackfillPage(context, job)
-    return await runPrune(context, job)
+    return await runBackfillPage(context, job)
   } catch (error) {
     if (error instanceof SlackRateLimitedError) {
       await ports.queue.send(job, Math.min(MAX_QUEUE_DELAY_SECONDS, Math.max(1, error.retryAfterSeconds)))
@@ -159,11 +161,17 @@ async function readAuthorName(context: JobContext, userId: string): Promise<stri
  * @param context - Job context.
  * @param message - Normalized message.
  * @param retentionDays - Days messages are kept.
- * @returns Whether a row was written.
+ * @param mappingRevision - Channel mapping revision the job read.
+ * @returns The write outcome, or `expired` for a message past the retention.
  */
-async function storeMessage(context: JobContext, message: SlackMessageContent, retentionDays: number): Promise<boolean> {
+async function storeMessage(
+  context: JobContext,
+  message: SlackMessageContent,
+  retentionDays: number,
+  mappingRevision: number,
+): Promise<SlackMessageWriteOutcome | 'expired'> {
   const nowSeconds = Math.floor(context.now.getTime() / 1000)
-  if (message.ts < retentionCutoffTs(nowSeconds, retentionDays)) return false
+  if (message.ts < retentionCutoffTs(nowSeconds, retentionDays)) return 'expired'
   const installation = await readInstallation(context)
   const authorName = await readAuthorName(context, message.userId)
   const outcome = await context.ports.store.putMessage(context.workspaceId, {
@@ -172,8 +180,8 @@ async function storeMessage(context: JobContext, message: SlackMessageContent, r
     keys: extractWorkItemKeys(message.text),
     permalink: buildSlackPermalink(installation.teamOrigin, message.channelId, message.ts, message.threadTs),
     expiresAt: messageExpiresAt(message.ts, retentionDays),
-  })
-  return outcome === 'written'
+  }, mappingRevision)
+  return outcome
 }
 
 /**
@@ -258,7 +266,8 @@ async function applyEvent(context: JobContext, job: Extract<SlackIngestJob, { ki
     return 'deleted'
   }
   const settings = await store.getSettings(context.workspaceId)
-  return await storeMessage(context, event.message, settings.retentionDays) ? 'stored' : 'skipped'
+  const outcome = await storeMessage(context, event.message, settings.retentionDays, channel.mappingRevision)
+  return outcome === 'written' ? 'stored' : 'skipped'
 }
 
 /**
@@ -284,22 +293,49 @@ async function runBackfillPage(context: JobContext, job: Extract<SlackIngestJob,
   const oldest = retentionCutoffTs(Math.floor(context.now.getTime() / 1000), settings.retentionDays)
   const previous = channel.backfill?.importedCount ?? 0
   let imported = 0
+  let loadedBeforeTs = job.resumeBeforeTs
   const page = await context.slack.history(job.channelId, oldest, job.cursor)
-  for (const raw of page.messages) {
-    if (previous + imported >= SLACK_BACKFILL_MESSAGE_LIMIT) break
-    const message = readSlackMessageContent(job.channelId, raw)
-    if (message && await storeMessage(context, message, settings.retentionDays)) imported += 1
-    const parentTs = readThreadParentTs(raw)
-    if (!parentTs) continue
-    const replies = await context.slack.replies(job.channelId, parentTs, oldest)
-    let threadCount = 0
-    for (const rawReply of replies.messages) {
-      if (threadCount >= SLACK_BACKFILL_REPLY_LIMIT || previous + imported >= SLACK_BACKFILL_MESSAGE_LIMIT) break
-      const reply = readSlackMessageContent(job.channelId, rawReply)
-      if (!reply?.threadTs) continue
-      threadCount += 1
-      if (await storeMessage(context, reply, settings.retentionDays)) imported += 1
+  try {
+    for (const raw of page.messages) {
+      if (previous + imported >= SLACK_BACKFILL_MESSAGE_LIMIT) break
+      const rawTs = readRawTs(raw)
+      // History lists newest first, so a resumed page skips what the earlier attempt loaded.
+      if (rawTs && job.resumeBeforeTs && rawTs >= job.resumeBeforeTs) continue
+      const message = readSlackMessageContent(job.channelId, raw)
+      if (message) {
+        const outcome = await storeMessage(context, message, settings.retentionDays, job.mappingRevision)
+        if (outcome === 'unmapped') return 'superseded'
+        if (outcome === 'written') imported += 1
+      }
+      const parentTs = readThreadParentTs(raw)
+      if (parentTs) {
+        const replies = await context.slack.replies(job.channelId, parentTs, oldest)
+        let threadCount = 0
+        for (const rawReply of replies.messages) {
+          if (threadCount >= SLACK_BACKFILL_REPLY_LIMIT || previous + imported >= SLACK_BACKFILL_MESSAGE_LIMIT) break
+          const reply = readSlackMessageContent(job.channelId, rawReply)
+          if (!reply?.threadTs) continue
+          threadCount += 1
+          const outcome = await storeMessage(context, reply, settings.retentionDays, job.mappingRevision)
+          if (outcome === 'unmapped') return 'superseded'
+          if (outcome === 'written') imported += 1
+        }
+      }
+      if (rawTs) loadedBeforeTs = rawTs
     }
+  } catch (error) {
+    if (!(error instanceof SlackRateLimitedError)) throw error
+    // Keep what this attempt loaded and retry the same page from the first unfinished message.
+    const current = await store.updateBackfill(context.workspaceId, job.channelId, job.mappingRevision, {
+      status: 'running',
+      importedCount: previous + imported,
+    }, nowIso)
+    if (!current) return 'superseded'
+    await context.ports.queue.send(
+      { ...job, ...(loadedBeforeTs ? { resumeBeforeTs: loadedBeforeTs } : {}) },
+      Math.min(MAX_QUEUE_DELAY_SECONDS, Math.max(1, error.retryAfterSeconds)),
+    )
+    return 'rate-limited'
   }
   const total = previous + imported
   const more = page.nextCursor !== undefined && total < SLACK_BACKFILL_MESSAGE_LIMIT
@@ -308,9 +344,27 @@ async function runBackfillPage(context: JobContext, job: Extract<SlackIngestJob,
     importedCount: total,
   }, nowIso)
   if (current && more && page.nextCursor) {
-    await context.ports.queue.send({ ...job, cursor: page.nextCursor })
+    await context.ports.queue.send({
+      kind: 'backfill',
+      workspaceId: job.workspaceId,
+      channelId: job.channelId,
+      mappingRevision: job.mappingRevision,
+      cursor: page.nextCursor,
+    })
   }
   return more ? 'page-loaded' : 'completed'
+}
+
+/**
+ * Reads the `ts` of a raw history message.
+ *
+ * @param raw - Raw Slack message.
+ * @returns The `ts`, when valid.
+ */
+function readRawTs(raw: unknown): string | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const ts = Reflect.get(raw, 'ts')
+  return isSlackTs(ts) ? ts : undefined
 }
 
 /**
@@ -331,23 +385,28 @@ function readThreadParentTs(raw: unknown): string | undefined {
 /**
  * Deletes a channel's stored messages after an unmapping, or those out of retention.
  *
- * @param context - Job context.
+ * @param ports - Worker ports.
  * @param job - Prune job.
+ * @param now - Current time.
  * @returns What happened.
  */
-async function runPrune(context: JobContext, job: Extract<SlackIngestJob, { kind: 'prune' }>): Promise<string> {
-  const { store } = context.ports
-  const channel = await store.getChannel(context.workspaceId, job.channelId)
+async function runPrune(
+  ports: SlackIngestWorkerPorts,
+  job: Extract<SlackIngestJob, { kind: 'prune' }>,
+  now: Date,
+): Promise<string> {
+  const { store } = ports
+  const channel = await store.getChannel(job.workspaceId, job.channelId)
   let beforeTs: string | undefined
   if (job.mode === 'all') {
     // A newer mapping keeps the messages it loads.
     if (channel?.target && channel.mappingRevision !== job.mappingRevision) return 'superseded'
   } else {
     if (!channel?.target) return 'unmapped'
-    const settings = await store.getSettings(context.workspaceId)
-    beforeTs = retentionCutoffTs(Math.floor(context.now.getTime() / 1000), settings.retentionDays)
+    const settings = await store.getSettings(job.workspaceId)
+    beforeTs = retentionCutoffTs(Math.floor(now.getTime() / 1000), settings.retentionDays)
   }
-  const result = await store.deleteChannelMessages(context.workspaceId, job.channelId, beforeTs, PRUNE_BATCH_LIMIT)
-  if (!result.done) await context.ports.queue.send(job)
+  const result = await store.deleteChannelMessages(job.workspaceId, job.channelId, beforeTs, PRUNE_BATCH_LIMIT)
+  if (!result.done) await ports.queue.send(job)
   return result.done ? 'pruned' : 'prune-continues'
 }

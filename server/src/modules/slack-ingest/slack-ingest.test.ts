@@ -42,6 +42,8 @@ class FakeSlack implements SlackWebApi {
   threads = new Map<string, unknown[]>()
   /** Error thrown by the next history call. */
   historyError: Error | undefined
+  /** Error thrown by the next replies call of a thread. */
+  repliesErrors = new Map<string, Error>()
 
   /**
    * Answers `auth.test`.
@@ -90,6 +92,11 @@ class FakeSlack implements SlackWebApi {
    */
   async replies(_channelId: string, threadTs: string) {
     this.calls.push('conversations.replies')
+    const error = this.repliesErrors.get(threadTs)
+    if (error) {
+      this.repliesErrors.delete(threadTs)
+      throw error
+    }
     return { messages: this.threads.get(threadTs) ?? [] }
   }
 
@@ -303,6 +310,67 @@ test('a Slack 429 queues the same job again after the delay', async () => {
   expect(queued).toEqual([{ job, delaySeconds: 42 }])
 })
 
+test('a 429 in the middle of a page resumes after the messages already loaded', async () => {
+  const { store, slack, queued, ports } = createWorld()
+  await store.recordMembership(WS, { channelId: CHANNEL, isPrivate: false, membership: 'joined', now: NOW.toISOString() })
+  await store.setChannelTarget(WS, CHANNEL, { kind: 'team', teamId: 'team-a' }, 0, audit)
+  const first = `${NOW.getTime() / 1000 - 600}.000100`
+  const second = `${NOW.getTime() / 1000 - 1_200}.000100`
+  slack.pages.set('', {
+    messages: [
+      { type: 'message', user: AUTHOR, ts: first, text: 'MK-1', thread_ts: first, reply_count: 1 },
+      { type: 'message', user: AUTHOR, ts: second, text: 'MK-2', thread_ts: second, reply_count: 1 },
+    ],
+  })
+  slack.threads.set(first, [{ type: 'message', user: AUTHOR, ts: `${NOW.getTime() / 1000 - 500}.000100`, text: 'r1', thread_ts: first }])
+  slack.threads.set(second, [{ type: 'message', user: AUTHOR, ts: `${NOW.getTime() / 1000 - 1_100}.000100`, text: 'r2', thread_ts: second }])
+  slack.repliesErrors.set(second, new SlackRateLimitedError(30))
+  const job: SlackIngestJob = { kind: 'backfill', workspaceId: WS, channelId: CHANNEL, mappingRevision: 1 }
+
+  expect(await runSlackIngestJob(job, ports)).toBe('rate-limited')
+  expect(queued).toEqual([{ job: { ...job, resumeBeforeTs: first }, delaySeconds: 30 }])
+  expect((await store.getChannel(WS, CHANNEL))?.backfill).toEqual({ status: 'running', importedCount: 3 })
+  const retry = queued.shift()
+  if (!retry) throw new Error('retry was not queued')
+  slack.calls.length = 0
+  expect(await runSlackIngestJob(retry.job, ports)).toBe('completed')
+  // The retry asks only for the unfinished thread.
+  expect(slack.calls.filter((call) => call === 'conversations.replies')).toHaveLength(1)
+  expect((await store.getChannel(WS, CHANNEL))?.backfill).toEqual({ status: 'completed', importedCount: 4 })
+})
+
+test('a message write after an unmap is fenced out, and cleanup runs without the Slack app', async () => {
+  const { store, queued, ports } = createWorld()
+  const admin = { config: ports.config, store, queue: ports.queue }
+  await store.recordMembership(WS, { channelId: CHANNEL, isPrivate: false, membership: 'joined', now: NOW.toISOString() })
+  await updateSlackChannelTarget(WS, CHANNEL, { kind: 'team', teamId: 'team-a' }, admin, audit)
+  await updateSlackChannelTarget(WS, CHANNEL, null, admin, audit)
+  const message = {
+    channelId: CHANNEL, ts: RECENT_TS, userId: AUTHOR, text: 'MK-1', version: RECENT_TS,
+    keys: ['MK-1'], permalink: 'https://example.slack.com/x', expiresAt: 9_999_999_999,
+  }
+  expect(await store.putMessage(WS, message, 1)).toBe('unmapped')
+  expect(store.messages.size).toBe(0)
+  const purge = queued.find((entry) => entry.job.kind === 'prune')
+  if (!purge) throw new Error('purge was not queued')
+  const unconfigured = { ...ports, config: { read: async () => undefined } }
+  expect(await runSlackIngestJob(purge.job, unconfigured)).toBe('pruned')
+})
+
+test('saving the same retention again queues its cleanup again', async () => {
+  const { store, queued, ports } = createWorld()
+  const admin = { config: ports.config, store, queue: ports.queue }
+  await store.recordMembership(WS, { channelId: CHANNEL, isPrivate: false, membership: 'joined', now: NOW.toISOString() })
+  await updateSlackChannelTarget(WS, CHANNEL, { kind: 'team', teamId: 'team-a' }, admin, audit)
+  queued.length = 0
+  await updateSlackIngestSettings(WS, { retentionDays: 14, expectedRevision: 0 }, admin, audit)
+  await updateSlackIngestSettings(WS, { retentionDays: 14, expectedRevision: 1 }, admin, audit)
+  expect(queued.filter((entry) => entry.job.kind === 'prune')).toHaveLength(2)
+  queued.length = 0
+  await updateSlackIngestSettings(WS, { retentionDays: 30, expectedRevision: 2 }, admin, audit)
+  expect(queued).toEqual([])
+})
+
 test('a superseded backfill stops, and jobs for another Workspace end', async () => {
   const { store, ports } = createWorld()
   await store.recordMembership(WS, { channelId: CHANNEL, isPrivate: false, membership: 'joined', now: NOW.toISOString() })
@@ -350,7 +418,7 @@ test('a Work Item lists only messages in channels the caller can read, newest fi
   for (const [channelId, ts] of [[visible, older], [visible, RECENT_TS], [hidden, RECENT_TS]] as const) {
     await store.putMessage(WS, {
       channelId, ts, userId: AUTHOR, text: 'MK-9', version: ts, keys: ['MK-9'], permalink: 'https://example.slack.com/x', expiresAt: 9_999_999_999,
-    })
+    }, 1)
   }
   const result = await listWorkItemSlackMessages(WS, 'MK-9', {
     store,

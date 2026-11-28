@@ -1,8 +1,7 @@
 import type { SlackMessageView } from '@mukuroji/contracts'
 import { useMemo } from 'react'
-import useSWR from 'swr'
 import { createTranslator, type Locale, type MessageKey } from '../../../shared/i18n/i18n'
-import { listWorkItemSlackMessages } from '../api/slackIngest'
+import { useWorkItemSlackMessages } from '../queries/useWorkItemSlackMessages'
 
 /** Props of the pure Slack message panel. */
 export type WorkItemSlackMessagesPanelProps = {
@@ -45,11 +44,7 @@ export function WorkItemSlackMessagesPanelContainer({ accessToken, locale, teamI
     () => new Intl.DateTimeFormat(locale === 'ja' ? 'ja-JP' : 'en-US', { dateStyle: 'medium', timeStyle: 'short' }),
     [locale],
   )
-  const { data, error, mutate } = useSWR(
-    ['work-item-slack-messages', accessToken, teamId, workItemId] as const,
-    ([, token, team, item]) => listWorkItemSlackMessages(token, team, item),
-    { shouldRetryOnError: false, revalidateOnFocus: false },
-  )
+  const { data, error, mutate } = useWorkItemSlackMessages(accessToken, teamId, workItemId)
   if (!data && !error) return null
   if (data && data.messages.length === 0) return null
   return (

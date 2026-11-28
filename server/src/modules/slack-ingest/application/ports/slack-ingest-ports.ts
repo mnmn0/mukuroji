@@ -46,8 +46,13 @@ export type SlackIngestJob =
       channelId: string
       /** Mapping revision the load belongs to; a newer mapping stops it. */
       mappingRevision: number
-      /** Slack history cursor of the next page. */
+      /** Slack history cursor of the page. */
       cursor?: string
+      /**
+       * Messages of the page at or after this `ts` were already loaded, so a retry after a rate
+       * limit resumes where it stopped.
+       */
+      resumeBeforeTs?: string
     }
   | {
       /** Delete stored messages of a channel. */
@@ -145,7 +150,7 @@ export type SlackIngestAuditInput<AuditContext> = {
 }
 
 /** Outcome of a conditional message write. */
-export type SlackMessageWriteOutcome = 'written' | 'stale'
+export type SlackMessageWriteOutcome = 'written' | 'stale' | 'unmapped'
 
 /** Persistence of the Slack ingest rows. */
 export interface SlackIngestStore<AuditContext = unknown> {
@@ -249,12 +254,15 @@ export interface SlackIngestStore<AuditContext = unknown> {
   ): Promise<boolean>
   /**
    * Writes a message unless a newer version or a deletion is stored, and replaces its key rows.
+   * The write is conditional on the channel still being mapped at the revision read, so a job
+   * that outlives an unmap or a remap cannot bring deleted messages back.
    *
    * @param workspaceId - Workspace ID.
    * @param message - Message to store.
-   * @returns `stale` when a newer version or a deletion won.
+   * @param mappingRevision - Channel mapping revision the job read.
+   * @returns `stale` when a newer version or a deletion won, `unmapped` when the mapping changed.
    */
-  putMessage(workspaceId: string, message: StoredSlackMessage): Promise<SlackMessageWriteOutcome>
+  putMessage(workspaceId: string, message: StoredSlackMessage, mappingRevision: number): Promise<SlackMessageWriteOutcome>
   /**
    * Replaces a message with a short-lived tombstone and deletes its key rows.
    *

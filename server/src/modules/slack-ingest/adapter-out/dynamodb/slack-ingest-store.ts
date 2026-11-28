@@ -137,6 +137,22 @@ function isConditionFailure(error: unknown): boolean {
 }
 
 /**
+ * Reports whether a cancelled transaction failed the condition of one item.
+ *
+ * @param error - Thrown error.
+ * @param index - Item position in the transaction.
+ * @returns Whether that item's condition failed.
+ */
+function isConditionFailureAt(error: unknown, index: number): boolean {
+  if (typeof error !== 'object' || error === null || !('name' in error)) return false
+  if (error.name !== 'TransactionCanceledException' || !('CancellationReasons' in error)) return false
+  const reasons = error.CancellationReasons
+  if (!Array.isArray(reasons)) return false
+  const reason: unknown = reasons[index]
+  return typeof reason === 'object' && reason !== null && 'Code' in reason && reason.Code === 'ConditionalCheckFailed'
+}
+
+/**
  * Reads a string array of Work Item keys from a row.
  *
  * @param value - Stored value.
@@ -673,11 +689,21 @@ export class DynamoDbSlackIngestStore implements SlackIngestStore<MutationAuditC
    * @param message - Message.
    * @returns Whether it was written.
    */
-  async putMessage(workspaceId: string, message: StoredSlackMessage): Promise<SlackMessageWriteOutcome> {
+  async putMessage(workspaceId: string, message: StoredSlackMessage, mappingRevision: number): Promise<SlackMessageWriteOutcome> {
     for (let attempt = 1; ; attempt += 1) {
       const existing = await this.getMessageRow(workspaceId, message)
       if (existing && (!existing.message || existing.version >= message.version)) return 'stale'
       const items: TransactItem[] = [
+        {
+          // An unmap or remap after the job read the channel fences this write out.
+          ConditionCheck: {
+            TableName: this.tableName,
+            Key: { workspaceId, recordKey: channelKey(message.channelId) },
+            ConditionExpression: 'mappingRevision = :revision AND attribute_exists(#target)',
+            ExpressionAttributeNames: { '#target': 'target' },
+            ExpressionAttributeValues: { ':revision': mappingRevision },
+          },
+        },
         {
           Put: {
             TableName: this.tableName,
@@ -697,6 +723,7 @@ export class DynamoDbSlackIngestStore implements SlackIngestStore<MutationAuditC
         await this.client.send(new TransactWriteCommand({ TransactItems: items }))
         return 'written'
       } catch (error) {
+        if (isConditionFailureAt(error, 0)) return 'unmapped'
         if (!isConditionFailure(error) || attempt >= MESSAGE_WRITE_ATTEMPTS) throw error
       }
     }

@@ -183,7 +183,12 @@ export function SlackIngestPanel({
               </label>
               <button
                 className="workbench-button-primary min-h-10 px-4"
-                disabled={busy || !isSlackIngestRetentionDays(retentionValue) || retentionValue === status.retentionDays}
+                disabled={
+                  busy ||
+                  !isSlackIngestRetentionDays(retentionValue) ||
+                  // After a failed change, saving the same retention again retries the deletion.
+                  (retentionValue === status.retentionDays && !hasOperationError)
+                }
                 type="submit"
               >
                 {t('slackIngest.save')}
