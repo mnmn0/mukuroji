@@ -199,4 +199,25 @@ describe('record decision dialog', () => {
     expect(html).toContain('前回送った決定')
     expect(html).not.toContain('新しい下書き')
   })
+
+  test('keeps the decided time of a failed save, so the retried request is the same one', () => {
+    const values = { ...toProjectDecisionFormValues(undefined, { title: '前回送った決定' }), decidedAtLocal: '2026-01-02T03:04' }
+    const sent = toProjectDecisionEntryInput(values, 'document')
+    const html = renderToStaticMarkup(
+      <RecordDecisionDialog
+        origin="document"
+        prefill={{ title: '新しい下書き' }}
+        projects={[{ teamId: 'core-team', id: 'atlas', name: 'Atlas' }]}
+        save={async () => undefined}
+        t={createTranslator('ja')}
+        unsentDraft={{ projectKey: JSON.stringify(['core-team', 'atlas']), values }}
+        onClose={() => undefined}
+        onRecorded={() => undefined}
+      />,
+    )
+    // The reopened form shows the time that was sent, not the time it was reopened, and turns
+    // back into the same request body.
+    expect(html).toContain('value="2026-01-02T03:04"')
+    expect(toProjectDecisionEntryInput(values, 'document')).toEqual(sent)
+  })
 })
