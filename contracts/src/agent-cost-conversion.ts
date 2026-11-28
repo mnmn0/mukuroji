@@ -50,8 +50,9 @@ export function isAgentCostUsdExchangeRate(value: unknown): value is number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > MAX_AGENT_COST_USD_EXCHANGE_RATE) {
     return false
   }
-  const scaled = value * 10 ** AGENT_COST_USD_EXCHANGE_RATE_FRACTION_DIGITS
-  return Math.abs(scaled - Math.round(scaled)) < 1e-6
+  // Rounding to the allowed digits and back keeps the value only when it has no more digits than
+  // allowed; scaling instead would let floating-point error reject rates such as 17000.01.
+  return Number(value.toFixed(AGENT_COST_USD_EXCHANGE_RATE_FRACTION_DIGITS)) === value
 }
 
 /**

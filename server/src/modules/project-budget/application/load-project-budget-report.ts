@@ -25,6 +25,7 @@ import {
   toProjectAgentRunCosts,
   type ProjectAgentCostInput,
   type ProjectAgentRunCostReader,
+  projectAgentRunFinishDateTest,
 } from '../project-agent-cost'
 
 /** Milliseconds in one UTC day. */
@@ -273,6 +274,7 @@ async function readReportInput(
           workItemIds: projectWorkItemIds,
           since: new Date(Date.parse(`${request.from}T00:00:00Z`) - MAX_TIMEZONE_OFFSET_MS).toISOString(),
           until: new Date(Date.parse(`${asOf}T00:00:00Z`) + DAY_MS + MAX_TIMEZONE_OFFSET_MS).toISOString(),
+          countsFinishedAt: projectAgentRunFinishDateTest(timeZone, request.from, asOf),
           maxRuns: MAX_PROJECT_AGENT_COST_RUNS,
         })
     agentCost = { usdExchangeRate: agentCostRate.usdExchangeRate, costs: toProjectAgentRunCosts(read, timeZone) }

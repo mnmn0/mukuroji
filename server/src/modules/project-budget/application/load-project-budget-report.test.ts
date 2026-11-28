@@ -181,7 +181,12 @@ describe('loadProjectBudgetReport Agent Run cost (ADR 0119)', () => {
       getBudget: async () => budget,
       readAgentCostSettings: async () => settings,
       listAgentRunCosts: async (input) => {
-        reads.push({ ...input, workItemIds: [...input.workItemIds] })
+        const { countsFinishedAt, ...rest } = input
+        // The padded instant range holds runs of the day before and after; the local date test
+        // drops them before they count toward the run limit.
+        const counts = ['2026-01-04T14:59:59.999Z', '2026-01-04T15:00:00.000Z', '2026-01-06T14:59:59.999Z', '2026-01-06T15:00:00.000Z']
+          .map((instant) => countsFinishedAt?.(instant))
+        reads.push({ ...rest, workItemIds: [...input.workItemIds], counts })
         // 2026-01-05T16:00Z is 2026-01-06 in Tokyo; $1.50 at 150 JPY is 225 yen.
         return { runs: [{ finishedAt: '2026-01-05T16:00:00.000Z', costMicroUsd: 1_500_000 }], truncated: false }
       },
@@ -199,6 +204,7 @@ describe('loadProjectBudgetReport Agent Run cost (ADR 0119)', () => {
       since: '2026-01-04T10:00:00.000Z',
       until: '2026-01-07T14:00:00.000Z',
       maxRuns: 1_000,
+      counts: [false, true, true, false],
     }])
     expect(report.agentCost).toEqual({
       status: 'included',

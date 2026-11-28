@@ -23,6 +23,9 @@ describe('Workspace agent cost settings (ADR 0119)', () => {
   test('limits rates to six fraction digits and the largest rate', () => {
     expect(isAgentCostUsdExchangeRate(0.000001)).toBe(true)
     expect(isAgentCostUsdExchangeRate(0.0000001)).toBe(false)
+    expect(isAgentCostUsdExchangeRate(17000.01)).toBe(true)
+    expect(isAgentCostUsdExchangeRate(999999.999999)).toBe(true)
+    expect(isAgentCostUsdExchangeRate(150.1234567)).toBe(false)
     expect(isAgentCostUsdExchangeRate(1_000_000)).toBe(true)
     expect(isAgentCostUsdExchangeRate(1_000_001)).toBe(false)
     expect(isAgentCostUsdExchangeRate(Number.NaN)).toBe(false)

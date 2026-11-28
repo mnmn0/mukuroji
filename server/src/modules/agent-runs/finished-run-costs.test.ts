@@ -159,6 +159,19 @@ describe('readFinishedAgentRunCosts ordering and bounds', () => {
     expect(costs.truncated).toBe(true)
   })
 
+  test('leaves runs the caller rejects out before the run limit', async () => {
+    const costs = await readFinishedAgentRunCosts(ports(), {
+      workspaceId: 'w',
+      teamId: 't',
+      workItemIds: new Set(['a']),
+      until: '2026-01-06T00:00:00.000Z',
+      countsFinishedAt: (finishedAt) => finishedAt !== '2026-01-05T03:00:00.000Z',
+      maxRuns: 1,
+    })
+
+    expect(costs).toEqual({ runs: [{ finishedAt: '2026-01-05T01:00:00.000Z', costMicroUsd: 1_000_000 }], truncated: false })
+  })
+
   test('reads nothing for a range that ends before it starts', async () => {
     const calls: string[] = []
     const base = ports()

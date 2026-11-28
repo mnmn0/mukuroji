@@ -34,7 +34,7 @@ Shinji の方針は「なるべく安く」。
 5. **誰に見えるか**：予算レポートは今どおり Project manager だけが読み、通知は割合だけを持つ（ADR 0105）。Project manager に
    見えるのはその Project の Work Item の Run の合計だけで、Run ごとの費用や Team 全体の費用（ADR 0108 の Team manager 限定）
    は広げない。Workspace 管理者が設定を on にすることで、Project の AI コストを Project の予算として扱うと決める。
-6. **上限**：1 回の計算で費用のある Run を 1,000 件、Team の終了済み Run index を 100 page まで読む。index は新しい Run から
+6. **上限**：1 回の計算で、予算の time zone の日付で期間内に終わった費用のある Run を 1,000 件（期間外の Run は上限に数えない）、Team の終了済み Run index を 100 page まで読む。index は新しい Run から
    返すので、超えたときは新しい Run の分だけを数えて `agentCost.truncated = true` にし、値は下限として表示する
    （閾値通知も下限で判定する）。失敗した Run とそれ以外の Run の index は交互に読んで終了時刻で混ぜ、新しい順の約束を
    結果で守る。閾値通知が Project の Work Item を探す Team の Work Item 読み取りは 200 page までで、超えたら一部だけで

@@ -116,6 +116,11 @@ export async function readFinishedAgentRunCosts(
     since?: string
     /** Inclusive upper finish instant. */
     until: string
+    /**
+     * Further test on a run's index finish time, applied before the run counts toward `maxRuns`, so
+     * runs the caller would drop, such as ones outside a local date range, do not use up the limit.
+     */
+    countsFinishedAt?: (finishedAt: string) => boolean
     /** Most runs with a cost to return. */
     maxRuns: number
   },
@@ -156,6 +161,7 @@ export async function readFinishedAgentRunCosts(
         const finishedAt = Date.parse(entry.finishedAt)
         if (finishedAt < state.oldestRead) state.oldestRead = finishedAt
         if (!(finishedAt >= sinceAt && finishedAt <= untilAt) || !input.workItemIds.has(entry.workItemId)) continue
+        if (input.countsFinishedAt && !input.countsFinishedAt(entry.finishedAt)) continue
         references.push({ runId: entry.runId, workItemId: entry.workItemId, finishedAt })
       }
       state.cursor = page.nextCursor

@@ -50,9 +50,35 @@ export type ProjectAgentRunCostReader = (input: {
   since?: string
   /** Inclusive upper finish instant, ISO 8601. */
   until: string
+  /**
+   * Whether a run that finished at an ISO 8601 instant counts; runs it rejects do not use up
+   * `maxRuns`. The padded instant range above holds a little more than the local date range.
+   */
+  countsFinishedAt?: (finishedAt: string) => boolean
   /** Most runs with a cost to return before the read is marked truncated. */
   maxRuns: number
 }) => Promise<ProjectAgentRunCostRead>
+
+/**
+ * Builds the finish-time test that keeps only runs whose local finish date, in the budget's time
+ * zone, falls within a date range (ADR 0119).
+ *
+ * @param timeZone - Budget time zone.
+ * @param from - First local date counted, or undefined for no lower bound.
+ * @param to - Last local date counted.
+ * @returns The test; an instant that cannot be read does not count.
+ */
+export function projectAgentRunFinishDateTest(
+  timeZone: string,
+  from: string | undefined,
+  to: string,
+): (finishedAt: string) => boolean {
+  return (finishedAt) => {
+    if (!Number.isFinite(Date.parse(finishedAt))) return false
+    const date = toWorkspaceLocalDate(finishedAt, timeZone)
+    return (from === undefined || date >= from) && date <= to
+  }
+}
 
 /** Agent Run cost a Project budget measurement adds, already read. */
 export type ProjectAgentCostInput = {
