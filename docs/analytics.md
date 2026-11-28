@@ -260,6 +260,15 @@ evidence、定期配信の hash に含まれます。
 hash は変わりません。Software factory を deploy していない環境と定期配信の runner は usage を読まず、widget は
 warning だけを返します（hash にも Team を加えません）。
 
+### Time in status
+
+[ADR 0115](adr/0115-work-phases.md)。`status-time` は、Work Item の履歴（`workflowStatusId` と `statusCategory` の変更）から
+各ステータスにいた区間を作り、期間と重なる時間のうち `unstarted`・`started` のカテゴリーの時間を足します（時間単位）。
+`groupBy` が `status` なら時間を過ごしたステータス ID、`phase` ならそのステータスの工程（Team の今の Work Item 設定で引く。
+工程のないステータスは `no-phase`）で分けます。`phase` で分けられるのはこの metric だけです。他の dimension は他の metric と同じく
+`asOf` の state で分けます。`phase` で分けるときは query の Team の Work Item 設定と tenant profile の工程名を読み、読めない
+runner では warning だけを返します。
+
 ### SPI / CPI / EAC（EVM）
 
 [ADR 0110](adr/0110-analytics-earned-value-metrics.md)。値は Project の予算レポート

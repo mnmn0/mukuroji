@@ -219,6 +219,7 @@ export const timeTrackingMessages = {
   'timeTracking.budget.periodBudgetNote': 'When the report period is exactly this period, actuals are compared with this budget instead of the default budget. A budget already saved for the same period is replaced. Periods of different budgets cannot overlap.',
   'timeTracking.budget.defaultBudgetNote': 'The default budget is compared with actuals when no budget is saved for exactly the report period.',
   'timeTracking.budget.teamPartial': 'Team actual costs include only the Projects you manage (time without a Project is not included), so the remaining amount and usage are not shown. They are shown for Project budgets.',
+  'timeTracking.report.groupBy.phase': 'Phase',
   'timeTracking.report.groupBy.category': 'Category',
   'timeTracking.report.category.design': 'Design',
   'timeTracking.report.category.implementation': 'Implementation',

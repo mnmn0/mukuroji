@@ -12,6 +12,7 @@ import type {
   UpdateTenantProfileInput,
   WorkspaceCalendarSettingsResponse,
   WorkspaceTimeEntryCategorySettings,
+  WorkspaceWorkPhaseSettings,
 } from '@mukuroji/contracts'
 import {
   isCurrencyCode,
@@ -21,6 +22,7 @@ import {
   readWorkspaceNationalHolidayDates,
   readWorkspaceFileTypeSettings,
   readWorkspaceTimeEntryCategorySettings,
+  readWorkspaceWorkPhaseSettings,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { WorkspaceAccessApiError } from './errors'
@@ -84,6 +86,26 @@ export async function getWorkspaceTimeEntryCategories(
 ): Promise<WorkspaceTimeEntryCategorySettings> {
   const body = await sendTenantRequest('/workspace/time-entry-categories', accessToken, { signal })
   const settings = readWorkspaceTimeEntryCategorySettings(body)
+  if (!settings) {
+    throw new WorkspaceAccessApiError(502, 'tenant.administration.invalidResponse')
+  }
+  return settings
+}
+
+/**
+ * Reads the Workspace work phases and the phase of each work category (ADR 0115). Any member may
+ * read them.
+ *
+ * @param accessToken - Bearer token used for the read.
+ * @param signal - Abort signal of the read.
+ * @returns The phases in effect, which are the defaults until an administrator saves them.
+ */
+export async function getWorkspaceWorkPhases(
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<WorkspaceWorkPhaseSettings> {
+  const body = await sendTenantRequest('/workspace/work-phases', accessToken, { signal })
+  const settings = readWorkspaceWorkPhaseSettings(body)
   if (!settings) {
     throw new WorkspaceAccessApiError(502, 'tenant.administration.invalidResponse')
   }
@@ -362,6 +384,7 @@ function isTenantProfile(value: unknown): value is TenantProfile {
       readPlanningUpdateTemplateSettings(value.planningUpdateTemplate) !== undefined) &&
     (value.timeEntryCategories === undefined ||
       readWorkspaceTimeEntryCategorySettings(value.timeEntryCategories) !== undefined) &&
+    (value.workPhases === undefined || readWorkspaceWorkPhaseSettings(value.workPhases) !== undefined) &&
     (value.fileTypes === undefined || readWorkspaceFileTypeSettings(value.fileTypes) !== undefined) &&
     (value.defaultCurrency === undefined || isCurrencyCode(value.defaultCurrency)) &&
     (value.status === 'active' || value.status === 'closing' || value.status === 'closed') &&

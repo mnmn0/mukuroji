@@ -645,6 +645,8 @@ export const workItemsMessages = {
   'workItems.configuration.moveStatusDown': 'Move {status} down',
   'workItems.configuration.removeStatus': 'Remove {status}',
   'workItems.configuration.initialStatus': 'Initial status for new items',
+  'workItems.configuration.statusPhase': 'Work phase',
+  'workItems.configuration.statusPhaseFor': 'Work phase of {status}',
   'workItems.configuration.transitionTitle': 'Transition matrix',
   'workItems.configuration.transitionDescription': 'Select the destinations that can be changed to directly from each current status.',
   'workItems.configuration.transitionFromTo': 'Current ↓ / next →',

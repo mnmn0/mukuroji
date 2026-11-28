@@ -706,6 +706,47 @@ describe('TimeTrackingService', () => {
     ])
   })
 
+  test('groups time by the work phase of each entry category', async () => {
+    let id = 0
+    const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
+      now: () => new Date('2026-08-03T09:00:00.000Z'),
+      createId: () => `id-${++id}`,
+      categories: {
+        readCategories: async () => ({ categories: [{ key: 'implementation', active: true }, { key: 'meeting', active: true }, { key: 'review', active: true }] }),
+        readWorkPhases: async () => ({
+          phases: [{ key: 'implementation', label: '実装', active: true }, { key: 'review', active: true }],
+          categoryPhases: { implementation: 'implementation', review: 'review' },
+        }),
+      },
+    })
+    const base = {
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      userId: 'member-1',
+      billable: false,
+      currency: 'JPY',
+      source: 'manual' as const,
+    }
+    await service.createEntry({ ...base, category: 'implementation', duration: { date: '2026-08-03', minutes: 90, timeZone: 'Asia/Tokyo' } }, false)
+    await service.createEntry({ ...base, category: 'review', duration: { date: '2026-08-04', minutes: 30, timeZone: 'Asia/Tokyo' } }, false)
+    await service.createEntry({ ...base, category: 'meeting', duration: { date: '2026-08-04', minutes: 45, timeZone: 'Asia/Tokyo' } }, false)
+    const summary = await service.createSummary({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      from: '2026-08-03',
+      to: '2026-08-09',
+      timeZone: 'Asia/Tokyo',
+      groupBy: 'phase',
+      includeCosts: false,
+    })
+    expect(summary.groups.map(({ key, label, minutes }) => ({ key, label, minutes }))).toEqual([
+      { key: 'implementation', label: '実装', minutes: 90 },
+      // Meetings map to no phase, and a built-in phase without a Workspace name keeps its key.
+      { key: 'no-phase', label: 'No phase', minutes: 45 },
+      { key: 'review', label: 'review', minutes: 30 },
+    ])
+  })
+
   test('keeps a category the Workspace retired after the entry was recorded', async () => {
     let active = true
     let id = 0

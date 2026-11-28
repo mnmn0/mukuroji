@@ -2,7 +2,6 @@ import {
   MAX_TIME_ENTRY_CATEGORY_LABEL_LENGTH,
   MAX_WORKSPACE_TIME_ENTRY_CATEGORIES,
   isBuiltInTimeEntryCategory,
-  type BuiltInTimeEntryCategory,
   type TimeEntryCategoryDefinition,
   type WorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
@@ -10,20 +9,11 @@ import { useState } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
   addTimeEntryCategory,
+  builtInCategoryLabelKeys,
   hasTimeEntryCategoryProblem,
   moveTimeEntryCategory,
 } from '../model/timeEntryCategories'
 
-/** Translated name of each built-in work category. */
-const builtInCategoryLabelKeys = {
-  design: 'timeTracking.report.category.design',
-  implementation: 'timeTracking.report.category.implementation',
-  review: 'timeTracking.report.category.review',
-  meeting: 'timeTracking.report.category.meeting',
-  management: 'timeTracking.report.category.management',
-  training: 'timeTracking.report.category.training',
-  leave: 'timeTracking.report.category.leave',
-} as const satisfies Record<BuiltInTimeEntryCategory, MessageKey>
 
 /** Props of the work category editor. */
 export type TimeEntryCategoryFieldsProps = {

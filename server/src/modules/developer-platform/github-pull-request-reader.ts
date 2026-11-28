@@ -58,16 +58,21 @@ export async function readGitHubPullRequest(
   if (typeof headSha !== 'string' || !COMMIT_SHA_PATTERN.test(headSha)) throw malformed('GitHub pull request head SHA is invalid.')
   if (payload.state !== 'open' && payload.state !== 'closed') throw malformed('GitHub pull request state is invalid.')
   const merged = payload.merged === true || (typeof payload.merged_at === 'string' && payload.merged_at !== '')
+  const author = isObject(payload.user) ? payload.user.id : undefined
   const [checks, review] = await Promise.all([
     readHeadChecks(request, repositoryPath, headSha),
-    readReviewState(request, pullPath),
+    readReviewState(request, pullPath, typeof author === 'number' || typeof author === 'string' ? String(author) : undefined),
   ])
+  const createdAt = readInstant(payload.created_at)
   return {
     state: merged ? 'merged' : payload.state,
     draft: payload.draft === true,
     headSha,
     checks,
-    review,
+    review: review.state,
+    ...(createdAt === undefined ? {} : { createdAt }),
+    ...(review.firstReviewedAt === undefined ? {} : { firstReviewedAt: review.firstReviewedAt }),
+    ...(review.approvedAt === undefined ? {} : { approvedAt: review.approvedAt }),
     ...(merged && typeof payload.merged_at === 'string' ? { mergedAt: payload.merged_at } : {}),
     ...(merged && typeof payload.merge_commit_sha === 'string' && COMMIT_SHA_PATTERN.test(payload.merge_commit_sha)
       ? { mergeCommitSha: payload.merge_commit_sha }
@@ -148,22 +153,50 @@ async function readCheckRuns(
   throw malformed('GitHub check runs are too many to read in full.')
 }
 
+/** Review state of a pull request with the times its review intervals are measured from. */
+type PullRequestReviewSummary = {
+  /** Review state from each reviewer's latest decision. */
+  state: AgentRunPullRequestReviewState
+  /** Time of the first review someone other than the author submitted. */
+  firstReviewedAt?: string
+  /** Time of the earliest approval that still stands; present only when the state is `approved`. */
+  approvedAt?: string
+}
+
+/**
+ * Reads a GitHub timestamp.
+ *
+ * @param value - Untrusted timestamp.
+ * @returns The timestamp as a UTC ISO 8601 instant, or undefined when it is missing or invalid.
+ */
+function readInstant(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const instant = Date.parse(value)
+  return Number.isFinite(instant) ? new Date(instant).toISOString() : undefined
+}
+
 /**
  * Reads each reviewer's latest approval or change request. A dismissed review withdraws the
- * reviewer's earlier decision; comments do not change it.
+ * reviewer's earlier decision; comments do not change it. It also notes when someone other than the
+ * author first reviewed, and when the standing approvals were given (ADR 0115).
  *
  * @param request - Authenticated provider requester.
  * @param pullPath - `repos/{owner}/{repo}/pulls/{number}` path.
+ * @param author - Provider user ID of the pull request author, whose own reviews are not counted
+ * as the first review.
  * @returns `changes-requested` when any reviewer's latest decision requests changes, `approved`
- * when at least one approves, and `none` otherwise.
+ * when at least one approves, and `none` otherwise, with the review times.
  * @throws ConnectorRuntimeError ConnectorProviderResponseMalformed when the history is longer than
  * {@link MAXIMUM_REVIEW_PAGES} pages, since a partial history could show an outdated decision.
  */
 async function readReviewState(
   request: ConnectorProviderRequester,
   pullPath: string,
-): Promise<AgentRunPullRequestReviewState> {
+  author: string | undefined,
+): Promise<PullRequestReviewSummary> {
   const decisions = new Map<string, 'approved' | 'changes-requested'>()
+  const approvedAt = new Map<string, string>()
+  let firstReviewedAt: string | undefined
   let complete = false
   for (let page = 1; page <= MAXIMUM_REVIEW_PAGES; page += 1) {
     const response = await request({
@@ -180,9 +213,23 @@ async function readReviewState(
       const user = isObject(review.user) ? review.user.id : undefined
       if (typeof user !== 'number' && typeof user !== 'string') continue
       const reviewer = String(user)
-      if (review.state === 'APPROVED') decisions.set(reviewer, 'approved')
-      else if (review.state === 'CHANGES_REQUESTED') decisions.set(reviewer, 'changes-requested')
-      else if (review.state === 'DISMISSED') decisions.delete(reviewer)
+      const submittedAt = readInstant(review.submitted_at)
+      if (
+        reviewer !== author && submittedAt !== undefined && review.state !== 'PENDING' &&
+        (firstReviewedAt === undefined || submittedAt < firstReviewedAt)
+      ) {
+        firstReviewedAt = submittedAt
+      }
+      if (review.state === 'APPROVED') {
+        decisions.set(reviewer, 'approved')
+        if (submittedAt !== undefined) approvedAt.set(reviewer, submittedAt)
+      } else if (review.state === 'CHANGES_REQUESTED') {
+        decisions.set(reviewer, 'changes-requested')
+        approvedAt.delete(reviewer)
+      } else if (review.state === 'DISMISSED') {
+        decisions.delete(reviewer)
+        approvedAt.delete(reviewer)
+      }
     }
     if (response.payload.length < REVIEWS_PAGE_SIZE) {
       complete = true
@@ -191,8 +238,11 @@ async function readReviewState(
   }
   if (!complete) throw malformed('GitHub review history is too long to read in full.')
   const values = [...decisions.values()]
-  if (values.includes('changes-requested')) return 'changes-requested'
-  return values.includes('approved') ? 'approved' : 'none'
+  const first = firstReviewedAt === undefined ? {} : { firstReviewedAt }
+  if (values.includes('changes-requested')) return { state: 'changes-requested', ...first }
+  if (!values.includes('approved')) return { state: 'none', ...first }
+  const approvals = [...approvedAt.values()].sort()
+  return { state: 'approved', ...first, ...(approvals[0] === undefined ? {} : { approvedAt: approvals[0] }) }
 }
 
 /**

@@ -258,7 +258,10 @@ function readArtifactStatus(value: unknown): AgentRunArtifactStatus | undefined 
  */
 function readPullRequestStatus(value: unknown): AgentRunPullRequestStatus | undefined {
   if (!isRecord(value)) return undefined
-  const { state, draft, headSha, checks, review, mergedAt, mergeCommitSha } = value
+  const { state, draft, headSha, checks, review, createdAt, firstReviewedAt, approvedAt, mergedAt, mergeCommitSha } = value
+  if (
+    !isOptionalInstant(createdAt) || !isOptionalInstant(firstReviewedAt) || !isOptionalInstant(approvedAt)
+  ) return undefined
   if (
     !isOneOf(AGENT_RUN_PULL_REQUEST_STATES, state) ||
     typeof draft !== 'boolean' ||
@@ -274,9 +277,22 @@ function readPullRequestStatus(value: unknown): AgentRunPullRequestStatus | unde
     headSha,
     checks,
     review,
+    ...(typeof createdAt === 'string' ? { createdAt } : {}),
+    ...(typeof firstReviewedAt === 'string' ? { firstReviewedAt } : {}),
+    ...(typeof approvedAt === 'string' ? { approvedAt } : {}),
     ...(typeof mergedAt === 'string' ? { mergedAt } : {}),
     ...(typeof mergeCommitSha === 'string' ? { mergeCommitSha } : {}),
   }
+}
+
+/**
+ * Checks that an optional stored timestamp is absent or a parseable string.
+ *
+ * @param value - Stored value.
+ * @returns True when the value is undefined or a timestamp string.
+ */
+function isOptionalInstant(value: unknown): boolean {
+  return value === undefined || (typeof value === 'string' && Number.isFinite(Date.parse(value)))
 }
 
 /**

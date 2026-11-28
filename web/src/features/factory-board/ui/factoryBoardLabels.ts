@@ -1,8 +1,16 @@
-import type { AgentRunRuntime, AgentRunUsage, FactoryAnalyticsStage, FactoryBoardLane } from '@mukuroji/contracts'
+import type {
+  AgentRunRuntime,
+  AgentRunUsage,
+  FactoryAnalyticsPullRequestInterval,
+  FactoryAnalyticsStage,
+  FactoryBoardLane,
+  WorkspaceWorkPhaseSettings,
+} from '@mukuroji/contracts'
 import type { FactoryLineStation } from '../model/factoryLine'
 import { createTranslator, type Locale } from '../../../shared/i18n/i18n'
 import { createWorkItemAgentRunsLabels, type WorkItemAgentRunsLabels } from '../../../work-items/ui/agentRunLabels'
 import { createAgentRunReportChipsLabels, type AgentRunReportChipsLabels } from '../../../work-items/ui/agentRunReportLabels'
+import { readWorkPhaseDisplayName } from '../../../workspace/model/workPhases'
 
 /** Locale-aware text of the line view of the Factory board. */
 export type FactoryLineLabels = {
@@ -302,6 +310,23 @@ export type FactoryAnalyticsLabels = {
   usageNoProject: string
   /** Heading of the Work Items with the most tokens. */
   usageWorkItemsHeading: string
+  /** Heading of the usage per work phase. */
+  usagePhasesHeading: string
+  /**
+   * Names a work phase of the usage per phase.
+   * @param phaseKey - Phase key, or the group of runs without a phase.
+   * @param settings - Workspace work phases, when loaded.
+   * @returns Display name.
+   */
+  phaseName: (phaseKey: string, settings: WorkspaceWorkPhaseSettings | undefined) => string
+  /** Heading of the pull request intervals. */
+  pullRequestHeading: string
+  /** Explanation of which pull requests the intervals count. */
+  pullRequestHint: string
+  /** Sample count with a `{count}` placeholder. */
+  pullRequestSamples: string
+  /** Names of the pull request intervals. */
+  pullRequestIntervals: Record<FactoryAnalyticsPullRequestInterval, string>
   /**
    * Describes total tokens and, for managers, the estimated cost.
    * @param usage - Usage to describe.
@@ -373,6 +398,17 @@ export function createFactoryAnalyticsLabels(locale: Locale): FactoryAnalyticsLa
     usageProjectsHeading: t('factoryBoard.analytics.usageProjectsHeading'),
     usageNoProject: t('factoryBoard.analytics.usageNoProject'),
     usageWorkItemsHeading: t('factoryBoard.analytics.usageWorkItemsHeading'),
+    usagePhasesHeading: t('factoryBoard.analytics.usagePhasesHeading'),
+    phaseName: (phaseKey, settings) => readWorkPhaseDisplayName(phaseKey, settings, t),
+    pullRequestHeading: t('factoryBoard.analytics.pullRequestHeading'),
+    pullRequestHint: t('factoryBoard.analytics.pullRequestHint'),
+    pullRequestSamples: t('factoryBoard.analytics.pullRequestSamples'),
+    pullRequestIntervals: {
+      'review-wait': t('factoryBoard.analytics.pullRequestInterval.reviewWait'),
+      review: t('factoryBoard.analytics.pullRequestInterval.review'),
+      'merge-wait': t('factoryBoard.analytics.pullRequestInterval.mergeWait'),
+      total: t('factoryBoard.analytics.pullRequestInterval.total'),
+    },
     formatUsageCompact: runLabels.formatUsageCompact,
     formatUsageTokens: runLabels.formatUsageTokens,
     formatUsageDetail: runLabels.formatUsageDetail,

@@ -14,16 +14,19 @@ import type {
   WorkspaceCalendarSettingsResponse,
   WorkspaceFileTypeSettings,
   WorkspaceTimeEntryCategorySettings,
+  WorkspaceWorkPhaseSettings,
 } from '@mukuroji/contracts'
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS,
   isKnownCurrencyCode,
   readPlanningUpdateTemplateSettings,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
   readWorkspaceFileTypeSettings,
   readWorkspaceTimeEntryCategorySettings,
+  readWorkspaceWorkPhaseSettings,
 } from '@mukuroji/contracts'
 import {
   TenantAdministrationError,
@@ -163,6 +166,18 @@ export function createTenantAdministrationRouter<
       const profile = await dependencies.client.getProfile(principal.directoryId)
       const settings: WorkspaceTimeEntryCategorySettings =
         profile?.timeEntryCategories ?? DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
+      return context.json(settings)
+    } catch (error) {
+      return dependencies.mapError(context, error)
+    }
+  })
+
+  // Every active member reads phases in reports and workflow settings, so only authentication is required.
+  router.get('/api/workspace/work-phases', async (context) => {
+    try {
+      const principal = await requirePrincipal(context, dependencies)
+      const profile = await dependencies.client.getProfile(principal.directoryId)
+      const settings: WorkspaceWorkPhaseSettings = profile?.workPhases ?? DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS
       return context.json(settings)
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -382,6 +397,9 @@ function readTenantProfileInput(value: unknown): UpdateTenantProfileInput {
     ...(body.timeEntryCategories === undefined
       ? {}
       : { timeEntryCategories: readTenantTimeEntryCategoryInput(body.timeEntryCategories) }),
+    ...(body.workPhases === undefined
+      ? {}
+      : { workPhases: readTenantWorkPhaseInput(body.workPhases) }),
     ...(body.fileTypes === undefined
       ? {}
       : { fileTypes: readTenantFileTypeInput(body.fileTypes) }),
@@ -484,6 +502,26 @@ function readTenantTimeEntryCategoryInput(value: unknown): WorkspaceTimeEntryCat
       400,
       'InvalidTimeEntryCategorySettings',
       'Work category keys, names, or flags are invalid, a key repeats, or no category is active.',
+    )
+  }
+  return settings
+}
+
+/**
+ * Validates the work phase settings of a profile update.
+ *
+ * @param value - Untrusted `workPhases` field of the request body.
+ * @returns The validated settings.
+ * @throws TenantAdministrationError When a key, name, or flag is invalid, a key repeats, there are
+ *   too many phases, or a category maps to a phase that is not listed.
+ */
+function readTenantWorkPhaseInput(value: unknown): WorkspaceWorkPhaseSettings {
+  const settings = readWorkspaceWorkPhaseSettings(value)
+  if (!settings) {
+    throw new TenantAdministrationError(
+      400,
+      'InvalidWorkPhaseSettings',
+      'Work phase keys, names, or flags are invalid, a key repeats, or a category maps to a phase that is not listed.',
     )
   }
   return settings

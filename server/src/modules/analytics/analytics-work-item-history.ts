@@ -157,6 +157,7 @@ export function normalizeAnalyticsFieldPath(field: string) {
     field === 'assigneeUserId' ||
     field === 'workItemTypeId' ||
     field === 'statusCategory' ||
+    field === 'workflowStatusId' ||
     field === 'priority' ||
     field === 'dueDate' ||
     field === 'createdAt' ||

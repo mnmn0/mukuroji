@@ -28,16 +28,20 @@ import type {
   WorkspaceCalendarSettings,
   WorkspaceFileTypeSettings,
   WorkspaceTimeEntryCategorySettings,
+  WorkspaceWorkPhaseSettings,
 } from '@mukuroji/contracts'
 import {
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS,
   findRemovedTimeEntryCategoryKeys,
+  findRemovedWorkPhaseKeys,
   isCurrencyCode,
   readPlanningUpdateTemplateSettings,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
   readWorkspaceFileTypeSettings,
   readWorkspaceTimeEntryCategorySettings,
+  readWorkspaceWorkPhaseSettings,
 } from '@mukuroji/contracts'
 import { calculateAuditExpiresAt } from '../../../audit'
 import {
@@ -286,6 +290,9 @@ export class DynamoDbTenantAdministrationClient implements
     const timeEntryCategories = input.timeEntryCategories
       ? readChangedTimeEntryCategories(current.timeEntryCategories, input.timeEntryCategories)
       : undefined
+    const workPhases = input.workPhases
+      ? readChangedWorkPhases(current.workPhases, input.workPhases)
+      : undefined
     const updated: TenantProfile = {
       ...current,
       region: validateTenantRegion(input.region),
@@ -299,6 +306,7 @@ export class DynamoDbTenantAdministrationClient implements
         ? { planningUpdateTemplate: readStoredPlanningUpdateTemplate(input.planningUpdateTemplate) }
         : {}),
       ...(timeEntryCategories ? { timeEntryCategories } : {}),
+      ...(workPhases ? { workPhases } : {}),
       ...(input.fileTypes ? { fileTypes: readStoredFileTypes(input.fileTypes) } : {}),
       ...(input.defaultCurrency ? { defaultCurrency: readStoredDefaultCurrency(input.defaultCurrency) } : {}),
       revision: current.revision + 1,
@@ -2020,6 +2028,9 @@ function readTenantProfile(value: unknown): TenantProfile {
     ...(value.timeEntryCategories === undefined
       ? {}
       : { timeEntryCategories: readStoredTimeEntryCategories(value.timeEntryCategories) }),
+    ...(value.workPhases === undefined
+      ? {}
+      : { workPhases: readStoredWorkPhases(value.workPhases) }),
     ...(value.fileTypes === undefined
       ? {}
       : { fileTypes: readStoredFileTypes(value.fileTypes) }),
@@ -2081,6 +2092,44 @@ function readStoredWeeklyReportReminders(value: unknown): WeeklyReportReminderSe
 function readStoredTimeEntryCategories(value: unknown): WorkspaceTimeEntryCategorySettings {
   const settings = readWorkspaceTimeEntryCategorySettings(value)
   if (!settings) throw new Error('invalid time entry category settings')
+  return settings
+}
+
+/**
+ * Reads stored or already-validated Workspace work phase settings.
+ *
+ * @param value - Settings candidate.
+ * @returns The settings.
+ * @throws Error when the settings are invalid.
+ */
+function readStoredWorkPhases(value: unknown): WorkspaceWorkPhaseSettings {
+  const settings = readWorkspaceWorkPhaseSettings(value)
+  if (!settings) throw new Error('invalid work phase settings')
+  return settings
+}
+
+/**
+ * Validates a work phase change against the phases in effect, which are the defaults until the
+ * Workspace saves its own.
+ *
+ * @param stored - Stored settings, if any.
+ * @param requested - Already-validated requested settings.
+ * @returns The settings to store.
+ * @throws TenantAdministrationError When the change drops a phase instead of retiring it.
+ */
+function readChangedWorkPhases(
+  stored: WorkspaceWorkPhaseSettings | undefined,
+  requested: WorkspaceWorkPhaseSettings,
+): WorkspaceWorkPhaseSettings {
+  const settings = readStoredWorkPhases(requested)
+  const removed = findRemovedWorkPhaseKeys(stored ?? DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS, settings)
+  if (removed.length > 0) {
+    throw new TenantAdministrationError(
+      400,
+      'WorkPhaseRemoved',
+      `Work phases cannot be removed, only retired: ${removed.join(', ')}.`,
+    )
+  }
   return settings
 }
 

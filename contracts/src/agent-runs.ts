@@ -938,6 +938,20 @@ export type FactoryAnalyticsWorkItemUsage = {
 }
 
 /**
+ * Telemetry usage of the period's runs in one work phase (ADR 0115): the phase of the workflow
+ * status the Work Item was in when each run started.
+ */
+export type FactoryAnalyticsPhaseUsage = {
+  /**
+   * Work phase key, or `no-phase` for runs whose status has no phase, whose status is no longer in
+   * the Team's workflows, or that started before runs recorded their status.
+   */
+  phaseKey: string
+  /** Usage added together. */
+  usage: AgentRunUsage
+}
+
+/**
  * Telemetry usage of the runs that finished in the period, on Work Items the viewer can see. The
  * estimated cost is included only for Team managers.
  */
@@ -948,6 +962,8 @@ export type FactoryAnalyticsUsage = {
   projects: FactoryAnalyticsProjectUsage[]
   /** The {@link FACTORY_ANALYTICS_USAGE_TOP_WORK_ITEMS} Work Items with the most tokens, most first. */
   workItems: FactoryAnalyticsWorkItemUsage[]
+  /** Usage per work phase, most tokens first. */
+  phases: FactoryAnalyticsPhaseUsage[]
   /** Whether finished runs beyond {@link FACTORY_ANALYTICS_MAX_USAGE_RUNS} were left out. */
   runsHasMore: boolean
 }
@@ -982,6 +998,35 @@ export type TeamFactoryAnalyticsResponse = FactoryAnalyticsRunSummary & {
   historyHasMore: boolean
   /** Telemetry usage of the period's runs; absent when none of them has usage. */
   usage?: FactoryAnalyticsUsage
+  /**
+   * Intervals of the verified pull requests the evaluated Work Items' reports name (ADR 0103,
+   * ADR 0115), in {@link FACTORY_ANALYTICS_PULL_REQUEST_INTERVALS} order. An interval counts when
+   * it ends in the period.
+   */
+  pullRequestLeadTimes: FactoryAnalyticsPullRequestLeadTime[]
+}
+
+/**
+ * Pull request intervals Factory analytics measures:
+ *
+ * - `review-wait`: opened until someone other than the author first reviews.
+ * - `review`: first review until the earliest approval that still stands.
+ * - `merge-wait`: that approval until the merge.
+ * - `total`: opened until merged.
+ */
+export const FACTORY_ANALYTICS_PULL_REQUEST_INTERVALS = ['review-wait', 'review', 'merge-wait', 'total'] as const
+
+/** One pull request interval Factory analytics measures. */
+export type FactoryAnalyticsPullRequestInterval = (typeof FACTORY_ANALYTICS_PULL_REQUEST_INTERVALS)[number]
+
+/** Median length of one pull request interval. */
+export type FactoryAnalyticsPullRequestLeadTime = {
+  /** Interval. */
+  interval: FactoryAnalyticsPullRequestInterval
+  /** Median hours; null when no pull request finished the interval in the period. */
+  medianHours: number | null
+  /** Number of pull requests that finished the interval in the period. */
+  sampleSize: number
 }
 
 /** Outcomes a finished Agent Run can have, for filtering the Run history. */

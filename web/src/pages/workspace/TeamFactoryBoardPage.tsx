@@ -12,6 +12,7 @@ import { createFactoryAnalyticsLabels, createFactoryBoardLabels } from '../../fe
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createProjectIssuesPath, createTeamIssuesPath, createTeamRunHistoryPath } from '../../shared/routing/paths'
 import { SoftwareFactoryGate } from '../../workspace/ui/SoftwareFactoryGate'
+import { useWorkspaceWorkPhases } from '../../workspace/queries/useWorkspaceWorkPhases'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
@@ -60,6 +61,7 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
   const reports = useFactoryBoardReports(accessToken, teamId, selectedWorkItemId)
   const [analyticsDays, setAnalyticsDays] = useState<FactoryAnalyticsPeriodDays>(DEFAULT_FACTORY_ANALYTICS_PERIOD_DAYS)
   const analytics = useFactoryAnalytics(accessToken, teamId, analyticsDays)
+  const { settings: workPhases } = useWorkspaceWorkPhases(accessToken)
   const onRelease = useReleaseFactoryBoardRun(accessToken, teamId, async (released) => {
     // Show the committed release from the response, so a failed refresh cannot bring back the active run.
     await board.applyRelease(released)
@@ -100,6 +102,7 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
           onRetry={() => { void analytics.mutate() }}
           periodDays={analyticsDays}
           projectNames={projectNames}
+          workPhases={workPhases}
         />
         <FactoryBoard
           board={board.data}

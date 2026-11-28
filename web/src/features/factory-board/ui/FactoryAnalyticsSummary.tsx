@@ -1,4 +1,10 @@
-import type { AgentRunUsage, FactoryAnalyticsUsage, TeamFactoryAnalyticsResponse } from '@mukuroji/contracts'
+import type {
+  AgentRunUsage,
+  FactoryAnalyticsPullRequestLeadTime,
+  FactoryAnalyticsUsage,
+  TeamFactoryAnalyticsResponse,
+  WorkspaceWorkPhaseSettings,
+} from '@mukuroji/contracts'
 import { useId } from 'react'
 import {
   FACTORY_ANALYTICS_PERIOD_DAYS,
@@ -28,6 +34,8 @@ export type FactoryAnalyticsSummaryProps = {
   formatNumber: (value: number) => string
   /** Project names by ID, for the usage per Project; an unknown ID shows as the ID. */
   projectNames?: Readonly<Record<string, string>>
+  /** Workspace work phases, for the names of the usage per phase; built-in phases are translated without them. */
+  workPhases?: WorkspaceWorkPhaseSettings
 }
 
 /** Props of the token usage part. */
@@ -38,6 +46,8 @@ type UsageSummaryProps = {
   labels: FactoryAnalyticsLabels
   /** Project names by ID. */
   projectNames: Readonly<Record<string, string>>
+  /** Workspace work phases, for phase names. */
+  workPhases?: WorkspaceWorkPhaseSettings
 }
 
 /**
@@ -57,8 +67,9 @@ function totalTokens(usage: AgentRunUsage): number {
  * @param props - Usage, text, and Project names.
  * @returns Usage part.
  */
-function UsageSummary({ usage, labels, projectNames }: UsageSummaryProps) {
+function UsageSummary({ usage, labels, projectNames, workPhases }: UsageSummaryProps) {
   const projectMax = Math.max(1, ...usage.projects.map((project) => totalTokens(project.usage)))
+  const phaseMax = Math.max(1, ...usage.phases.map((phase) => totalTokens(phase.usage)))
   const workItemMax = Math.max(1, ...usage.workItems.map((item) => totalTokens(item.usage)))
   const partial = usage.runsHasMore || usage.total.hasMore ||
     usage.projects.some((project) => project.usage.hasMore) || usage.workItems.some((item) => item.usage.hasMore)
@@ -97,7 +108,60 @@ function UsageSummary({ usage, labels, projectNames }: UsageSummaryProps) {
             ))}
           </ol>
         </section>
+        {usage.phases.length > 0 ? (
+          <section className="flex min-w-0 flex-col gap-1" data-testid="factory-analytics-usage-phases">
+            <h4 className="text-xs font-semibold text-[var(--workbench-muted)]">{labels.usagePhasesHeading}</h4>
+            <ul className="flex flex-col gap-1.5">
+              {usage.phases.map((phase) => (
+                <UsageRow
+                  key={phase.phaseKey}
+                  labels={labels}
+                  max={phaseMax}
+                  name={labels.phaseName(phase.phaseKey, workPhases)}
+                  usage={phase.usage}
+                />
+              ))}
+            </ul>
+          </section>
+        ) : null}
       </div>
+    </div>
+  )
+}
+
+/** Props of the pull request interval part. */
+type PullRequestLeadTimesProps = {
+  /** Median of each interval. */
+  intervals: readonly FactoryAnalyticsPullRequestLeadTime[]
+  /** Locale-aware text. */
+  labels: FactoryAnalyticsLabels
+  /** Formats hours, or the not-available text for null. */
+  hours: (value: number | null) => string
+  /** Formats a number for the locale. */
+  formatNumber: (value: number) => string
+}
+
+/**
+ * Shows the median pull request intervals of the period, from creation to the first review, to
+ * approval, and to merge.
+ *
+ * @param props - Intervals, text, and formatters.
+ * @returns Interval part.
+ */
+function PullRequestLeadTimes({ intervals, labels, hours, formatNumber }: PullRequestLeadTimesProps) {
+  return (
+    <div className="flex flex-col gap-2" data-testid="factory-analytics-pull-requests">
+      <h3 className="text-sm font-semibold text-[var(--workbench-text)]">{labels.pullRequestHeading}</h3>
+      <p className="text-xs text-[var(--workbench-muted)]">{labels.pullRequestHint}</p>
+      <ol className="grid grid-cols-2 gap-2 min-[760px]:grid-cols-4">
+        {intervals.map((interval) => (
+          <li className="flex flex-col gap-0.5 rounded-md bg-[var(--workbench-surface-muted)] px-3 py-2" key={interval.interval}>
+            <span className="text-xs font-semibold text-[var(--workbench-muted)]">{labels.pullRequestIntervals[interval.interval]}</span>
+            <span className="text-lg font-semibold tabular-nums text-[var(--workbench-text)]">{hours(interval.medianHours)}</span>
+            <span className="text-xs text-[var(--workbench-muted)]">{labels.pullRequestSamples.replace('{count}', formatNumber(interval.sampleSize))}</span>
+          </li>
+        ))}
+      </ol>
     </div>
   )
 }
@@ -179,6 +243,7 @@ export function FactoryAnalyticsSummary({
   labels,
   formatNumber,
   projectNames = {},
+  workPhases,
 }: FactoryAnalyticsSummaryProps) {
   const headingId = useId()
   const periodId = useId()
@@ -308,7 +373,18 @@ export function FactoryAnalyticsSummary({
                 </div>
               </div>
 
-              {analytics.usage ? <UsageSummary labels={labels} projectNames={projectNames} usage={analytics.usage} /> : null}
+              {analytics.pullRequestLeadTimes.some((interval) => interval.sampleSize > 0) ? (
+                <PullRequestLeadTimes
+                  formatNumber={formatNumber}
+                  hours={hours}
+                  intervals={analytics.pullRequestLeadTimes}
+                  labels={labels}
+                />
+              ) : null}
+
+              {analytics.usage ? (
+                <UsageSummary labels={labels} projectNames={projectNames} usage={analytics.usage} workPhases={workPhases} />
+              ) : null}
             </>
           )}
         </>

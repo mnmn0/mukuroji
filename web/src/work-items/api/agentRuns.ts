@@ -6,6 +6,7 @@ import {
   AGENT_RUN_PULL_REQUEST_STATES,
   AGENT_RUN_ARTIFACT_TYPES,
   AGENT_RUN_RUNTIMES,
+  FACTORY_ANALYTICS_PULL_REQUEST_INTERVALS,
   FACTORY_ANALYTICS_STAGES,
   AGENT_RUN_REPORT_KINDS,
   AGENT_RUN_VERIFICATION_STATUSES,
@@ -24,6 +25,7 @@ import {
   type AgentRunVerification,
   type AgentRunView,
   type FactoryAnalyticsOutcomeCounts,
+  type FactoryAnalyticsPullRequestLeadTime,
   type FactoryAnalyticsRunSummary,
   type FactoryAnalyticsRuntimeSummary,
   type FactoryAnalyticsStageLeadTime,
@@ -454,6 +456,8 @@ function readTeamFactoryAnalytics(value: unknown): TeamFactoryAnalyticsResponse 
   if (validStages.length !== stageLeadTimes.length || validRuntimes.length !== runtimes.length) return undefined
   const usage = value.usage === undefined ? undefined : readFactoryAnalyticsUsage(value.usage)
   if (value.usage !== undefined && usage === undefined) return undefined
+  const pullRequestLeadTimes = readPullRequestLeadTimes(value.pullRequestLeadTimes)
+  if (!pullRequestLeadTimes) return undefined
   return {
     generatedAt,
     from,
@@ -464,8 +468,36 @@ function readTeamFactoryAnalytics(value: unknown): TeamFactoryAnalyticsResponse 
     finishedRunsHasMore,
     workItemsHasMore,
     historyHasMore,
+    pullRequestLeadTimes,
     ...(usage === undefined ? {} : { usage }),
   }
+}
+
+/**
+ * Validates the pull request intervals of a Factory analytics response. A server that predates them
+ * sends none, which reads as an empty list.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The intervals, or undefined when any entry is malformed.
+ */
+function readPullRequestLeadTimes(value: unknown): FactoryAnalyticsPullRequestLeadTime[] | undefined {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) return undefined
+  const intervals: FactoryAnalyticsPullRequestLeadTime[] = []
+  for (const entry of value) {
+    if (!isRecord(entry)) return undefined
+    const interval = FACTORY_ANALYTICS_PULL_REQUEST_INTERVALS.find((candidate) => candidate === entry.interval)
+    const { medianHours, sampleSize } = entry
+    if (
+      interval === undefined ||
+      (medianHours !== null && (typeof medianHours !== 'number' || !Number.isFinite(medianHours) || medianHours < 0)) ||
+      typeof sampleSize !== 'number' || !Number.isSafeInteger(sampleSize) || sampleSize < 0
+    ) {
+      return undefined
+    }
+    intervals.push({ interval, medianHours, sampleSize })
+  }
+  return intervals
 }
 
 /**
@@ -504,7 +536,18 @@ function readFactoryAnalyticsUsage(value: unknown): FactoryAnalyticsUsage | unde
       usage,
     })
   }
-  return { total, projects, workItems, runsHasMore: value.runsHasMore }
+  const phases: FactoryAnalyticsUsage['phases'] = []
+  // A server that predates work phases sends none.
+  if (value.phases !== undefined) {
+    if (!Array.isArray(value.phases)) return undefined
+    for (const phase of value.phases) {
+      if (!isRecord(phase) || typeof phase.phaseKey !== 'string') return undefined
+      const usage = readAgentRunUsage(phase.usage)
+      if (!usage) return undefined
+      phases.push({ phaseKey: phase.phaseKey, usage })
+    }
+  }
+  return { total, projects, workItems, phases, runsHasMore: value.runsHasMore }
 }
 
 /**

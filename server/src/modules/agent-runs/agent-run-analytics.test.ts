@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { AgentRunOutcome, AgentRunReport, AgentRunReportKind } from '@mukuroji/contracts'
-import { calculateFactoryAnalytics } from './domain/agent-run-analytics'
+import { calculateFactoryAnalytics, summarizePullRequestLeadTimes } from './domain/agent-run-analytics'
 import { createActiveAgentRun, finishAgentRun, readStartAgentRunRequest, type StoredAgentRun } from './domain/agent-run'
 
 const hourMs = 3_600_000
@@ -134,5 +134,27 @@ describe('calculateFactoryAnalytics', () => {
       histories: [{ runs: [before], runsComplete: true, reports: [] }, { runs: [after], runsComplete: true, reports: [] }],
     })
     expect(result.finishedRuns).toBe(0)
+  })
+})
+
+describe('pull request lead times', () => {
+  test('takes the median of each interval that ends in the period', () => {
+    const at = (hoursAgo: number) => new Date(end - hoursAgo * hourMs).toISOString()
+    const lead = summarizePullRequestLeadTimes([
+      { state: 'merged', draft: false, headSha: 'a', checks: 'success', review: 'approved', createdAt: at(20), firstReviewedAt: at(18), approvedAt: at(10), mergedAt: at(9) },
+      { state: 'merged', draft: false, headSha: 'b', checks: 'success', review: 'approved', createdAt: at(30), firstReviewedAt: at(22), approvedAt: at(21), mergedAt: at(1) },
+      // Reviewed before the period and still open: only its review wait is outside, so nothing counts.
+      { state: 'open', draft: false, headSha: 'c', checks: 'pending', review: 'none', createdAt: at(50), firstReviewedAt: at(40) },
+    ], period.from, period.to)
+    expect(lead).toEqual([
+      { interval: 'review-wait', medianHours: 5, sampleSize: 2 },
+      { interval: 'review', medianHours: 4.5, sampleSize: 2 },
+      { interval: 'merge-wait', medianHours: 10.5, sampleSize: 2 },
+      { interval: 'total', medianHours: 20, sampleSize: 2 },
+    ])
+  })
+
+  test('reports null medians without pull requests', () => {
+    expect(summarizePullRequestLeadTimes([], period.from, period.to).every((entry) => entry.medianHours === null && entry.sampleSize === 0)).toBe(true)
   })
 })

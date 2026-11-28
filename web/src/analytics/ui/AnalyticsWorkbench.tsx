@@ -351,6 +351,7 @@ const metricKeys = [
   'evm-spi',
   'evm-cpi',
   'evm-eac',
+  'status-time',
 ] as const satisfies readonly AnalyticsMetricKey[]
 
 const statusCategories = [
@@ -390,6 +391,7 @@ const metricLabelKeys: Record<AnalyticsMetricKey, MessageKey> = {
   'evm-spi': 'analytics.metric.evmSpi',
   'evm-cpi': 'analytics.metric.evmCpi',
   'evm-eac': 'analytics.metric.evmEac',
+  'status-time': 'analytics.metric.statusTime',
 }
 
 const metricDescriptionKeys: Record<AnalyticsMetricKey, MessageKey> = {
@@ -409,6 +411,7 @@ const metricDescriptionKeys: Record<AnalyticsMetricKey, MessageKey> = {
   'evm-spi': 'analytics.metricDescription.evmSpi',
   'evm-cpi': 'analytics.metricDescription.evmCpi',
   'evm-eac': 'analytics.metricDescription.evmEac',
+  'status-time': 'analytics.metricDescription.statusTime',
 }
 
 /** Dimensions an earned value widget may group by; it is measured per Project at the as-of date. */
@@ -2140,7 +2143,10 @@ function AnalyticsWidgetEditor({
               ? { ...next, groupBy: next.type === 'chart' ? { dimension: 'week' } : undefined }
               : isEarnedValueMetric(metric)
                 ? withEarnedValueGroupBy(next)
-                : next)
+                : metric !== 'status-time' && next.groupBy?.dimension === 'phase'
+                  // Only time in status groups by work phase.
+                  ? { ...next, groupBy: undefined }
+                  : next)
           }}
         >
           {metricKeys.map((metric) => <option key={metric} value={metric}>{t(metricLabelKeys[metric])}</option>)}
@@ -2179,6 +2185,7 @@ function AnalyticsWidgetEditor({
               'priority',
               'cycle',
               'milestone',
+              ...(widget.metric === 'status-time' ? ['phase'] : []),
               'custom-field',
             ]).map((dimension) => (
               <option key={dimension} value={dimension}>

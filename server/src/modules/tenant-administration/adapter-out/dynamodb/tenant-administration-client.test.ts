@@ -10,6 +10,7 @@ import type {
 } from '@mukuroji/contracts'
 import {
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS,
   type WorkspaceFileTypeSettings,
 } from '@mukuroji/contracts'
 import {
@@ -551,6 +552,48 @@ describe('DynamoDbTenantAdministrationClient', () => {
     })).rejects.toMatchObject({ code: 'TimeEntryCategoryRemoved', status: 400 })
     // Stored settings that no longer validate fail the read instead of falling back to defaults.
     items.set('PROFILE', { ...items.get('PROFILE'), timeEntryCategories: { categories: [] } })
+    await expect(client.getProfile('workspace-1')).rejects.toThrow()
+  })
+
+  test('retires work phases but refuses to drop one already offered', async () => {
+    const items = createAggregateItems()
+    const client = new DynamoDbTenantAdministrationClient(
+      'TenantAdministrationTable',
+      createDocumentClient((command) => {
+        if (command.constructor.name === 'TransactWriteCommand') return {}
+        const recordKey = readRecordKey(command)
+        if (!recordKey) return {}
+        const value = items.get(recordKey)
+        return value ? { Item: createStateItem(recordKey, value) } : {}
+      }),
+      () => '2026-08-02T00:00:00.000Z',
+    )
+    const input = {
+      region: 'ap-northeast-1',
+      locale: 'ja',
+      defaultPolicy: { defaultMemberRole: 'member' },
+      expectedRevision: 0,
+    } satisfies import('@mukuroji/contracts').UpdateTenantProfileInput
+    const builtIns = DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS.phases
+
+    await expect(client.updateProfile('workspace-1', 'system-admin-1', {
+      ...input,
+      workPhases: { phases: builtIns.filter((phase) => phase.key !== 'evaluation'), categoryPhases: {} },
+    })).rejects.toMatchObject({ code: 'WorkPhaseRemoved', status: 400 })
+
+    const retired = {
+      phases: [
+        ...builtIns.map((phase) => phase.key === 'evaluation' ? { ...phase, active: false } : phase),
+        { key: 'custom-operation', label: '運用', active: true },
+      ],
+      categoryPhases: { implementation: 'implementation', meeting: 'custom-operation' },
+    }
+    const saved = await client.updateProfile('workspace-1', 'system-admin-1', { ...input, workPhases: retired })
+    expect(saved.workPhases).toEqual(retired)
+    items.set('PROFILE', { ...items.get('PROFILE'), workPhases: retired })
+    expect((await client.getProfile('workspace-1'))?.workPhases).toEqual(retired)
+    // A category mapped to a phase that is not listed fails the read instead of falling back.
+    items.set('PROFILE', { ...items.get('PROFILE'), workPhases: { ...retired, categoryPhases: { meeting: 'unknown' } } })
     await expect(client.getProfile('workspace-1')).rejects.toThrow()
   })
 

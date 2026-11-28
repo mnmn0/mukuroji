@@ -22,6 +22,20 @@ describe('Work Item workflow definition domain', () => {
     })
   })
 
+  test('keeps a status work phase key and rejects one that is not a phase key', () => {
+    const workflow = (phaseKey: unknown) => ({
+      id: 'default',
+      name: 'Default',
+      initialStatusId: 'todo',
+      statuses: [{ id: 'todo', name: 'To do', category: 'unstarted', sortOrder: 0, phaseKey }],
+      transitions: [],
+    })
+    expect(validateWorkflowDefinition(workflow('review')).statuses[0]?.phaseKey).toBe('review')
+    expect(validateWorkflowDefinition(workflow(null)).statuses[0]).not.toHaveProperty('phaseKey')
+    expect(() => validateWorkflowDefinition(workflow('no-phase'))).toThrow(WorkflowDefinitionValidationError)
+    expect(() => validateWorkflowDefinition(workflow('Review'))).toThrow(WorkflowDefinitionValidationError)
+  })
+
   test('rejects transitions to undefined statuses with a stable pure error', () => {
     expect(() => validateWorkflowDefinition({
       id: 'default',

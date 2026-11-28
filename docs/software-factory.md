@@ -397,6 +397,12 @@ Factory board の上部に、期間内に終わった Run の集計を出す。d
   （新しい順に最大 300 件、超えたら `runsHasMore`）の合計、Project 別の合計、トークンの多い Work Item 上位 10 件を
   返す。推定費用は Team manager にだけ入れる。Analytics の report では `agent-tokens` / `agent-cost` metric として
   widget・snapshot・export に使える（[ADR 0108](adr/0108-analytics-agent-usage-metrics.md)、[docs/analytics.md](analytics.md)）。
+- 工程別の usage（`usage.phases`、[ADR 0115](adr/0115-work-phases.md)）は、Run の開始時に保存した Work Item のステータス
+  （`startWorkflowStatusId`）を Team の今の設定で工程に引いて足す。工程のないステータスと、保存前の Run は `no-phase`。
+- プルリクエストの間隔（`pullRequestLeadTimes`）は、期間サマリーで読む Work Item の Run が報告し、照会済み（`verified`）の
+  プルリクエストの状態（ADR 0103）にある作成・最初のレビュー・承認・マージの時刻から、区間の終わりが期間内のものの中央値を返す。
+  最初のレビューは作成者以外の提出済みレビュー、承認は取り消されていない承認のうち最も早いもの。CI の待ち時間は check の時刻を
+  保存していないので測らない（#827）。
 
 ## Triage への自動起票
 

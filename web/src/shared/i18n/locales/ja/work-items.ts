@@ -645,6 +645,8 @@ export const workItemsMessages = {
   'workItems.configuration.moveStatusDown': '{status} を下へ移動',
   'workItems.configuration.removeStatus': '{status} を削除',
   'workItems.configuration.initialStatus': '作成時の初期状態',
+  'workItems.configuration.statusPhase': '工程',
+  'workItems.configuration.statusPhaseFor': '{status} の工程',
   'workItems.configuration.transitionTitle': '遷移マトリクス',
   'workItems.configuration.transitionDescription': '現在の状態から直接変更できる行き先を選択します。',
   'workItems.configuration.transitionFromTo': '現在 ↓ / 次 →',

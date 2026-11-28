@@ -1257,7 +1257,14 @@ function createPublicWorkItemTypeCatalog(
             id: workflow.id,
             name: workflow.name,
             initialStatusId: workflow.initialStatusId,
-            statuses: workflow.statuses,
+            // The Public API status schema is closed, so only its documented fields cross the boundary.
+            statuses: workflow.statuses.map((status) => ({
+              id: status.id,
+              name: status.name,
+              category: status.category,
+              sortOrder: status.sortOrder,
+              ...(status.color === undefined ? {} : { color: status.color }),
+            })),
           },
           customFields,
         }

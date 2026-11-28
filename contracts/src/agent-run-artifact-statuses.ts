@@ -54,6 +54,12 @@ export type AgentRunPullRequestStatus = {
   checks: AgentRunPullRequestCheckState
   /** Review state from each reviewer's latest approval or change request. */
   review: AgentRunPullRequestReviewState
+  /** When the pull request was opened (ADR 0115). */
+  createdAt?: string
+  /** When someone other than the author first submitted a review. */
+  firstReviewedAt?: string
+  /** When the earliest approval that still stands was given; present only while `review` is `approved`. */
+  approvedAt?: string
   /** When the pull request was merged. */
   mergedAt?: string
   /** Merge commit SHA, once merged. */
