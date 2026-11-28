@@ -1,5 +1,7 @@
 import type { ProjectDecisionOrigin } from '@mukuroji/contracts'
 import { useRef, useState } from 'react'
+import { readAccessTokenSubject } from '../../auth/session'
+import { onSessionDraftsDiscarded } from '../../auth/sessionDrafts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { ProjectDecisionFormPrefill } from '../model/projectDecisionForm'
 import { useSaveProjectDecision } from '../mutations/useSaveProjectDecision'
@@ -28,15 +30,32 @@ export type RecordDecisionButtonProps = {
   disabled?: boolean
   /**
    * Names what the decision is recorded from, such as one Work Item, so a failed save's form
-   * comes back when the same item is shown again after another one was selected.
+   * comes back to the same account when the same item is shown again after another one was
+   * selected.
    */
   draftKey?: string
   /** Translator. */
   t: (key: MessageKey) => string
 }
 
-/** Forms whose save failed, by draft key, kept while another item is shown. */
+/**
+ * Forms whose save failed, by signed-in account and draft key, kept while another item is shown.
+ * Another account never sees them, and signing out drops them.
+ */
 const unsentDrafts = new Map<string, RecordDecisionUnsentDraft>()
+onSessionDraftsDiscarded(() => unsentDrafts.clear())
+
+/**
+ * Builds the key a failed form is kept under.
+ *
+ * @param accessToken - Token of the signed-in account.
+ * @param draftKey - Item the decision is recorded from.
+ * @returns The key, or `undefined` when the account or the item is unknown and nothing is kept.
+ */
+function unsentDraftStoreKey(accessToken: string | undefined, draftKey: string | undefined): string | undefined {
+  const owner = accessToken ? readAccessTokenSubject(accessToken) : undefined
+  return owner && draftKey !== undefined ? JSON.stringify([owner, draftKey]) : undefined
+}
 
 /**
  * Renders a "Record as decision" button that opens the record dialog and confirms the save.
@@ -66,8 +85,9 @@ export function RecordDecisionButton({
   const openCount = useRef(0)
   const [openedAs, setOpenedAs] = useState(0)
   // A failed save's form is reopened as it was, so its retry reuses the same Idempotency-Key.
+  const storeKey = unsentDraftStoreKey(accessToken, draftKey)
   const [unsentDraft, setUnsentDraftState] = useState<RecordDecisionUnsentDraft | undefined>(
-    () => (draftKey === undefined ? undefined : unsentDrafts.get(draftKey)),
+    () => (storeKey === undefined ? undefined : unsentDrafts.get(storeKey)),
   )
   /**
    * Keeps or drops the failed form, also for a later mount with the same draft key.
@@ -76,9 +96,9 @@ export function RecordDecisionButton({
    */
   const setUnsentDraft = (draft: RecordDecisionUnsentDraft | undefined) => {
     setUnsentDraftState(draft)
-    if (draftKey === undefined) return
-    if (draft) unsentDrafts.set(draftKey, draft)
-    else unsentDrafts.delete(draftKey)
+    if (storeKey === undefined) return
+    if (draft) unsentDrafts.set(storeKey, draft)
+    else unsentDrafts.delete(storeKey)
   }
   return (
     <>

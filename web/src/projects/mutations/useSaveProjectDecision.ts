@@ -1,20 +1,23 @@
 import type { ProjectDecisionEntry, ProjectDecisionEntryInput } from '@mukuroji/contracts'
 import { useCallback } from 'react'
 import { useSWRConfig } from 'swr'
+import { readAccessTokenSubject } from '../../auth/session'
+import { onSessionDraftsDiscarded } from '../../auth/sessionDrafts'
 import { createMutationRequestContext, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { ProjectDirectoryApiError } from '../api/errors'
 import { createProjectDecision, updateProjectDecision } from '../api/decisionLog'
 import { isTeamDecisionLogKey, projectDecisionLogKey } from '../queries/useProjectDecisionLog'
 
 /**
- * Request contexts of saves that got no answer, by input.
+ * Request contexts of saves that got no answer, by signed-in account and input.
  *
  * They live outside any component, so a retry reuses the Idempotency-Key even after the screen
- * that started the save was left, such as when another Work Item was selected meanwhile. The
- * access token is not part of the key, so a retry after the token was refreshed keeps it too;
- * the server derives the decision ID from the key together with the signed-in member.
+ * that started the save was left, such as when another Work Item was selected meanwhile. The key
+ * names the account by its token subject rather than the token, so a retry after the token was
+ * refreshed keeps it too. Signing out drops them.
  */
 const pendingSaves = new Map<string, MutationRequestContext>()
+onSessionDraftsDiscarded(() => pendingSaves.clear())
 
 /** Session a save applies to. */
 export type ProjectDecisionSaveScope = {
@@ -45,7 +48,7 @@ export function useSaveProjectDecision({ accessToken }: ProjectDecisionSaveScope
   ): Promise<ProjectDecisionEntry | undefined> => {
     if (!accessToken || !teamId) return undefined
     const key = projectDecisionLogKey(accessToken, teamId, projectId)
-    const fingerprint = JSON.stringify([teamId, projectId, entry?.id ?? null, entry?.revision ?? null, input])
+    const fingerprint = JSON.stringify([readAccessTokenSubject(accessToken) ?? null, teamId, projectId, entry?.id ?? null, entry?.revision ?? null, input])
     const context = pendingSaves.get(fingerprint) ?? createMutationRequestContext()
     pendingSaves.set(fingerprint, context)
     /** Drops this save's context, but not one that a later save of the same input started. */

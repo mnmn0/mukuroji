@@ -8,6 +8,7 @@ import {
   toProjectDecisionEntryInput,
   toProjectDecisionFormValues,
 } from '../src/projects/model/projectDecisionForm'
+import { discardSessionDrafts } from '../src/auth/sessionDrafts'
 import { useSaveProjectDecision } from '../src/projects/mutations/useSaveProjectDecision'
 import { loadTeamDecisionNotes } from '../src/projects/queries/useTeamDecisionNotes'
 import { ProjectDecisionLogPanel } from '../src/projects/ui/ProjectDecisionLogPanel'
@@ -256,5 +257,19 @@ describe('saving a decision', () => {
     expect(keys).toHaveLength(2)
     expect(keys[0]).toBeTruthy()
     expect(keys[1]).toBe(keys[0])
+  })
+
+  test('drops the kept Idempotency-Key on sign-out', async () => {
+    const keys: (string | null)[] = []
+    globalThis.fetch = async (_input, init) => {
+      keys.push(new Headers(init?.headers).get('Idempotency-Key'))
+      return new Response(JSON.stringify({ code: 'Unavailable' }), { status: 503 })
+    }
+    const input = toProjectDecisionEntryInput(toProjectDecisionFormValues(undefined, { title: 'サインアウト前の決定' }), 'work-item')
+    await expect(mountSave()('core-team', 'atlas', undefined, input)).rejects.toThrow()
+    discardSessionDrafts()
+    await expect(mountSave()('core-team', 'atlas', undefined, input)).rejects.toThrow()
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).not.toBe(keys[0])
   })
 })
