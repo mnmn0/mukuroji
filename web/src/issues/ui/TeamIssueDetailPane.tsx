@@ -106,6 +106,7 @@ import {
   type TeamIssueTypeChangeState,
 } from './teamIssueScreenShared'
 import { usePromoteProjectRisk } from '../../projects/mutations/usePromoteProjectRisk'
+import { RecordDecisionButton } from '../../projects/ui/RecordDecisionButton'
 
 /**
  * Renders the detail pane for the selected Team Work Item.
@@ -1297,6 +1298,21 @@ function IssueDetailContent({
             ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            {onUpdateIssue && issue.assignedProjectId ? (
+              <RecordDecisionButton
+                key={issue.id}
+                accessToken={accessToken}
+                createPrefill={() => ({ title: resolveIssueTitle(issue, t), relatedWorkItemIds: [issue.id] })}
+                disabled={isAiSummaryOperationPending}
+                draftKey={`work-item:${issue.teamId}:${issue.id}`}
+                defaultProject={{ teamId: issue.teamId, id: issue.assignedProjectId }}
+                lockProject
+                origin="work-item"
+                projects={projects.map((project) => ({ teamId: issue.teamId, id: project.id, name: project.name }))}
+                t={t}
+                workItemOptions={[{ id: issue.id, label: issue.key ? `${issue.key} ${issue.title}` : issue.title }]}
+              />
+            ) : null}
             {onDuplicateIssue ? (
               <button
                 className="workbench-button-secondary h-8 px-3 text-xs"

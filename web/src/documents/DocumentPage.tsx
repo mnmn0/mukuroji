@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from 'react'
 import { createPortal, flushSync } from 'react-dom'
 import type {
@@ -50,6 +51,7 @@ import {
   type MessageKey,
 } from '../shared/i18n/i18n'
 import type { ProjectDirectoryTeam } from '../projects/api'
+import { RecordDecisionButton } from '../projects/ui/RecordDecisionButton'
 import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
 import {
   createDocumentPath,
@@ -1775,6 +1777,10 @@ export function DocumentScreen({
     selectedDocument?.kind === 'page' || selectedDocument?.kind === 'template'
       ? selectedDocument
       : undefined
+  const decisionProjects = useMemo(
+    () => listDecisionProjects(data.teams, selectedDocument?.scope),
+    [data.teams, selectedDocument?.scope],
+  )
 
   /**
    * Mounts the print-only document copy, opens the browser print dialog and
@@ -2134,6 +2140,29 @@ export function DocumentScreen({
                   )
                 }
               : undefined
+          }
+          recordDecision={
+            selectedDocument && selectedDocument.kind !== 'folder' && decisionProjects.length > 0 ? (
+              <RecordDecisionButton
+                key={selectedDocument.id}
+                accessToken={accessToken}
+                className="workbench-button-secondary inline-flex min-h-9 shrink-0 px-3"
+                draftKey={`document:${selectedDocument.id}`}
+                createPrefill={() => ({
+                  title: selectedDocument.title,
+                  sources: [{
+                    url: `${window.location.origin}${window.location.pathname}`,
+                    label: selectedDocument.title,
+                  }],
+                })}
+                {...(selectedDocument.scope.type === 'project' && decisionProjects.length === 1 && decisionProjects[0]
+                  ? { defaultProject: decisionProjects[0], lockProject: true }
+                  : {})}
+                origin="document"
+                projects={decisionProjects}
+                t={t}
+              />
+            ) : undefined
           }
           onShareOpen={
             selectedDocument?.capabilities.canShare
@@ -3445,6 +3474,24 @@ function DocumentWorkspace({
   )
 }
 
+/**
+ * Lists the Projects a decision read from a Document may be recorded in: the Document's own
+ * Project for a Project Document, or every Project of the directory for a Workspace Document.
+ *
+ * @param teams - Teams and Projects the viewer can see.
+ * @param scope - Scope of the Document.
+ * @returns The Projects with their Teams.
+ */
+function listDecisionProjects(teams: readonly ProjectDirectoryTeam[], scope: DocumentRecord['scope'] | undefined) {
+  const all = teams.flatMap((team) => (team.projects ?? []).map((project) => ({
+    teamId: team.id,
+    id: project.id,
+    name: teams.length > 1 ? `${project.name} (${team.name})` : project.name,
+  })))
+  if (scope?.type !== 'project') return all
+  return all.filter((project) => project.id === scope.projectId)
+}
+
 function DocumentHeader({
   contextTab,
   isExportMenuOpen,
@@ -3461,6 +3508,7 @@ function DocumentHeader({
   onShareOpen,
   onTreeOpen,
   presence,
+  recordDecision,
   selectedDocument,
   t,
   userInitial,
@@ -3481,6 +3529,8 @@ function DocumentHeader({
   onShareOpen?: () => void
   onTreeOpen: () => void
   presence: DocumentPresence[]
+  /** Button that records a decision from this Document, when any Project can receive it. */
+  recordDecision?: ReactNode
   selectedDocument?: DocumentRecord
   t: (key: MessageKey) => string
   userInitial: string
@@ -3599,6 +3649,7 @@ function DocumentHeader({
           >
             ◫
           </button>
+          {recordDecision}
           {onShareOpen ? (
             <button
               className="workbench-button-primary hidden min-h-9 px-3 sm:inline-flex"

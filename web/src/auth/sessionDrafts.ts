@@ -202,13 +202,31 @@ export function keepSessionDraftsOnlyFor(owner: string | undefined) {
   if (stored && stored.owner !== owner) discardStoredDrafts()
 }
 
+/** Callbacks that drop drafts kept in memory elsewhere when this tab's drafts are discarded. */
+const discardListeners = new Set<() => void>()
+
+/**
+ * Runs a callback whenever this tab's drafts are discarded, such as on an explicit sign-out, so
+ * input kept in memory outside this module goes with them.
+ *
+ * @param listener - Drops the caller's own kept input.
+ * @returns A function that removes the callback.
+ */
+export function onSessionDraftsDiscarded(listener: () => void): () => void {
+  discardListeners.add(listener)
+  return () => {
+    discardListeners.delete(listener)
+  }
+}
+
 /**
  * Removes every preserved draft of this tab, such as on an explicit sign-out.
  *
  * Inputs still mounted are marked so that unmounting them afterwards does not keep their value
- * again.
+ * again, and input kept in memory by {@link onSessionDraftsDiscarded} callers is dropped too.
  */
 export function discardSessionDrafts() {
+  for (const listener of discardListeners) listener()
   for (const registration of registrations) registration.discarded = true
   retainedRegistrations.clear()
   discardStoredDrafts()
