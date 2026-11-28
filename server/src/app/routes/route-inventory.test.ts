@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(696)
-  expect(new Set(inventory).size).toBe(692)
+  expect(inventory).toHaveLength(700)
+  expect(new Set(inventory).size).toBe(696)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -62,6 +62,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/raid-log')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/raid-log/entries')
   expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/raid-log/entries/:entryId')
+  expect(inventory).toContain('GET /api/teams/:teamId/decision-log')
+  expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/decision-log')
+  expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/decision-log/entries')
+  expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/decision-log/entries/:entryId')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/status-report/pdf')
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/status-shares')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/status-shares')
@@ -253,6 +257,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '97344cdd60a8ba60a338cd9be4755cf873cc31015dc06cc38acb6d05e18a0576',
+    'f9f2e8f8ed9837af94ba026f1e74ec77acea40ef84f8d933b62e750affb64e04',
   )
 })

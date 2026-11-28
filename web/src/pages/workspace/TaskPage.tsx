@@ -66,6 +66,7 @@ import {
 } from '../../projects/model/projectCharterView'
 import { ProjectCharterSection } from '../../projects/ui/ProjectCharterSection'
 import { ProjectRaidLogSection } from '../../projects/ui/ProjectRaidLogSection'
+import { ProjectDecisionLogSection } from '../../projects/ui/ProjectDecisionLogSection'
 import {
   TeamIssuesApiError,
   type TeamIssue,
@@ -2227,6 +2228,16 @@ export function TaskPage() {
                 redirectEnterpriseSessionError(error)
               }
             }}
+          />
+          <ProjectDecisionLogSection
+            accessToken={accessToken}
+            canMutate={canMutateContent}
+            enabled={Boolean(user && !currentUserError)}
+            locale={locale}
+            memberOptions={raidOwnerOptions}
+            projectId={projectId}
+            t={t}
+            teamId={interactionTeamId}
           />
         </>
       )}
