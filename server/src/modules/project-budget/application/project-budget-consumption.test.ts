@@ -217,7 +217,7 @@ describe('loadProjectBudgetConsumption Agent Run cost (ADR 0119)', () => {
     const reads: unknown[] = []
     const consumption = await loadProjectBudgetConsumption(scope, 'Asia/Tokyo', new Date('2026-01-20T00:00:00.000Z'), agentPorts('USD', reads))
 
-    expect(reads).toEqual([{ workItemIds: ['a', 'c'], since: '2026-01-04T10:00:00.000Z', until: '2026-01-21T14:00:00.000Z', counts: [false, true, true, false] }])
+    expect(reads).toEqual([{ workItemIds: ['a', 'c'], since: '2026-01-04T15:00:00.000Z', until: '2026-01-20T14:59:59.999Z', counts: [false, true, true, false] }])
     expect(consumption).toMatchObject({ actualCostMinor: 4_000, consumedPercent: 40 })
   })
 

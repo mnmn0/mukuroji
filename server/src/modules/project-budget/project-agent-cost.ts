@@ -51,7 +51,7 @@ export type ProjectAgentRunCostReader = (input: {
   until: string
   /**
    * Whether a run that finished at an ISO 8601 instant counts; runs it rejects do not use up
-   * `maxRuns`. The padded instant range above holds a little more than the local date range.
+   * `maxRuns`. It guards the local date range when the instant range above is wider.
    */
   countsFinishedAt?: (finishedAt: string) => boolean
   /** Most runs with a cost to return before the read is marked truncated. */
@@ -77,6 +77,52 @@ export function projectAgentRunFinishDateTest(
     const date = toWorkspaceLocalDate(finishedAt, timeZone)
     return (from === undefined || date >= from) && date <= to
   }
+}
+
+/** Milliseconds in a UTC day. */
+const DAY_MS = 86_400_000
+
+/** Farthest any time zone is from UTC, so a local date starts within this much of its UTC midnight. */
+const MAX_TIMEZONE_OFFSET_MS = 14 * 3_600_000
+
+/**
+ * Finds the first instant whose local date, in a time zone, is on or after a date. It searches
+ * the hours around the date's UTC midnight, because every zone is within 14 hours of UTC.
+ *
+ * @param date - Local date, `YYYY-MM-DD`.
+ * @param timeZone - IANA time zone.
+ * @returns Milliseconds since the epoch of the local start of the date.
+ */
+function localDateStartMs(date: string, timeZone: string): number {
+  const midnight = Date.parse(`${date}T00:00:00Z`)
+  let low = midnight - MAX_TIMEZONE_OFFSET_MS
+  let high = midnight + MAX_TIMEZONE_OFFSET_MS
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2)
+    if (toWorkspaceLocalDate(new Date(middle).toISOString(), timeZone) >= date) high = middle
+    else low = middle + 1
+  }
+  return low
+}
+
+/**
+ * Builds the finish instants of the Agent Runs whose local finish date, in the budget's time
+ * zone, falls within a date range (ADR 0119). The bounds are exact so that runs of the days just
+ * outside the range do not use up the finished-run index pages of one read.
+ *
+ * @param timeZone - Budget time zone.
+ * @param from - First local date counted, or undefined for no lower bound.
+ * @param to - Last local date counted.
+ * @returns Inclusive ISO 8601 bounds; `since` is absent without a lower bound.
+ */
+export function projectAgentRunFinishRange(
+  timeZone: string,
+  from: string | undefined,
+  to: string,
+): { since?: string; until: string } {
+  const nextDay = new Date(Date.parse(`${to}T00:00:00Z`) + DAY_MS).toISOString().slice(0, 10)
+  const until = new Date(localDateStartMs(nextDay, timeZone) - 1).toISOString()
+  return from === undefined ? { until } : { since: new Date(localDateStartMs(from, timeZone)).toISOString(), until }
 }
 
 /** Agent Run cost a Project budget measurement adds, already read. */

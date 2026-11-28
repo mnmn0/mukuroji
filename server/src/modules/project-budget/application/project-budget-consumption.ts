@@ -13,6 +13,7 @@ import {
   toProjectAgentRunCosts,
   type ProjectAgentRunCostReader,
   projectAgentRunFinishDateTest,
+  projectAgentRunFinishRange,
 } from '../project-agent-cost'
 
 /** Most Team Work Item pages one Project's Agent Run cost reads to find the Project's Work Items. */
@@ -243,10 +244,7 @@ async function loadAgentCostMinor(
     workspaceId: scope.workspaceId,
     teamId: scope.teamId,
     workItemIds,
-    ...(budget.periodFrom === undefined
-      ? {}
-      : { since: new Date(Date.parse(`${budget.periodFrom}T00:00:00Z`) - MAX_TIMEZONE_OFFSET_MS).toISOString() }),
-    until: new Date(Date.parse(`${asOf}T00:00:00Z`) + DAY_MS + MAX_TIMEZONE_OFFSET_MS).toISOString(),
+    ...projectAgentRunFinishRange(timeZone, budget.periodFrom, asOf),
     countsFinishedAt: projectAgentRunFinishDateTest(timeZone, budget.periodFrom, asOf),
     maxRuns: MAX_PROJECT_AGENT_COST_RUNS,
   })

@@ -205,8 +205,8 @@ describe('loadProjectBudgetReport Agent Run cost (ADR 0119)', () => {
       workspaceId: 'w',
       teamId: 't',
       workItemIds: ['a'],
-      since: '2026-01-04T10:00:00.000Z',
-      until: '2026-01-07T14:00:00.000Z',
+      since: '2026-01-04T15:00:00.000Z',
+      until: '2026-01-06T14:59:59.999Z',
       maxRuns: 1_000,
       counts: [false, true, true, false],
     }])
