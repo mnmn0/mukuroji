@@ -235,12 +235,9 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
     } catch (error) {
       const reasons = readCancellationCodes(error)
       const transactionSize = 2 + input.callerAuthorization.length + (audit ? 1 : 0)
-      const callerAuthorizationFailed = reasons
-        ?.slice(2, 2 + input.callerAuthorization.length)
-        .includes('ConditionalCheckFailed') ?? false
-      // A caller whose access changed gets the same answer as for any other write, even when
-      // the decision or the counter also failed.
-      if (callerAuthorizationFailed) return storageFailure(error, transactionSize)
+      // A caller whose access changed, or whose fences did not pass cleanly, gets the same answer
+      // as for any other write, even when the decision or the counter also failed.
+      if (!callerFencesPassed(reasons, 2, input.callerAuthorization.length)) return storageFailure(error, transactionSize)
       if (reasons?.[0] === 'ConditionalCheckFailed') {
         // The entry ID comes from the request's idempotency key, so an existing decision means
         // the same request was already applied, unless it carried different content.
@@ -310,10 +307,8 @@ export class DynamoDbProjectDecisionLogStore implements ProjectDecisionLogStore 
     } catch (error) {
       const transactionSize = 1 + input.callerAuthorization.length + (audit ? 1 : 0)
       const reasons = readCancellationCodes(error)
-      const callerAuthorizationFailed = reasons
-        ?.slice(1, 1 + input.callerAuthorization.length)
-        .includes('ConditionalCheckFailed') ?? false
-      if (!callerAuthorizationFailed && reasons?.[0] === 'ConditionalCheckFailed') {
+      // Only a revision failure with every caller fence confirmed may turn into an earlier success.
+      if (callerFencesPassed(reasons, 1, input.callerAuthorization.length) && reasons?.[0] === 'ConditionalCheckFailed') {
         // A concurrent attempt of this same request may have taken the revision first.
         const current = await this.readRow(input, input.next.id)
         if (current) {
@@ -514,6 +509,19 @@ export class InMemoryProjectDecisionLogStore implements ProjectDecisionLogStore 
     })
     return input.next
   }
+}
+
+/**
+ * Tells whether every caller authorization fence of a cancelled transaction passed.
+ *
+ * @param reasons - Cancellation codes in transaction order, or `undefined` when unknown.
+ * @param start - Index of the first fence.
+ * @param count - Number of fences.
+ * @returns Whether each fence reported `None`; unknown or other codes count as not passed.
+ */
+function callerFencesPassed(reasons: readonly (string | undefined)[] | undefined, start: number, count: number): boolean {
+  if (!reasons || reasons.length < start + count) return false
+  return reasons.slice(start, start + count).every((reason) => reason === 'None')
 }
 
 /**

@@ -22,11 +22,14 @@
 2. 決定は要約（200 文字）、決めた内容と理由（各 2,000 文字）、決めた人（Project member の member key、10 人まで）、
    Project 外の決めた人の自由記述（200 文字）、決めた日時（UTC、server 時刻より24時間を超えて先は不可、秒の小数はミリ秒まで）、関連 Work Item（同じ
    Project の Work Item、10 件まで）、出典（`https` / `http` の URL、認証情報を含まない 1,000 文字まで、5 件まで、表示名付き）、
-   置き換えた決定（同じ Project の決定）、記録元（`project` / `work-item` / `document` / `slack`）、記録した人を持つ。
+   置き換えた決定（同じ Project の決定）、記録元（`project` / `work-item` / `document` / `slack`）、記録した人（member key、254 文字まで）を持つ。
    記録元と記録した人は最初の記録のまま変えない。`slack` は Slack の shortcut だけが server 側で付け、HTTP の body からは受けない。
 3. 決定 ID は Idempotency-Key・actor・Project から決まる hash にし、同じ request の再送は保存済みの決定を返す
    （ADR 0024 と同じ）。関連 Work Item は、呼び出し元が読めて同じ Project にあることを確かめ、Project 割り当ての fence を
    同じ transaction に入れる。決めた人は記録の時点で Project member であることを確かめ、後で抜けても記録には残すので fence は置かない。
+   更新は Idempotency-Key と内容の receipt を決定の行に直近 20 件まで残し、revision の確認より前に照合する。再送の窓は
+   「その決定の後続更新が 20 件に達するまで」で、応答を失った端末が数秒から数分で再送する用途には足りる。receipt を別行に
+   無期限で残すと、決定ごとに行が増え続け TTL の管理も要るので採らない。
 4. 読み取りは Project の viewer、記録・編集は Project の member（Enterprise は `projects.read` / `projects.write`）で、
    リスク・課題・変更要求の登録簿と同じ判定にする。
 5. Team の意思決定ログ（`GET /api/teams/:teamId/decision-log`）は、読み取りのたびに `begins_with(recordKey, PROJECT_DECISION#<teamId>#)`
@@ -51,7 +54,7 @@
 ## 結果
 
 - 1 Project 100 件まで保存できる。上限は、全件を返す Project の一覧が自由記述と出典を最大まで使っても Lambda の 6 MB
-  応答上限に収まるように決めた。1 件は各項目の上限で約 14,000 文字になる。引用符やバックスラッシュは JSON で 2 バイト、
+  応答上限に収まるように決めた。1 件は記録した人を含む各項目の上限で約 14,600 文字になる。引用符やバックスラッシュは JSON で 2 バイト、
   Lambda の応答が本文をさらに JSON 文字列に入れると 4 バイトになるので、1 件は最大でおよそ 58 KB、100 件で約 5.8 MB になる。Team の一覧は 100 件までで、件数と同じく応答上限に収まる。
 - Team の一覧は Team の決定を全件読むので、決定が増えると読み取り単位と応答時間が伸びる。数千件を超えるようなら、
   日時順の index か検索 index を足す新しい ADR を作る。

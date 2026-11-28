@@ -2144,6 +2144,7 @@ export function DocumentScreen({
           recordDecision={
             selectedDocument && selectedDocument.kind !== 'folder' && decisionProjects.length > 0 ? (
               <RecordDecisionButton
+                key={selectedDocument.id}
                 accessToken={accessToken}
                 className="workbench-button-secondary inline-flex min-h-9 shrink-0 px-3"
                 createPrefill={() => ({

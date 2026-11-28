@@ -6,6 +6,7 @@ import {
   toProjectDecisionEntryInput,
   toProjectDecisionFormValues,
   type ProjectDecisionFormPrefill,
+  type ProjectDecisionFormValues,
 } from '../model/projectDecisionForm'
 import { describeProjectDecisionSaveError } from '../model/projectDecisionMessages'
 import type { useSaveProjectDecision } from '../mutations/useSaveProjectDecision'
@@ -33,6 +34,14 @@ function projectKey(project: Pick<RecordDecisionProjectOption, 'teamId' | 'id'>)
   return JSON.stringify([project.teamId, project.id])
 }
 
+/** Form of a save that failed, kept so reopening the dialog retries exactly the same request. */
+export type RecordDecisionUnsentDraft = {
+  /** Select value of the chosen Project. */
+  projectKey: string
+  /** Form values sent with the failed save. */
+  values: ProjectDecisionFormValues
+}
+
 /** Props of the dialog that records a decision from a Work Item or Document screen. */
 export type RecordDecisionDialogProps = {
   /** Cognito access token. */
@@ -47,6 +56,14 @@ export type RecordDecisionDialogProps = {
   lockProject?: boolean
   /** Values the screen suggests. */
   prefill: ProjectDecisionFormPrefill
+  /** Form of an earlier failed save; when present it replaces the prefill. */
+  unsentDraft?: RecordDecisionUnsentDraft
+  /**
+   * Receives the form of a save that failed, so the opener can offer it again.
+   *
+   * @param draft - Project and values sent with the failed save.
+   */
+  onUnsent?: (draft: RecordDecisionUnsentDraft) => void
   /** Labels of the Work Items the prefill names. */
   workItemOptions?: readonly ProjectDecisionReferenceOption[]
   /** Screen the decision is recorded from. */
@@ -76,6 +93,8 @@ export function RecordDecisionDialog({
   defaultProject,
   lockProject = false,
   prefill,
+  unsentDraft,
+  onUnsent,
   workItemOptions,
   origin,
   t,
@@ -90,12 +109,13 @@ export function RecordDecisionDialog({
   }
   const dialogRef = useModalFocus<HTMLElement>(closeUnlessSaving)
   const [selectedKey, setSelectedKey] = useState(() => {
+    if (unsentDraft) return unsentDraft.projectKey
     const initial = defaultProject ?? (projects.length === 1 ? projects[0] : undefined)
     return initial ? projectKey(initial) : ''
   })
   const selected = projects.find((project) => projectKey(project) === selectedKey)
   const projectId = selected?.id ?? ''
-  const [values, setValues] = useState(() => toProjectDecisionFormValues(undefined, prefill))
+  const [values, setValues] = useState(() => unsentDraft?.values ?? toProjectDecisionFormValues(undefined, prefill))
   const [saveError, setSaveError] = useState<string>()
   // A Team-qualified lookup resolves a Project ID that several Teams share.
   const members = useProjectMembers(accessToken, projectId || undefined, Boolean(projectId), selected?.teamId)
@@ -123,6 +143,8 @@ export function RecordDecisionDialog({
       if (stored) onRecorded(selected)
       else setSaveError(t('projects.decisionLog.record.noSession'))
     } catch (error) {
+      // The outcome may be unknown, so the same form is kept and a retry sends the same request.
+      onUnsent?.({ projectKey: selectedKey, values })
       setSaveError(describeProjectDecisionSaveError(error, t))
     } finally {
       setIsSaving(false)

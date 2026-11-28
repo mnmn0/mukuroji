@@ -38,8 +38,8 @@ export const PROJECT_DECISION_SOURCE_LABEL_MAX_LENGTH = 200
 /** Longest entry ID a decision may name as the one replacing it. */
 export const PROJECT_DECISION_ENTRY_ID_MAX_LENGTH = 64
 /**
- * Most decisions one Project log may hold. An entry at every field limit is about 14,000
- * characters; JSON escapes a quote or backslash to two bytes, and the Lambda response wraps the
+ * Most decisions one Project log may hold. An entry at every field limit is about 14,600
+ * characters, recorder included; JSON escapes a quote or backslash to two bytes, and the Lambda response wraps the
  * JSON body in another JSON string, so each such character can take four bytes. 100 entries stay
  * below the 6 MB Lambda response limit even then (ADR 0114).
  */
@@ -431,7 +431,13 @@ export function parseProjectDecisionEntry(value: unknown): ProjectDecisionEntry 
   if (!isRecord(value)) return undefined
   const { id, recordedByMemberId, revision, createdAt, updatedAt } = value
   if (typeof id !== 'string' || id.length === 0 || id.length > PROJECT_DECISION_ENTRY_ID_MAX_LENGTH) return undefined
-  if (typeof recordedByMemberId !== 'string' || recordedByMemberId.length === 0) return undefined
+  if (
+    typeof recordedByMemberId !== 'string' ||
+    recordedByMemberId.length === 0 ||
+    recordedByMemberId.length > PROJECT_DECISION_MEMBER_ID_MAX_LENGTH
+  ) {
+    return undefined
+  }
   if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1) return undefined
   if (!isTimestamp(createdAt) || !isTimestamp(updatedAt)) return undefined
   const input = parseProjectDecisionEntryInput(value)

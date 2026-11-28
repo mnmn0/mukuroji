@@ -4,7 +4,7 @@ import type { MessageKey } from '../../shared/i18n/i18n'
 import type { ProjectDecisionFormPrefill } from '../model/projectDecisionForm'
 import { useSaveProjectDecision } from '../mutations/useSaveProjectDecision'
 import type { ProjectDecisionReferenceOption } from './ProjectDecisionForm'
-import { RecordDecisionDialog, type RecordDecisionProjectOption } from './RecordDecisionDialog'
+import { RecordDecisionDialog, type RecordDecisionProjectOption, type RecordDecisionUnsentDraft } from './RecordDecisionDialog'
 
 /** Props of the button that records a decision from another screen. */
 export type RecordDecisionButtonProps = {
@@ -56,6 +56,8 @@ export function RecordDecisionButton({
   // Each opening gets its own number, so only the dialog that saved can close itself.
   const openCount = useRef(0)
   const [openedAs, setOpenedAs] = useState(0)
+  // A failed save's form is reopened as it was, so its retry reuses the same Idempotency-Key.
+  const [unsentDraft, setUnsentDraft] = useState<RecordDecisionUnsentDraft>()
   return (
     <>
       <button
@@ -82,6 +84,8 @@ export function RecordDecisionButton({
           accessToken={accessToken}
           key={openedAs}
           save={save}
+          {...(unsentDraft ? { unsentDraft } : {})}
+          onUnsent={setUnsentDraft}
           {...(defaultProject ? { defaultProject } : {})}
           lockProject={lockProject}
           origin={origin}
@@ -92,6 +96,7 @@ export function RecordDecisionButton({
           onClose={() => setPrefill(undefined)}
           onRecorded={(project) => {
             if (openCount.current !== openedAs) return
+            setUnsentDraft(undefined)
             setPrefill(undefined)
             setRecordedProjectName(project.name)
           }}

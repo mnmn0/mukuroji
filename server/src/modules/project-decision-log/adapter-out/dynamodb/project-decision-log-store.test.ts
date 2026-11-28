@@ -220,6 +220,19 @@ test('recognizes a concurrent attempt of the same update after the revision move
   expect(await update('r2')).toMatchObject({ status: 409, code: 'ProjectDecisionEntryIdempotencyConflict' })
 })
 
+test('does not turn a revision failure into success when a caller fence was not confirmed', async () => {
+  const next: ProjectDecisionEntry = { ...entry, title: 'Renamed', revision: 2, updatedAt: '2026-11-20T00:00:00.000Z' }
+  const row = { ...entryRow(next), updateReceipts: [{ updateKey: 'k1', receipt: 'r1' }] }
+  for (const fence of ['ConditionalCheckFailed', 'TransactionConflict']) {
+    const writeError = cancellation(['ConditionalCheckFailed', fence, 'None'])
+    const result = await new DynamoDbProjectDecisionLogStore('planning', fakeClient({ row, writeError }), 'audit')
+      .update({ ...scope, now: next.updatedAt, callerAuthorization, auditContext, previous: entry, previousReceipts: [], next, updateReceipt: 'r1', updateKey: 'k1' })
+      .then((value) => value, (error: unknown) => error)
+    expect(result).not.toEqual(next)
+    expect(result).toBeInstanceOf(Error)
+  }
+})
+
 test('reads every decision of a Team on the server-side filter, across pages', async () => {
   const sent: SentCommand[] = []
   const other = { ...entry, id: 'e2' }

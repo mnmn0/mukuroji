@@ -1300,6 +1300,7 @@ function IssueDetailContent({
           <div className="flex shrink-0 items-center gap-2">
             {onUpdateIssue && issue.assignedProjectId ? (
               <RecordDecisionButton
+                key={issue.id}
                 accessToken={accessToken}
                 createPrefill={() => ({ title: resolveIssueTitle(issue, t), relatedWorkItemIds: [issue.id] })}
                 disabled={isAiSummaryOperationPending}

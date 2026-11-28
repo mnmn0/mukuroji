@@ -113,6 +113,7 @@ describe('parseProjectDecisionEntry', () => {
     expect(parseProjectDecisionEntry({ ...decision(), title: ' Use DynamoDB' })).toBeUndefined()
     expect(parseProjectDecisionEntry({ ...decision(), sources: [{ url: 'https://example.com', extra: true }] })).toBeUndefined()
     expect(parseProjectDecisionEntry({ ...decision(), revision: 0 })).toBeUndefined()
+    expect(parseProjectDecisionEntry({ ...decision(), recordedByMemberId: 'a'.repeat(255) })).toBeUndefined()
   })
 })
 

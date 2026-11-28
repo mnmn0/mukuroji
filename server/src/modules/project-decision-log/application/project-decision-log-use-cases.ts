@@ -2,6 +2,7 @@ import {
   compareProjectDecisionEntries,
   compareTimestampsNewestFirst,
   parseProjectDecisionEntryInput,
+  PROJECT_DECISION_MEMBER_ID_MAX_LENGTH,
   teamDecisionLogItemMatches,
   TEAM_DECISION_LOG_MAX_ITEMS,
   TEAM_DECISION_LOG_QUERY_MAX_LENGTH,
@@ -224,6 +225,10 @@ export async function createProjectDecisionEntryUseCase<TCallerCheck, TAudit>(
   mutation: CreateProjectDecisionMutation<TCallerCheck, TAudit>,
 ): Promise<ProjectDecisionEntryResponse> {
   const input = readEntryInput(isRecord(body) ? body.entry : undefined, mutation.now, mutation.origin)
+  // The stored recorder must stay readable, so a member key longer than the contract allows is refused.
+  if (mutation.recorderMemberId.length === 0 || mutation.recorderMemberId.length > PROJECT_DECISION_MEMBER_ID_MAX_LENGTH) {
+    throw new ProjectDataError(403, 'ProjectDecisionRecorderInvalid', 'This member cannot record decisions.')
+  }
   // A retry of a committed creation is answered by the store from the stored decision, so its
   // references are not verified again; a decider who left the Project since then must not turn
   // the retry into an error.

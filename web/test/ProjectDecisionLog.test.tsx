@@ -10,6 +10,7 @@ import {
 } from '../src/projects/model/projectDecisionForm'
 import { loadTeamDecisionNotes } from '../src/projects/queries/useTeamDecisionNotes'
 import { ProjectDecisionLogPanel } from '../src/projects/ui/ProjectDecisionLogPanel'
+import { RecordDecisionDialog } from '../src/projects/ui/RecordDecisionDialog'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
 const originalFetch = globalThis.fetch
@@ -177,5 +178,25 @@ describe('Team decision notes', () => {
       preconnect: originalFetch.preconnect,
     })
     expect(await loadTeamDecisionNotes('token', 'core-team', { keyword: '', projectId: '' })).toEqual({ notes: [], truncated: false })
+  })
+})
+
+describe('record decision dialog', () => {
+  test('reopens a failed save with the same form instead of a fresh prefill', () => {
+    const values = toProjectDecisionFormValues(undefined, { title: '前回送った決定' })
+    const html = renderToStaticMarkup(
+      <RecordDecisionDialog
+        origin="document"
+        prefill={{ title: '新しい下書き' }}
+        projects={[{ teamId: 'core-team', id: 'atlas', name: 'Atlas' }]}
+        save={async () => undefined}
+        t={createTranslator('ja')}
+        unsentDraft={{ projectKey: JSON.stringify(['core-team', 'atlas']), values }}
+        onClose={() => undefined}
+        onRecorded={() => undefined}
+      />,
+    )
+    expect(html).toContain('前回送った決定')
+    expect(html).not.toContain('新しい下書き')
   })
 })
