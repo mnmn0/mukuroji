@@ -47,7 +47,9 @@ import type {
 import {
   CUSTOMER_MAX_OPERATION_ROWS,
   CustomerError,
+  redactExpiredCustomerData,
 } from '../../domain/customer'
+import { ProjectCustomerLinkAccumulator } from '../../domain/project-customer-links'
 import {
   InMemoryCustomerClient,
   type CustomerAuthorizationConditionChecks,
@@ -1552,12 +1554,38 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
 
   /** Lists the Customers each Project is linked to through Customer Request to Project links.
    *
+   * The Request and Customer rows are read page by page and only the counts and the linked
+   * Customers' names are kept, so the read has no row limit (ADR 0122). The Workspace revision
+   * fences the pages as in a bounded read.
+   *
    * @param workspaceId Workspace containing the links.
    * @returns One entry for each linked Project, ordered by Project ID.
    */
   async listProjectCustomerLinks(workspaceId: string): Promise<ProjectCustomerLinks[]> {
-    const { memory } = await this.readMemoryForRead(workspaceId, [CUSTOMER_RECORD_PREFIX, REQUEST_RECORD_PREFIX])
-    return await memory.listProjectCustomerLinks(workspaceId)
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      // Completes a resumable deletion or retention first, as every read does.
+      await this.load(workspaceId, [])
+      const metadata = await this.readWorkspaceMetadata(workspaceId)
+      if (metadata.pendingDeletion?.phase === 'customer' || metadata.pendingRetention) continue
+      const hidden = new Set<string>()
+      if (metadata.pendingDeletion?.phase === 'triage') hidden.add(metadata.pendingDeletion.customerId)
+      if (metadata.pendingMerge) {
+        hidden.add(metadata.pendingMerge.sourceCustomerId)
+        hidden.add(metadata.pendingMerge.targetCustomerId)
+      }
+      const links = new ProjectCustomerLinkAccumulator((customerId) => hidden.has(customerId))
+      await this.forEachRowPage(workspaceId, REQUEST_RECORD_PREFIX, (row) => {
+        if (row.kind === 'request') links.addRequest(row.value)
+      })
+      const retentionAt = this.now().toISOString()
+      await this.forEachRowPage(workspaceId, CUSTOMER_RECORD_PREFIX, (row) => {
+        if (row.kind !== 'customer' || !links.isLinked(row.value.id)) return
+        // An expired Customer is shown redacted, as a bounded read shows it before its redaction is saved.
+        for (const customer of redactExpiredCustomerData([row.value], [], [], retentionAt).customers) links.addCustomer(customer)
+      })
+      if (sameCustomerMetadata(metadata, await this.readWorkspaceMetadata(workspaceId))) return links.result()
+    }
+    throw new CustomerError(409, 'CustomerSnapshotChanged', 'Customer data changed while the read was in progress. Retry the read.')
   }
 
   /** Returns Work Items associated with a Customer.
@@ -1845,6 +1873,39 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       exclusiveStartKey = response.LastEvaluatedKey
     } while (exclusiveStartKey)
     return rows
+  }
+
+  /**
+   * Reads every row under a prefix page by page and hands each decoded row to a visitor, holding
+   * one page at a time.
+   *
+   * @param workspaceId Workspace partition to read.
+   * @param recordPrefix Physical record prefix.
+   * @param visit Receives each decoded row.
+   * @returns A promise that resolves after the last page.
+   */
+  private async forEachRowPage(
+    workspaceId: string,
+    recordPrefix: string,
+    visit: (row: DecodedCustomerRow) => void,
+  ): Promise<void> {
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)',
+        ExpressionAttributeValues: { ':workspaceId': workspaceId, ':recordPrefix': recordPrefix },
+        ConsistentRead: true,
+        Limit: 1_000,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }))
+      for (const item of response.Items ?? []) {
+        const decoded = decodeStoredRow(item, workspaceId)
+        if (!decoded) throw new CustomerError(503, 'CustomerPersistenceCorrupt', 'A Customer record is malformed.')
+        visit(decoded)
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
   }
 
   /** Reads the optimistic Workspace metadata without loading unrelated records.

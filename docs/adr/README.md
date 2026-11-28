@@ -134,3 +134,4 @@
 | [0119](0119-agent-cost-in-project-budgets.md) | coding agent の推定費用は USD のまま Project 予算レポートに出し、USD の予算だけ実績・閾値通知・EVM に足すかを Workspace 設定で選ぶ | 提案 |
 | [0120](0120-artifact-status-refresh-sequence-and-stale-authorization.md) | pull request の照会は refresh の連番で接続を順に試し、古い credential の 401 で再認証にしない | 提案 |
 | [0121](0121-retry-retired-channel-webhook-deletion.md) | 削除・差し替えた channel 投稿先の古い Webhook secret の削除を再試行する | 提案 |
+| [0122](0122-charter-owner-sync-use-case-and-streamed-project-customer-links.md) | Charter owner の同期を Planning の use case に置き、Project ごとの顧客リンクは件数上限なしで数える | 提案 |
