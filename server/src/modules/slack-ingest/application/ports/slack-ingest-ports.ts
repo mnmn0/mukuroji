@@ -25,6 +25,22 @@ export interface SlackIngestConfigSource {
   read(): Promise<SlackIngestConfig | undefined>
 }
 
+/** A membership change of the bot in one channel. */
+export type SlackMembershipChange = {
+  /** Channel ID. */
+  channelId: string
+  /** Channel name, when known. */
+  name?: string
+  /** Whether the channel is private. */
+  isPrivate: boolean
+  /** Membership after the change. */
+  membership: 'joined' | 'left'
+  /** Slack event timestamp that orders membership changes, when the change came from one. */
+  eventTs?: string
+  /** Time of the change. */
+  now: string
+}
+
 /** One asynchronous ingest step. */
 export type SlackIngestJob =
   | {
@@ -209,15 +225,16 @@ export interface SlackIngestStore<AuditContext = unknown> {
    */
   listChannels(workspaceId: string): Promise<SlackChannelRecord[]>
   /**
-   * Records that the bot joined or left a channel, keeping its mapping.
+   * Records that the bot joined or left a channel, keeping its mapping. A change with an event
+   * timestamp older than the last one recorded leaves the membership as it is.
    *
    * @param workspaceId - Workspace ID.
    * @param channel - Channel facts from Slack.
-   * @returns The channel after the change.
+   * @returns The channel after the change, or as it is when the change was older.
    */
   recordMembership(
     workspaceId: string,
-    channel: { channelId: string, name?: string, isPrivate: boolean, membership: 'joined' | 'left', now: string },
+    channel: SlackMembershipChange,
   ): Promise<SlackChannelRecord>
   /**
    * Changes a channel's mapping while its revision is still the one read, and resets its load.

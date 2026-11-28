@@ -65,13 +65,15 @@ function parseQueuedEvent(value: unknown): SlackInboundEvent {
     }
     return { kind: 'message-deleted', channelId: value.channelId, ts: value.ts, eventTs: value.eventTs }
   }
+  if (value.eventTs !== undefined && !isSlackTs(value.eventTs)) throw new TypeError('eventTs is invalid.')
+  const eventTs = isSlackTs(value.eventTs) ? { eventTs: value.eventTs } : {}
   if (value.kind === 'member-joined') {
     if (!isSlackChannelId(value.channelId) || !isSlackUserId(value.userId)) throw new TypeError('join is invalid.')
-    return { kind: 'member-joined', channelId: value.channelId, userId: value.userId, ...(channelKind ? { channelKind } : {}) }
+    return { kind: 'member-joined', channelId: value.channelId, userId: value.userId, ...(channelKind ? { channelKind } : {}), ...eventTs }
   }
   if (value.kind === 'bot-left') {
     if (!isSlackChannelId(value.channelId)) throw new TypeError('leave is invalid.')
-    return { kind: 'bot-left', channelId: value.channelId }
+    return { kind: 'bot-left', channelId: value.channelId, ...eventTs }
   }
   throw new TypeError('event kind is invalid.')
 }

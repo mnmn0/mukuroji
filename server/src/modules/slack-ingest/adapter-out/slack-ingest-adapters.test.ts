@@ -175,6 +175,32 @@ test('a shorter retention lowers the TTL of a kept message and its key rows only
   expect(updates[1]).toMatchObject({ ConditionExpression: 'attribute_exists(recordKey)' })
 })
 
+test('a membership change is conditional on its event timestamp, and an older one keeps the row', async () => {
+  const channelRow = {
+    workspaceId: 'w', recordKey: 'slack-ingest#channel#C012345678', channelId: 'C012345678',
+    isPrivate: false, membership: 'joined', mappingRevision: 1, updatedAt: '2026-11-28T00:00:00.000Z',
+  }
+  const sent: SentCommand[] = []
+  const client = {
+    async send(command: { constructor: { name: string }, input: Record<string, unknown> }) {
+      sent.push({ name: command.constructor.name, input: command.input })
+      if (command.constructor.name === 'UpdateCommand') {
+        throw Object.assign(new Error('failed'), { name: 'ConditionalCheckFailedException' })
+      }
+      return { Item: channelRow }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const store = new DynamoDbSlackIngestStore('dev-platform', client)
+  const channel = await store.recordMembership('w', {
+    channelId: 'C012345678', isPrivate: false, membership: 'left', eventTs: '1700000100.000100', now: '2026-11-28T00:00:01.000Z',
+  })
+  expect(channel.membership).toBe('joined')
+  expect(sent[0]?.input).toMatchObject({
+    ConditionExpression: 'attribute_not_exists(membershipEventTs) OR membershipEventTs <= :eventTs',
+    ExpressionAttributeValues: expect.objectContaining({ ':eventTs': '1700000100.000100', ':membership': 'left' }),
+  })
+})
+
 test('a malformed stored row fails closed', async () => {
   const { client } = createClient({ 'slack-ingest#channel#C012345678': { recordKey: 'slack-ingest#channel#C012345678', channelId: 'C012345678' } })
   const store = new DynamoDbSlackIngestStore('dev-platform', client)

@@ -218,15 +218,17 @@ async function storeMessage(
  *
  * @param context - Job context.
  * @param channelId - Channel ID.
- * @returns The channel row.
+ * @param eventTs - Timestamp of the join event, which orders it against a leave.
+ * @returns The channel row, unchanged when a newer leave was already recorded.
  */
-async function recordJoinedChannel(context: JobContext, channelId: string): Promise<SlackChannelRecord> {
+async function recordJoinedChannel(context: JobContext, channelId: string, eventTs?: string): Promise<SlackChannelRecord> {
   const info = await context.slack.conversationInfo(channelId)
   return await context.ports.store.recordMembership(context.workspaceId, {
     channelId,
     ...(info.name ? { name: info.name } : {}),
     isPrivate: info.isPrivate,
     membership: 'joined',
+    ...(eventTs ? { eventTs } : {}),
     now: context.now.toISOString(),
   })
 }
@@ -266,7 +268,9 @@ async function applyEvent(context: JobContext, job: Extract<SlackIngestJob, { ki
   if (event.kind === 'member-joined') {
     const installation = await readInstallation(context)
     if (event.userId !== installation.botUserId) return 'ignored-member'
-    const channel = await recordJoinedChannel(context, event.channelId)
+    const channel = await recordJoinedChannel(context, event.channelId, event.eventTs)
+    // A join older than a recorded leave changes nothing.
+    if (channel.membership !== 'joined') return 'stale-membership'
     if (channel.target) await startBackfill(context, channel)
     return 'bot-joined'
   }
@@ -277,6 +281,7 @@ async function applyEvent(context: JobContext, job: Extract<SlackIngestJob, { ki
       ...(existing?.name ? { name: existing.name } : {}),
       isPrivate: existing?.isPrivate ?? false,
       membership: 'left',
+      ...(event.eventTs ? { eventTs: event.eventTs } : {}),
       now: context.now.toISOString(),
     })
     return 'bot-left'
@@ -446,7 +451,16 @@ async function runPrune(
     PRUNE_BATCH_LIMIT,
     job.mappingRevision,
   )
-  if (result.superseded) return 'superseded'
+  if (result.superseded) {
+    // A remap does not cancel retention cleanup: start it again against the new mapping.
+    if (job.mode === 'expired') {
+      const current = await store.getChannel(job.workspaceId, job.channelId)
+      if (!current?.target) return 'unmapped'
+      await ports.queue.send({ ...job, mappingRevision: current.mappingRevision })
+      return 'prune-restarted'
+    }
+    return 'superseded'
+  }
   if (!result.done) {
     await ports.queue.send(job)
     return 'prune-continues'

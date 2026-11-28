@@ -73,12 +73,16 @@ export type SlackInboundEvent =
       userId: string
       /** Channel kind, when Slack sent it. */
       channelKind?: SlackChannelKind
+      /** Event timestamp, which orders membership changes, when Slack sent it. */
+      eventTs?: string
     }
   | {
       /** The bot left or was removed from a channel. */
       kind: 'bot-left'
       /** Channel ID. */
       channelId: string
+      /** Event timestamp, which orders membership changes, when Slack sent it. */
+      eventTs?: string
     }
 
 /** A parsed Slack Events API request body. */
@@ -218,11 +222,17 @@ export function readSlackInboundEvent(value: unknown): SlackInboundEvent | undef
   if (value.type === 'member_joined_channel') {
     if (!isSlackChannelId(channelId) || !isSlackUserId(value.user)) return undefined
     const channelKind = value.channel_type === 'C' ? 'public' : value.channel_type === 'G' ? 'private' : undefined
-    return { kind: 'member-joined', channelId, userId: value.user, ...(channelKind ? { channelKind } : {}) }
+    return {
+      kind: 'member-joined',
+      channelId,
+      userId: value.user,
+      ...(channelKind ? { channelKind } : {}),
+      ...(isSlackTs(value.event_ts) ? { eventTs: value.event_ts } : {}),
+    }
   }
   if (value.type === 'channel_left' || value.type === 'group_left') {
     if (!isSlackChannelId(channelId)) return undefined
-    return { kind: 'bot-left', channelId }
+    return { kind: 'bot-left', channelId, ...(isSlackTs(value.event_ts) ? { eventTs: value.event_ts } : {}) }
   }
   return undefined
 }

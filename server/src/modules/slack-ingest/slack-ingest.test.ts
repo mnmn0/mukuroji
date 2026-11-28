@@ -455,6 +455,51 @@ test('a cleanup queued before a remap does not delete what the new mapping keeps
   expect((await store.listMessageRefsByKey(WS, 'MK-1', 10)).refs).toHaveLength(1)
 })
 
+test('a delayed membership event never undoes a newer join or leave', async () => {
+  const { store, queued, ports } = createWorld()
+  const admin = { config: ports.config, store, queue: ports.queue }
+  await store.recordMembership(WS, { channelId: CHANNEL, isPrivate: false, membership: 'joined', now: NOW.toISOString() })
+  await updateSlackChannelTarget(WS, CHANNEL, { kind: 'team', teamId: 'team-a' }, admin, audit)
+  const joined = (eventId: string, eventTs: string) => ({
+    kind: 'event' as const, workspaceId: WS, eventId,
+    event: { kind: 'member-joined' as const, channelId: CHANNEL, userId: BOT, eventTs },
+  })
+  const left = (eventId: string, eventTs: string) => ({
+    kind: 'event' as const, workspaceId: WS, eventId,
+    event: { kind: 'bot-left' as const, channelId: CHANNEL, eventTs },
+  })
+  expect(await runSlackIngestJob(joined('Ev020002', '1700000200.000100'), ports)).toBe('bot-joined')
+  // The leave before that rejoin arrives late and keeps the channel joined.
+  expect(await runSlackIngestJob(left('Ev020001', '1700000100.000100'), ports)).toBe('bot-left')
+  expect((await store.getChannel(WS, CHANNEL))?.membership).toBe('joined')
+  expect(await runSlackIngestJob(left('Ev020003', '1700000300.000100'), ports)).toBe('bot-left')
+  queued.length = 0
+  expect(await runSlackIngestJob(joined('Ev020002', '1700000200.000100'), ports)).toBe('stale-membership')
+  expect((await store.getChannel(WS, CHANNEL))?.membership).toBe('left')
+  expect(queued).toEqual([])
+})
+
+test('a remap restarts a queued retention cleanup against the new mapping', async () => {
+  const { store, queued, ports } = createWorld()
+  const admin = { config: ports.config, store, queue: ports.queue }
+  await store.recordMembership(WS, { channelId: CHANNEL, isPrivate: false, membership: 'joined', now: NOW.toISOString() })
+  await updateSlackChannelTarget(WS, CHANNEL, { kind: 'team', teamId: 'team-a' }, admin, audit)
+  await runSlackIngestJob(posted(RECENT_TS, 'MK-1 new'), ports)
+  queued.length = 0
+  await updateSlackIngestSettings(WS, { retentionDays: 7, expectedRevision: 0 }, admin, audit)
+  const prune = queued.shift()
+  if (!prune) throw new Error('prune was not queued')
+  await updateSlackChannelTarget(WS, CHANNEL, { kind: 'team', teamId: 'team-b' }, admin, audit)
+  queued.length = 0
+  expect(await runSlackIngestJob(prune.job, ports)).toBe('prune-restarted')
+  const restarted = queued.shift()
+  expect(restarted?.job).toMatchObject({ kind: 'prune', mode: 'expired', mappingRevision: 2 })
+  if (!restarted) throw new Error('prune was not queued again')
+  expect(await runSlackIngestJob(restarted.job, ports)).toBe('pruned')
+  const [kept] = await store.getMessages(WS, [{ channelId: CHANNEL, ts: RECENT_TS }])
+  expect(kept?.expiresAt).toBe(Math.floor(Number(RECENT_TS)) + 7 * 86_400)
+})
+
 test('unmapping deletes stored messages and a shorter retention prunes old ones', async () => {
   const { store, queued, ports } = createWorld()
   const admin = { config: ports.config, store, queue: ports.queue }

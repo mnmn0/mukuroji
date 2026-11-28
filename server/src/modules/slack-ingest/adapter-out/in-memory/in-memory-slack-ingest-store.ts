@@ -8,6 +8,7 @@ import type {
   SlackIngestStore,
   SlackInstallation,
   SlackMessageRef,
+  SlackMembershipChange,
   SlackMessageWriteOutcome,
   StoredSlackMessage,
 } from '../../application/ports/slack-ingest-ports'
@@ -38,6 +39,8 @@ export class InMemorySlackIngestStore implements SlackIngestStore {
   readonly installations = new Map<string, SlackInstallation>()
   /** Channels by Workspace and channel. */
   readonly channels = new Map<string, SlackChannelRecord>()
+  /** Event timestamp of each channel's last membership change. */
+  private readonly membershipEventTs = new Map<string, string>()
   /** Messages by Workspace, channel, and timestamp. */
   readonly messages = new Map<string, Entry>()
   /** User names by Workspace and user. */
@@ -133,9 +136,13 @@ export class InMemorySlackIngestStore implements SlackIngestStore {
    */
   async recordMembership(
     workspaceId: string,
-    channel: { channelId: string, name?: string, isPrivate: boolean, membership: 'joined' | 'left', now: string },
+    channel: SlackMembershipChange,
   ): Promise<SlackChannelRecord> {
-    const existing = this.channels.get(`${workspaceId}#${channel.channelId}`)
+    const key = `${workspaceId}#${channel.channelId}`
+    const existing = this.channels.get(key)
+    const lastEventTs = this.membershipEventTs.get(key)
+    if (existing && channel.eventTs && lastEventTs && lastEventTs > channel.eventTs) return structuredClone(existing)
+    if (channel.eventTs) this.membershipEventTs.set(key, channel.eventTs)
     const record: SlackChannelRecord = {
       ...existing,
       channelId: channel.channelId,

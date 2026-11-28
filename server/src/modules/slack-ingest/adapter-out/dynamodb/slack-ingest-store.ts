@@ -27,6 +27,7 @@ import type {
   SlackIngestStore,
   SlackInstallation,
   SlackMessageRef,
+  SlackMembershipChange,
   SlackMessageWriteOutcome,
   StoredSlackMessage,
 } from '../../application/ports/slack-ingest-ports'
@@ -501,30 +502,44 @@ export class DynamoDbSlackIngestStore implements SlackIngestStore<MutationAuditC
    */
   async recordMembership(
     workspaceId: string,
-    channel: { channelId: string, name?: string, isPrivate: boolean, membership: 'joined' | 'left', now: string },
+    channel: SlackMembershipChange,
   ): Promise<SlackChannelRecord> {
-    const response = await this.client.send(new UpdateCommand({
-      TableName: this.tableName,
-      Key: { workspaceId, recordKey: channelKey(channel.channelId) },
-      UpdateExpression: [
-        'SET entryType = :entryType, schemaVersion = :schemaVersion, channelId = :channelId',
-        'isPrivate = :isPrivate, membership = :membership, updatedAt = :now',
-        'mappingRevision = if_not_exists(mappingRevision, :zero)',
-        ...(channel.name ? ['#name = :name'] : []),
-      ].join(', '),
-      ...(channel.name ? { ExpressionAttributeNames: { '#name': 'name' } } : {}),
-      ExpressionAttributeValues: {
-        ':entryType': 'slack-ingest-channel',
-        ':schemaVersion': SCHEMA_VERSION,
-        ':channelId': channel.channelId,
-        ':isPrivate': channel.isPrivate,
-        ':membership': channel.membership,
-        ':now': channel.now,
-        ':zero': 0,
-        ...(channel.name ? { ':name': channel.name } : {}),
-      },
-      ReturnValues: 'ALL_NEW',
-    }))
+    let response
+    try {
+      response = await this.client.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: channelKey(channel.channelId) },
+        UpdateExpression: [
+          'SET entryType = :entryType, schemaVersion = :schemaVersion, channelId = :channelId',
+          'isPrivate = :isPrivate, membership = :membership, updatedAt = :now',
+          'mappingRevision = if_not_exists(mappingRevision, :zero)',
+          ...(channel.name ? ['#name = :name'] : []),
+          ...(channel.eventTs ? ['membershipEventTs = :eventTs'] : []),
+        ].join(', '),
+        // A delayed or redelivered event never undoes a newer join or leave.
+        ...(channel.eventTs
+          ? { ConditionExpression: 'attribute_not_exists(membershipEventTs) OR membershipEventTs <= :eventTs' }
+          : {}),
+        ...(channel.name ? { ExpressionAttributeNames: { '#name': 'name' } } : {}),
+        ExpressionAttributeValues: {
+          ':entryType': 'slack-ingest-channel',
+          ':schemaVersion': SCHEMA_VERSION,
+          ':channelId': channel.channelId,
+          ':isPrivate': channel.isPrivate,
+          ':membership': channel.membership,
+          ':now': channel.now,
+          ':zero': 0,
+          ...(channel.name ? { ':name': channel.name } : {}),
+          ...(channel.eventTs ? { ':eventTs': channel.eventTs } : {}),
+        },
+        ReturnValues: 'ALL_NEW',
+      }))
+    } catch (error) {
+      if (!isConditionFailure(error)) throw error
+      const current = await this.getChannel(workspaceId, channel.channelId)
+      if (!current) throw corruptRow()
+      return current
+    }
     if (!response.Attributes) throw corruptRow()
     return parseChannel(response.Attributes)
   }
