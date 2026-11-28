@@ -38,7 +38,13 @@ const FAILING_STATUS_STATES = new Set(['ERROR', 'FAILURE'])
  * Stored state of one pull request (ADR 0079). The Team link is not part of it: the inbox reads
  * the repository's current link, so moving a repository to another Team takes effect at once.
  */
-export type GitHubPullRequestSnapshot = Omit<GitHubPullRequestSummary, 'teamId' | 'section'>
+export type GitHubPullRequestSnapshot = Omit<GitHubPullRequestSummary, 'teamId' | 'section'> & {
+  /**
+   * Conflict state GitHub last computed, kept while it recomputes after a push (`mergeable` is
+   * `unknown`), so the change to a conflict is still noticed. Not part of the inbox response.
+   */
+  lastKnownMergeable?: Exclude<GitHubPullRequestMergeableState, 'unknown'>
+}
 
 /** Repository a GraphQL pull request must belong to. */
 export type GitHubSnapshotRepository = {

@@ -33,9 +33,10 @@ import type {
   SaveMemberLoginInput,
   SaveRepositoryLinkInput,
 } from '../../application/ports'
+import { createGitHubRepositoryLinkRecordKey, GITHUB_REPOSITORY_LINK_ENTRY_TYPE } from '../../domain/notification-scope'
 
 /** Record types in the Planning table. */
-const LINK_TYPE = 'github-repository-link'
+const LINK_TYPE = GITHUB_REPOSITORY_LINK_ENTRY_TYPE
 const LOGIN_TYPE = 'github-login'
 const MEMBER_LOGIN_TYPE = 'github-member-login'
 const PULL_REQUEST_TYPE = 'github-pull-request'
@@ -44,7 +45,7 @@ const PULL_REQUEST_TYPE = 'github-pull-request'
 const SCHEMA_VERSION = 1
 
 /** Record key prefixes. */
-const LINK_PREFIX = 'GITHUB_REPOSITORY#'
+const LINK_PREFIX = createGitHubRepositoryLinkRecordKey('')
 const LOGIN_PREFIX = 'GITHUB_LOGIN#'
 const MEMBER_LOGIN_PREFIX = 'GITHUB_MEMBER#'
 const PULL_REQUEST_PREFIX = 'GITHUB_PULL_REQUEST#'
@@ -381,17 +382,13 @@ export class DynamoDbGitHubIntegrationStore implements GitHubIntegrationStore<Mu
    * @param workspaceId - Workspace.
    * @param repositoryId - Repository ID.
    * @param number - Pull request number.
-   * @returns The snapshot, or `null` when none is stored or the row cannot be read.
+   * @returns The snapshot, or `null` when none is stored.
+   * @throws {GitHubIntegrationError} When the stored row cannot be read, so the job fails instead of
+   *   notifying again and overwriting it.
    */
   async getPullRequestSnapshot(workspaceId: string, repositoryId: string, number: number): Promise<GitHubPullRequestSnapshot | null> {
     const row = await this.readItem(workspaceId, pullRequestKey(repositoryId, number))
-    if (!row) return null
-    try {
-      return parseSnapshotRow(row)
-    } catch {
-      // The row is rewritten by this read; an unreadable one only means no change is detected.
-      return null
-    }
+    return row ? parseSnapshotRow(row) : null
   }
 
   /**
@@ -767,7 +764,8 @@ function parseSnapshotRow(row: Record<string, unknown>): GitHubPullRequestSnapsh
     !reviews ||
     (row.authorLogin !== undefined && typeof row.authorLogin !== 'string') ||
     (row.mergedAt !== undefined && typeof row.mergedAt !== 'string') ||
-    (row.closedAt !== undefined && typeof row.closedAt !== 'string')
+    (row.closedAt !== undefined && typeof row.closedAt !== 'string') ||
+    (row.lastKnownMergeable !== undefined && row.lastKnownMergeable !== 'mergeable' && row.lastKnownMergeable !== 'conflicting')
   ) {
     throw corrupt()
   }
@@ -798,6 +796,7 @@ function parseSnapshotRow(row: Record<string, unknown>): GitHubPullRequestSnapsh
     ...(typeof row.mergedAt === 'string' ? { mergedAt: row.mergedAt } : {}),
     ...(typeof row.closedAt === 'string' ? { closedAt: row.closedAt } : {}),
     syncedAt: String(row.syncedAt),
+    ...(row.lastKnownMergeable === 'mergeable' || row.lastKnownMergeable === 'conflicting' ? { lastKnownMergeable: row.lastKnownMergeable } : {}),
   }
 }
 

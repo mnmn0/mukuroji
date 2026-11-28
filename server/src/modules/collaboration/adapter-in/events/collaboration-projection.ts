@@ -31,6 +31,12 @@ import {
 import type { DocumentProjectRole, GetDocumentRequest } from '../../../documents'
 import { TriageError } from '../../../triage'
 import {
+  createGitHubRepositoryLinkRecordKey,
+  GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX,
+  GITHUB_REPOSITORY_LINK_ENTRY_TYPE,
+  readGitHubNotificationRepositoryId,
+} from '../../../github-integration'
+import {
   REQUEST_REQUESTER_EVENT_TYPE_PREFIX,
   REQUEST_REQUESTER_NOTIFICATION_REASON,
 } from '../../../request-intake'
@@ -899,11 +905,13 @@ async function processRecord(
   const timesheetReminder = await readTimesheetReminderFence(event, dependencies.timesheetReminders)
   const weeklyReportReminder = await readWeeklyReportReminderFence(event, dependencies.weeklyReportReminders)
   const accessExpiryNotice = await readMemberAccessExpiryNoticeFence(event)
+  const githubLink = await readGitHubPullRequestNotificationFence(event)
   if (
     !workItemAuthorizationEvent ||
     !timesheetReminder.current ||
     !weeklyReportReminder.current ||
-    !accessExpiryNotice.current
+    !accessExpiryNotice.current ||
+    !githubLink.current
   ) {
     await markProjectionProcessed(event.eventId)
     return
@@ -953,7 +961,8 @@ async function processRecord(
     : undefined) ??
     timesheetReminder.condition ??
     weeklyReportReminder.condition ??
-    accessExpiryNotice.condition
+    accessExpiryNotice.condition ??
+    githubLink.condition
   const watcherCandidates = await readSubscribedWatcherCandidates(authorizationEvent)
   const memberDirectory = notifiesPlanningUpdateProjectMembers(authorizationEvent)
     ? await readProjectDirectory(authorizationEvent.workspaceId)
@@ -2008,6 +2017,42 @@ export async function readMemberAccessExpiryNoticeFence(
         ConditionExpression: '#status = :active AND accessExpiresAt = :accessExpiresAt',
         ExpressionAttributeNames: { '#status': 'status' },
         ExpressionAttributeValues: { ':active': 'active', ':accessExpiresAt': accessExpiresAt },
+      },
+    },
+  }
+}
+
+/**
+ * Revalidates a GitHub pull request notification against its repository's current link (ADR 0079).
+ *
+ * The notification is authorized against the Team the repository was linked to when it was
+ * written. It is dropped when an administrator has since removed the link or moved the
+ * repository to another Team, so readers of the old Team are not told about it. A current
+ * notification carries a condition on the link row, written in the same transaction as the
+ * notification, so a link change that lands before the save cancels it.
+ *
+ * @param event - Parsed audit event.
+ * @returns Whether the event should still be projected, and the condition for a GitHub notification.
+ */
+export async function readGitHubPullRequestNotificationFence(
+  event: AuditProjectionEvent,
+): Promise<{ current: boolean; condition?: ProjectionConditionCheck }> {
+  if (!event.eventType.startsWith(GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX)) return { current: true }
+  const repositoryId = readGitHubNotificationRepositoryId(event.entityId)
+  if (!repositoryId || !event.teamId) return { current: false }
+  const tableName = requireEnv('PLANNING_TABLE_NAME')
+  const key = { workspaceId: event.workspaceId, recordKey: createGitHubRepositoryLinkRecordKey(repositoryId) }
+  const result = await documentClient.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true }))
+  const link = result.Item
+  if (link?.entryType !== GITHUB_REPOSITORY_LINK_ENTRY_TYPE || link.teamId !== event.teamId) return { current: false }
+  return {
+    current: true,
+    condition: {
+      ConditionCheck: {
+        TableName: tableName,
+        Key: key,
+        ConditionExpression: 'entryType = :entryType AND teamId = :teamId',
+        ExpressionAttributeValues: { ':entryType': GITHUB_REPOSITORY_LINK_ENTRY_TYPE, ':teamId': event.teamId },
       },
     },
   }
@@ -3074,6 +3119,7 @@ export async function authorizeNotificationDelivery(
       throw error
     }
   }
+  if (!(await readGitHubPullRequestNotificationFence(sourceEvent)).current) return false
   const currentScope = await readCurrentWorkItemScope(sourceEvent)
   if (!currentScope.exists) return false
   const recipientReasons = {

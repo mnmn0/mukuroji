@@ -49,5 +49,6 @@ CI の失敗・conflict・レビュー依頼を受信箱に届けることを求
 
 - Shinji が GitHub App を作り secret を入れるまで、何も動かない（[docs/github-integration.md](../github-integration.md) の手順）。
 - 費用は webhook 1 件につき Lambda 2 回と SQS 1 件、毎時の reconcile 1 回。link する repository が少なければ無料枠に収まる。
-- Reviews 画面・個人設定・管理画面・受信箱の通知は続く PR で足す。#827 の取り込みも同じ App と受け口を使う。
+- 受信箱の通知は audit event で書き、link 先の Team を持たせる。collaboration の projection と外部チャネルの送信は、
+  repository が今も同じ Team に link されていることを確かめてから届ける。#827 の取り込みも同じ App と受け口を使う。
 - 更新した文書：`docs/github-integration.md`、`docs/architecture.md`。

@@ -1,4 +1,5 @@
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { classifyGitHubPullRequestSection, type GitHubPullRequestSectionInput } from '@mukuroji/contracts'
 import { GitHubIntegrationError } from './domain/github-integration-error'
 import { selectPullRequestInboxItems } from './domain/pull-request-inbox'
@@ -16,10 +17,11 @@ import {
   saveGitHubRepositoryLink,
 } from './application/pull-request-inbox'
 import type { GitHubAppCredentialSource, GitHubAppGateway, GitHubRepositoryLinkRecord } from './application/ports'
-import { InMemoryGitHubIntegrationStore } from './adapter-out/dynamodb/github-integration-store'
+import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb'
+import { DynamoDbGitHubIntegrationStore, InMemoryGitHubIntegrationStore } from './adapter-out/dynamodb/github-integration-store'
 import { InMemoryGitHubSyncQueue } from './adapter-out/sqs/github-sync-queue'
 import { createGitHubNotificationAuditEvent, InMemoryGitHubNotificationSink } from './adapter-out/dynamodb/github-notification-sink'
-import { detectPullRequestNotifications } from './domain/pull-request-notifications'
+import { carryLastKnownMergeable, detectPullRequestNotifications } from './domain/pull-request-notifications'
 import { createGitHubSyncQueueHandler } from './adapter-in/events/github-sync-worker'
 
 /** Workspace of the tests. */
@@ -410,6 +412,15 @@ test('notifies new reviewers and the author of new CI failures and conflicts, on
   // GitHub recomputing the conflict state after a push is not a new conflict.
   const recomputing = { ...failing, mergeable: 'unknown' as const, syncedAt: '2026-11-28T03:00:00.000Z' }
   expect(detectPullRequestNotifications(recomputing, { ...failing, syncedAt: '2026-11-28T04:00:00.000Z' }, { notifyNew: false })).toEqual([])
+  // A push makes GitHub answer `unknown` before `conflicting`; the state before the push counts.
+  const pushed = carryLastKnownMergeable(before, { ...before, mergeable: 'unknown', syncedAt: '2026-11-28T03:00:00.000Z' })
+  expect(pushed.lastKnownMergeable).toBe('mergeable')
+  const conflicting = { ...before, mergeable: 'conflicting' as const, syncedAt: '2026-11-28T04:00:00.000Z' }
+  expect(detectPullRequestNotifications(pushed, conflicting, { notifyNew: false }).map((item) => item.kind)).toEqual(['conflict'])
+  expect(carryLastKnownMergeable(pushed, conflicting).lastKnownMergeable).toBeUndefined()
+  // A conflict that lasts through the recomputation is not new.
+  const stillConflicting = carryLastKnownMergeable(conflicting, { ...conflicting, mergeable: 'unknown', syncedAt: '2026-11-28T05:00:00.000Z' })
+  expect(detectPullRequestNotifications(stillConflicting, { ...conflicting, syncedAt: '2026-11-28T06:00:00.000Z' }, { notifyNew: false })).toEqual([])
 })
 
 test('sends pull request notifications to registered members before storing the snapshot', async () => {
@@ -444,4 +455,19 @@ test('sends pull request notifications to registered members before storing the 
   })
   // The event ID comes from the notification key, so a retry writes the same row.
   expect(createGitHubNotificationAuditEvent(notifications.published[0], new Date('2026-11-28T02:05:00Z'), 30).eventId).toBe(event.eventId)
+})
+
+test('fails instead of treating an unreadable stored snapshot as absent', async () => {
+  const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'us-east-1' }))
+  const send = spyOn(client, 'send').mockImplementation(async () => ({
+    Item: { workspaceId: WORKSPACE_ID, recordKey: 'GITHUB_PULL_REQUEST#42#0000000005', entryType: 'github-pull-request', schemaVersion: 99 },
+    $metadata: {},
+  }))
+  try {
+    const store = new DynamoDbGitHubIntegrationStore('planning', client)
+    await expect(store.getPullRequestSnapshot(WORKSPACE_ID, '42', 5)).rejects.toMatchObject({ code: 'GitHubIntegrationCorrupt' })
+    expect(send.mock.calls[0]?.[0]).toBeInstanceOf(GetCommand)
+  } finally {
+    send.mockRestore()
+  }
 })

@@ -59,11 +59,30 @@ export function detectPullRequestNotifications(
   if (newlyFailing) {
     notifications.push({ kind: 'checks-failed', login: next.authorLogin, key: `checks-failed\0${next.headSha}\0${base}` })
   }
-  // GitHub recomputes the conflict state after each push, so `unknown` in between is not a change.
+  // GitHub recomputes the conflict state after each push, so `unknown` in between is not a change:
+  // the state before it counts. Without one, only a new head commit counts as a change.
+  const before = previous.mergeable === 'unknown' ? previous.lastKnownMergeable : previous.mergeable
   const newlyConflicting = next.mergeable === 'conflicting' &&
-    (previous.mergeable === 'mergeable' || (previous.mergeable === 'unknown' && previous.headSha !== next.headSha))
+    (before === 'mergeable' || (before === undefined && previous.headSha !== next.headSha))
   if (newlyConflicting) {
     notifications.push({ kind: 'conflict', login: next.authorLogin, key: `conflict\0${next.headSha}\0${base}` })
   }
   return notifications
+}
+
+/**
+ * Carries the last computed conflict state onto a snapshot read while GitHub recomputes it.
+ *
+ * @param previous - Stored snapshot, if any.
+ * @param next - Snapshot read from GitHub.
+ * @returns The snapshot to store.
+ */
+export function carryLastKnownMergeable(
+  previous: GitHubPullRequestSnapshot | undefined,
+  next: GitHubPullRequestSnapshot,
+): GitHubPullRequestSnapshot {
+  const { lastKnownMergeable: _stale, ...read } = next
+  if (next.mergeable !== 'unknown' || !previous) return read
+  const known = previous.mergeable === 'unknown' ? previous.lastKnownMergeable : previous.mergeable
+  return known ? { ...read, lastKnownMergeable: known } : read
 }

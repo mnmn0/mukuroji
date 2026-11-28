@@ -4,13 +4,14 @@ import { createNotificationMessage, type NotificationMessage } from '@mukuroji/c
 import { calculateAuditExpiresAt, createAuditEvent, createMutationAuditContext } from '../../../audit'
 import { GitHubIntegrationError } from '../../domain/github-integration-error'
 import type { GitHubPullRequestNotificationKind } from '../../domain/pull-request-notifications'
+import { GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX } from '../../domain/notification-scope'
 import type { GitHubPullRequestNotificationDelivery, GitHubPullRequestNotificationSink } from '../../application/ports'
 
 /** Audit event type of each notification kind. */
 export const GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPES = {
-  'review-requested': 'github.pull_request_review_requested',
-  'checks-failed': 'github.pull_request_checks_failed',
-  conflict: 'github.pull_request_conflict',
+  'review-requested': `${GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX}review_requested`,
+  'checks-failed': `${GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX}checks_failed`,
+  conflict: `${GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX}conflict`,
 } as const satisfies Record<GitHubPullRequestNotificationKind, string>
 
 /** Recipient reason of each notification kind. */

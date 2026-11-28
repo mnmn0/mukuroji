@@ -55,7 +55,8 @@ export function selectPullRequestInboxItems(
       const reviewed = snapshot.reviews.some((review) => review.login.toLowerCase() === login)
       if (!requested && !reviewed) continue
     }
-    items.push({ ...snapshot, teamId, section: classifyGitHubPullRequestSection(snapshot) })
+    const { lastKnownMergeable: _lastKnownMergeable, ...summary } = snapshot
+    items.push({ ...summary, teamId, section: classifyGitHubPullRequestSection(snapshot) })
   }
   return items.sort((left, right) =>
     right.updatedAt.localeCompare(left.updatedAt) ||

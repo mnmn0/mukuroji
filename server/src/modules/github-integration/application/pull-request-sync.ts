@@ -6,7 +6,7 @@ import {
   type GitHubSyncJob,
 } from '../domain/sync-jobs'
 import { isExpiredPullRequestSnapshot } from '../domain/pull-request-inbox'
-import { detectPullRequestNotifications } from '../domain/pull-request-notifications'
+import { carryLastKnownMergeable, detectPullRequestNotifications } from '../domain/pull-request-notifications'
 import type { GitHubPullRequestSnapshot } from '../domain/pull-request-snapshot'
 import type {
   GitHubAppCredentialSource,
@@ -295,7 +295,7 @@ async function storeSnapshots(
       if (!memberKey) continue
       await dependencies.notifications.publish({ ...notification, workspaceId, memberKey, teamId: link.teamId, pullRequest: snapshot })
     }
-    if (await store.putPullRequestSnapshot(workspaceId, snapshot) === 'written') written += 1
+    if (await store.putPullRequestSnapshot(workspaceId, carryLastKnownMergeable(previous, snapshot)) === 'written') written += 1
   }
   for (const number of missing) await store.deletePullRequestSnapshot(workspaceId, link.repositoryId, number)
   return { written, deleted: missing.length }

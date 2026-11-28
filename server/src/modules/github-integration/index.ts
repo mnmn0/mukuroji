@@ -1,5 +1,11 @@
 /** GitHub App integration: webhook receipt, pull request snapshots, and the review inbox (ADR 0079). */
 export { GitHubIntegrationError, type GitHubIntegrationErrorCategory } from './domain/github-integration-error'
+export {
+  createGitHubRepositoryLinkRecordKey,
+  GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX,
+  GITHUB_REPOSITORY_LINK_ENTRY_TYPE,
+  readGitHubNotificationRepositoryId,
+} from './domain/notification-scope'
 export type {
   GitHubAppCredentialSource,
   GitHubAppGateway,

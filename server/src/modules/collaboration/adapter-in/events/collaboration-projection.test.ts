@@ -43,6 +43,7 @@ import {
   processCollaborationProjectionBatch,
   projectsSubscribedWatchers,
   readMemberAccessExpiryNoticeFence,
+  readGitHubPullRequestNotificationFence,
   isCurrentBudgetThresholdRecipient,
   isCurrentMemberAccessExpiryRecipient,
   publishRealtimeInvalidation,
@@ -3442,6 +3443,41 @@ describe('collaboration projection pure helpers', () => {
       send.mockRestore()
       groups.mockRestore()
       keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+
+  test('drops a GitHub pull request notification once its repository is unlinked or moved to another Team', async () => {
+    const previous = process.env.PLANNING_TABLE_NAME
+    process.env.PLANNING_TABLE_NAME = 'PLANNING_TABLE_NAME'
+    let link: Record<string, unknown> | undefined = { entryType: 'github-repository-link', repositoryId: '42', teamId: 'core' }
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (command instanceof GetCommand && command.input.TableName === 'PLANNING_TABLE_NAME' &&
+        command.input.Key?.recordKey === 'GITHUB_REPOSITORY#42') {
+        expect(command.input.ConsistentRead).toBe(true)
+        return link ? { Item: link, $metadata: {} } : { $metadata: {} }
+      }
+      throw new Error('Unexpected command.')
+    })
+    try {
+      const event = parseAuditProjectionEvent({
+        eventId: 'github', eventType: 'github.pull_request_review_requested', workspaceId: 'workspace-1',
+        entityType: 'github-pull-request', entityId: '42#7', occurredAt: '2026-11-28T00:00:00.000Z', outboxStatus: 'pending',
+        metadata: { teamId: 'core', notificationCandidates: [{ memberKey: 'bob@example.com', reason: 'review-requested' }] },
+      })
+      if (!event) throw new Error('Expected a parsed event.')
+      const fence = await readGitHubPullRequestNotificationFence(event)
+      expect(fence.current).toBe(true)
+      expect(fence.condition?.ConditionCheck.ExpressionAttributeValues).toEqual({ ':entryType': 'github-repository-link', ':teamId': 'core' })
+      link = { ...link, teamId: 'other' }
+      expect((await readGitHubPullRequestNotificationFence(event)).current).toBe(false)
+      link = undefined
+      expect((await readGitHubPullRequestNotificationFence(event)).current).toBe(false)
+      // Other events are not fenced on a repository link.
+      expect((await readGitHubPullRequestNotificationFence({ ...event, eventType: 'work-item.updated' })).current).toBe(true)
+    } finally {
+      send.mockRestore()
+      if (previous === undefined) delete process.env.PLANNING_TABLE_NAME
+      else process.env.PLANNING_TABLE_NAME = previous
     }
   })
 

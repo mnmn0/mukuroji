@@ -68,7 +68,7 @@ collaboration projection がそれを受信箱の通知にし、届ける時点�
 | --- | --- | --- |
 | `github.pull_request_review_requested` | 新しくレビューを頼まれた人 | open な pull request の reviewer に加わったとき |
 | `github.pull_request_checks_failed` | 作成者 | CI が失敗に変わったとき、または新しい head commit で失敗したとき |
-| `github.pull_request_conflict` | 作成者 | conflict のない状態から conflict に変わったとき |
+| `github.pull_request_conflict` | 作成者 | conflict のない状態から conflict に変わったとき（push の後で GitHub が計算し直している間の `unknown` は、その前の状態で比べます） |
 
 - 受け手は登録済みの GitHub login で引きます。login を登録していない人には届きません。自分の操作は通知しません。
 - 初めて読む pull request は、webhook が知らせたときだけ reviewer に通知します。repository の link と毎時の reconcile は
@@ -76,6 +76,8 @@ collaboration projection がそれを受信箱の通知にし、届ける時点�
 - event の ID は「比べた snapshot・変化の種類・受け手」から決まるので、再試行や重複した webhook で二重に届きません。
 - audit log の summary には pull request の題名を書きません（題名は権限を確かめる通知の側だけに入ります）。
 - 通知の deep link は `/reviews` です。
+- 受信箱に入れるときと、メール・Slack・push で送る直前に、repository が今も同じ Team に link されているかを確かめます。
+  link を外したり別の Team に移したりした後は、前の Team の人には届きません。
 
 ## API
 
