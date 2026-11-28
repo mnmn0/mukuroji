@@ -333,7 +333,7 @@ export class MukurojiStack extends cdk.Stack {
         definePushNotificationJob(this, { dataStores, parameters, webOrigin: webDistribution.webOrigin }),
         emailFeedback.job,
         defineAnalyticsScheduleJob({ dataStores, parameters }),
-        defineNotificationScheduleJob({ dataStores, parameters }),
+        defineNotificationScheduleJob({ dataStores, parameters, softwareFactoryEnabled }),
         defineCycleScheduleJob({ dataStores, parameters }),
         defineMemberAccessExpiryJob({ dataStores, parameters }),
         defineInboxDigestJob({ dataStores, parameters }),

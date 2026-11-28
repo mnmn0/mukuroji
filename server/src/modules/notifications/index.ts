@@ -106,6 +106,7 @@ export type {
   ScheduledBudgetThresholdReader,
   ScheduledProjectBudgetStatus,
 } from './application/budget-threshold-alerts'
+export { BudgetThresholdPartialReadError } from './application/budget-threshold-alerts'
 export {
   createDynamoDbBudgetAlertProjectReader,
   type BudgetAlertProject,
