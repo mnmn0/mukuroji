@@ -105,7 +105,7 @@ export type SidebarNavId =
 /**
  * チーム配下で選択できる固定ビューです。
  */
-export type SidebarTeamViewId = 'overview' | 'triage' | 'factory' | 'issues' | 'timesheet' | 'projects' | 'members'
+export type SidebarTeamViewId = 'overview' | 'triage' | 'factory' | 'issues' | 'timesheet' | 'decisions' | 'projects' | 'members'
 
 /**
  * 新規作成モーダルで選択できる作成対象です。
@@ -356,6 +356,10 @@ export type SidebarLabels = {
    * Team time tracking view label.
    */
   timeTracking: string
+  /**
+   * Team decision log view label (ADR 0114).
+   */
+  decisionLog: string
   /**
    * Issue ビューの文言です。
    */
@@ -701,6 +705,7 @@ const defaultLabels: SidebarLabels = {
   triage: 'Triage',
   factoryBoard: 'Factory board',
   timeTracking: '工数',
+  decisionLog: '意思決定ログ',
   issues: 'Issues',
   members: 'メンバー',
   projectCount: (count) => `プロジェクト ${count}`,
@@ -2366,6 +2371,13 @@ function CurrentTeamNavigation({
         icon={ClockIcon}
         label={labels.timeTracking}
         onClick={() => onSelectTeamView(team.id, 'timesheet')}
+      />
+      <SubNavButton
+        active={isTeamActive && activeTeamViewId === 'decisions'}
+        collapsed={collapsed}
+        icon={DocumentIcon}
+        label={labels.decisionLog}
+        onClick={() => onSelectTeamView(team.id, 'decisions')}
       />
       <SubNavButton
         active={isTeamActive && activeTeamViewId === 'projects'}

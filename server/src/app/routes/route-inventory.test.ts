@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(692)
-  expect(new Set(inventory).size).toBe(688)
+  expect(inventory).toHaveLength(696)
+  expect(new Set(inventory).size).toBe(692)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -63,6 +63,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/raid-log')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/raid-log/entries')
   expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/raid-log/entries/:entryId')
+  expect(inventory).toContain('GET /api/teams/:teamId/decision-log')
+  expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/decision-log')
+  expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/decision-log/entries')
+  expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/decision-log/entries/:entryId')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/status-report/pdf')
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/status-shares')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/status-shares')
@@ -248,6 +252,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'e67c1f9c668059c070554637ca2f3e5867ca5603a60752daffb455048643b0ea',
+    '07249a5ee1af9334d79ba9f08566c1ef59faf9ef04c48780af238dbfb5a3f490',
   )
 })

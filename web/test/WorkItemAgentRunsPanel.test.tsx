@@ -181,10 +181,25 @@ describe('Agent Run API', () => {
     await expect(listWorkItemAgentRuns('token', 'core', 'task')).rejects.toMatchObject({ status: 502 })
   })
 
+  test('shows the model time of a run that sent requests but no activity', () => {
+    const usage = {
+      inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 2,
+      models: ['claude-sonnet-5-5'], aiDurationMs: 4_000, byModel: [], hasMore: false,
+    }
+    const [active, ...rest] = agentRunFixtures
+    if (!active) throw new Error('Expected a fixture run.')
+    const runs = [{ ...active, usage, activity: undefined }, ...rest.map((run) => ({ ...run, usage, activity: undefined }))]
+    const html = renderToStaticMarkup(
+      <WorkItemAgentRunsPanel formatDateTime={(value) => value} labels={labels} runs={runs} />,
+    )
+    expect(html.split('data-testid="agent-run-activity"').length - 1).toBe(runs.length)
+    expect(html).toContain('model 4 s')
+  })
+
   test('shows token usage per run and for the Work Item, with the cost only when the server sends it', async () => {
     const usage = {
       inputTokens: 1_200, outputTokens: 300, cacheReadTokens: 40_000, cacheCreationTokens: 500, requestCount: 7,
-      models: ['claude-sonnet-5-5'], hasMore: false,
+      models: ['claude-sonnet-5-5'], aiDurationMs: 0, byModel: [], hasMore: false,
     }
     const [active, ...rest] = agentRunFixtures
     if (!active) throw new Error('Expected a fixture run.')
@@ -212,6 +227,45 @@ describe('Agent Run API', () => {
     globalThis.fetch = async () => Response.json({ items: runs, hasMore: false, usageTotal: { ...usage, inputTokens: -1 } })
     await expect(listWorkItemAgentRuns('token', 'core', 'task')).rejects.toMatchObject({ status: 502 })
     globalThis.fetch = async () => Response.json({ items: [{ ...active, usage: { ...usage, models: [1] } }], hasMore: false })
+    await expect(listWorkItemAgentRuns('token', 'core', 'task')).rejects.toMatchObject({ status: 502 })
+  })
+
+  test('shows where the time went and the totals per model, and validates them', async () => {
+    const usage = {
+      inputTokens: 1_000, outputTokens: 100, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 3,
+      models: ['claude-haiku-5-5', 'claude-sonnet-5-5'], aiDurationMs: 65_000,
+      byModel: [
+        { model: 'claude-haiku-5-5', inputTokens: 400, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 2, aiDurationMs: 5_000 },
+        { model: 'claude-sonnet-5-5', inputTokens: 600, outputTokens: 100, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 1, aiDurationMs: 60_000 },
+      ],
+      hasMore: false,
+    }
+    const activity = {
+      toolCount: 3, toolDurationMs: 200_000, toolFailureCount: 1,
+      tools: [
+        { kind: 'builtin' as const, name: 'Bash', count: 2, durationMs: 190_000, failureCount: 1 },
+        { kind: 'mcp' as const, name: 'github/get_issue', count: 1, durationMs: 10_000, failureCount: 0 },
+      ],
+      approvalWait: { count: 1, durationMs: 30_000 }, promptWait: { count: 1, durationMs: 3_900_000 }, hasMore: false,
+    }
+    const [active, ...rest] = agentRunFixtures
+    if (!active) throw new Error('Expected a fixture run.')
+    const runs = [{ ...active, usage, activity }, ...rest]
+    const html = renderToStaticMarkup(
+      <WorkItemAgentRunsPanel activityTotal={activity} formatDateTime={(value) => value} labels={labels} runs={runs} usageTotal={usage} />,
+    )
+    expect(html).toContain(labels.activityTitle)
+    expect(html).toContain('Model 1 min 5 s · tools 3 min 20 s · waiting for approval 30 s · waiting for the next prompt 1 h 5 min')
+    expect(html).toContain('Bash: 3 min 10 s · 2 calls · 1 failed')
+    expect(html).toContain('MCP github/get_issue: 10 s · 1 call')
+    expect(html).toContain('claude-sonnet-5-5: 700 tokens · 1 request · 1 min 0 s')
+    expect(html).toContain('data-testid="agent-run-activity"')
+
+    globalThis.fetch = async () => Response.json({ items: runs, hasMore: false, usageTotal: usage, activityTotal: activity })
+    const listed = await listWorkItemAgentRuns('token', 'core', 'task')
+    expect(listed.activityTotal).toEqual(activity)
+    expect(listed.items[0]?.usage?.byModel).toEqual(usage.byModel)
+    globalThis.fetch = async () => Response.json({ items: runs, hasMore: false, activityTotal: { ...activity, tools: [{ kind: 'other' }] } })
     await expect(listWorkItemAgentRuns('token', 'core', 'task')).rejects.toMatchObject({ status: 502 })
   })
 

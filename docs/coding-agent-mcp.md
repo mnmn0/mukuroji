@@ -322,9 +322,17 @@ Run とそのタスクに積み上がります（[ADR 0061](adr/0061-agent-token
   OpenTelemetry の送信先に付けます。metrics や traces を別の collector に送っている環境でこの設定を足すと、
   Mukuroji の token がその collector にも渡ります。その場合は設定しないでください。
 - `OTEL_LOGS_EXPORT_INTERVAL` を 60 秒にすると request 数が減ります（既定は 5 秒）。metrics の exporter は
-  設定しません。Mukuroji は logs の `claude_code.api_request` だけを読みます。
-- Mukuroji が読むのはトークン数、推定費用、model、時刻、`mukuroji.agent_instance` だけで、prompt や tool の
-  入力は受け取っても保存しません。`OTEL_LOG_USER_PROMPTS` などを有効にする必要はありません。
+  設定しません。Mukuroji は logs の `claude_code.api_request`、`tool_result`、`tool_decision`、`user_prompt`、
+  `api_error` を読みます（[ADR 0117](adr/0117-agent-run-time-breakdown-and-peer-comparison.md)）。
+- Mukuroji が読むのはトークン数、推定費用、model、request と tool の所要時間（`duration_ms`）、tool 名と成否、
+  権限を誰が判断したか（`source`）、時刻、`event.sequence`、`session.id`（hash にして保存）、`mukuroji.agent_instance`
+  だけで、prompt や tool の入出力は受け取っても保存しません。`OTEL_LOG_USER_PROMPTS` などを有効にする必要はありません。
+- MCP server 名と skill 名を分けて見たいときは `"OTEL_LOG_TOOL_DETAILS": "1"` を足します。この設定は Bash の command
+  などの tool 入力も export に載せますが、Mukuroji は `tool_parameters` から `mcp_server_name`・`mcp_tool_name`・
+  `skill_name` だけを取り出し、残りは捨てます。足さない場合、利用者が追加した MCP の tool は `unknown/unknown`、
+  skill は `Skill` にまとまります。
+- 承認待ちと指示待ちは、人が tool を承認・拒否した `tool_decision` と次の `user_prompt` について、同じ session の
+  直前の event からの間隔で推定します。2 時間を超える間隔は数えません。
 - 同じ instance ID の session を同時に 2 つ動かし、それぞれ別のタスクに着手すると、その間の usage は両方の Run に
   数えられます。同時に動かす session には別の instance ID を指定します（プロジェクトの
   `.claude/settings.local.json` と `.mcp.json` で分けるなど）。

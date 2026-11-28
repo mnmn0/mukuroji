@@ -3237,7 +3237,7 @@ describe('Factory board route', () => {
      */
     const record = (at: number, inputTokens: number, batchId: string) => usage.recordBatch(workspaceId, 'demo@example.com', batchId, [{
       bucketStart: formatUsageBucketStart(at), instanceIdHash: hashAgentInstanceId('laptop-1'), model: 'claude-sonnet-5-5',
-      inputTokens, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicroUsd: inputTokens * 10, requestCount: 1,
+      inputTokens, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicroUsd: inputTokens * 10, requestCount: 1, durationMs: 0,
     }])
     await record(now - 2.5 * hourMs, 500, 'refero')
     await record(now - 4.5 * hourMs, 200, 'loose')
@@ -3247,7 +3247,11 @@ describe('Factory board route', () => {
 
     const body = await readAnalytics(now)
     expect(body.usage).toEqual({
-      total: { inputTokens: 700, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 2, models: ['claude-sonnet-5-5'], hasMore: false },
+      total: {
+        inputTokens: 700, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 2, models: ['claude-sonnet-5-5'], aiDurationMs: 0,
+        byModel: [{ model: 'claude-sonnet-5-5', inputTokens: 700, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 2, aiDurationMs: 0 }],
+        hasMore: false,
+      },
       projects: [
         { projectId: 'refero', usage: expect.objectContaining({ inputTokens: 500 }) },
         { usage: expect.objectContaining({ inputTokens: 200 }) },
@@ -3262,6 +3266,8 @@ describe('Factory board route', () => {
     })
     expect(JSON.stringify(body)).not.toContain('estimatedCostMicroUsd')
     expect(JSON.stringify(body)).not.toContain('task-hidden')
+    // Both visible Work Items have no estimate, so they share the unsized group of the size axis.
+    expect(body.comparison).toMatchObject({ axis: { kind: 'size' }, outliers: [], unsizedWorkItems: 2 })
   })
 
   test('reads a past period without spending its budget on runs that finished after it', async () => {
@@ -3300,6 +3306,11 @@ describe('Factory board route', () => {
     const tooLong = await app.request(`${path}?from=2026-01-01T00:00:00Z&to=2026-10-31T00:00:00Z`, { headers })
     expect(tooLong.status).toBe(400)
     expect(await tooLong.json()).toMatchObject({ code: 'validation_failed' })
+    expect((await app.request(`${path}${period}&compareFieldId=field-size`, { headers })).status).toBe(200)
+    expect((await app.request(`${path}${period}&compareFieldId=story.points`, { headers })).status).toBe(200)
+    const badField = await app.request(`${path}${period}&compareFieldId=${encodeURIComponent('a#b')}`, { headers })
+    expect(badField.status).toBe(400)
+    expect(await badField.json()).toMatchObject({ code: 'validation_failed' })
     expect((await app.request(`http://localhost/api/teams/unknown-team/agent-runs/analytics${period}`, { headers })).status).toBe(404)
   })
 
@@ -3564,6 +3575,89 @@ describe('Agent telemetry usage', () => {
     const body = usageExport(new Date(Date.now() - 20_000), 'laptop')
     expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, body))).toEqual({ rejectedRecords: 0, duplicate: false })
     expect(usage.buckets.size).toBe(1)
+  })
+
+  test('attributes tool time and estimated waits to the run, across exports of the same session', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = createHeldRun('task-1', 'laptop')
+    store.seed(held)
+    const usage = new InMemoryAgentRunUsageStore()
+    setTestAppDependencies({ agentRunUsage: usage })
+    const telemetry = createCanonicalPublicAgentTelemetryService()
+    // The run started just now, so the session runs ahead of it within the accepted clock skew.
+    const start = Date.now() + 10_000
+    /**
+     * Builds one log record of the session.
+     *
+     * @param offsetMs - Milliseconds after the start.
+     * @param event - Event name.
+     * @param attributes - Extra string attributes.
+     * @returns OTLP `LogRecord`.
+     */
+    const record = (offsetMs: number, event: string, attributes: Record<string, string>) => ({
+      timeUnixNano: `${BigInt(start + offsetMs) * 1_000_000n}`,
+      body: { stringValue: `claude_code.${event}` },
+      attributes: [
+        { key: 'session.id', value: { stringValue: 'session-1' } },
+        ...Object.entries(attributes).map(([key, value]) => ({ key, value: { stringValue: value } })),
+      ],
+    })
+    /**
+     * Wraps records in an export of the laptop instance.
+     *
+     * @param records - Log records.
+     * @returns OTLP JSON export.
+     */
+    const exportOf = (records: unknown[]) => ({
+      resourceLogs: [{
+        resource: { attributes: [{ key: 'mukuroji.agent_instance', value: { stringValue: 'laptop' } }] },
+        scopeLogs: [{ logRecords: records }],
+      }],
+    })
+    const first = exportOf([
+      record(0, 'api_request', { model: 'claude-sonnet-5-5', input_tokens: '10', duration_ms: '4000' }),
+      record(6_000, 'tool_decision', { tool_name: 'Bash', decision: 'accept', source: 'user_temporary', prompt: 'secret prompt text' }),
+      record(9_000, 'tool_result', { tool_name: 'Bash', success: 'true', duration_ms: '3000', tool_input: 'rm -rf secret' }),
+      record(10_000, 'tool_result', { tool_name: 'mcp__github__get_issue', success: 'false', duration_ms: '500' }),
+    ])
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, first))).toEqual({ rejectedRecords: 0, duplicate: false })
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, first))).toEqual({ rejectedRecords: 0, duplicate: true })
+    // The prompt arrives in a later export; its wait is measured from the session's last event.
+    const second = exportOf([record(70_000, 'user_prompt', { prompt_length: '12', prompt: 'secret prompt text' })])
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, second))).toEqual({ rejectedRecords: 0, duplicate: false })
+
+    const history = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
+    const listed: unknown = await history.json()
+    expect(listed).toMatchObject({
+      items: [{
+        runId: held.runId,
+        usage: { aiDurationMs: 4_000, byModel: [{ model: 'claude-sonnet-5-5', aiDurationMs: 4_000, requestCount: 1 }] },
+        activity: {
+          toolCount: 2,
+          toolDurationMs: 3_500,
+          toolFailureCount: 1,
+          tools: [
+            { kind: 'builtin', name: 'Bash', count: 1, durationMs: 3_000, failureCount: 0 },
+            { kind: 'mcp', name: 'github/get_issue', count: 1, durationMs: 500, failureCount: 1 },
+          ],
+          approvalWait: { count: 1, durationMs: 6_000 },
+          promptWait: { count: 1, durationMs: 60_000 },
+          hasMore: false,
+        },
+      }],
+      activityTotal: { toolCount: 2, promptWait: { count: 1, durationMs: 60_000 } },
+    })
+    expect(JSON.stringify([...usage.activity.values(), ...usage.sessionCursors.keys()])).not.toContain('secret')
+    expect(JSON.stringify([...usage.sessionCursors.keys()])).not.toContain('session-1')
+
+    // A run with more tools than one run lists still adds every tool to the Work Item total.
+    const many = exportOf(Array.from({ length: 31 }, (_, index) =>
+      record(80_000 + index, 'tool_result', { tool_name: `mcp__srv__t${index}`, success: 'true', duration_ms: String(100 + index) })))
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, many))).toEqual({ rejectedRecords: 0, duplicate: false })
+    const wide: unknown = await (await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })).json()
+    expect(wide).toMatchObject({ items: [{ activity: { toolCount: 33 } }], activityTotal: { toolCount: 33 } })
+    if (!isRecord(wide) || !Array.isArray(wide.items) || !isRecord(wide.items[0]) || !isRecord(wide.items[0].activity)) throw new Error('unexpected body')
+    expect(wide.items[0].activity.tools).toHaveLength(30)
   })
 
   test('refuses an export that is not an OTLP logs request', async () => {

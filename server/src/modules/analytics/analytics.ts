@@ -82,6 +82,7 @@ import {
   analyticsQueryReadsAgentCost,
   isAnalyticsAgentUsageMetric,
   type AnalyticsAgentUsage,
+  type AnalyticsAgentUsageRun,
 } from './analytics-agent-usage'
 import {
   ANALYTICS_EARNED_VALUE_UNAVAILABLE_WARNING,
@@ -2459,6 +2460,12 @@ function normalizeWidgets(value: unknown): AnalyticsWidget[] {
         'Only time in status widgets group by work phase.',
       )
     }
+    if (groupBy?.dimension === 'model' && !isAnalyticsAgentUsageMetric(metric)) {
+      throw invalid(
+        'AnalyticsGroupByInvalid',
+        'Only Agent tokens and Agent estimated cost widgets group by model.',
+      )
+    }
     const slaTargetHours = candidate.slaTargetHours === undefined
       ? undefined
       : readPositiveNumber(candidate.slaTargetHours, 'Analytics SLA target hours')
@@ -2522,6 +2529,7 @@ function normalizeGroupBy(value: unknown): AnalyticsGroupBy {
     dimension !== 'cycle' &&
     dimension !== 'milestone' &&
     dimension !== 'phase' &&
+    dimension !== 'model' &&
     dimension !== 'custom-field'
   ) {
     throw invalid('AnalyticsGroupByInvalid', 'Analytics group-by dimension is invalid.')
@@ -3579,6 +3587,7 @@ function createMetricGroups(
   if (widget.metric === 'status-time' && (groupBy.dimension === 'status' || groupBy.dimension === 'phase')) {
     return createStatusTimeGroups(facts, groupBy.dimension, normalized)
   }
+  if (groupBy.dimension === 'model') return createModelGroups(widget, facts, normalized)
   const grouped = new Map<string, {
     label: string
     facts: AnalyticsWorkItemFact[]
@@ -3609,6 +3618,57 @@ function createMetricGroups(
         sampleSize: result.sampleSize,
       }
     })
+}
+
+/**
+ * Splits an Agent usage widget by the model of each request (ADR 0117). Each group counts the runs
+ * that used the model, with only that model's tokens or estimated cost.
+ *
+ * @param widget - `agent-tokens` or `agent-cost` widget.
+ * @param facts - Filtered Work Item facts.
+ * @param normalized - Normalized query with the authorized Agent Run usage.
+ * @returns One group per model, sorted by model name.
+ */
+function createModelGroups(
+  widget: AnalyticsWidget,
+  facts: readonly AnalyticsWorkItemFact[],
+  normalized: NormalizedAnalyticsQuery,
+): AnalyticsGroup[] {
+  const usage = normalized.agentUsage
+  if (usage === undefined) return []
+  const keys = new Set(facts.map((fact) => workItemKey(fact.state.teamId, fact.state.id)))
+  const models = new Set<string>()
+  for (const [key, runs] of usage.runs) {
+    if (!keys.has(key)) continue
+    for (const run of runs) for (const entry of run.byModel) models.add(entry.model)
+  }
+  return [...models].sort((left, right) => left.localeCompare(right)).map((model): AnalyticsGroup => {
+    const runs = new Map<string, AnalyticsAgentUsageRun[]>()
+    for (const [key, list] of usage.runs) {
+      const projected = list.flatMap((run) => {
+        const entry = run.byModel.find((candidate) => candidate.model === model)
+        if (entry === undefined) return []
+        return [{
+          ...run,
+          tokens: entry.tokens,
+          ...(run.estimatedCostMicroUsd === undefined ? {} : { estimatedCostMicroUsd: entry.estimatedCostMicroUsd ?? 0 }),
+          byModel: [entry],
+        }]
+      })
+      if (projected.length > 0) runs.set(key, projected)
+    }
+    const result = calculateMetric(
+      widget.metric,
+      facts,
+      { ...normalized, agentUsage: { ...usage, runs } },
+      normalized.periodFrom,
+      normalized.periodTo,
+      normalized.asOf,
+      widget.slaTargetHours,
+      widget.weighting,
+    )
+    return { key: model, label: model, value: result.value, sampleSize: result.sampleSize }
+  })
 }
 
 function analyticsGroupIdentity(state: AnalyticsWorkItemState, groupBy: AnalyticsGroupBy) {

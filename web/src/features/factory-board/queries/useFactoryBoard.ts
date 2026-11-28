@@ -135,13 +135,22 @@ export function useFactoryBoardReports(
  * @param accessToken - Session access token; reading is skipped without it.
  * @param teamId - Team ID; reading is skipped without it.
  * @param days - Period length in days.
+ * @param compareFieldId - Custom field the comparison splits by; the size band when undefined.
  * @returns SWR state of the analytics.
  */
-export function useFactoryAnalytics(accessToken: string | undefined, teamId: string | undefined, days: FactoryAnalyticsPeriodDays) {
+export function useFactoryAnalytics(
+  accessToken: string | undefined,
+  teamId: string | undefined,
+  days: FactoryAnalyticsPeriodDays,
+  compareFieldId?: string,
+) {
   return useSWR(
-    accessToken && teamId ? ['factory-analytics', accessToken, teamId, days] as const : null,
-    ([, token, currentTeamId, currentDays]) =>
-      getTeamFactoryAnalytics(token, currentTeamId, createFactoryAnalyticsPeriod(currentDays, new Date())),
+    accessToken && teamId ? ['factory-analytics', accessToken, teamId, days, compareFieldId ?? ''] as const : null,
+    ([, token, currentTeamId, currentDays, currentFieldId]) =>
+      getTeamFactoryAnalytics(token, currentTeamId, {
+        ...createFactoryAnalyticsPeriod(currentDays, new Date()),
+        ...(currentFieldId === '' ? {} : { compareFieldId: currentFieldId }),
+      }),
     {
       dedupingInterval: 60_000,
       // Another period's numbers are never shown under the newly selected period.

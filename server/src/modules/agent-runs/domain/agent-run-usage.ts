@@ -2,11 +2,22 @@ import { createHash } from 'node:crypto'
 import {
   AGENT_TELEMETRY_API_REQUEST_EVENT,
   AGENT_TELEMETRY_INSTANCE_ATTRIBUTE,
+  AGENT_TELEMETRY_TOOL_DECISION_EVENT,
+  AGENT_TELEMETRY_TOOL_RESULT_EVENT,
+  AGENT_TELEMETRY_USER_PROMPT_EVENT,
+  type AgentModelUsage,
   type AgentRunUsage,
   type FactoryAnalyticsUsage,
   NO_WORK_PHASE_GROUP_KEY,
 } from '@mukuroji/contracts'
 import { hashAgentInstanceId } from './agent-run'
+import {
+  classifyAgentTool,
+  hashAgentSessionId,
+  isPersonDecisionSource,
+  type AgentActivityEvent,
+  type AgentActivityEventKind,
+} from './agent-run-activity'
 
 /** Length of one usage bucket. Usage is attributed to runs at this resolution. */
 export const AGENT_USAGE_BUCKET_SECONDS = 10
@@ -35,6 +46,21 @@ export const UNKNOWN_AGENT_INSTANCE_HASH = 'unknown'
 /** Event names, without the runtime prefix, that carry the usage of one model request. */
 const apiRequestEventNames = new Set([AGENT_TELEMETRY_API_REQUEST_EVENT, 'api_request'])
 
+/** Longest model request or tool call the receiver accepts, in milliseconds (one day). */
+const maximumEventDurationMs = 86_400_000
+
+/** Activity event kinds by event name, with and without the runtime prefix (ADR 0117). */
+const activityEventKinds: ReadonlyMap<string, AgentActivityEventKind> = new Map([
+  ['claude_code.api_error', 'error'],
+  ['api_error', 'error'],
+  [AGENT_TELEMETRY_TOOL_RESULT_EVENT, 'tool'],
+  ['tool_result', 'tool'],
+  [AGENT_TELEMETRY_TOOL_DECISION_EVENT, 'decision'],
+  ['tool_decision', 'decision'],
+  [AGENT_TELEMETRY_USER_PROMPT_EVENT, 'prompt'],
+  ['user_prompt', 'prompt'],
+])
+
 /** Usage of one model request, read from one OTLP log record. */
 export type AgentUsageEvent = {
   /** SHA-256 of the agent instance ID, or {@link UNKNOWN_AGENT_INSTANCE_HASH}. */
@@ -53,6 +79,8 @@ export type AgentUsageEvent = {
   cacheCreationTokens: number
   /** Estimated cost in millionths of US dollars. */
   costMicroUsd: number
+  /** Milliseconds the request took; 0 when the runtime sent no duration. */
+  durationMs: number
 }
 
 /** Usage events read from one OTLP export and the number of usage records it rejected. */
@@ -67,6 +95,10 @@ export type ParsedAgentTelemetry = {
   wellFormedEvents: AgentUsageEvent[]
   /** Usage records that were malformed or outside the accepted time window. */
   rejectedRecords: number
+  /** Accepted activity events, including the model requests as timeline points (ADR 0117). */
+  activityEvents: AgentActivityEvent[]
+  /** Well-formed activity events, inside the time window or not. */
+  wellFormedActivityEvents: AgentActivityEvent[]
 }
 
 /** Usage added together for one member, agent instance, model, and bucket. */
@@ -89,6 +121,8 @@ export type AgentUsageBucket = {
   costMicroUsd: number
   /** Model requests the bucket covers. */
   requestCount: number
+  /** Milliseconds the requests took. Rows saved before ADR 0117 read as 0. */
+  durationMs: number
 }
 
 /** Error for an export body that is not an OTLP JSON logs request at all. */
@@ -150,14 +184,20 @@ function readAnyValue(value: unknown): string | number | boolean | undefined {
  *
  * @param attributes - OTLP `KeyValue` list.
  * @param keep - Attribute keys to read.
+ * @param malformed - Receives the kept keys whose value is present but not a scalar.
  * @returns Scalars by key.
  */
-function readAttributes(attributes: unknown[], keep: ReadonlySet<string>): Map<string, string | number | boolean> {
+function readAttributes(
+  attributes: unknown[],
+  keep: ReadonlySet<string>,
+  malformed?: Set<string>,
+): Map<string, string | number | boolean> {
   const values = new Map<string, string | number | boolean>()
   for (const attribute of attributes) {
     if (!isRecord(attribute) || typeof attribute.key !== 'string' || !keep.has(attribute.key)) continue
     const value = readAnyValue(attribute.value)
     if (value !== undefined) values.set(attribute.key, value)
+    else malformed?.add(attribute.key)
   }
   return values
 }
@@ -177,6 +217,18 @@ const logAttributeKeys = new Set([
   'cache_creation_tokens',
   'cost_usd',
   'cost_usd_micros',
+  // Timeline and tool attributes (ADR 0117). `tool_parameters` is parsed only for MCP and skill names.
+  'duration_ms',
+  'session.id',
+  'event.sequence',
+  'tool_name',
+  'success',
+  'source',
+  'decision_source',
+  'tool_parameters',
+  'mcp_server_name',
+  'mcp_tool_name',
+  'skill_name',
 ])
 
 /**
@@ -193,6 +245,22 @@ function readNonNegativeNumber(value: string | number | boolean | undefined, max
     : typeof value === 'string' && /^\d+(\.\d+)?([eE][+-]?\d+)?$/u.test(value.trim()) ? Number(value) : Number.NaN
   if (!Number.isFinite(number) || number < 0 || number > maximum) return undefined
   return number
+}
+
+/**
+ * Reads the `duration_ms` attribute. An absent value counts as 0, but a value that is present and
+ * not a scalar makes the record malformed.
+ *
+ * @param attributes - Scalar attributes of the record.
+ * @param malformedAttributes - Keys whose value was present but not a scalar.
+ * @returns Milliseconds, or undefined when malformed or out of range.
+ */
+function readDurationMs(
+  attributes: ReadonlyMap<string, string | number | boolean>,
+  malformedAttributes: ReadonlySet<string>,
+): number | undefined {
+  if (malformedAttributes.has('duration_ms')) return undefined
+  return readNonNegativeNumber(attributes.get('duration_ms'), maximumEventDurationMs)
 }
 
 /**
@@ -271,6 +339,8 @@ export function parseAgentTelemetryLogs(body: unknown, now: Date): ParsedAgentTe
   if (!isRecord(body)) throw new AgentTelemetryFormatError('The body must be an OTLP ExportLogsServiceRequest object.')
   const events: AgentUsageEvent[] = []
   const wellFormedEvents: AgentUsageEvent[] = []
+  const activityEvents: AgentActivityEvent[] = []
+  const wellFormedActivityEvents: AgentActivityEvent[] = []
   let rejectedRecords = 0
   let recordCount = 0
   const oldest = now.getTime() - AGENT_TELEMETRY_MAX_EVENT_AGE_DAYS * 86_400_000
@@ -290,12 +360,32 @@ export function parseAgentTelemetryLogs(body: unknown, now: Date): ParsedAgentTe
           rejectedRecords += 1
           continue
         }
-        const attributes = readAttributes(readArray(record, 'attributes'), logAttributeKeys)
+        const malformedAttributes = new Set<string>()
+        const attributes = readAttributes(readArray(record, 'attributes'), logAttributeKeys, malformedAttributes)
         const body = readAnyValue(record.body)
         const eventName = attributes.get('event.name')
         const isUsage = (typeof body === 'string' && apiRequestEventNames.has(body)) ||
           (typeof eventName === 'string' && apiRequestEventNames.has(eventName))
-        if (!isUsage) continue
+        const instanceIdHash = readInstanceHash(
+          attributes.get(AGENT_TELEMETRY_INSTANCE_ATTRIBUTE) ?? resourceAttributes.get(AGENT_TELEMETRY_INSTANCE_ATTRIBUTE),
+        )
+        if (!isUsage) {
+          const kind = (typeof eventName === 'string' ? activityEventKinds.get(eventName) : undefined) ??
+            (typeof body === 'string' ? activityEventKinds.get(body) : undefined)
+          if (kind === undefined) continue
+          const activity = readActivityEvent(kind, record, attributes, malformedAttributes, resourceAttributes, instanceIdHash)
+          if (activity === undefined) {
+            rejectedRecords += 1
+            continue
+          }
+          wellFormedActivityEvents.push(activity)
+          if (activity.occurredAtMs < oldest || activity.occurredAtMs > newest) {
+            rejectedRecords += 1
+            continue
+          }
+          activityEvents.push(activity)
+          continue
+        }
         const occurredAtMs = readRecordTime(record, attributes.get('event.timestamp'))
         const inputTokens = readTokenCount(attributes.get('input_tokens'))
         const outputTokens = readTokenCount(attributes.get('output_tokens'))
@@ -306,8 +396,9 @@ export function parseAgentTelemetryLogs(body: unknown, now: Date): ParsedAgentTe
         const costUsd = !attributes.has('cost_usd_micros')
           ? readNonNegativeNumber(attributes.get('cost_usd'), maximumCostUsdPerRequest)
           : costMicros === undefined ? undefined : costMicros / 1_000_000
+        const durationMs = readDurationMs(attributes, malformedAttributes)
         if (
-          occurredAtMs === undefined ||
+          occurredAtMs === undefined || durationMs === undefined ||
           inputTokens === undefined || outputTokens === undefined ||
           cacheReadTokens === undefined || cacheCreationTokens === undefined || costUsd === undefined
         ) {
@@ -316,9 +407,7 @@ export function parseAgentTelemetryLogs(body: unknown, now: Date): ParsedAgentTe
         }
         const event: AgentUsageEvent = {
           // A record attribute wins, so one exporter can serve several instances.
-          instanceIdHash: readInstanceHash(
-            attributes.get(AGENT_TELEMETRY_INSTANCE_ATTRIBUTE) ?? resourceAttributes.get(AGENT_TELEMETRY_INSTANCE_ATTRIBUTE),
-          ),
+          instanceIdHash,
           occurredAtMs,
           model: readModel(attributes.get('model')),
           inputTokens,
@@ -326,17 +415,101 @@ export function parseAgentTelemetryLogs(body: unknown, now: Date): ParsedAgentTe
           cacheReadTokens,
           cacheCreationTokens,
           costMicroUsd: Math.round(costUsd * 1_000_000),
+          durationMs: Math.round(durationMs),
         }
+        // The request is also a point on the session timeline, so a wait is measured from its end.
+        const timelinePoint = readTimelinePoint('request', record, attributes, resourceAttributes, instanceIdHash, occurredAtMs)
         wellFormedEvents.push(event)
+        wellFormedActivityEvents.push(timelinePoint)
         if (occurredAtMs < oldest || occurredAtMs > newest) {
           rejectedRecords += 1
           continue
         }
         events.push(event)
+        activityEvents.push(timelinePoint)
       }
     }
   }
-  return { events, wellFormedEvents, rejectedRecords }
+  return { events, wellFormedEvents, rejectedRecords, activityEvents, wellFormedActivityEvents }
+}
+
+/** Longest runtime session ID the receiver hashes; longer IDs are treated as absent. */
+const maximumSessionIdLength = 256
+
+/**
+ * Reads the fields every activity event shares: time, sequence, and session.
+ *
+ * @param kind - Event kind.
+ * @param record - OTLP `LogRecord`.
+ * @param attributes - Allowlisted record attributes.
+ * @param resourceAttributes - Allowlisted resource attributes.
+ * @param instanceIdHash - Instance hash of the record.
+ * @param occurredAtMs - Event time in epoch milliseconds.
+ * @returns The timeline point.
+ */
+function readTimelinePoint(
+  kind: AgentActivityEventKind,
+  record: Record<string, unknown>,
+  attributes: ReadonlyMap<string, string | number | boolean>,
+  resourceAttributes: ReadonlyMap<string, string | number | boolean>,
+  instanceIdHash: string,
+  occurredAtMs: number,
+): AgentActivityEvent {
+  const sessionId = attributes.get('session.id') ?? resourceAttributes.get('session.id')
+  const sequence = readNonNegativeNumber(attributes.get('event.sequence'), Number.MAX_SAFE_INTEGER)
+  return {
+    kind,
+    instanceIdHash,
+    occurredAtMs,
+    ...(attributes.has('event.sequence') && sequence !== undefined && Number.isInteger(sequence) ? { sequence } : {}),
+    ...(typeof sessionId === 'string' && sessionId !== '' && sessionId.length <= maximumSessionIdLength
+      ? { sessionHash: hashAgentSessionId(sessionId) }
+      : {}),
+  }
+}
+
+/**
+ * Reads a tool result, tool decision, prompt, or API error record as an activity event. Only names,
+ * times, durations, and outcomes are read; the prompt text and tool input never are.
+ *
+ * @param kind - Event kind.
+ * @param record - OTLP `LogRecord`.
+ * @param attributes - Allowlisted record attributes.
+ * @param malformedAttributes - Allowlisted keys whose value was present but not a scalar.
+ * @param resourceAttributes - Allowlisted resource attributes.
+ * @param instanceIdHash - Instance hash of the record.
+ * @returns The event, or undefined when the record is malformed.
+ */
+function readActivityEvent(
+  kind: AgentActivityEventKind,
+  record: Record<string, unknown>,
+  attributes: ReadonlyMap<string, string | number | boolean>,
+  malformedAttributes: ReadonlySet<string>,
+  resourceAttributes: ReadonlyMap<string, string | number | boolean>,
+  instanceIdHash: string,
+): AgentActivityEvent | undefined {
+  const occurredAtMs = readRecordTime(record, attributes.get('event.timestamp'))
+  if (occurredAtMs === undefined) return undefined
+  const point = readTimelinePoint(kind, record, attributes, resourceAttributes, instanceIdHash, occurredAtMs)
+  if (kind === 'decision') {
+    return { ...point, byPerson: isPersonDecisionSource(attributes.get('source') ?? attributes.get('decision_source')) }
+  }
+  if (kind !== 'tool') return point
+  const tool = classifyAgentTool(attributes.get('tool_name'), {
+    toolParameters: attributes.get('tool_parameters'),
+    mcpServerName: attributes.get('mcp_server_name'),
+    mcpToolName: attributes.get('mcp_tool_name'),
+    skillName: attributes.get('skill_name'),
+  })
+  const durationMs = readDurationMs(attributes, malformedAttributes)
+  if (tool === undefined || durationMs === undefined) return undefined
+  const success = attributes.get('success')
+  return {
+    ...point,
+    tool,
+    durationMs: Math.round(durationMs),
+    failed: success === false || success === 'false',
+  }
 }
 
 /**
@@ -371,6 +544,7 @@ export function groupAgentUsageBuckets(events: readonly AgentUsageEvent[]): Agen
       cacheCreationTokens: 0,
       costMicroUsd: 0,
       requestCount: 0,
+      durationMs: 0,
     }
     bucket.inputTokens += event.inputTokens
     bucket.outputTokens += event.outputTokens
@@ -378,6 +552,7 @@ export function groupAgentUsageBuckets(events: readonly AgentUsageEvent[]): Agen
     bucket.cacheCreationTokens += event.cacheCreationTokens
     bucket.costMicroUsd += event.costMicroUsd
     bucket.requestCount += 1
+    bucket.durationMs += event.durationMs
     buckets.set(key, bucket)
   }
   return [...buckets.entries()].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([, bucket]) => bucket)
@@ -484,16 +659,34 @@ export function isAgentUsageBucketInRun(bucket: Pick<AgentUsageBucket, 'bucketSt
  * @returns The summary, or undefined when nothing was found and nothing was left unread.
  */
 export function summarizeAgentUsage(
-  buckets: readonly Pick<AgentUsageBucket, 'model' | 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheCreationTokens' | 'costMicroUsd' | 'requestCount'>[],
+  buckets: readonly Pick<AgentUsageBucket, 'model' | 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheCreationTokens' | 'costMicroUsd' | 'requestCount' | 'durationMs'>[],
   includeCost: boolean,
   hasMore: boolean,
 ): AgentRunUsage | undefined {
   // An empty read that stopped early still reports that some usage was not read.
   if (buckets.length === 0 && !hasMore) return undefined
-  const models = new Set<string>()
-  const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 0, costMicroUsd: 0 }
+  const models = new Map<string, AgentModelUsage>()
+  const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 0, costMicroUsd: 0, durationMs: 0 }
   for (const bucket of buckets) {
-    models.add(bucket.model)
+    const model = models.get(bucket.model) ?? {
+      model: bucket.model,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      requestCount: 0,
+      aiDurationMs: 0,
+      ...(includeCost ? { estimatedCostMicroUsd: 0 } : {}),
+    }
+    model.inputTokens += bucket.inputTokens
+    model.outputTokens += bucket.outputTokens
+    model.cacheReadTokens += bucket.cacheReadTokens
+    model.cacheCreationTokens += bucket.cacheCreationTokens
+    model.requestCount += bucket.requestCount
+    model.aiDurationMs += bucket.durationMs
+    if (model.estimatedCostMicroUsd !== undefined) model.estimatedCostMicroUsd += bucket.costMicroUsd
+    models.set(bucket.model, model)
+    usage.durationMs += bucket.durationMs
     usage.inputTokens += bucket.inputTokens
     usage.outputTokens += bucket.outputTokens
     usage.cacheReadTokens += bucket.cacheReadTokens
@@ -508,9 +701,45 @@ export function summarizeAgentUsage(
     cacheCreationTokens: usage.cacheCreationTokens,
     requestCount: usage.requestCount,
     ...(includeCost ? { estimatedCostMicroUsd: usage.costMicroUsd } : {}),
-    models: [...models].sort(),
+    models: [...models.keys()].sort(),
+    aiDurationMs: usage.durationMs,
+    byModel: [...models.values()].sort((left, right) => left.model < right.model ? -1 : left.model > right.model ? 1 : 0),
     hasMore,
   }
+}
+
+/**
+ * Adds the per-model totals of several usage summaries together.
+ *
+ * @param usages - Summaries.
+ * @param includeCost - Whether every summary carries the estimated cost.
+ * @returns Totals per model, sorted by model name.
+ */
+function combineModelUsage(usages: readonly AgentRunUsage[], includeCost: boolean): AgentModelUsage[] {
+  const models = new Map<string, AgentModelUsage>()
+  for (const usage of usages) {
+    for (const entry of usage.byModel) {
+      const model = models.get(entry.model) ?? {
+        model: entry.model,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        requestCount: 0,
+        aiDurationMs: 0,
+        ...(includeCost ? { estimatedCostMicroUsd: 0 } : {}),
+      }
+      model.inputTokens += entry.inputTokens
+      model.outputTokens += entry.outputTokens
+      model.cacheReadTokens += entry.cacheReadTokens
+      model.cacheCreationTokens += entry.cacheCreationTokens
+      model.requestCount += entry.requestCount
+      model.aiDurationMs += entry.aiDurationMs
+      if (model.estimatedCostMicroUsd !== undefined) model.estimatedCostMicroUsd += entry.estimatedCostMicroUsd ?? 0
+      models.set(entry.model, model)
+    }
+  }
+  return [...models.values()].sort((left, right) => left.model < right.model ? -1 : left.model > right.model ? 1 : 0)
 }
 
 /**
@@ -532,6 +761,8 @@ export function combineAgentRunUsage(usages: readonly (AgentRunUsage | undefined
     requestCount: present.reduce((sum, usage) => sum + usage.requestCount, 0),
     ...(includeCost ? { estimatedCostMicroUsd: present.reduce((sum, usage) => sum + (usage.estimatedCostMicroUsd ?? 0), 0) } : {}),
     models: [...models].sort(),
+    aiDurationMs: present.reduce((sum, usage) => sum + usage.aiDurationMs, 0),
+    byModel: combineModelUsage(present, includeCost),
     hasMore: present.some((usage) => usage.hasMore),
   }
 }

@@ -92,6 +92,7 @@ describe('agent telemetry parsing', () => {
       cacheReadTokens: 1000,
       cacheCreationTokens: 0,
       costMicroUsd: 12_500,
+      durationMs: 0,
     }])
     expect(JSON.stringify(parsed)).not.toContain('secret prompt text')
   })
@@ -135,6 +136,27 @@ describe('agent telemetry parsing', () => {
     ]), now)
     expect(parsed.rejectedRecords).toBe(6)
     expect(parsed.events).toHaveLength(1)
+  })
+
+  test('rejects a duration_ms that is present but not a scalar, and reads an absent one as 0', () => {
+    const toolResult = (durationMs: unknown): Record<string, unknown> => ({
+      timeUnixNano: nanos('2026-11-22T17:05:13Z'),
+      body: { stringValue: 'claude_code.tool_result' },
+      attributes: [
+        { key: 'event.name', value: { stringValue: 'tool_result' } },
+        { key: 'tool_name', value: { stringValue: 'Bash' } },
+        ...(durationMs === undefined ? [] : [{ key: 'duration_ms', value: durationMs }]),
+      ],
+    })
+    const malformed = { arrayValue: { values: [] } }
+    const parsed = parseAgentTelemetryLogs(exportOf([
+      apiRequest('2026-11-22T17:05:12Z', { duration_ms: malformed }),
+      toolResult(malformed),
+      toolResult(undefined),
+    ]), now)
+    expect(parsed.rejectedRecords).toBe(2)
+    expect(parsed.events).toEqual([])
+    expect(parsed.activityEvents.map((event) => event.durationMs)).toEqual([0])
   })
 
   test('accepts nothing from an export resent after its receipt expired', () => {
@@ -193,7 +215,9 @@ describe('agent usage buckets and run attribution', () => {
     const withoutCost = summarizeAgentUsage(buckets, false, false)
     expect(withoutCost).toEqual({
       inputTokens: 360, outputTokens: 90, cacheReadTokens: 3000, cacheCreationTokens: 0, requestCount: 3,
-      models: ['claude-sonnet-5-5'], hasMore: false,
+      models: ['claude-sonnet-5-5'], aiDurationMs: 0,
+      byModel: [{ model: 'claude-sonnet-5-5', inputTokens: 360, outputTokens: 90, cacheReadTokens: 3000, cacheCreationTokens: 0, requestCount: 3, aiDurationMs: 0 }],
+      hasMore: false,
     })
     const withCost = summarizeAgentUsage(buckets, true, true)
     expect(withCost?.estimatedCostMicroUsd).toBe(37_500)
@@ -385,7 +409,7 @@ describe('period usage summary', () => {
    */
   const usage = (inputTokens: number) => ({
     inputTokens, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 1,
-    estimatedCostMicroUsd: inputTokens, models: ['m'], hasMore: false,
+    estimatedCostMicroUsd: inputTokens, models: ['m'], aiDurationMs: 0, byModel: [], hasMore: false,
   })
 
   test('ranks Projects and Work Items by tokens and keeps only the top Work Items', () => {

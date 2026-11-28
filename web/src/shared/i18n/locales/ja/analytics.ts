@@ -142,6 +142,7 @@ export const analyticsMessages = {
   'analytics.group.cycle': 'Cycle',
   'analytics.group.milestone': 'Milestone',
   'analytics.group.phase': '工程',
+  'analytics.group.model': 'model',
   'analytics.group.customField': 'カスタムフィールド',
   'analytics.group.unset': '未設定',
   'analytics.deliveries.label': '自分への配信',

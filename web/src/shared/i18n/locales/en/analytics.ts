@@ -142,6 +142,7 @@ export const analyticsMessages = {
   'analytics.group.cycle': 'Cycle',
   'analytics.group.milestone': 'Milestone',
   'analytics.group.phase': 'Phase',
+  'analytics.group.model': 'Model',
   'analytics.group.customField': 'Custom field',
   'analytics.group.unset': 'Unassigned',
   'analytics.deliveries.label': 'Delivered to me',

@@ -18,6 +18,18 @@ export type AnalyticsAgentUsageRun = {
   estimatedCostMicroUsd?: number
   /** True when the run had more usage than one read returns, so its totals are a lower bound. */
   hasMore: boolean
+  /** Tokens and estimated cost per model of the run's requests, sorted by model (ADR 0117). */
+  byModel: readonly AnalyticsAgentUsageModel[]
+}
+
+/** Tokens and estimated cost of one model within an {@link AnalyticsAgentUsageRun}. */
+export type AnalyticsAgentUsageModel = {
+  /** Model that served the requests. */
+  model: string
+  /** Input, output, prompt cache read, and prompt cache write tokens added together. */
+  tokens: number
+  /** Estimated cost in millionths of US dollars, present when the run carries a cost. */
+  estimatedCostMicroUsd?: number
 }
 
 /** Agent Run usage the API read for one Analytics run, under the viewer's current access. */

@@ -6,17 +6,23 @@ import {
   FACTORY_ANALYTICS_MAX_USAGE_RUNS,
   FACTORY_ANALYTICS_MAX_WORK_ITEMS,
   FACTORY_ANALYTICS_USAGE_TOP_WORK_ITEMS,
+  workItemSizeBand,
+  type CustomFieldValue,
+  type FactoryAnalyticsComparisonAxis,
   type TeamFactoryAnalyticsResponse,
 } from '@mukuroji/contracts'
 import {
   AgentRunError,
   calculateFactoryAnalytics,
   collectPullRequestArtifacts,
+  compareFactoryWorkItems,
   createAgentRunIntegrityError,
   isArtifactRepositoryAllowed,
-  summarizeFactoryUsage,
   selectLatestVerifiedPullRequests,
+  summarizeFactoryActivity,
+  summarizeFactoryUsage,
   summarizePullRequestLeadTimes,
+  type AgentRunComparisonEntry,
   toAgentRunReport,
   type StoredAgentRunReport,
   type AgentRunFinishedGroup,
@@ -29,7 +35,7 @@ import {
   type WorkflowStatusPhaseEntry,
 } from '../../modules/work-items'
 import { mapInOrderWithConcurrency } from '../shared/agent-run-access'
-import { readAgentRunUsage } from '../shared/agent-run-usage-access'
+import { readAgentRunActivity, readAgentRunUsage } from '../shared/agent-run-usage-access'
 import { workItemDependencies } from '../shared/app-dependencies'
 import { canAccessAssignedProject, requireTeamPermission, type WorkspacePrincipal } from '../shared/project-access'
 import type { TeamPermissionContext } from '../shared/workspace-access'
@@ -53,7 +59,12 @@ export type FactoryAnalyticsPeriod = {
   from: number
   /** End of the period in epoch milliseconds, inclusive. */
   to: number
+  /** Axis that splits Work Items of one type for the comparison; the size band unless a custom field was asked for. */
+  comparisonAxis: FactoryAnalyticsComparisonAxis
 }
+
+/** Custom field definition IDs accepted for the comparison axis: the stored configuration ID shape (dots allowed). */
+const customFieldIdPattern = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu
 
 /**
  * Reads one period bound from a query parameter.
@@ -80,8 +91,14 @@ function readPeriodBound(value: string | undefined, name: 'from' | 'to'): number
  * @throws AgentRunError when a bound is invalid, the period runs backwards, or it is longer than
  * {@link FACTORY_ANALYTICS_MAX_PERIOD_DAYS} days.
  */
-export function readFactoryAnalyticsPeriod(from: string | undefined, to: string | undefined): FactoryAnalyticsPeriod {
-  const period = { from: readPeriodBound(from, 'from'), to: readPeriodBound(to, 'to') }
+export function readFactoryAnalyticsPeriod(from: string | undefined, to: string | undefined, compareFieldId?: string): FactoryAnalyticsPeriod {
+  if (compareFieldId !== undefined && !customFieldIdPattern.test(compareFieldId)) {
+    throw new AgentRunError('validation_failed', 'compareFieldId must be a custom field ID.', { pointer: '/compareFieldId' })
+  }
+  const comparisonAxis: FactoryAnalyticsComparisonAxis = compareFieldId === undefined
+    ? { kind: 'size' }
+    : { kind: 'custom-field', customFieldId: compareFieldId }
+  const period = { from: readPeriodBound(from, 'from'), to: readPeriodBound(to, 'to'), comparisonAxis }
   if (period.to < period.from) {
     throw new AgentRunError('validation_failed', 'to must not be earlier than from.', { pointer: '/to' })
   }
@@ -126,12 +143,18 @@ async function readFinishedRunWorkItemIds(
   return { workItemIds: [...workItemIds], hasMore: cursor !== undefined }
 }
 
-/** Fields of a visible Work Item that the usage breakdown shows. */
+/** Fields of a visible Work Item that the usage breakdown and the comparison read. */
 type VisibleWorkItem = {
   /** Work Item title. */
   title: string
   /** Project of the Work Item, when it has one. */
   projectId?: string
+  /** Work Item type, when it has one. */
+  workItemTypeId?: string
+  /** Effort estimate in minutes, when it has one. */
+  plannedEffortMinutes?: number
+  /** Custom field values. */
+  customFieldValues: Record<string, CustomFieldValue>
 }
 
 /**
@@ -158,7 +181,14 @@ async function readVisibleWorkItem(
       { consistentIssueRead: true, includeEvents: false },
     )
     if (!canAccessAssignedProject(principal, permission, issue.assignedProjectId, 'viewer')) return undefined
-    return { title: issue.title, ...(issue.assignedProjectId === undefined ? {} : { projectId: issue.assignedProjectId }) }
+    const plannedEffortMinutes = issue.schedule?.plannedEffortMinutes
+    return {
+      title: issue.title,
+      ...(issue.assignedProjectId === undefined ? {} : { projectId: issue.assignedProjectId }),
+      ...(issue.workItemTypeId === undefined ? {} : { workItemTypeId: issue.workItemTypeId }),
+      ...(plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes }),
+      customFieldValues: issue.customFieldValues ?? {},
+    }
   } catch (error) {
     if (isTeamIssueNotFoundError(error)) return undefined
     throw error
@@ -271,7 +301,7 @@ export async function getWebTeamFactoryAnalytics(
     to: period.to,
     histories: visible.map((entry) => entry.history),
   })
-  const [usage, pullRequestLeadTimes] = await Promise.all([
+  const [{ usage, activity, comparison }, pullRequestLeadTimes] = await Promise.all([
     readPeriodUsage(principal, teamId, period, visible),
     readPullRequestLeadTimes(principal, teamId, period, visible),
   ])
@@ -284,8 +314,28 @@ export async function getWebTeamFactoryAnalytics(
     workItemsHasMore: workItemIds.length > evaluatedIds.length,
     historyHasMore,
     ...(usage === undefined ? {} : { usage }),
+    ...(activity === undefined ? {} : { activity }),
+    ...(comparison === undefined ? {} : { comparison }),
     pullRequestLeadTimes,
   }
+}
+
+/**
+ * Reads a Work Item's value on the comparison axis.
+ *
+ * @param workItem - Visible Work Item.
+ * @param axis - Comparison axis.
+ * @returns The size band or custom field value, or undefined when the Work Item has none.
+ */
+function comparisonValue(workItem: VisibleWorkItem, axis: FactoryAnalyticsComparisonAxis): string | undefined {
+  if (axis.kind === 'size') {
+    const band = workItemSizeBand(workItem.plannedEffortMinutes)
+    return band === 'none' ? undefined : band
+  }
+  if (!Object.hasOwn(workItem.customFieldValues, axis.customFieldId)) return undefined
+  const value = workItem.customFieldValues[axis.customFieldId]
+  if (value === undefined || value === '' || (Array.isArray(value) && value.length === 0)) return undefined
+  return Array.isArray(value) ? [...value].sort().join(', ') : String(value)
 }
 
 /**
@@ -302,39 +352,82 @@ async function readPeriodUsage(
   principal: WorkspacePrincipal,
   teamId: string,
   period: FactoryAnalyticsPeriod,
-  workItems: readonly { workItemId: string; workItem: VisibleWorkItem; history: WorkItemHistoryWithPullRequests }[],
-): Promise<TeamFactoryAnalyticsResponse['usage']> {
-  const runs = workItems.flatMap(({ workItemId, workItem, history }) => history.runs.flatMap((run) => {
-    const finishedAt = run.finishedAt === undefined ? Number.NaN : Date.parse(run.finishedAt)
-    return finishedAt >= period.from && finishedAt <= period.to ? [{ run, workItemId, workItem, finishedAt }] : []
-  })).sort((left, right) => right.finishedAt - left.finishedAt || (left.run.runId < right.run.runId ? -1 : 1))
-  if (runs.length === 0) return undefined
+  workItems: readonly { workItemId: string; workItem: VisibleWorkItem; history: FactoryAnalyticsWorkItemHistory }[],
+): Promise<Pick<TeamFactoryAnalyticsResponse, 'usage' | 'activity' | 'comparison'>> {
+  const runs = workItems.flatMap(({ workItemId, workItem, history }) => {
+    const ordered = [...history.runs].sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt) || left.runId.localeCompare(right.runId))
+    return ordered.flatMap((run, index) => {
+      const finishedAt = run.finishedAt === undefined ? Number.NaN : Date.parse(run.finishedAt)
+      const previous = ordered[index - 1]
+      const rework = previous?.outcome === 'failed' || previous?.outcome === 'completed'
+      return finishedAt >= period.from && finishedAt <= period.to ? [{ run, workItemId, workItem, finishedAt, rework }] : []
+    })
+  }).sort((left, right) => right.finishedAt - left.finishedAt || (left.run.runId < right.run.runId ? -1 : 1))
+  if (runs.length === 0) return {}
   const evaluated = runs.slice(0, FACTORY_ANALYTICS_MAX_USAGE_RUNS)
+  const runsHasMore = runs.length > evaluated.length
   const [includeCost, statusPhases] = await Promise.all([
     isTeamManager(principal, teamId),
     readTeamStatusPhases(principal, teamId),
   ])
-  const usages = await mapInOrderWithConcurrency(evaluated, analyticsReadConcurrency, ({ run }) =>
-    readAgentRunUsage(principal.directoryId, run, includeCost))
-  return summarizeFactoryUsage(
+  const reads = await mapInOrderWithConcurrency(evaluated, analyticsReadConcurrency, async ({ run }) => {
+    const [usage, activity] = await Promise.all([
+      readAgentRunUsage(principal.directoryId, run, includeCost),
+      // Every tool of each run, so the period's top tools are cut only after the runs are added together.
+      readAgentRunActivity(principal.directoryId, run, Number.MAX_SAFE_INTEGER),
+    ])
+    return { usage, activity }
+  })
+  const usage = summarizeFactoryUsage(
     evaluated.flatMap(({ run, workItemId, workItem }, index) => {
-      const usage = usages[index]
+      const runUsage = reads[index]?.usage
       const phaseKey = run.startWorkflowStatusId === undefined
         ? undefined
         : statusPhases.get(run.startWorkflowStatusId)?.phaseKey
-      return usage
+      return runUsage
         ? [{
             workItemId,
             title: workItem.title,
             ...(workItem.projectId === undefined ? {} : { projectId: workItem.projectId }),
-            usage,
+            usage: runUsage,
             ...(phaseKey === undefined ? {} : { phaseKey }),
           }]
         : []
     }),
     FACTORY_ANALYTICS_USAGE_TOP_WORK_ITEMS,
-    runs.length > evaluated.length,
+    runsHasMore,
   )
+  const activity = summarizeFactoryActivity(reads.map((read) => read.usage), reads.map((read) => read.activity), runsHasMore)
+  const entries = new Map<string, AgentRunComparisonEntry>()
+  evaluated.forEach(({ run, workItemId, workItem, rework }, index) => {
+    if (run.finishedAt === undefined) return
+    const value = comparisonValue(workItem, period.comparisonAxis)
+    const entry = entries.get(workItemId) ?? {
+      workItemId,
+      title: workItem.title,
+      ...(workItem.projectId === undefined ? {} : { projectId: workItem.projectId }),
+      ...(workItem.workItemTypeId === undefined ? {} : { workItemTypeId: workItem.workItemTypeId }),
+      ...(value === undefined ? {} : { value }),
+      runs: [],
+    }
+    const read = reads[index]
+    entry.runs.push({
+      runtime: run.runtime,
+      assigneeUserId: run.assigneeUserId,
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+      rework,
+      ...(read?.usage === undefined ? {} : { usage: read.usage }),
+      ...(read?.activity === undefined ? {} : { activity: read.activity }),
+    })
+    entries.set(workItemId, entry)
+  })
+  const comparison = compareFactoryWorkItems(period.comparisonAxis, [...entries.values()], includeCost)
+  return {
+    ...(usage === undefined ? {} : { usage }),
+    ...(activity === undefined ? {} : { activity }),
+    ...(comparison === undefined ? {} : { comparison }),
+  }
 }
 
 /**

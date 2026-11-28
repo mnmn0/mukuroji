@@ -6,6 +6,7 @@ export {
   createAgentRunTakeoverDisabledError,
   createAgentRunIntegrityError,
   createAgentRunNotActiveError,
+  createAgentUsageUnavailableError,
   type AgentRunErrorCategory,
 } from './domain/agent-run-error'
 export {
@@ -115,6 +116,7 @@ export {
   InMemoryTransactionCanceledError,
 } from './adapter-out/in-memory/agent-run-store'
 export {
+  AGENT_USAGE_BUCKET_SECONDS,
   AgentTelemetryFormatError,
   agentUsageRunBucketRange,
   combineAgentRunUsage,
@@ -132,8 +134,26 @@ export {
   type ParsedAgentTelemetry,
 } from './domain/agent-run-usage'
 export {
+  agentSessionKey,
+  classifyAgentTool,
+  combineAgentRunActivity,
+  deriveAgentActivityBatchId,
+  AGENT_ACTIVITY_MAX_WAIT_ITEMS,
+  layoutAgentActivityRows,
+  summarizeAgentActivity,
+  type AgentActivityEvent,
+  type AgentActivityRow,
+} from './domain/agent-run-activity'
+export {
+  compareFactoryWorkItems,
+  summarizeFactoryActivity,
+  type AgentRunComparisonEntry,
+  type AgentRunComparisonRun,
+} from './domain/agent-run-comparison'
+export {
   AGENT_USAGE_TTL_ATTRIBUTE,
   DynamoDbAgentRunUsageStore,
+  type AgentActivityRowPage,
   type AgentRunUsageStore,
   type AgentUsageBucketPage,
 } from './adapter-out/dynamodb/agent-run-usage-store'

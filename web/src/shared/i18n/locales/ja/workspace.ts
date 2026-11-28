@@ -1076,6 +1076,7 @@ export const workspaceMessages = {
   'archiveImpact.webhookSubscriptions': 'この Team に配信している Webhook: {count}',
   'sidebar.teamOverview': 'チーム概要',
   'sidebar.triage': 'Triage',
+  'sidebar.decisionLog': '意思決定ログ',
   'sidebar.factoryBoard': 'Factory board',
   'sidebar.timeTracking': '工数',
   'sidebar.issues': 'Issues',

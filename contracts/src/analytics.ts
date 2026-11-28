@@ -140,6 +140,11 @@ export type AnalyticsGroupBy =
         | 'cycle'
         | 'milestone'
         | 'phase'
+        /**
+         * Model that served the Agent Run requests. Only `agent-tokens` and `agent-cost` widgets accept
+         * it; one run's tokens and cost are split by the model of each request (ADR 0117).
+         */
+        | 'model'
       /** Built-in dimension では custom field ID を指定しません。 */
       customFieldId?: never
     }

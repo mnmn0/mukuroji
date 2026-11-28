@@ -1,9 +1,12 @@
 import type {
+  AgentRunActivity,
   AgentRunRuntime,
   AgentRunUsage,
+  AgentToolActivity,
   FactoryAnalyticsPullRequestInterval,
   FactoryAnalyticsStage,
   FactoryBoardLane,
+  WorkItemSizeBand,
   WorkspaceWorkPhaseSettings,
 } from '@mukuroji/contracts'
 import type { FactoryLineStation } from '../model/factoryLine'
@@ -349,6 +352,65 @@ export type FactoryAnalyticsLabels = {
    * @returns Detail text.
    */
   formatUsageDetail: (usage: AgentRunUsage) => string
+  /** Heading of the time breakdown. */
+  activityHeading: string
+  /** Explanation of the time breakdown. */
+  activityHint: string
+  /** Share of agent working time, with `{value}`. */
+  activityShare: string
+  /** Heading of the tools with the longest time. */
+  activityTopTools: string
+  /** Heading of the comparison. */
+  comparisonHeading: string
+  /** Explanation of the comparison. */
+  comparisonHint: string
+  /** Label of the comparison axis selector. */
+  comparisonAxis: string
+  /** Option of the size axis. */
+  comparisonAxisSize: string
+  /** Shown in place of the axis selector when the custom fields could not be read. */
+  comparisonFieldsError: string
+  /** Names the group of Work Items that have no value in the compared custom field. */
+  comparisonNoValue: string
+  /** Button that goes back to comparing by estimate size after a custom-field comparison failed to load. */
+  comparisonBackToSize: string
+  /** Heading of the comparison groups. */
+  comparisonGroups: string
+  /** Heading of the outliers. */
+  comparisonOutliers: string
+  /** Text shown when no Work Item is an outlier. */
+  comparisonNoOutliers: string
+  /** Note on Work Items without a value, with `{count}`. */
+  comparisonUnsized: string
+  /** Group line with `{type}`, `{value}`, `{count}`, `{minutes}`, and `{tokens}`. */
+  comparisonGroupLine: string
+  /** Outlier line with `{ratio}`, `{minutes}`, `{tokens}`, `{runs}`, and `{rework}`. */
+  comparisonOutlierLine: string
+  /** Outlier time line with `{ai}`, `{tools}`, and `{wait}`. */
+  comparisonOutlierTime: string
+  /** Name of the group of Work Items without a type. */
+  comparisonNoType: string
+  /** Display names of size bands. */
+  sizeBands: Record<WorkItemSizeBand, string>
+  /**
+   * Describes model, tool, and wait time.
+   * @param aiDurationMs - Milliseconds of model requests.
+   * @param activity - Tool time and waits, when present.
+   * @returns Breakdown text.
+   */
+  formatActivityBreakdown: (aiDurationMs: number, activity: AgentRunActivity | undefined) => string
+  /**
+   * Describes one tool's time.
+   * @param tool - Tool.
+   * @returns Tool text.
+   */
+  formatTool: (tool: AgentToolActivity) => string
+  /**
+   * Formats an elapsed time.
+   * @param milliseconds - Elapsed milliseconds.
+   * @returns Duration text.
+   */
+  formatDuration: (milliseconds: number) => string
 }
 
 /**
@@ -418,5 +480,34 @@ export function createFactoryAnalyticsLabels(locale: Locale): FactoryAnalyticsLa
     formatUsageCompact: runLabels.formatUsageCompact,
     formatUsageTokens: runLabels.formatUsageTokens,
     formatUsageDetail: runLabels.formatUsageDetail,
+    activityHeading: t('factoryBoard.analytics.activityHeading'),
+    activityHint: t('factoryBoard.analytics.activityHint'),
+    activityShare: t('factoryBoard.analytics.activityShare'),
+    activityTopTools: t('factoryBoard.analytics.activityTopTools'),
+    comparisonHeading: t('factoryBoard.analytics.comparisonHeading'),
+    comparisonHint: t('factoryBoard.analytics.comparisonHint'),
+    comparisonAxis: t('factoryBoard.analytics.comparisonAxis'),
+    comparisonAxisSize: t('factoryBoard.analytics.comparisonAxisSize'),
+    comparisonFieldsError: t('factoryBoard.analytics.comparisonFieldsError'),
+    comparisonNoValue: t('factoryBoard.analytics.comparisonNoValue'),
+    comparisonBackToSize: t('factoryBoard.analytics.comparisonBackToSize'),
+    comparisonGroups: t('factoryBoard.analytics.comparisonGroups'),
+    comparisonOutliers: t('factoryBoard.analytics.comparisonOutliers'),
+    comparisonNoOutliers: t('factoryBoard.analytics.comparisonNoOutliers'),
+    comparisonUnsized: t('factoryBoard.analytics.comparisonUnsized'),
+    comparisonGroupLine: t('factoryBoard.analytics.comparisonGroupLine'),
+    comparisonOutlierLine: t('factoryBoard.analytics.comparisonOutlierLine'),
+    comparisonOutlierTime: t('factoryBoard.analytics.comparisonOutlierTime'),
+    comparisonNoType: t('factoryBoard.analytics.comparisonNoType'),
+    sizeBands: {
+      'up-to-2h': t('factoryBoard.analytics.sizeBand.up-to-2h'),
+      'up-to-1d': t('factoryBoard.analytics.sizeBand.up-to-1d'),
+      'up-to-3d': t('factoryBoard.analytics.sizeBand.up-to-3d'),
+      'over-3d': t('factoryBoard.analytics.sizeBand.over-3d'),
+      none: t('factoryBoard.analytics.sizeBand.none'),
+    },
+    formatActivityBreakdown: runLabels.formatActivityBreakdown,
+    formatTool: runLabels.formatTool,
+    formatDuration: runLabels.formatDuration,
   }
 }

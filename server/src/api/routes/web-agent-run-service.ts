@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from 'node:crypto'
 import {
+  AGENT_RUN_ACTIVITY_MAX_TOOLS,
   FACTORY_BOARD_COMPLETED_WINDOW_HOURS,
   FACTORY_BOARD_MAX_ACTIVE_RUNS,
   FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS,
@@ -7,6 +8,7 @@ import {
   FACTORY_BOARD_REPORT_EXCERPT_MAX_LENGTH,
   classifyFactoryBoardItem,
   type AgentRunReport,
+  type AgentRunActivity,
   type AgentRunUsage,
   type AgentRunView,
   type AgentSettings,
@@ -20,6 +22,7 @@ import {
 import {
   AgentRunError,
   applyWorkspaceAgentDefaults,
+  combineAgentRunActivity,
   combineAgentRunUsage,
   createAgentRunIntegrityError,
   createAgentRunNotActiveError,
@@ -65,7 +68,7 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from '../shared/work-item-access'
-import { readAgentRunUsage } from '../shared/agent-run-usage-access'
+import { readAgentRunActivity, readAgentRunUsage } from '../shared/agent-run-usage-access'
 import { isRecord } from '../shared/value-guards'
 import { readWorkspaceMemberNamesForDisplay, type TeamPermissionContext } from '../shared/workspace-access'
 import { withCurrentAnswer } from './web-agent-run-answer-service'
@@ -151,6 +154,7 @@ function mayRelease(run: StoredAgentRun, principal: WorkspacePrincipal, manager:
  * @param canRelease - Whether the viewer may release the run while it is active.
  * @param now - Read time.
  * @param usage - Usage attributed to the run, if any.
+ * @param activity - Tool time and waits attributed to the run, if any.
  * @param credentialNames - API key names for a Team manager; the starting credential is shown only when given.
  * @returns Run view.
  */
@@ -159,6 +163,7 @@ function toAgentRunView(
   canRelease: boolean,
   now: Date,
   usage?: AgentRunUsage,
+  activity?: AgentRunActivity,
   credentialNames?: ReadonlyMap<string, string>,
 ): AgentRunView {
   const credentialName = credentialNames?.get(run.credentialId)
@@ -167,6 +172,7 @@ function toAgentRunView(
     canRelease: run.state === 'active' && canRelease,
     ...(run.resumedFromRunId === undefined ? {} : { resumedFromRunId: run.resumedFromRunId }),
     ...(usage === undefined ? {} : { usage }),
+    ...(activity === undefined ? {} : { activity }),
     ...(credentialNames === undefined
       ? {}
       : {
@@ -225,16 +231,24 @@ export async function listWebWorkItemAgentRuns(
   // Tokens are visible to every viewer of the Work Item; the estimated cost only to Team managers.
   const usages = await Promise.all(page.runs.map((run) => readAgentRunUsage(principal.directoryId, run, manager)))
   const usageTotal = combineAgentRunUsage(usages)
+  // Every tool of each run is read, so the Work Item total adds them all before it keeps the longest.
+  const fullActivities = await Promise.all(page.runs.map((run) => readAgentRunActivity(principal.directoryId, run, Number.MAX_SAFE_INTEGER)))
+  const activityTotal = combineAgentRunActivity(fullActivities)
+  const activities = fullActivities.map((activity) => activity === undefined
+    ? undefined
+    : { ...activity, tools: activity.tools.slice(0, AGENT_RUN_ACTIVITY_MAX_TOOLS) })
   return {
     items: page.runs.map((run, index) => toAgentRunView(
       run,
       writable && mayRelease(run, principal, manager, detail.issue.assigneeUserId),
       now,
       usages[index],
+      activities[index],
       credentialNames,
     )),
     hasMore: page.nextCursor !== undefined,
     ...(usageTotal === undefined ? {} : { usageTotal }),
+    ...(activityTotal === undefined ? {} : { activityTotal }),
   }
 }
 
@@ -749,7 +763,7 @@ export async function listWebTeamAgentRunBoard(
         ...(workItem.assignedProjectId === undefined ? {} : { assignedProjectId: workItem.assignedProjectId }),
         assigneeUserId: workItem.assigneeUserId,
       },
-      ...(run === undefined ? {} : { run: toAgentRunView(run, canRelease, now, undefined, credentialNames) }),
+      ...(run === undefined ? {} : { run: toAgentRunView(run, canRelease, now, undefined, undefined, credentialNames) }),
       ...(latestReport === undefined ? {} : { latestReport }),
     }
     return classifyFactoryBoardItem(item, now) === undefined ? undefined : item

@@ -112,6 +112,7 @@ function createRun(
     tokens,
     ...(estimatedCostMicroUsd === undefined ? {} : { estimatedCostMicroUsd }),
     hasMore,
+    byModel: [{ model: 'm', tokens, ...(estimatedCostMicroUsd === undefined ? {} : { estimatedCostMicroUsd }) }],
   }
 }
 
@@ -194,6 +195,50 @@ describe('Agent usage metrics', () => {
     expect(cost?.warnings).toContain('1 Agent Run(s) of Teams you do not manage were left out of the estimated cost.')
     // A Team whose cost the viewer cannot see has no value rather than zero.
     expect(byTeam?.groups.map((group) => [group.key, group.value])).toEqual([['core', 0.15], ['ops', null]])
+  })
+
+  test('splits tokens and cost by the model of each request', () => {
+    const mixed: AnalyticsAgentUsage = {
+      runs: new Map([
+        ['core\0item-1', [{
+          ...createRun('run-1', '2026-01-02T10:00:00.000Z', 1_000, 120_000),
+          byModel: [
+            { model: 'claude-opus-5-5', tokens: 700, estimatedCostMicroUsd: 100_000 },
+            { model: 'claude-haiku-5-5', tokens: 300, estimatedCostMicroUsd: 20_000 },
+          ],
+        }]],
+        ['ops\0item-2', [{ ...createRun('run-3', '2026-01-04T12:00:00.000Z', 2_000), byModel: [{ model: 'claude-haiku-5-5', tokens: 2_000 }] }]],
+      ]),
+      costTeamIds: ['core'],
+    }
+    const snapshot = createAnalyticsSnapshot({
+      workItems,
+      events: [],
+      authorizedProjectIds,
+      agentUsage: mixed,
+      query: createQuery([
+        { id: 'tokens', title: 'Tokens', type: 'metric', metric: 'agent-tokens', groupBy: { dimension: 'model' } },
+        { id: 'cost', title: 'Cost', type: 'metric', metric: 'agent-cost', groupBy: { dimension: 'model' } },
+      ]),
+    })
+    const [tokens, cost] = snapshot.widgets
+    expect(tokens?.groups.map((group) => [group.key, group.value, group.sampleSize])).toEqual([
+      ['claude-haiku-5-5', 2_300, 2],
+      ['claude-opus-5-5', 700, 1],
+    ])
+    expect(cost?.groups.map((group) => [group.key, group.value])).toEqual([
+      ['claude-haiku-5-5', 0.02],
+      ['claude-opus-5-5', 0.1],
+    ])
+  })
+
+  test('refuses the model dimension on other metrics', () => {
+    expect(() => createAnalyticsSnapshot({
+      workItems,
+      events: [],
+      authorizedProjectIds,
+      query: createQuery([{ id: 'x', title: 'X', type: 'metric', metric: 'throughput', groupBy: { dimension: 'model' } }]),
+    })).toThrow('Only Agent tokens and Agent estimated cost widgets group by model.')
   })
 
   test('counts a run without a reported cost as zero and says so', () => {
