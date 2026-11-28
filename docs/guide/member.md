@@ -208,6 +208,27 @@ Project manager への escalation の日数は Team の設定だけで決まり�
 
 ![受信箱](../../web/visual/__screenshots__/application-pages-workspaceroutes--inbox-route--light.png)
 
+## GitHub の pull request をレビューする
+
+管理者が GitHub 連携を設定した環境では、サイドバーの **レビュー**（`/reviews`）に GitHub の pull request が表示されます。
+
+1. **設定** → **個人** → **GitHub** で、自分の GitHub のユーザー名を登録します。同じユーザー名は 1 人しか登録できません。
+   別の人が登録済みと表示されたら、Workspace 管理者に外してもらってください。
+2. **レビュー依頼** のタブには、ほかの人が作った open な pull request のうち、自分がレビューを頼まれたものと、
+   すでにレビューしたものが出ます。**自分の PR** のタブには、自分が作った pull request が出ます。
+3. どちらのタブも **マージできる**（draft でなく、conflict がなく、CI が通り、承認済みかレビュー不要）・**オープン**・
+   **マージ済み**・**クローズ** に分かれます。CI が失敗していれば失敗した check の名前が、conflict があればその印が付きます。
+   タイトルを押すと GitHub で開きます。閉じた pull request は 30 日で一覧から消えます。
+
+表示されるのは、管理者が Team に紐付けた repository のうち、自分が見られる Team のものだけです。
+GitHub の表示は数秒から数分遅れることがあり、取りこぼしは 1 時間ごとに直ります。
+
+受信箱には次の通知が届きます（GitHub のユーザー名を登録している場合だけ）。
+
+- レビューを頼まれたとき
+- 自分の pull request の CI が失敗したとき（同じ commit で失敗が続く間は 1 回だけ）
+- 自分の pull request に conflict が出たとき
+
 ## 工数を記録する
 
 ### タスクから記録する

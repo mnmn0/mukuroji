@@ -592,6 +592,8 @@ export const workspaceMessages = {
   'workspace.settings.panel.work-item-key-prefix': 'Work Item key の prefix',
   'workspace.settings.panel.team-automation': 'チームの自動化',
   'workspace.settings.panel.agent-settings': 'エージェント設定',
+  'workspace.settings.panel.github': 'GitHub',
+  'workspace.settings.panel.github-repositories': 'GitHub リポジトリ',
   'workspace.settings.profile.nameLabel': '表示名',
   'workspace.settings.profile.nameHelp': '担当者の一覧・コメント・週報などで、ほかのメンバーに表示される名前です。空にするとメールアドレスで表示されます。',
   'workspace.settings.profile.directoryManaged': 'この表示名はディレクトリ（SCIM）連携で管理されているため、ここでは変更できません。',

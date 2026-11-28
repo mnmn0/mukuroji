@@ -8,6 +8,8 @@ import { DEFAULT_NOTIFICATION_PREFERENCES } from '../../../notifications/notific
 import { createAnalyticsDeliveryAuditNotifier } from '../../../analytics'
 import { TIMESHEET_REMINDER_EVENT_TYPE } from '../../../notifications'
 import { S3Client } from '@aws-sdk/client-s3'
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDbGitHubNotificationReader } from '../../../github-integration'
 import {
   WORK_ITEM_SCHEMA_VERSION,
   createDefaultDueDateWorkItemSchedule,
@@ -43,6 +45,8 @@ import {
   processCollaborationProjectionBatch,
   projectsSubscribedWatchers,
   readMemberAccessExpiryNoticeFence,
+  readGitHubPullRequestNotificationFence,
+  type GitHubPullRequestNotificationRevalidator,
   isCurrentBudgetThresholdRecipient,
   isCurrentMemberAccessExpiryRecipient,
   publishRealtimeInvalidation,
@@ -3445,6 +3449,103 @@ describe('collaboration projection pure helpers', () => {
     }
   })
 
+  test('drops a GitHub pull request notification once its repository is unlinked or moved to another Team', async () => {
+    const previous = process.env.PLANNING_TABLE_NAME
+    process.env.PLANNING_TABLE_NAME = 'PLANNING_TABLE_NAME'
+    let link: Record<string, unknown> | undefined = {
+      workspaceId: 'workspace-1', recordKey: 'GITHUB_REPOSITORY#42', entryType: 'github-repository-link', schemaVersion: 1,
+      repositoryId: '42', repository: 'acme/app', installationId: '7', private: true, teamId: 'core', revision: 1,
+      linkedAt: '2026-11-27T00:00:00.000Z',
+    }
+    let snapshotSyncedAt: string | undefined = '2026-11-28T00:00:00.000Z'
+    let requestedReviewers = ['someone-else']
+    let snapshotOverrides: Record<string, unknown> = {}
+    /**
+     * Builds the stored snapshot row the fence reads.
+     *
+     * @param syncedAt - Read time of the snapshot.
+     * @returns A row the integration store would write.
+     */
+    const snapshotRow = (syncedAt: string): Record<string, unknown> => ({
+      workspaceId: 'workspace-1', recordKey: 'GITHUB_PULL_REQUEST#42#0000000007', entryType: 'github-pull-request', schemaVersion: 1,
+      repositoryId: '42', repository: 'acme/app', number: 7, title: 'Review me', url: 'https://github.com/acme/app/pull/7',
+      state: 'open', draft: false, headRef: 'feature', baseRef: 'main', headSha: 'a'.repeat(40), mergeable: 'mergeable',
+      reviewDecision: 'review-required', requestedReviewerLogins: requestedReviewers, requestedTeamSlugs: [], reviews: [],
+      checks: { state: 'success', failedNames: [], total: 1 }, createdAt: '2026-11-27T00:00:00.000Z',
+      updatedAt: syncedAt, syncedAt, ...snapshotOverrides,
+    })
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (command instanceof GetCommand && command.input.TableName === 'PLANNING_TABLE_NAME') {
+        expect(command.input.ConsistentRead).toBe(true)
+        if (command.input.Key?.recordKey === 'GITHUB_REPOSITORY#42') return link ? { Item: link, $metadata: {} } : { $metadata: {} }
+        if (command.input.Key?.recordKey === 'GITHUB_PULL_REQUEST#42#0000000007') {
+          return snapshotSyncedAt
+            ? { Item: snapshotRow(snapshotSyncedAt), $metadata: {} }
+            : { $metadata: {} }
+        }
+      }
+      throw new Error('Unexpected command.')
+    })
+    try {
+      const event = parseAuditProjectionEvent({
+        eventId: 'github', eventType: 'github.pull_request_review_requested', workspaceId: 'workspace-1',
+        entityType: 'github-pull-request', entityId: '42#7', occurredAt: '2026-11-28T00:00:00.000Z', outboxStatus: 'pending',
+        metadata: {
+          teamId: 'core', githubPullRequestSyncedAt: '2026-11-28T00:00:00.000Z', githubRecipientLogin: 'bob',
+          notificationCandidates: [{ memberKey: 'bob@example.com', reason: 'review-requested' }],
+        },
+      })
+      if (!event) throw new Error('Expected a parsed event.')
+      const reader = new DynamoDbGitHubNotificationReader('PLANNING_TABLE_NAME', DynamoDBDocumentClient.from(new DynamoDBClient({})))
+      const revalidator: GitHubPullRequestNotificationRevalidator = {
+        async readLinkCondition({ workspaceId, repositoryId, teamId }) {
+          const current = await reader.readLink(workspaceId, repositoryId)
+          return current?.teamId === teamId ? reader.linkTeamCondition(workspaceId, repositoryId, teamId) : undefined
+        },
+        async readSnapshot({ workspaceId, repositoryId, number }) {
+          return await reader.readSnapshot(workspaceId, repositoryId, number) ?? undefined
+        },
+      }
+      // Without a revalidator a GitHub notification is never trusted.
+      expect((await readGitHubPullRequestNotificationFence(event, undefined)).current).toBe(false)
+      const fence = await readGitHubPullRequestNotificationFence(event, revalidator)
+      expect(fence.current).toBe(true)
+      expect(fence.condition?.ConditionCheck.ExpressionAttributeValues).toEqual({ ':entryType': 'github-repository-link', ':teamId': 'core' })
+      // The notification is written before its snapshot, so a missing snapshot keeps it.
+      snapshotSyncedAt = undefined
+      expect((await readGitHubPullRequestNotificationFence(event, revalidator)).current).toBe(true)
+      // A later read is already stored: the notification describes a state GitHub has left.
+      snapshotSyncedAt = '2026-11-28T01:00:00.000Z'
+      expect((await readGitHubPullRequestNotificationFence(event, revalidator)).current).toBe(false)
+      // A later read that still requests Bob's review confirms the notification.
+      requestedReviewers = ['Bob']
+      expect((await readGitHubPullRequestNotificationFence(event, revalidator)).current).toBe(true)
+      requestedReviewers = ['someone-else']
+      // An unreadable snapshot fails the event instead of being trusted.
+      snapshotOverrides = { schemaVersion: 99 }
+      await expect(readGitHubPullRequestNotificationFence(event, revalidator)).rejects.toMatchObject({ code: 'GitHubIntegrationCorrupt' })
+      snapshotOverrides = { syncedAt: 'not a time' }
+      await expect(readGitHubPullRequestNotificationFence(event, revalidator)).rejects.toMatchObject({ code: 'GitHubIntegrationCorrupt' })
+      snapshotOverrides = {}
+      // Delivery checks only the link, since later reads are expected by then.
+      expect((await readGitHubPullRequestNotificationFence(event, revalidator, { checkSnapshot: false })).current).toBe(true)
+      snapshotSyncedAt = '2026-11-28T00:00:00.000Z'
+      link = { ...link, teamId: 'other' }
+      expect((await readGitHubPullRequestNotificationFence(event, revalidator)).current).toBe(false)
+      // An unreadable link fails delivery too, rather than authorizing it.
+      link = { ...link, teamId: 'core', schemaVersion: 99 }
+      await expect(readGitHubPullRequestNotificationFence(event, revalidator, { checkSnapshot: false })).rejects.toMatchObject({ code: 'GitHubIntegrationCorrupt' })
+      link = undefined
+      expect((await readGitHubPullRequestNotificationFence(event, revalidator)).current).toBe(false)
+      // Other events are not fenced on a repository link.
+      expect((await readGitHubPullRequestNotificationFence({ ...event, eventType: 'work-item.updated' }, revalidator)).current).toBe(true)
+    } finally {
+      send.mockRestore()
+      if (previous === undefined) delete process.env.PLANNING_TABLE_NAME
+      else process.env.PLANNING_TABLE_NAME = previous
+    }
+  })
+
   test('projects a Team report delivery for a recipient whose Project access is an Enterprise role only', async () => {
     const keys = [
       'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',
@@ -3519,6 +3620,101 @@ describe('collaboration projection pure helpers', () => {
         .toEqual([['same-team-grant', 'member@example.com']])
 
       // A grant on another Team's Project does not open this Team's report.
+      grantedProjectId = 'elsewhere'
+      expect(await processCollaborationProjectionBatch({ Records: [record('other-team-grant')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      expect(notifications.some((item) => item.eventId === 'other-team-grant')).toBe(false)
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+
+  test('projects a GitHub pull request notification for a recipient whose Team access is an Enterprise role only', async () => {
+    const keys = [
+      'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',
+      'WORK_ITEMS_TABLE_NAME', 'COLLABORATION_TABLE_NAME', 'PROJECT_DIRECTORY_TABLE_NAME',
+      'PLANNING_TABLE_NAME', 'SYSTEM_ADMIN_GROUPS', 'COGNITO_USER_POOL_ID',
+    ]
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const notifications: Array<Record<string, unknown>> = []
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (command instanceof GetCommand) {
+        if (command.input.TableName === 'WORKSPACE_ACCESS_TABLE_NAME') {
+          const recordKey = String(command.input.Key?.recordKey)
+          return { Item: { entryType: 'workspace-member', memberKey: recordKey.slice('MEMBER#'.length), role: 'member', status: 'active' }, $metadata: {} }
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof QueryCommand) {
+        if (command.input.TableName === 'COLLABORATION_TABLE_NAME') return { Items: [], $metadata: {} }
+        if (command.input.TableName === 'PROJECT_DIRECTORY_TABLE_NAME') {
+          // No legacy project-member row: access comes only from the Enterprise role below.
+          return { Items: [
+            { entryType: 'team', teamId: 'core' },
+            { entryType: 'project', teamId: 'core', projectId: 'platform' },
+            { entryType: 'team', teamId: 'other' },
+            { entryType: 'project', teamId: 'other', projectId: 'elsewhere' },
+          ], $metadata: {} }
+        }
+      }
+      if (command instanceof TransactWriteCommand) {
+        for (const item of command.input.TransactItems ?? []) {
+          if (item.Put?.TableName === 'NOTIFICATIONS_TABLE_NAME' && item.Put.Item) notifications.push(item.Put.Item)
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof PutCommand) return { $metadata: {} }
+      throw new Error('Unexpected projection command')
+    })
+    let grantedProjectId = 'platform'
+    const snapshot = () => createRealtimeEnterpriseSnapshot({
+      customRoles: [{ workspaceId: 'workspace-1', roleId: 'custom:work-item-reader', name: 'Work Item reader',
+        permissions: ['work-items.read'], guestAssignable: false, revision: 1,
+        createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z' }],
+      roleAssignments: [{ workspaceId: 'workspace-1', assignmentId: 'reader', principalKind: 'member',
+        principalId: 'bob@example.com', roleId: 'custom:work-item-reader', source: 'direct',
+        scope: { workspaceId: 'workspace-1', kind: 'project', targetId: grantedProjectId } }],
+    })
+    const githubPullRequests: GitHubPullRequestNotificationRevalidator = {
+      readLinkCondition: async ({ workspaceId, repositoryId, teamId }) => ({ ConditionCheck: {
+        TableName: 'PLANNING_TABLE_NAME',
+        Key: { workspaceId, recordKey: `GITHUB_REPOSITORY#${repositoryId}` },
+        ConditionExpression: '#teamId = :teamId',
+        ExpressionAttributeNames: { '#teamId': 'teamId' },
+        ExpressionAttributeValues: { ':teamId': teamId },
+      } }),
+      readSnapshot: async () => undefined,
+    }
+    const dependencies = {
+      deletedFileCleanup: { readFile: async () => undefined, queryRows: async () => [], tagDeletedObjectVersion: async () => {}, expireMetadata: async () => {} },
+      curatedContextSearch: { upsertCurrent: async () => {}, deleteCurrent: async () => {} }, realtime: { publish: async () => {} },
+      enterpriseIdentity: { getSnapshot: async () => snapshot() },
+      githubPullRequests,
+    }
+    const record = (eventId: string) => ({
+      eventName: 'INSERT', dynamodb: { SequenceNumber: eventId, NewImage: {
+        eventId: { S: eventId }, eventType: { S: 'github.pull_request_review_requested' }, workspaceId: { S: 'workspace-1' },
+        entityType: { S: 'github-pull-request' }, entityId: { S: '42#7' },
+        occurredAt: { S: '2026-11-28T00:00:00.000Z' }, outboxStatus: { S: 'pending' },
+        metadata: { M: {
+          actorMemberKey: { S: 'system' }, teamId: { S: 'core' }, deepLink: { S: '/reviews' },
+          notificationTitle: { S: 'acme/app#7 Review me' },
+          githubPullRequestSyncedAt: { S: '2026-11-28T00:00:00.000Z' }, githubRecipientLogin: { S: 'bob' },
+          notificationCandidates: { L: [{ M: { memberKey: { S: 'bob@example.com' }, reason: { S: 'review-requested' } } }] },
+        } },
+      } },
+    })
+    try {
+      expect(await processCollaborationProjectionBatch({ Records: [record('same-team-grant')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      expect(notifications.map((item) => [item.eventId, item.recipientMemberKey]))
+        .toEqual([['same-team-grant', 'bob@example.com']])
+
+      // A grant on another Team's Project does not open this Team's pull requests.
       grantedProjectId = 'elsewhere'
       expect(await processCollaborationProjectionBatch({ Records: [record('other-team-grant')] }, dependencies))
         .toEqual({ batchItemFailures: [] })

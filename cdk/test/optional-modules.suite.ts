@@ -7,6 +7,7 @@ import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
 import {
   CONNECTORS_CONTEXT_KEY,
   DEMO_DATA_CONTEXT_KEY,
+  GITHUB_APP_CONTEXT_KEY,
   REQUEST_EMAIL_CONTEXT_KEY,
   RESTORE_DRILL_CONTEXT_KEY,
   SOFTWARE_FACTORY_CONTEXT_KEY,
@@ -98,6 +99,7 @@ describe('default deployment without optional modules', () => {
       'TenantData',
       'TenantSecrets',
       'TenantVerification',
+      'GitHub',
     ]) {
       expect(logicalIds.filter((id) => id.startsWith(prefix))).toEqual([]);
       expect(Object.keys(json.Outputs).filter((id) => id.startsWith(prefix)))
@@ -245,6 +247,34 @@ describe('optional modules selected through CDK context', () => {
         }),
       },
     });
+  });
+
+  test('turns the GitHub App module on with a placeholder secret and an hourly reconcile', () => {
+    const { template, errors } = synthesizeDefaultStack({ [GITHUB_APP_CONTEXT_KEY]: 'true' });
+
+    expect(errors).toEqual([]);
+    template.hasOutput('GitHubAppSecretArn', {});
+    template.hasOutput('GitHubAppWebhookUrl', {});
+    template.hasResourceProperties('AWS::SecretsManager::Secret', {
+      GenerateSecretString: Match.objectLike({ SecretStringTemplate: '{}', GenerateStringKey: 'placeholder' }),
+    });
+    template.hasResourceProperties('AWS::Events::Rule', { ScheduleExpression: 'rate(1 hour)' });
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Handler: 'index.queueHandler',
+      Environment: { Variables: Match.objectLike({ MUKUROJI_RUNTIME_ROLE: 'github-sync' }) },
+    });
+    // The API, the queue worker, and the reconcile read the secret and send to the queue.
+    expect(Object.keys(template.findResources('AWS::Lambda::Function', {
+      Properties: {
+        Environment: {
+          Variables: Match.objectLike({ GITHUB_APP_SECRET_ARN: Match.anyValue(), GITHUB_SYNC_QUEUE_URL: Match.anyValue() }),
+        },
+      },
+    })).sort()).toEqual([
+      expect.stringMatching(/^ApiFunction/u),
+      expect.stringMatching(/^GitHubReconcileFunction/u),
+      expect.stringMatching(/^GitHubSyncFunction/u),
+    ]);
   });
 
   test('turns request email ingestion on', () => {

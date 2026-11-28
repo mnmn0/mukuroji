@@ -16,6 +16,9 @@ export const DEMO_DATA_CONTEXT_KEY = 'mukuroji:demoData';
 /** Context key that turns on the optional external connector workers. */
 export const CONNECTORS_CONTEXT_KEY = 'mukuroji:connectors';
 
+/** Context key that turns on the optional GitHub App module of the review inbox (ADR 0079). */
+export const GITHUB_APP_CONTEXT_KEY = 'mukuroji:githubApp';
+
 /** Context key that turns on the optional request email ingestion. */
 export const REQUEST_EMAIL_CONTEXT_KEY = 'mukuroji:requestEmail';
 
@@ -30,6 +33,7 @@ type StackModuleProps = Pick<
   MukurojiStackProps,
   | 'restoreDrillEnabled'
   | 'connectorsEnabled'
+  | 'githubAppEnabled'
   | 'requestEmailEnabled'
   | 'tenantLifecycleEnabled'
   | 'softwareFactoryEnabled'
@@ -40,6 +44,7 @@ type StackModuleProps = Pick<
 export const ALL_STACK_MODULE_PROPS: StackModuleProps = {
   restoreDrillEnabled: true,
   connectorsEnabled: true,
+  githubAppEnabled: true,
   requestEmailEnabled: true,
   tenantLifecycleEnabled: true,
   softwareFactoryEnabled: true,
@@ -70,6 +75,7 @@ export function readStackModuleProps(app: Construct): StackModuleProps {
   return {
     restoreDrillEnabled: readBooleanContext(app, RESTORE_DRILL_CONTEXT_KEY),
     connectorsEnabled: readBooleanContext(app, CONNECTORS_CONTEXT_KEY),
+    githubAppEnabled: readBooleanContext(app, GITHUB_APP_CONTEXT_KEY),
     requestEmailEnabled: readBooleanContext(app, REQUEST_EMAIL_CONTEXT_KEY),
     tenantLifecycleEnabled: readBooleanContext(app, TENANT_LIFECYCLE_CONTEXT_KEY),
     softwareFactoryEnabled: readBooleanContext(app, SOFTWARE_FACTORY_CONTEXT_KEY),

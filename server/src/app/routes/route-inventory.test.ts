@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(696)
-  expect(new Set(inventory).size).toBe(692)
+  expect(inventory).toHaveLength(705)
+  expect(new Set(inventory).size).toBe(701)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -251,7 +251,13 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   // Attachment refs for coding agents (#409).
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
+  // GitHub App webhook and the pull request review inbox (#775, ADR 0079).
+  expect(inventory).toContain('POST /api/integrations/github/webhook')
+  expect(inventory).toContain('GET /api/me/pull-requests')
+  expect(inventory).toContain('PUT /api/me/github-login')
+  expect(inventory).toContain('PUT /api/workspace/github/repositories/:repositoryId')
+  expect(inventory).toContain('DELETE /api/workspace/github/logins/:login')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '07249a5ee1af9334d79ba9f08566c1ef59faf9ef04c48780af238dbfb5a3f490',
+    'e3f12c6e6a6ad87aa9fa02b126ec2c61d6b65669ea6c386733e967b2a7ed25b6',
   )
 })

@@ -98,6 +98,12 @@ const updatesRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'updates.title',
   descriptionKey: 'updates.description',
 }
+const reviewsRouteMetadata: WorkspaceRouteMetadata = {
+  activeNavId: 'reviews',
+  eyebrowKey: 'workspace.home.eyebrow',
+  titleKey: 'githubReviews.title',
+  descriptionKey: 'githubReviews.description',
+}
 const myTasksRouteMetadata: WorkspaceRouteMetadata = {
   activeNavId: 'my-tasks',
   eyebrowKey: 'workspace.myTasks.eyebrow',
@@ -785,6 +791,8 @@ function resolveWorkspaceRouteMetadata(
   if (matchPath('/work-items', pathname)) {
     return workItemsRouteMetadata
   }
+
+  if (matchPath('/reviews', pathname)) return reviewsRouteMetadata
 
   if (matchPath('/inbox', pathname)) {
     return inboxRouteMetadata

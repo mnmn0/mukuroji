@@ -45,6 +45,7 @@ import { registerRealtimeRoutes } from './routes/realtime-routes'
 import { registerFilesRoutes } from './routes/files-routes'
 import { registerPublicApiRoutes } from './routes/public-api-routes'
 import { registerCalendarFeedRoutes } from './routes/calendar-feed-routes'
+import { registerGitHubIntegrationRoutes } from './routes/github-integration-routes'
 
 export type {
   AppDependencies,
@@ -217,3 +218,4 @@ registerRealtimeRoutes(routeApp)
 registerFilesRoutes(routeApp)
 registerPublicApiRoutes(routeApp)
 registerCalendarFeedRoutes(routeApp)
+registerGitHubIntegrationRoutes(routeApp)

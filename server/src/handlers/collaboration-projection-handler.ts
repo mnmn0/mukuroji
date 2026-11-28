@@ -25,6 +25,7 @@ import { loadServerConfig } from '../infrastructure/config/server-config'
 import { createConfiguredTimesheetReminderRevalidator } from '../app/composition/timesheet-reminders'
 import { createConfiguredWeeklyReportReminderRevalidator } from '../app/composition/weekly-report-reminders'
 import { createConfiguredPlanningMilestoneNotificationRevalidator } from '../app/composition/planning-milestone-notifications'
+import { createConfiguredGitHubPullRequestNotificationRevalidator } from '../app/composition/github-pull-request-notifications'
 import { createConfiguredChannelPostEnqueueDependencies } from '../app/composition/channel-post-enqueue'
 
 const deletedFileCleanup = createDefaultDeletedFileCleanupDependencies()
@@ -50,6 +51,10 @@ const weeklyReportReminders = createConfiguredWeeklyReportReminderRevalidator(
 )
 
 const planningMilestones = createConfiguredPlanningMilestoneNotificationRevalidator(
+  readOptionalEnvironment('PLANNING_TABLE_NAME'),
+)
+
+const githubPullRequests = createConfiguredGitHubPullRequestNotificationRevalidator(
   readOptionalEnvironment('PLANNING_TABLE_NAME'),
 )
 
@@ -169,6 +174,7 @@ export async function handler(event: DynamoStreamEvent) {
     ...(timesheetReminders ? { timesheetReminders } : {}),
     ...(weeklyReportReminders ? { weeklyReportReminders } : {}),
     ...(planningMilestones ? { planningMilestones } : {}),
+    ...(githubPullRequests ? { githubPullRequests } : {}),
     ...(channelPosts ? { channelPosts } : {}),
   })
 }

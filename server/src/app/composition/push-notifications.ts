@@ -20,6 +20,7 @@ import { parseNotificationAppOrigin } from './notification-app-origin'
 import { createProductionNotificationDeliveryAuthorizer } from './notification-delivery-authorization'
 import { createConfiguredTimesheetReminderRevalidator } from './timesheet-reminders'
 import { createConfiguredPlanningMilestoneNotificationRevalidator } from './planning-milestone-notifications'
+import { createConfiguredGitHubPullRequestNotificationRevalidator } from './github-pull-request-notifications'
 import { createConfiguredWeeklyReportReminderRevalidator } from './weekly-report-reminders'
 
 /** Default Secrets Manager name of the VAPID private key; the CDK grant covers this name. */
@@ -88,6 +89,7 @@ export function createProductionPushNotificationHandler(): () => Promise<number>
     timesheetReminders: createConfiguredTimesheetReminderRevalidator(environment.ANALYTICS_TABLE_NAME?.trim()),
     weeklyReportReminders: createConfiguredWeeklyReportReminderRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
     planningMilestones: createConfiguredPlanningMilestoneNotificationRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
+    githubPullRequests: createConfiguredGitHubPullRequestNotificationRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
   })
   const secrets = createSecretsManagerClient()
   const send = createWebPushNotificationSender({

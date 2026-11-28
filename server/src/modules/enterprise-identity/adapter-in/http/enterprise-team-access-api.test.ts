@@ -5,6 +5,11 @@ import {
   InMemoryEnterpriseIdentityClient,
 } from '../../enterprise-identity'
 import { InMemoryPlanningClient } from '../../../planning/planning'
+import {
+  InMemoryGitHubIntegrationStore,
+  InMemoryGitHubSyncQueue,
+  type GitHubAppGateway,
+} from '../../../github-integration'
 import type {
   EnterprisePermissionId,
 } from '@mukuroji/contracts'
@@ -293,6 +298,47 @@ test('lets a Team-scoped grant read workload and submit time across its Teams on
     })
     const afterTeams: { entries: { id: string; status: string }[] }[] = (await after.json()).teams
     expect(afterTeams[0]?.entries.find((entry) => entry.id === draft.id)?.status).toBe('submitted')
+  })
+})
+
+test('lists the review inbox of a Team the member reads through a Team-scoped grant only', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess(['teams.read'])
+    const workspaceId = 'user#demo@example.com'
+    const store = new InMemoryGitHubIntegrationStore()
+    const now = '2026-08-10T00:00:00.000Z'
+    await store.saveRepositoryLink({
+      workspaceId,
+      record: { installationId: '7', repositoryId: '42', repository: 'acme/app', private: true, teamId: 'core-team', revision: 1, linkedAt: now },
+    })
+    await store.saveMemberLogin({ workspaceId, memberKey: 'demo@example.com', login: 'demo', now })
+    await store.putPullRequestSnapshot(workspaceId, {
+      repositoryId: '42', repository: 'acme/app', number: 5, title: 'Add the inbox', url: 'https://github.com/acme/app/pull/5',
+      state: 'open', draft: false, authorLogin: 'demo', headRef: 'feature', baseRef: 'main', headSha: 'a'.repeat(40),
+      mergeable: 'mergeable', reviewDecision: 'none', requestedReviewerLogins: [], requestedTeamSlugs: [], reviews: [],
+      checks: { state: 'success', failedNames: [], total: 1 }, createdAt: now, updatedAt: now, syncedAt: now,
+    })
+    const gateway: GitHubAppGateway = {
+      async listRepositories() { return { repositories: [], incomplete: false } },
+      async readRepositoryName() { return 'acme/app' },
+      async readPullRequests() { return { snapshots: [], missing: [] } },
+      async readCommitPullRequests() { return [] },
+      async readOpenPullRequests() { return { snapshots: [], incomplete: false } },
+    }
+    setTestAppDependencies({
+      githubIntegration: {
+        workspaceId,
+        store,
+        credentials: { async read() { return { appId: '1', privateKey: 'unused', webhookSecrets: ['webhook-secret-of-at-least-20-characters'] } } },
+        gateway,
+        queue: new InMemoryGitHubSyncQueue(),
+      },
+    })
+
+    const response = await app.request('/api/me/pull-requests?view=created', { headers: { Authorization: authorization } })
+    expect(response.status).toBe(200)
+    const body: unknown = await response.json()
+    expect(body).toMatchObject({ configured: true, githubLogin: 'demo', items: [{ repositoryId: '42', number: 5, teamId: 'core-team' }] })
   })
 })
 

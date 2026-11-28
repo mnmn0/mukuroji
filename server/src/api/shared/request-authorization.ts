@@ -316,6 +316,8 @@ const enterpriseRoutePermissionRules = [
   },
   // Workspace agent defaults are Workspace administration.
   { method: '*', pathPattern: '/api/workspace/agent-defaults', permission: 'workspace.manage' },
+  // Linking GitHub repositories and removing members' GitHub logins is Workspace administration.
+  { method: '*', pathPattern: '/api/workspace/github/*', permission: 'workspace.manage' },
   { method: 'GET', pathPattern: '/api/workspace/*', permission: 'members.read' },
   { method: '*', pathPattern: '/api/workspace/*', permission: 'members.manage' },
   // Closing or reopening a month for every Team is Workspace administration (ADR 0076).
@@ -899,6 +901,17 @@ const enterpriseRoutePermissionRules = [
   {
     method: '*',
     pathPattern: '/api/me/preferences',
+    permission: 'workspace.read',
+  },
+  // A member's own GitHub login and review inbox; the inbox re-checks Team read access (ADR 0079).
+  {
+    method: '*',
+    pathPattern: '/api/me/github-login',
+    permission: 'workspace.read',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/me/pull-requests',
     permission: 'workspace.read',
   },
   // A member's own calendar feeds; each feed read re-checks `work-items.read` for its owner.
@@ -1865,6 +1878,8 @@ function shouldEvaluateEnterpriseProjectScopes(
     return /^\/api\/collections\/(?:candidates|[^/]+\/items)(?:\/|$)/u.test(path)
   }
   if (/^\/api\/(?:workload|time-tracking\/my-timesheet)(?:\/|$)/u.test(path)) return true
+  // The review inbox lists pull requests of every Team the caller can read, Enterprise grants included.
+  if (path === '/api/me/pull-requests') return true
   return /^\/api\/(?:analytics|approvals|bulk-operations|document-backlinks|documents|focus|notifications|planning|projects|realtime\/tickets|task-views|teams|work-item-configuration|work-items)(?:\/|$)/u
     .test(path)
 }

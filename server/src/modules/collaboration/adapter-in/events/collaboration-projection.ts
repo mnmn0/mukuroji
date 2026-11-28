@@ -31,6 +31,11 @@ import {
 import type { DocumentProjectRole, GetDocumentRequest } from '../../../documents'
 import { TriageError } from '../../../triage'
 import {
+  GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX,
+  readGitHubNotificationPullRequest,
+  type GitHubPullRequestSnapshot,
+} from '../../../github-integration'
+import {
   REQUEST_REQUESTER_EVENT_TYPE_PREFIX,
   REQUEST_REQUESTER_NOTIFICATION_REASON,
 } from '../../../request-intake'
@@ -198,6 +203,12 @@ export type AuditProjectionEvent = {
   accessExpiryMemberKey?: string
   /** Access expiry an access expiry notice announces, as stored on the member row when scanned. */
   accessExpiresAt?: string
+  /** Read time of the pull request snapshot a GitHub notification was found in (ADR 0079). */
+  githubPullRequestSyncedAt?: string
+  /** GitHub login a GitHub notification is addressed to. */
+  githubRecipientLogin?: string
+  /** Head commit of the pull request a GitHub notification describes. */
+  githubHeadSha?: string
   /** notification/realtime consumer へ配送する event かどうかです。 */
   outboxStatus: 'pending' | 'suppressed'
 }
@@ -250,6 +261,11 @@ export interface CollaborationProjectionDependencies {
   weeklyReportReminders?: WeeklyReportReminderRevalidator
   /** Rereads Milestones and their watches; without it every Milestone notification is dropped. */
   planningMilestones?: PlanningMilestoneNotificationRevalidator
+  /**
+   * Rereads GitHub repository links and pull request snapshots; without it every GitHub pull
+   * request notification is dropped.
+   */
+  githubPullRequests?: GitHubPullRequestNotificationRevalidator
   /** Queues Team and Project channel posts; without it no channel receives posts. */
   channelPosts?: ChannelPostEnqueueDependencies
 }
@@ -295,6 +311,32 @@ export type ProjectionConditionCheck = {
     /** Attribute value placeholders. */
     ExpressionAttributeValues?: Record<string, unknown>
   }
+}
+
+/** Rereads the GitHub rows a pull request notification is revalidated against (ADR 0079). */
+export type GitHubPullRequestNotificationRevalidator = {
+  /**
+   * Reports whether a repository is still linked to a Team.
+   *
+   * @param input - Workspace, repository, and the Team the notification is scoped to.
+   * @param input.workspaceId - Canonical Workspace ID.
+   * @param input.repositoryId - Numeric repository ID.
+   * @param input.teamId - Team the notification was written for.
+   * @returns A condition that holds while the link stays on that Team, or undefined when it is not.
+   * @throws When the stored link cannot be read, so the event is retried instead of trusted.
+   */
+  readLinkCondition(input: { workspaceId: string, repositoryId: string, teamId: string }): Promise<ProjectionConditionCheck | undefined>
+  /**
+   * Reads the stored snapshot of a pull request.
+   *
+   * @param input - Workspace, repository, and number.
+   * @param input.workspaceId - Canonical Workspace ID.
+   * @param input.repositoryId - Numeric repository ID.
+   * @param input.number - Pull request number.
+   * @returns The snapshot, or undefined when none is stored.
+   * @throws When the stored snapshot cannot be read.
+   */
+  readSnapshot(input: { workspaceId: string, repositoryId: string, number: number }): Promise<GitHubPullRequestSnapshot | undefined>
 }
 
 /** Checks that a timesheet reminder still names an unsubmitted entry of its recipient. */
@@ -618,8 +660,9 @@ const workloadEventTypePrefix = 'workload.'
 
 /**
  * Checks whether an event is readable through any one scope that it covers rather than the one
- * scope it carries: a delivered Analytics report, or a Team workload event that the workload API
- * shows through any visible Project of the Team.
+ * scope it carries: a delivered Analytics report, a Team workload event that the workload API
+ * shows through any visible Project of the Team, or a GitHub pull request notification of a linked
+ * Team, which the Reviews page shows the same way.
  *
  * @param event - Projected event.
  * @returns Whether any covered scope admits the recipient.
@@ -627,7 +670,9 @@ const workloadEventTypePrefix = 'workload.'
 function isReadableThroughAnyCoveredScope(event: Pick<AuditProjectionEvent, 'eventType' | 'projectId' | 'teamId'>): boolean {
   if (event.projectId !== undefined) return false
   return event.eventType === analyticsReportDeliveredEventType ||
-    event.eventType.startsWith(workloadEventTypePrefix) && event.teamId !== undefined
+    event.eventType.startsWith(workloadEventTypePrefix) && event.teamId !== undefined ||
+    // The Reviews page shows a linked Team's pull requests to anyone who can read one of its Projects.
+    event.eventType.startsWith(GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX) && event.teamId !== undefined
 }
 /** Scheduled Work Item events that are revalidated against the current Work Item row. */
 const scheduledWorkItemNotificationReasons = new Map([
@@ -899,11 +944,13 @@ async function processRecord(
   const timesheetReminder = await readTimesheetReminderFence(event, dependencies.timesheetReminders)
   const weeklyReportReminder = await readWeeklyReportReminderFence(event, dependencies.weeklyReportReminders)
   const accessExpiryNotice = await readMemberAccessExpiryNoticeFence(event)
+  const githubLink = await readGitHubPullRequestNotificationFence(event, dependencies.githubPullRequests)
   if (
     !workItemAuthorizationEvent ||
     !timesheetReminder.current ||
     !weeklyReportReminder.current ||
-    !accessExpiryNotice.current
+    !accessExpiryNotice.current ||
+    !githubLink.current
   ) {
     await markProjectionProcessed(event.eventId)
     return
@@ -953,7 +1000,8 @@ async function processRecord(
     : undefined) ??
     timesheetReminder.condition ??
     weeklyReportReminder.condition ??
-    accessExpiryNotice.condition
+    accessExpiryNotice.condition ??
+    githubLink.condition
   const watcherCandidates = await readSubscribedWatcherCandidates(authorizationEvent)
   const memberDirectory = notifiesPlanningUpdateProjectMembers(authorizationEvent)
     ? await readProjectDirectory(authorizationEvent.workspaceId)
@@ -2014,6 +2062,75 @@ export async function readMemberAccessExpiryNoticeFence(
 }
 
 /**
+ * Reports whether a stored pull request snapshot still shows the change a GitHub notification
+ * describes, so a newer read that confirms it keeps the notification.
+ *
+ * @param event - GitHub notification event.
+ * @param stored - Stored snapshot row.
+ * @returns Whether the snapshot shows the same review request, CI failure, or conflict.
+ */
+function isGitHubNotificationStillShown(event: AuditProjectionEvent, stored: GitHubPullRequestSnapshot): boolean {
+  if (stored.state !== 'open') return false
+  const kind = event.eventType.slice(GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX.length)
+  if (kind === 'review_requested') {
+    const login = event.githubRecipientLogin?.toLowerCase()
+    return login !== undefined && stored.requestedReviewerLogins.some((reviewer) => reviewer.toLowerCase() === login)
+  }
+  if (event.githubHeadSha === undefined || stored.headSha !== event.githubHeadSha) return false
+  if (kind === 'checks_failed') return stored.checks.state === 'failure'
+  if (kind === 'conflict') {
+    return stored.mergeable === 'conflicting' || (stored.mergeable === 'unknown' && stored.lastKnownMergeable === 'conflicting')
+  }
+  return false
+}
+
+/**
+ * Revalidates a GitHub pull request notification against its repository's current link (ADR 0079).
+ *
+ * The notification is authorized against the Team the repository was linked to when it was
+ * written. It is dropped when an administrator has since removed the link or moved the
+ * repository to another Team, so readers of the old Team are not told about it. A current
+ * notification carries a condition on the link row, written in the same transaction as the
+ * notification, so a link change that lands before the save cancels it.
+ *
+ * When projecting, the notification is also dropped if a snapshot read after the one it was found
+ * in is already stored and no longer shows the same change, so an overlapping sync of an older
+ * read does not report a state GitHub has since left, while a newer read that confirms it keeps it. A missing snapshot does not drop it: the notification is written before its snapshot.
+ *
+ * Without a revalidator every GitHub notification is dropped, so an unchecked one is never shown.
+ *
+ * @param event - Parsed audit event.
+ * @param revalidator - Current link and snapshot reader.
+ * @param options - Whether to compare with the stored snapshot; delivery checks only the link.
+ * @param options.checkSnapshot - Whether a newer stored snapshot drops the notification.
+ * @returns Whether the event should still be projected, and the condition for a GitHub notification.
+ */
+export async function readGitHubPullRequestNotificationFence(
+  event: AuditProjectionEvent,
+  revalidator: GitHubPullRequestNotificationRevalidator | undefined,
+  options: { checkSnapshot: boolean } = { checkSnapshot: true },
+): Promise<{ current: boolean; condition?: ProjectionConditionCheck }> {
+  if (!event.eventType.startsWith(GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX)) return { current: true }
+  const pullRequest = readGitHubNotificationPullRequest(event.entityId)
+  if (!revalidator || !pullRequest || !event.teamId) return { current: false }
+  const condition = await revalidator.readLinkCondition({
+    workspaceId: event.workspaceId,
+    repositoryId: pullRequest.repositoryId,
+    teamId: event.teamId,
+  })
+  if (!condition) return { current: false }
+  if (options.checkSnapshot) {
+    const readAt = readTimestamp(event.githubPullRequestSyncedAt)
+    if (!readAt) return { current: false }
+    const stored = await revalidator.readSnapshot({ workspaceId: event.workspaceId, ...pullRequest })
+    if (stored && new Date(stored.syncedAt).toISOString() > readAt && !isGitHubNotificationStillShown(event, stored)) {
+      return { current: false }
+    }
+  }
+  return { current: true, condition }
+}
+
+/**
  * Reports whether a recipient may still receive a weekly report reminder or escalation.
  *
  * The author must still write (`manager` or `member`, unarchived) in the event's Project, and an
@@ -2864,6 +2981,8 @@ async function isEligibleRecipient(
       event.eventType.startsWith(workloadEventTypePrefix) ||
       // A budget alert follows the Enterprise role that manages the Project, not a stale member row.
       event.eventType === BUDGET_THRESHOLD_REACHED_EVENT_TYPE ||
+      // A GitHub pull request notification goes to whoever can read the linked Team, as the Reviews page does.
+      event.eventType.startsWith(GITHUB_PULL_REQUEST_NOTIFICATION_EVENT_TYPE_PREFIX) ||
       enforceContentAuthorization
     ) &&
     (event.projectId !== undefined || event.teamId !== undefined || enforceContentAuthorization)
@@ -3514,6 +3633,11 @@ export function parseAuditProjectionEvent(
       ? { accessExpiryMemberKey: readString(metadata.accessExpiryMemberKey) }
       : {}),
     ...(readTimestamp(metadata.accessExpiresAt) ? { accessExpiresAt: readTimestamp(metadata.accessExpiresAt) } : {}),
+    ...(readTimestamp(metadata.githubPullRequestSyncedAt)
+      ? { githubPullRequestSyncedAt: readTimestamp(metadata.githubPullRequestSyncedAt) }
+      : {}),
+    ...(readString(metadata.githubRecipientLogin) ? { githubRecipientLogin: readString(metadata.githubRecipientLogin) } : {}),
+    ...(readString(metadata.githubHeadSha) ? { githubHeadSha: readString(metadata.githubHeadSha) } : {}),
     outboxStatus: value.outboxStatus === 'suppressed' ? 'suppressed' : 'pending',
   }
 }

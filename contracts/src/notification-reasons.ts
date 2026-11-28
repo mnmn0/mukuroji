@@ -29,6 +29,8 @@ export const NOTIFICATION_REASON_LABELS = {
   'weekly-report-escalation': { en: 'Member weekly report unsubmitted', ja: 'メンバーの週報が未提出' },
   'approval-requested': { en: 'Approval requested', ja: '承認の依頼' },
   automation: { en: 'Automation', ja: 'Automation' },
+  'review-requested': { en: 'Review requested', ja: 'レビュー依頼' },
+  'pull-request-author': { en: 'Your pull request', ja: 'あなたの pull request' },
   'agent-run-blocker': { en: 'Agent blocked', ja: 'エージェントが blocker を報告' },
   'agent-run-handoff': { en: 'Agent handoff', ja: 'エージェントから引き継ぎ' },
   'agent-run-failed': { en: 'Agent run failed', ja: 'エージェントの Run が失敗' },
