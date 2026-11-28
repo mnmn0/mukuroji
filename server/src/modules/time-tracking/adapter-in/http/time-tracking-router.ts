@@ -3,6 +3,7 @@ import { Hono, type Context } from 'hono'
 import {
   DEFAULT_WORKSPACE_CURRENCY,
   type MyTimesheetSubmitEntry,
+  readTeamInvestmentAssignments,
   readTeamTimeEntryPolicy,
   readTimeEntryCategoryKey,
   type TimeEntryPolicyWarning,
@@ -320,6 +321,36 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
     })
   }
 
+  router.get('/api/teams/:teamId/investment-assignments', async (context) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId, canManage) => {
+      // The row names every Project and Work Item of the Team, including ones outside a member's Project allowlist.
+      await requireInvestmentAssignmentManager(dependencies, principal, teamId, canManage)
+      const assignments = await dependencies.getTimeTracking().getInvestmentAssignments(principal.directoryId, teamId)
+      return context.json({ assignments, canEdit: true })
+    })
+  })
+
+  router.put('/api/teams/:teamId/investment-assignments', async (context) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId, canManage) => {
+      // Assignments decide how every Project's time is classified, so only a manager of the whole Team changes them.
+      await requireInvestmentAssignmentManager(dependencies, principal, teamId, canManage)
+      const body = asRecord(await dependencies.readJson(context.req))
+      const assignments = readTeamInvestmentAssignments(body)
+      if (!assignments) {
+        throw new TimeTrackingError(400, 'InvalidInvestmentAssignments', 'projects and workItems must map IDs to investment category keys, within the limits.')
+      }
+      const saved = await dependencies.getTimeTracking().saveInvestmentAssignments({
+        workspaceId: principal.directoryId,
+        teamId,
+        assignments,
+        expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
+        actorUserId: principal.userKey,
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
+      })
+      return context.json({ assignments: saved, canEdit: true })
+    })
+  })
+
   router.get('/api/teams/:teamId/time-entry-policy', async (context) => {
     return await withTeam(context, dependencies, 'viewer', async (principal, teamId, canManage) => {
       const policy = await dependencies.getTimeTracking().getEntryPolicy(principal.directoryId, teamId)
@@ -605,6 +636,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       input.managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
       input.viewer = { userId: principal.userKey, canManage, includeAllMembers: input.groupBy === 'work-item' }
       if (input.budgetScope === 'project' && input.budgetScopeId) await dependencies.verifyProject(principal, teamId, input.budgetScopeId, 'viewer')
+      if (input.filterProjectId) await dependencies.verifyProject(principal, teamId, input.filterProjectId, 'viewer')
       return context.json(await dependencies.getTimeTracking().createSummary(input))
     })
   })
@@ -625,6 +657,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       input.projectIds = await dependencies.getAccessibleProjectIds(principal, teamId)
       input.managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
       input.viewer = { userId: principal.userKey, canManage, includeAllMembers: input.groupBy === 'work-item' }
+      if (input.filterProjectId) await dependencies.verifyProject(principal, teamId, input.filterProjectId, 'viewer')
       const csv = await dependencies.getTimeTracking().createCsv(input)
       return new Response(csv, {
         status: 200,
@@ -996,6 +1029,27 @@ async function requireRateCardManager<Principal extends TimeTrackingPrincipal>(
 }
 
 /**
+ * Requires a manager of every Project in the Team, because the investment category assignments
+ * name every Project and Work Item of the Team and classify all of their time (ADR 0116).
+ *
+ * @param dependencies - Router dependencies used to read the Team management scope.
+ * @param principal - Authenticated caller.
+ * @param teamId - Team whose assignments are read or changed.
+ * @param canManage - Whether the caller manages time in the Team at all.
+ * @throws TimeTrackingError with `InvestmentAssignmentsDenied` when the caller manages only some Projects.
+ */
+async function requireInvestmentAssignmentManager<Principal extends TimeTrackingPrincipal>(
+  dependencies: TimeTrackingRouterDependencies<Principal>,
+  principal: Principal,
+  teamId: string,
+  canManage: boolean,
+): Promise<void> {
+  if (!canManage || !await dependencies.canManageWholeTeam(principal, teamId)) {
+    throw new TimeTrackingError(403, 'InvestmentAssignmentsDenied', 'Only a manager of the whole Team may read or change its investment categories.')
+  }
+}
+
+/**
  * Reads the currency a request names, or the Workspace default with a flag that keeps the default
  * out of the request fingerprint.
  *
@@ -1070,6 +1124,7 @@ function readReportInput(
   if (budgetScope !== 'project' && budgetScopeId) {
     throw new TimeTrackingError(400, 'InvalidBudgetScope', 'projectId is only valid for a project budget scope.')
   }
+  const filterProjectId = context.req.query('filterProjectId')?.trim() || undefined
   return {
     workspaceId,
     teamId,
@@ -1080,6 +1135,7 @@ function readReportInput(
     includeCosts,
     ...(budgetScope ? { budgetScope } : {}),
     ...(budgetScopeId ? { budgetScopeId } : {}),
+    ...(filterProjectId ? { filterProjectId } : {}),
   }
 }
 
@@ -1256,8 +1312,13 @@ function readStatus(value: string | undefined): TimeEntryStatus {
 
 /** Converts a validated group-by query into its contract union. */
 function readGroupBy(value: string): TimeTrackingGroupBy {
-  if (value === 'day' || value === 'week' || value === 'user' || value === 'project' || value === 'work-item' || value === 'category' || value === 'phase') return value
-  throw new TimeTrackingError(400, 'InvalidGroupBy', 'groupBy must be day, week, project, user, work-item, category, or phase.')
+  if (
+    value === 'day' || value === 'week' || value === 'user' || value === 'project' || value === 'work-item' ||
+    value === 'category' || value === 'phase' || value === 'investment'
+  ) {
+    return value
+  }
+  throw new TimeTrackingError(400, 'InvalidGroupBy', 'groupBy must be day, week, project, user, work-item, category, phase, or investment.')
 }
 
 /**

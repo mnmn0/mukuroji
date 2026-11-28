@@ -1,4 +1,4 @@
-import type { TimeTrackingSummary } from '@mukuroji/contracts'
+import { DEFAULT_WORKSPACE_INVESTMENT_CATEGORY_SETTINGS, type TimeTrackingSummary } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
 import { expect, fn, userEvent, within } from 'storybook/test'
@@ -6,6 +6,7 @@ import { createTranslator } from '../../../shared/i18n/i18n'
 import { timeTrackingFixtureMemberNames } from '../fixtures'
 import {
   timeReportFixtureBudgetSummary,
+  timeReportFixtureInvestmentSummary,
   timeReportFixtureManagerSummary,
   timeReportFixtureMemberSummary,
   timeReportFixturePeriodBudgetSummary,
@@ -202,4 +203,20 @@ export const AddPeriodBudget: Story = {
 /** Phone width. */
 export const Phone: Story = {
   globals: { viewport: { value: 'mobile1', isRotated: false } },
+}
+
+/** Time by investment category with person-months, share, and the Capex and Opex totals of one Project. */
+export const InvestmentCategories: Story = {
+  args: {
+    groupBy: 'investment',
+    summary: timeReportFixtureInvestmentSummary,
+    investmentCategories: DEFAULT_WORKSPACE_INVESTMENT_CATEGORY_SETTINGS,
+    projectFilter: { options: timeReportFixtureProjects, projectId: 'atlas', onChange: fn() },
+    showBudget: false,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getAllByRole('columnheader', { name: '人月' }).length).toBeGreaterThan(0)
+    await expect(canvas.getByRole('table', { name: '開発（Capex）と運用（Opex）' })).toBeVisible()
+  },
 }

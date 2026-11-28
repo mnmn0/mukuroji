@@ -32,6 +32,13 @@ import {
   NO_WORK_PHASE_GROUP_KEY,
   type WorkspaceTimeEntryCategorySettings,
   type WorkspaceWorkPhaseSettings,
+  DEFAULT_WORKSPACE_INVESTMENT_CATEGORY_SETTINGS,
+  UNCLASSIFIED_INVESTMENT_GROUP_KEY,
+  readTeamInvestmentAssignments,
+  resolveInvestmentCategory,
+  type TeamInvestmentAssignments,
+  type TeamInvestmentAssignmentsRecord,
+  type WorkspaceInvestmentCategorySettings,
   type WorkspaceWeekStartDay,
   workspaceWeekContaining,
   type RunningTimer,
@@ -121,6 +128,8 @@ const BUDGET_PREFIX = 'TIME_BUDGET#'
 const MAX_BUDGET_PERIODS = 40
 const PERIOD_CLOSE_PREFIX = 'TIME_CLOSE#'
 const ENTRY_POLICY_PREFIX = 'TIME_POLICY#'
+/** Record key prefix of a Team's investment category assignments (ADR 0116). */
+const INVESTMENT_ASSIGNMENTS_PREFIX = 'TIME_INVESTMENT#'
 const RATE_CARD_PREFIX = 'TIME_RATE_CARD#'
 const MONTH_PATTERN = /^\d{4}-(?:0[1-9]|1[0-2])$/u
 const MIN_CLOSE_YEAR = 1970
@@ -415,6 +424,14 @@ export type TimeTrackingCategorySource = {
    */
   readWorkPhases?(workspaceId: string): Promise<WorkspaceWorkPhaseSettings>
   /**
+   * Reads the Workspace investment categories, which name `groupBy=investment` groups and decide
+   * which categories a Team may assign (ADR 0116).
+   *
+   * @param workspaceId - Workspace identifier.
+   * @returns The stored categories, or the defaults when the Workspace has not saved any.
+   */
+  readInvestmentCategories?(workspaceId: string): Promise<WorkspaceInvestmentCategorySettings>
+  /**
    * Reads the Workspace time zone, which decides the local dates the daily total is counted on.
    *
    * @param workspaceId - Workspace identifier.
@@ -444,6 +461,38 @@ export type StoredTeamTimeEntryPolicy = TeamTimeEntryPolicy & {
   updatedBy: string
   /** Save timestamp. */
   updatedAt: string
+}
+
+/** A Team's stored investment category assignments (ADR 0116). */
+export type StoredTeamInvestmentAssignments = TeamInvestmentAssignments & {
+  /** Record schema version. */
+  schemaVersion: 1
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Team identifier. */
+  teamId: string
+  /** Optimistic concurrency revision, starting at 1. */
+  revision: number
+  /** Member who saved the assignments. */
+  updatedBy: string
+  /** Save timestamp. */
+  updatedAt: string
+}
+
+/** A Team investment category assignment update request. */
+export type SaveTeamInvestmentAssignmentsInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Team identifier. */
+  teamId: string
+  /** Requested assignments; they replace the stored ones. */
+  assignments: TeamInvestmentAssignments
+  /** Revision the caller read; 0 while the Team has saved none. */
+  expectedRevision: number
+  /** Manager saving the assignments. */
+  actorUserId: string
+  /** Optional mutation replay key. */
+  idempotencyKey?: string
 }
 
 /** A Team time entry policy update request. */
@@ -753,6 +802,8 @@ export type TimeTrackingReportInput = {
   budgetScope?: 'team' | 'project'
   /** Project ID used when budgetScope is project. */
   budgetScopeId?: string
+  /** Only entries of this Project are reported; the caller checked that the viewer may see it. */
+  filterProjectId?: string
 }
 
 /** Input of {@link TimeTrackingService.summarizeProjectBudgets}. */
@@ -904,6 +955,15 @@ export interface TimeTrackingRepository {
     auditPut?: AuditTransactWriteItem,
     idempotencyPut?: AuditTransactWriteItem,
     authorizationChecks?: readonly TimeTrackingAuthorizationConditionCheck[],
+  ): Promise<void>
+  /** Reads a Team's investment category assignments, or undefined while the Team has saved none. */
+  getInvestmentAssignments(workspaceId: string, teamId: string): Promise<StoredTeamInvestmentAssignments | undefined>
+  /** Saves a Team's investment category assignments with optimistic concurrency and optional audit. */
+  saveInvestmentAssignments(
+    assignments: StoredTeamInvestmentAssignments,
+    expectedRevision: number,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
   ): Promise<void>
   /** Reads a Team's time entry policy, or undefined while the Team uses the defaults. */
   getEntryPolicy(workspaceId: string, teamId: string): Promise<StoredTeamTimeEntryPolicy | undefined>
@@ -2195,6 +2255,116 @@ export class TimeTrackingService {
   }
 
   /**
+   * Reads a Team's investment category assignments (ADR 0116).
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team identifier.
+   * @returns The saved assignments, or none at revision 0.
+   */
+  async getInvestmentAssignments(workspaceId: string, teamId: string): Promise<TeamInvestmentAssignmentsRecord> {
+    const stored = await this.repository.getInvestmentAssignments(
+      readIdentifier(workspaceId, 'Workspace ID'),
+      readIdentifier(teamId, 'Team ID'),
+    )
+    return stored ? toInvestmentAssignmentsRecord(stored) : { teamId, projects: {}, workItems: {}, revision: 0 }
+  }
+
+  /**
+   * Replaces a Team's investment category assignments and records the change in the audit log.
+   * A newly assigned category must be an active category of the Workspace; an assignment that
+   * keeps the category it had stays valid after the category is retired.
+   *
+   * @param input - Assignments, expected revision, and the saving manager.
+   * @returns The saved assignments.
+   * @throws TimeTrackingError When an assignment is invalid or the revision changed.
+   */
+  async saveInvestmentAssignments(input: SaveTeamInvestmentAssignmentsInput): Promise<TeamInvestmentAssignmentsRecord> {
+    return toInvestmentAssignmentsRecord(await this.withIdempotency(
+      input.workspaceId,
+      input.actorUserId,
+      input.idempotencyKey,
+      'investment-assignments.save',
+      input,
+      (completion) => this.saveInvestmentAssignmentsInternal(input, completion),
+      readStoredInvestmentAssignments,
+    ))
+  }
+
+  /** Saves Team investment category assignments without the public idempotency wrapper. */
+  private async saveInvestmentAssignmentsInternal(
+    input: SaveTeamInvestmentAssignmentsInput,
+    completion?: TimeTrackingIdempotencyCompletion,
+  ): Promise<StoredTeamInvestmentAssignments> {
+    const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
+    const teamId = readIdentifier(input.teamId, 'Team ID')
+    const actorUserId = readIdentifier(input.actorUserId, 'Actor user ID')
+    const assignments = readTeamInvestmentAssignments(input.assignments)
+    if (!assignments) {
+      throw new TimeTrackingError(400, 'InvalidInvestmentAssignments', 'Investment category assignments are invalid or too many.')
+    }
+    const expectedRevision = requireInteger(input.expectedRevision, 'Assignment revision', 0, Number.MAX_SAFE_INTEGER)
+    const [current, settings] = await Promise.all([
+      this.repository.getInvestmentAssignments(workspaceId, teamId),
+      this.readInvestmentCategorySettings(workspaceId),
+    ])
+    if ((current?.revision ?? 0) !== expectedRevision) {
+      throw new TimeTrackingError(409, 'InvestmentAssignmentsRevisionConflict', 'The investment categories were changed by another request.')
+    }
+    const active = new Set(settings.categories.filter((category) => category.active).map((category) => category.key))
+    const unchanged = (stored: Readonly<Record<string, string>> | undefined, id: string, key: string) =>
+      stored !== undefined && Object.hasOwn(stored, id) && stored[id] === key
+    for (const [scope, map, stored] of [
+      ['project', assignments.projects, current?.projects],
+      ['workItem', assignments.workItems, current?.workItems],
+    ] as const) {
+      for (const [id, key] of Object.entries(map)) {
+        if (!active.has(key) && !unchanged(stored, id, key)) {
+          throw new TimeTrackingError(400, 'InvalidInvestmentCategory', `Investment category "${key}" of ${scope} "${id}" is not offered by the Workspace.`)
+        }
+      }
+    }
+    const saved: StoredTeamInvestmentAssignments = {
+      schemaVersion: 1,
+      workspaceId,
+      teamId,
+      projects: assignments.projects,
+      workItems: assignments.workItems,
+      revision: expectedRevision + 1,
+      updatedBy: actorUserId,
+      updatedAt: readNow(this.now).toISOString(),
+    }
+    const auditPut = this.createAuditEventPut({
+      workspaceId,
+      teamId,
+      actorUserId,
+      eventType: 'investment-assignments.updated',
+      entityType: 'investment-assignments',
+      entityId: teamId,
+      action: 'updated',
+      idempotencyKey: input.idempotencyKey ?? this.createId(),
+      requestBody: { action: 'investment-assignments.updated', teamId, revision: saved.revision },
+      ...diffInvestmentAssignments(current ?? { projects: {}, workItems: {}, revision: 0 }, saved),
+      includeFields: ['projects', 'workItems', 'revision'],
+      metadata: { teamId },
+      path: `/api/teams/${teamId}/investment-assignments`,
+      occurredAt: saved.updatedAt,
+    })
+    const idempotencyPut = completion ? await completion(saved) : undefined
+    await this.repository.saveInvestmentAssignments(saved, expectedRevision, auditPut, idempotencyPut)
+    return saved
+  }
+
+  /**
+   * Reads the Workspace investment categories.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @returns The categories, or the defaults without a category source.
+   */
+  private async readInvestmentCategorySettings(workspaceId: string): Promise<WorkspaceInvestmentCategorySettings> {
+    return await this.categories?.readInvestmentCategories?.(workspaceId) ?? DEFAULT_WORKSPACE_INVESTMENT_CATEGORY_SETTINGS
+  }
+
+  /**
    * Reads a Team's time entry policy.
    *
    * @param workspaceId - Workspace identifier.
@@ -2336,11 +2506,14 @@ export class TimeTrackingService {
     const entries = await this.listReportEntries(input, period)
     const estimateByWorkItem = await this.listPlannedEffort(input.workspaceId, input.teamId)
     const phaseSettings = input.groupBy === 'phase' ? await this.readWorkPhaseSettings(input.workspaceId) : undefined
+    const investment = input.groupBy === 'investment'
+      ? await this.readInvestmentGrouping(input.workspaceId, input.teamId)
+      : undefined
     const categoryLabels = input.groupBy === 'category'
       ? readCategoryLabels(await this.readCategorySettings(input.workspaceId))
-      : phaseSettings === undefined ? undefined : readPhaseLabels(phaseSettings)
+      : phaseSettings !== undefined ? readPhaseLabels(phaseSettings) : investment?.labels
     const weekStartDay = input.groupBy === 'week' ? await this.readWeekStartDay(input.workspaceId) : undefined
-    const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds, categoryLabels, weekStartDay, phaseSettings)
+    const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds, categoryLabels, weekStartDay, phaseSettings, investment?.assignments)
     const includeBudget = input.includeCosts && (
       input.budgetScope !== 'project' ||
       input.managedProjectIds === undefined ||
@@ -2503,6 +2676,31 @@ export class TimeTrackingService {
   }
 
   /**
+   * Reads what `groupBy=investment` needs: the Team's assignments and the names the Workspace
+   * gave its investment categories.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team identifier.
+   * @returns Assignments and group labels.
+   */
+  private async readInvestmentGrouping(
+    workspaceId: string,
+    teamId: string,
+  ): Promise<{ assignments: TeamInvestmentAssignments; labels: ReadonlyMap<string, string> }> {
+    const [stored, settings] = await Promise.all([
+      this.repository.getInvestmentAssignments(workspaceId, teamId),
+      this.readInvestmentCategorySettings(workspaceId),
+    ])
+    return {
+      assignments: stored ?? { projects: {}, workItems: {} },
+      labels: new Map([
+        [UNCLASSIFIED_INVESTMENT_GROUP_KEY, 'Unclassified'],
+        ...settings.categories.flatMap((category) => category.label === undefined ? [] : [[category.key, category.label] as const]),
+      ]),
+    }
+  }
+
+  /**
    * Reads the entries a report may total.
    *
    * With a viewer, entries without a Project are read too, and the result keeps the viewer's
@@ -2526,8 +2724,11 @@ export class TimeTrackingService {
       ...(input.viewer ? { includeUnassigned: true } : {}),
     })
     const viewer = input.viewer
-    if (!viewer || viewer.includeAllMembers) return entries
-    return entries.filter((entry) =>
+    const inProject = input.filterProjectId === undefined
+      ? entries
+      : entries.filter((entry) => entry.projectId === input.filterProjectId)
+    if (!viewer || viewer.includeAllMembers) return inProject
+    return inProject.filter((entry) =>
       entry.userId === viewer.userId ||
       (viewer.canManage && canManageEntryProject(entry, input.managedProjectIds))
     )
@@ -2709,6 +2910,29 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   private readonly periodCloses = new Map<string, TimePeriodClose>()
   /** Team time entry policies keyed by Workspace and Team. */
   private readonly entryPolicies = new Map<string, StoredTeamTimeEntryPolicy>()
+
+  /** Team investment category assignments keyed by Workspace and Team. */
+  private readonly investmentAssignments = new Map<string, StoredTeamInvestmentAssignments>()
+
+  /** Reads a Team's investment category assignments. */
+  async getInvestmentAssignments(workspaceId: string, teamId: string): Promise<StoredTeamInvestmentAssignments | undefined> {
+    const assignments = this.investmentAssignments.get(`${workspaceId}\0${teamId}`)
+    return assignments ? clone(assignments) : undefined
+  }
+
+  /** Saves a Team's investment category assignments at the expected revision. */
+  async saveInvestmentAssignments(
+    assignments: StoredTeamInvestmentAssignments,
+    expectedRevision: number,
+    _auditPut?: AuditTransactWriteItem,
+    _idempotencyPut?: AuditTransactWriteItem,
+  ): Promise<void> {
+    const key = `${assignments.workspaceId}\0${assignments.teamId}`
+    if ((this.investmentAssignments.get(key)?.revision ?? 0) !== expectedRevision) {
+      throw new TimeTrackingError(409, 'InvestmentAssignmentsRevisionConflict', 'The investment categories were changed by another request.')
+    }
+    this.investmentAssignments.set(key, clone(assignments))
+  }
 
   /** Reads a Team time entry policy. */
   async getEntryPolicy(workspaceId: string, teamId: string): Promise<StoredTeamTimeEntryPolicy | undefined> {
@@ -3417,6 +3641,53 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     }
   }
 
+  /** Reads a Team's investment category assignments with a consistent read. */
+  async getInvestmentAssignments(workspaceId: string, teamId: string): Promise<StoredTeamInvestmentAssignments | undefined> {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: `${INVESTMENT_ASSIGNMENTS_PREFIX}${teamId}` },
+      ConsistentRead: true,
+    }))
+    if (!response.Item) return undefined
+    const assignments = readStoredInvestmentAssignments(response.Item)
+    if (assignments.workspaceId !== workspaceId || assignments.teamId !== teamId) {
+      throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored investment assignments scope does not match the requested key.')
+    }
+    return assignments
+  }
+
+  /** Saves a Team's investment category assignments with optimistic concurrency, its audit event, and receipt. */
+  async saveInvestmentAssignments(
+    assignments: StoredTeamInvestmentAssignments,
+    expectedRevision: number,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+  ): Promise<void> {
+    const put = {
+      Put: {
+        TableName: this.tableName,
+        Item: { ...assignments, recordKey: `${INVESTMENT_ASSIGNMENTS_PREFIX}${assignments.teamId}` },
+        ...(expectedRevision === 0
+          ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
+          : {
+              ConditionExpression: 'revision = :expectedRevision',
+              ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+            }),
+      },
+    }
+    try {
+      if (auditPut || idempotencyPut) {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [put, ...(auditPut ? [auditPut] : []), ...(idempotencyPut ? [idempotencyPut] : [])],
+        }))
+      } else {
+        await this.documentClient.send(new PutCommand(put.Put))
+      }
+    } catch (error) {
+      throw mapConditionalWriteError(error, 'InvestmentAssignmentsRevisionConflict', 'The investment categories were changed by another request.')
+    }
+  }
+
   /** Reads a Team time entry policy with a consistent read. */
   async getEntryPolicy(workspaceId: string, teamId: string): Promise<StoredTeamTimeEntryPolicy | undefined> {
     const response = await this.documentClient.send(new GetCommand({
@@ -3896,6 +4167,7 @@ function aggregateEntries(
   categoryLabels?: ReadonlyMap<string, string>,
   weekStartDay: WorkspaceWeekStartDay = DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
   phaseSettings: WorkspaceWorkPhaseSettings = DEFAULT_WORKSPACE_WORK_PHASE_SETTINGS,
+  investmentAssignments: TeamInvestmentAssignments = { projects: {}, workItems: {} },
 ): TimeSummaryGroup[] {
   if (groupBy === 'day' || groupBy === 'week') {
     return aggregateCalendarEntries(entries, groupBy, timeZone, from, to, estimateByWorkItem, includeCosts, managedProjectIds, weekStartDay)
@@ -3912,7 +4184,9 @@ function aggregateEntries(
           ? entry.category ?? UNCATEGORIZED_TIME_ENTRY_GROUP_KEY
           : groupBy === 'phase'
             ? resolveWorkCategoryPhase(phaseSettings, entry.category)
-            : entry.projectId ?? 'unassigned'
+            : groupBy === 'investment'
+              ? resolveInvestmentCategory(investmentAssignments, entry)
+              : entry.projectId ?? 'unassigned'
     const group = grouped.get(key) ?? createMutableSummaryGroup(key, categoryLabels?.get(key) ?? readFallbackGroupLabel(groupBy, entry))
     group.minutes += minutes
     group.billableMinutes += entry.billable ? minutes : 0
@@ -4787,7 +5061,84 @@ function readStoredHistory(value: unknown): TimeEntryHistory {
   }
 }
 
-/** Reads a stored budget. */
+/**
+ * Reads stored Team investment category assignments, failing closed on an invalid map.
+ *
+ * @param value - Stored item.
+ * @returns The stored assignments.
+ */
+function readStoredInvestmentAssignments(value: unknown): StoredTeamInvestmentAssignments {
+  const record = readRecord(value)
+  readSchemaVersion(record, 'Stored investment assignments')
+  const assignments = readTeamInvestmentAssignments(record)
+  if (!assignments) throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored investment assignments are invalid.')
+  return {
+    schemaVersion: 1,
+    workspaceId: readString(record.workspaceId, 'Stored assignments Workspace ID'),
+    teamId: readString(record.teamId, 'Stored assignments Team ID'),
+    ...assignments,
+    revision: readNumber(record.revision, 'Stored assignments revision'),
+    updatedBy: readString(record.updatedBy, 'Stored assignments author'),
+    updatedAt: readString(record.updatedAt, 'Stored assignments update time'),
+  }
+}
+
+/**
+ * Converts stored assignments to the API record.
+ *
+ * @param assignments - Stored assignments.
+ * @returns The assignments with their Team, revision, and save time.
+ */
+function toInvestmentAssignmentsRecord(assignments: StoredTeamInvestmentAssignments): TeamInvestmentAssignmentsRecord {
+  return {
+    teamId: assignments.teamId,
+    projects: assignments.projects,
+    workItems: assignments.workItems,
+    revision: assignments.revision,
+    updatedAt: assignments.updatedAt,
+  }
+}
+
+/**
+ * Builds the audit snapshots of an assignment change with only the Projects and Work Items whose
+ * category changed, so the audit event stays small when a Team assigns many Work Items.
+ *
+ * @param before - Assignments before the change, with their revision.
+ * @param after - Assignments after the change, with their revision.
+ * @returns Before and after snapshots of the changed entries.
+ */
+function diffInvestmentAssignments(
+  before: TeamInvestmentAssignments & { revision: number },
+  after: TeamInvestmentAssignments & { revision: number },
+): { before: Record<string, unknown>; after: Record<string, unknown> } {
+  /**
+   * Splits one map into the changed entries before and after.
+   *
+   * @param left - Map before the change.
+   * @param right - Map after the change.
+   * @returns Changed entries of each side; a removed or added entry is absent on one side.
+   */
+  const changed = (left: Readonly<Record<string, string>>, right: Readonly<Record<string, string>>) => {
+    const ids = new Set([...Object.keys(left), ...Object.keys(right)])
+    const from: Record<string, string> = {}
+    const to: Record<string, string> = {}
+    for (const id of ids) {
+      const previous = Object.hasOwn(left, id) ? left[id] : undefined
+      const next = Object.hasOwn(right, id) ? right[id] : undefined
+      if (previous === next) continue
+      if (previous !== undefined) from[id] = previous
+      if (next !== undefined) to[id] = next
+    }
+    return { from, to }
+  }
+  const projects = changed(before.projects, after.projects)
+  const workItems = changed(before.workItems, after.workItems)
+  return {
+    before: { projects: projects.from, workItems: workItems.from, revision: before.revision },
+    after: { projects: projects.to, workItems: workItems.to, revision: after.revision },
+  }
+}
+
 /**
  * Reads a stored Team time entry policy, failing closed on an invalid mode or limit.
  *
@@ -4856,6 +5207,7 @@ function entryMinutesOnDate(entry: TimeEntry, date: string, timeZone: string): n
     .find((segment) => segment.date === date)?.minutes ?? 0
 }
 
+/** Reads a stored budget. */
 function readStoredBudget(value: unknown): TimeBudget {
   const record = readRecord(value)
   readSchemaVersion(record, 'Stored budget')

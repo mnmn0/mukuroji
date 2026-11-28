@@ -22,6 +22,7 @@ import {
 import { isWorkspaceCalendarSettingsKey } from '../queries/useWorkspaceCalendarSettings'
 import { isWorkspaceTimeEntryCategoriesKey } from '../queries/useWorkspaceTimeEntryCategories'
 import { isWorkspaceWorkPhasesKey } from '../queries/useWorkspaceWorkPhases'
+import { isWorkspaceInvestmentCategoriesKey } from '../queries/useWorkspaceInvestmentCategories'
 
 /** Stable error view returned by tenant administration mutations. */
 export type TenantAdministrationMutationError = {
@@ -96,6 +97,7 @@ export function useTenantAdministrationMutations({
           ...(profile.planningUpdateTemplate ? { planningUpdateTemplate: profile.planningUpdateTemplate } : {}),
           ...(profile.timeEntryCategories ? { timeEntryCategories: profile.timeEntryCategories } : {}),
           ...(profile.workPhases ? { workPhases: profile.workPhases } : {}),
+          ...(profile.investmentCategories ? { investmentCategories: profile.investmentCategories } : {}),
           ...(profile.fileTypes ? { fileTypes: profile.fileTypes } : {}),
           ...(profile.defaultCurrency ? { defaultCurrency: profile.defaultCurrency } : {}),
           ...(profile.agentCost ? { agentCost: profile.agentCost } : {}),
@@ -106,6 +108,11 @@ export function useTenantAdministrationMutations({
         const savedCategories = updated.timeEntryCategories ?? profile.timeEntryCategories
         if (savedCategories) {
           await mutateGlobal(isWorkspaceTimeEntryCategoriesKey, savedCategories, { revalidate: false })
+            .catch(() => undefined)
+        }
+        const savedInvestment = updated.investmentCategories ?? profile.investmentCategories
+        if (savedInvestment) {
+          await mutateGlobal(isWorkspaceInvestmentCategoriesKey, savedInvestment, { revalidate: false })
             .catch(() => undefined)
         }
         const savedPhases = updated.workPhases ?? profile.workPhases

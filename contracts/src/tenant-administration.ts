@@ -1,5 +1,6 @@
 import type { WorkspaceAgentCostSettings } from './workspace-agent-cost'
 import type { WorkspaceFileTypeSettings } from './file-types'
+import type { WorkspaceInvestmentCategorySettings } from './investment-categories'
 import type { PlanningUpdateTemplateSettings } from './planning-update-template'
 import type { WorkspaceTimeEntryCategorySettings } from './time-entry-categories'
 import type { WeeklyReportReminderSettings } from './weekly-report-reminders'
@@ -48,6 +49,8 @@ export type TenantProfile = {
   timeEntryCategories?: WorkspaceTimeEntryCategorySettings
   /** Work phases and the category of each phase (ADR 0115); absent until an administrator chooses them. */
   workPhases?: WorkspaceWorkPhaseSettings
+  /** Investment categories and person-month hours (ADR 0116); absent until an administrator chooses them. */
+  investmentCategories?: WorkspaceInvestmentCategorySettings
   /** File types accepted for attachments; absent until an administrator changes them. */
   fileTypes?: WorkspaceFileTypeSettings
   /**
@@ -274,6 +277,11 @@ export type UpdateTenantProfileInput = {
    * already offered may be retired but not removed.
    */
   workPhases?: WorkspaceWorkPhaseSettings
+  /**
+   * Investment categories and the hours of a person-month; omitted keeps the stored settings. A
+   * category already offered may be retired but not removed.
+   */
+  investmentCategories?: WorkspaceInvestmentCategorySettings
   /**
    * File types accepted for attachments; omitted keeps the stored settings. Types outside the
    * catalog, such as executables, cannot be enabled.

@@ -16,6 +16,7 @@ import type {
   WorkspaceTimeEntryCategorySettings,
   WorkspaceWorkPhaseSettings,
   WorkspaceAgentCostSettings,
+  WorkspaceInvestmentCategorySettings,
 } from '@mukuroji/contracts'
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
@@ -29,6 +30,8 @@ import {
   readWorkspaceFileTypeSettings,
   readWorkspaceTimeEntryCategorySettings,
   readWorkspaceWorkPhaseSettings,
+  readWorkspaceInvestmentCategorySettings,
+  DEFAULT_WORKSPACE_INVESTMENT_CATEGORY_SETTINGS,
 } from '@mukuroji/contracts'
 import {
   TenantAdministrationError,
@@ -168,6 +171,19 @@ export function createTenantAdministrationRouter<
       const profile = await dependencies.client.getProfile(principal.directoryId)
       const settings: WorkspaceTimeEntryCategorySettings =
         profile?.timeEntryCategories ?? DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
+      return context.json(settings)
+    } catch (error) {
+      return dependencies.mapError(context, error)
+    }
+  })
+
+  // Every active member reads investment categories in time reports, so only authentication is required.
+  router.get('/api/workspace/investment-categories', async (context) => {
+    try {
+      const principal = await requirePrincipal(context, dependencies)
+      const profile = await dependencies.client.getProfile(principal.directoryId)
+      const settings: WorkspaceInvestmentCategorySettings =
+        profile?.investmentCategories ?? DEFAULT_WORKSPACE_INVESTMENT_CATEGORY_SETTINGS
       return context.json(settings)
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -402,6 +418,9 @@ function readTenantProfileInput(value: unknown): UpdateTenantProfileInput {
     ...(body.workPhases === undefined
       ? {}
       : { workPhases: readTenantWorkPhaseInput(body.workPhases) }),
+    ...(body.investmentCategories === undefined
+      ? {}
+      : { investmentCategories: readTenantInvestmentCategoryInput(body.investmentCategories) }),
     ...(body.fileTypes === undefined
       ? {}
       : { fileTypes: readTenantFileTypeInput(body.fileTypes) }),
@@ -505,6 +524,26 @@ function readTenantTimeEntryCategoryInput(value: unknown): WorkspaceTimeEntryCat
       400,
       'InvalidTimeEntryCategorySettings',
       'Work category keys, names, or flags are invalid, a key repeats, or no category is active.',
+    )
+  }
+  return settings
+}
+
+/**
+ * Validates the investment category settings of a profile update (ADR 0116).
+ *
+ * @param value - Untrusted `investmentCategories` field of the request body.
+ * @returns The validated settings.
+ * @throws TenantAdministrationError When a key, name, group, or flag is invalid, a key repeats,
+ *   no category is active, or the person-month hours are out of range.
+ */
+function readTenantInvestmentCategoryInput(value: unknown): WorkspaceInvestmentCategorySettings {
+  const settings = readWorkspaceInvestmentCategorySettings(value)
+  if (!settings) {
+    throw new TenantAdministrationError(
+      400,
+      'InvalidInvestmentCategorySettings',
+      'Investment category keys, names, groups, or flags are invalid, a key repeats, none is active, or person-month hours are not 1 to 744.',
     )
   }
   return settings

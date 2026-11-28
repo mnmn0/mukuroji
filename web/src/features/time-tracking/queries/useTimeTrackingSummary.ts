@@ -30,6 +30,7 @@ export function useTimeTrackingSummary(
       input.groupBy,
       scope?.scopeType ?? '',
       scope?.scopeType === 'project' ? scope.projectId : '',
+      input.filterProjectId ?? '',
     ] as const
     : null
   return useSWR(

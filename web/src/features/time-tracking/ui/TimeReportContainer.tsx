@@ -8,10 +8,14 @@ import { createTimeReportFileName, isTimeReportRangeOrdered, type TimeReportRang
 import { resolveBrowserTimeZone } from '../model/timePeriod'
 import { useSaveTeamTimeEntryPolicy } from '../mutations/useSaveTeamTimeEntryPolicy'
 import { useDeleteTimeBudgetPeriod, useSaveTimeBudget } from '../mutations/useSaveTimeBudget'
+import { useSaveTeamInvestmentAssignments } from '../mutations/useSaveTeamInvestmentAssignments'
 import { useSaveTimeRateCard } from '../mutations/useSaveTimeRateCard'
+import { useTeamInvestmentAssignments } from '../queries/useTeamInvestmentAssignments'
 import { useTeamTimeEntryPolicy } from '../queries/useTeamTimeEntryPolicy'
 import { useTimeRateCard, useTimeTrackingTeamSettings } from '../queries/useTimeRateCard'
 import { useTimeTrackingSummary } from '../queries/useTimeTrackingSummary'
+import { useWorkspaceInvestmentCategories } from '../../../workspace/queries/useWorkspaceInvestmentCategories'
+import { InvestmentAssignmentsPanel } from './InvestmentAssignmentsPanel'
 import { TimeBudgetPanel, type TimeBudgetProjectOption } from './TimeBudgetPanel'
 import { TimeEntryPolicyPanel } from './TimeEntryPolicyPanel'
 import { TimeRateCardPanel, type TimeRateCardJobRoleOption } from './TimeRateCardPanel'
@@ -66,7 +70,8 @@ function triggerCsvDownload(blob: Blob, fileName: string): void {
 }
 
 /**
- * Connects the Team report, its CSV export, the budget panel, and the Team's time entry checks to the API.
+ * Connects the Team report, its CSV export, the budget panel, the investment category assignments,
+ * and the Team's time entry checks to the API.
  *
  * The budget panel appears only when the server returns costs (`costsRedacted` is false), so
  * members who may not see confidential money never see budgets either.
@@ -95,7 +100,11 @@ export function TimeReportContainer({
   const timeZone = resolveBrowserTimeZone()
   const ordered = isTimeReportRangeOrdered(range)
   const [budgetScope, setBudgetScope] = useState<TimeReportBudgetScope>({ scopeType: 'team' })
-  const reportInput = useMemo(() => ({ ...range, timeZone, groupBy }), [groupBy, range, timeZone])
+  const [filterProjectId, setFilterProjectId] = useState<string>()
+  const reportInput = useMemo(
+    () => ({ ...range, timeZone, groupBy, ...(filterProjectId ? { filterProjectId } : {}) }),
+    [filterProjectId, groupBy, range, timeZone],
+  )
   const report = useTimeTrackingSummary(accessToken, teamId, reportInput, ordered)
   const canSeeCosts = report.data ? !report.data.costsRedacted : false
   const budgetInput = useMemo(
@@ -111,6 +120,16 @@ export function TimeReportContainer({
   const canManageRateCard = settings.data?.canManageRateCard === true
   const rateCard = useTimeRateCard(accessToken, teamId, canManageRateCard)
   const saveRateCard = useSaveTimeRateCard(accessToken, teamId)
+  const investmentCategories = useWorkspaceInvestmentCategories(accessToken)
+  // Only a manager of the whole Team may read the assignments, the same managers as the rate card.
+  const investmentAssignments = useTeamInvestmentAssignments(accessToken, canManageRateCard ? teamId : undefined)
+  const saveInvestmentAssignments = useSaveTeamInvestmentAssignments(accessToken, teamId)
+  const workItemOptions = useMemo(
+    () => Object.entries(labels.workItems)
+      .map(([id, name]) => ({ id, name }))
+      .sort((left, right) => left.name.localeCompare(right.name, locale)),
+    [labels.workItems, locale],
+  )
   const members = useMemo(
     () => Object.entries(labels.members)
       .map(([id, name]) => ({ id, name }))
@@ -135,8 +154,14 @@ export function TimeReportContainer({
           triggerCsvDownload(blob, createTimeReportFileName(range, groupBy))
         }}
         onRetry={() => { void report.mutate().catch(() => undefined) }}
+        projectFilter={{
+          options: projects,
+          onChange: setFilterProjectId,
+          ...(filterProjectId ? { projectId: filterProjectId } : {}),
+        }}
         range={range}
         t={t}
+        {...(investmentCategories.settings ? { investmentCategories: investmentCategories.settings } : {})}
         {...(report.data ? { summary: report.data } : {})}
       />
       {canSeeCosts ? (
@@ -177,6 +202,22 @@ export function TimeReportContainer({
           onSave={saveRateCard}
           t={t}
           {...(rateCard.data ? { rateCard: rateCard.data } : {})}
+        />
+      ) : null}
+      {canManageRateCard ? (
+        <InvestmentAssignmentsPanel
+          hasLoadError={Boolean(investmentAssignments.error ?? investmentCategories.error)}
+          isLoading={investmentAssignments.isLoading || (!investmentCategories.settings && !investmentCategories.error)}
+          onRetry={() => {
+            void investmentAssignments.mutate().catch(() => undefined)
+            investmentCategories.retry()
+          }}
+          onSave={saveInvestmentAssignments}
+          projects={projects}
+          t={t}
+          workItems={workItemOptions}
+          {...(investmentCategories.settings ? { settings: investmentCategories.settings } : {})}
+          {...(investmentAssignments.data ? { view: investmentAssignments.data } : {})}
         />
       ) : null}
       <TimeEntryPolicyPanel

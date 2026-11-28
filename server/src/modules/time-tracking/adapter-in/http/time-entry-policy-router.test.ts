@@ -123,6 +123,53 @@ describe('time entry policy routes', () => {
     expect(await stale.json()).toMatchObject({ code: 'TimeEntryPolicyRevisionConflict' })
   })
 
+  test('only a manager of the whole Team reads and changes investment assignments (ADR 0116)', async () => {
+    const member = createFixture({ canManage: false, wholeTeam: false })
+    const memberRead = await member.router.request('/api/teams/team-1/investment-assignments', { headers })
+    expect(memberRead.status).toBe(403)
+    const save = (router: ReturnType<typeof createFixture>['router'], body: Record<string, unknown>) =>
+      router.request('/api/teams/team-1/investment-assignments', { method: 'PUT', headers, body: JSON.stringify(body) })
+    const partial = createFixture({ canManage: true, wholeTeam: false })
+    const denied = await save(partial.router, { projects: { alpha: 'maintenance' }, workItems: {}, expectedRevision: 0 })
+    expect(denied.status).toBe(403)
+    expect(await denied.json()).toMatchObject({ code: 'InvestmentAssignmentsDenied' })
+    const partialRead = await partial.router.request('/api/teams/team-1/investment-assignments', { headers })
+    expect(await partialRead.json()).toMatchObject({ code: 'InvestmentAssignmentsDenied' })
+
+    const manager = createFixture({ canManage: true, wholeTeam: true })
+    const read = await manager.router.request('/api/teams/team-1/investment-assignments', { headers })
+    expect(await read.json()).toEqual({ assignments: { teamId: 'team-1', projects: {}, workItems: {}, revision: 0 }, canEdit: true })
+    for (const invalid of [
+      { projects: { alpha: 'Maintenance' }, workItems: {} },
+      { projects: { alpha: 'unclassified' }, workItems: {} },
+      { projects: [], workItems: {} },
+    ]) {
+      const rejected = await save(manager.router, { ...invalid, expectedRevision: 0 })
+      expect(rejected.status).toBe(400)
+    }
+    // A key that would replace the prototype is refused, not merged.
+    const prototypeKey = await manager.router.request('/api/teams/team-1/investment-assignments', {
+      method: 'PUT',
+      headers,
+      body: '{"projects":{},"workItems":{"__proto__":"maintenance"},"expectedRevision":0}',
+    })
+    expect(prototypeKey.status).toBe(400)
+    const unknown = await save(manager.router, { projects: { alpha: 'custom-research' }, workItems: {}, expectedRevision: 0 })
+    expect(await unknown.json()).toMatchObject({ code: 'InvalidInvestmentCategory' })
+    const saved = await save(manager.router, { projects: { alpha: 'maintenance' }, workItems: { 'task-1': 'operations' }, expectedRevision: 0 })
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toMatchObject({
+      assignments: { projects: { alpha: 'maintenance' }, workItems: { 'task-1': 'operations' }, revision: 1 },
+      canEdit: true,
+    })
+    const report = await manager.router.request(
+      '/api/teams/team-1/time-tracking/summary?from=2026-08-01&to=2026-08-07&groupBy=investment&filterProjectId=alpha',
+      { headers },
+    )
+    expect(report.status).toBe(200)
+    expect(await report.json()).toMatchObject({ groupBy: 'investment', groups: [], totalMinutes: 0 })
+  })
+
   test('warns about or rejects overlapping time', async () => {
     const { router } = createFixture({ canManage: true, wholeTeam: true })
     const first = await record(router, '2026-08-03T01:00:00.000Z', '2026-08-03T03:00:00.000Z')
