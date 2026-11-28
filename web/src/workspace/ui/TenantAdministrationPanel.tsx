@@ -24,6 +24,7 @@ import { WeeklyReportReminderFields } from './WeeklyReportReminderFields'
 import { hasWeeklyReportReminderConflict } from '../model/weeklyReportReminders'
 import { hasTimeEntryCategoryProblem } from '../model/timeEntryCategories'
 import { FileTypeFields } from './FileTypeFields'
+import { AgentCostBudgetFields } from './AgentCostBudgetFields'
 import { TimeEntryCategoryFields } from './TimeEntryCategoryFields'
 import { useTenantAdministrationMutations } from '../mutations/useTenantAdministrationMutations'
 import { useTenantAdministration } from '../queries/useTenantAdministration'
@@ -393,6 +394,13 @@ export function TenantAdministrationPanel({
                 {t('workspace.tenantAdministration.defaultCurrencyHint')}
               </span>
             </label>
+            <AgentCostBudgetFields
+              currency={profile.defaultCurrency ?? DEFAULT_WORKSPACE_CURRENCY}
+              disabled={isSaving || tenantLifecycleLocked}
+              onChange={(next) => onChangeProfile({ ...profile, agentCost: next })}
+              settings={profile.agentCost}
+              t={t}
+            />
             <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
               {t('workspace.tenantAdministration.fiscalYearStartMonth')}
               <select

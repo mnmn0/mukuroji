@@ -1,5 +1,6 @@
 import {
   isProjectBudgetReportInterval,
+  type ProjectBudgetAgentCost,
   type ProjectBudgetReport,
   type ProjectBudgetReportBaseline,
   type ProjectBudgetReportInterval,
@@ -119,9 +120,10 @@ export function readProjectBudgetReport(value: unknown): ProjectBudgetReport | u
   const points = value.points.map(readPoint)
   const budgetConsumedPercent = readOptionalNumber(value.budgetConsumedPercent)
   const effortConsumedPercent = readOptionalNumber(value.effortConsumedPercent)
+  const agentCost = value.agentCost === undefined ? undefined : readAgentCost(value.agentCost)
   if (
     budget === undefined || baseline === undefined || earnedValue === undefined ||
-    budgetConsumedPercent === false || effortConsumedPercent === false
+    budgetConsumedPercent === false || effortConsumedPercent === false || agentCost === false
   ) {
     return undefined
   }
@@ -142,11 +144,37 @@ export function readProjectBudgetReport(value: unknown): ProjectBudgetReport | u
     actualCostByCurrency,
     approvedExpenseByCurrency,
     pendingExpenseByCurrency,
+    ...(agentCost === undefined ? {} : { agentCost }),
     ...(budgetConsumedPercent === undefined ? {} : { budgetConsumedPercent }),
     ...(effortConsumedPercent === undefined ? {} : { effortConsumedPercent }),
     earnedValue,
     points: validPoints,
   }
+}
+
+/**
+ * Validates the Agent Run cost the budget counts (ADR 0119).
+ *
+ * @param value - Unknown value.
+ * @returns The cost, or `false` when the shape is invalid.
+ */
+function readAgentCost(value: unknown): ProjectBudgetAgentCost | false {
+  if (!isRecord(value)) return false
+  const { status, estimatedCostMicroUsd, amountMinor, usdExchangeRate, runCount, truncated } = value
+  if (
+    !isNonnegativeSafeInteger(estimatedCostMicroUsd) || !isNonnegativeSafeInteger(runCount) || typeof truncated !== 'boolean'
+  ) {
+    return false
+  }
+  if (status === 'missing-exchange-rate') {
+    return amountMinor === undefined && usdExchangeRate === undefined
+      ? { status, estimatedCostMicroUsd, runCount, truncated }
+      : false
+  }
+  if (status !== 'included' || !isNonnegativeSafeInteger(amountMinor) || !isFiniteNumber(usdExchangeRate) || usdExchangeRate <= 0) {
+    return false
+  }
+  return { status, estimatedCostMicroUsd, amountMinor, usdExchangeRate, runCount, truncated }
 }
 
 /**

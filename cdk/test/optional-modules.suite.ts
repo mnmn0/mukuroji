@@ -190,6 +190,9 @@ describe('default deployment without optional modules', () => {
       },
     });
     expect(logicalIds.filter((id) => id.startsWith('AgentRunTriageJobPolicy'))).toEqual([]);
+    // Budget threshold alerts count no Agent Run cost without the Software factory (ADR 0119).
+    expect(JSON.stringify(Object.entries(template.toJSON().Resources)
+      .filter(([id]) => id.startsWith('NotificationScheduleJobPolicy')))).not.toContain('FinishedRunIndex');
   });
 
   test('keeps deleted file versions unreadable for everyone without the restore drill', () => {
@@ -288,6 +291,11 @@ describe('optional modules selected through CDK context', () => {
       },
     });
     expect(logicalIds.some((id) => id.startsWith('AgentRunTriageJobPolicy'))).toBe(true);
+    // Budget threshold alerts read finished runs and their usage to count Agent Run cost (ADR 0119).
+    const notificationPolicies = Object.entries(template.toJSON().Resources)
+      .filter(([id]) => id.startsWith('NotificationScheduleJobPolicy'));
+    expect(notificationPolicies.length).toBeGreaterThan(0);
+    expect(JSON.stringify(notificationPolicies)).toContain('FinishedRunIndex');
   });
 
   test('turns the demo data on', () => {

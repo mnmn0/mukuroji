@@ -180,7 +180,7 @@ function createProjectBudgetReportCsv(report: ProjectBudgetReport): string {
   const currency = report.budget?.currency ?? ''
   const ev = report.earnedValue
   const rows: Array<Array<string | number>> = [
-    ['From', 'To', 'Time zone', 'As of', 'Budget', 'Currency', 'BAC minutes', 'PV minutes', 'EV minutes', 'AC minutes', 'SPI', 'CPI', 'EAC minutes', 'PV', 'EV', 'AC', 'Cost CPI', 'EAC', 'Approved expenses', 'Pending expenses'],
+    ['From', 'To', 'Time zone', 'As of', 'Budget', 'Currency', 'BAC minutes', 'PV minutes', 'EV minutes', 'AC minutes', 'SPI', 'CPI', 'EAC minutes', 'PV', 'EV', 'AC', 'Cost CPI', 'EAC', 'Approved expenses', 'Pending expenses', 'Agent cost', 'Agent cost USD micros'],
     [
       report.from,
       report.to,
@@ -202,6 +202,9 @@ function createProjectBudgetReportCsv(report: ProjectBudgetReport): string {
       ev?.money?.estimateAtCompletionMinor ?? '',
       currency === '' ? '' : report.approvedExpenseByCurrency[currency] ?? 0,
       currency === '' ? '' : report.pendingExpenseByCurrency[currency] ?? 0,
+      // Blank when the Workspace does not count Agent Run cost or has no rate (ADR 0119).
+      report.agentCost?.amountMinor ?? '',
+      report.agentCost?.estimatedCostMicroUsd ?? '',
     ],
     [],
     ['Period start', 'Period end', 'Planned value minutes', 'Actual minutes', 'Planned value', 'Actual cost', 'Currency'],

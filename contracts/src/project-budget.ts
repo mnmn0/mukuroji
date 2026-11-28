@@ -41,6 +41,31 @@ export type ProjectBudgetReportBaseline = {
   canceledEffortMinutes: number
 }
 
+/**
+ * Estimated coding agent cost the Project budget counts (ADR 0119): Agent Runs that finished from
+ * the report start through the as-of date on Work Items the Project holds now.
+ */
+export type ProjectBudgetAgentCost = {
+  /**
+   * `included` when the cost is part of the actual cost; `missing-exchange-rate` when the
+   * Workspace has no USD rate for the budget currency, so nothing is added.
+   */
+  status: 'included' | 'missing-exchange-rate'
+  /** Estimated cost in millionths of a US dollar, as the agent runtimes reported it. */
+  estimatedCostMicroUsd: number
+  /** The cost in the budget currency; present only when `status` is `included`. */
+  amountMinor?: number
+  /** Major units of the budget currency per US dollar used; present only when `included`. */
+  usdExchangeRate?: number
+  /** Agent Runs with a reported cost that were counted. */
+  runCount: number
+  /**
+   * True when the Project had more finished Agent Runs than one report reads, or a run had more
+   * usage than one read returns, so the cost is a lower bound.
+   */
+  truncated: boolean
+}
+
 /** Cumulative values at the end of one day or week of the report. */
 export type ProjectBudgetReportPoint = {
   /** First local date of the bucket (a Monday for weeks, clipped to the report start). */
@@ -58,7 +83,8 @@ export type ProjectBudgetReportPoint = {
   actualMinutes?: number
   /**
    * Actual cost in the budget currency from the report start through the bucket, time cost plus
-   * approved expenses; absent without a budget and for buckets that start after the as-of date.
+   * approved expenses, plus Agent Run cost when the Workspace counts it (ADR 0119); absent without
+   * a budget and for buckets that start after the as-of date.
    */
   actualCostMinor?: number
 }
@@ -73,7 +99,10 @@ export type ProjectEarnedValueMoney = {
   plannedValueMinor: number
   /** Earned value at the as-of date. */
   earnedValueMinor: number
-  /** Actual cost in the budget currency through the as-of date: time cost plus approved expenses. */
+  /**
+   * Actual cost in the budget currency through the as-of date: time cost plus approved expenses,
+   * plus Agent Run cost when the Workspace counts it (ADR 0119).
+   */
   actualCostMinor: number
   /** Schedule variance, earned minus planned value. */
   scheduleVarianceMinor: number
@@ -159,8 +188,13 @@ export type ProjectBudgetReport = {
   /** Project expenses dated from `from` through `asOf` that wait for a decision, keyed by ISO currency. */
   pendingExpenseByCurrency: Readonly<Record<string, number>>
   /**
-   * Time cost plus approved expenses in the budget currency as a percentage of the budget; absent
-   * without a budget.
+   * Agent Run cost the budget counts; absent unless the Workspace counts it (ADR 0119), the
+   * report has a budget, and the deployment has the Software factory.
+   */
+  agentCost?: ProjectBudgetAgentCost
+  /**
+   * Time cost plus approved expenses, plus Agent Run cost when `agentCost.status` is `included`,
+   * in the budget currency as a percentage of the budget; absent without a budget.
    */
   budgetConsumedPercent?: number
   /** Actual minutes as a percentage of the baseline effort; absent without baseline effort. */

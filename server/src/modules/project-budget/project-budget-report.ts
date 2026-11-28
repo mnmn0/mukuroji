@@ -8,6 +8,7 @@ import type {
   ProjectScheduleBaseline,
   TimeBudget,
 } from '@mukuroji/contracts'
+import { describeProjectAgentCost, sumProjectAgentCost, type ProjectAgentCostInput } from './project-agent-cost'
 
 /** Current state of one Work Item that earned value reads. */
 export type ProjectBudgetWorkItemProgress = {
@@ -55,6 +56,11 @@ export type ProjectBudgetReportInput = {
   entries: readonly ProjectBudgetTimeEntry[]
   /** Expenses of the Project in every state. Expenses dated outside `from`..`asOf` are ignored. */
   expenses: readonly ProjectExpense[]
+  /**
+   * Agent Run cost to add to the actual cost (ADR 0119); absent when the Workspace does not count
+   * it. Runs that finished outside `from`..`asOf` are ignored.
+   */
+  agentCost?: ProjectAgentCostInput
 }
 
 /** One baseline Work Item that is planned on the calendar. */
@@ -78,7 +84,8 @@ const DAY_MS = 86_400_000
  * that date, and one without an end date plans none. Earned value is each baseline Work Item's
  * planned effort times its current progress. Canceled Work Items leave every value. Amounts are
  * the effort figures times the budget amount per baseline minute, and actual cost counts only the
- * entries and the approved expenses in the budget currency.
+ * entries and the approved expenses in the budget currency, plus Agent Run cost converted into it
+ * when the input carries it (ADR 0119).
  *
  * @param input - Report inputs.
  * @returns The report.
@@ -183,11 +190,22 @@ function measureProjectBudget(
     actualByDate.set(expense.date, day)
   }
 
+  // Agent Run cost is actual cost in the budget currency when the Workspace counts it and has a
+  // rate for the currency (ADR 0119); it needs a budget currency to convert into.
+  const agentCostTotal = input.agentCost && currency !== undefined && measured
+    ? sumProjectAgentCost(input.agentCost, currency, input.from, asOf)
+    : undefined
+  for (const [date, minor] of agentCostTotal?.byDate ?? []) {
+    const day = actualByDate.get(date) ?? { minutes: 0, costMinor: 0 }
+    day.costMinor += minor
+    actualByDate.set(date, day)
+  }
+
   const points = withSeries ? createSeries(input, asOf, measured, planned, actualByDate, minorPerMinute) : []
   const plannedValueMinutes = plannedValueAt(planned, asOf)
   const actualCostMinor = currency === undefined
     ? 0
-    : (actualCostByCurrency[currency] ?? 0) + (approvedExpenseByCurrency[currency] ?? 0)
+    : (actualCostByCurrency[currency] ?? 0) + (approvedExpenseByCurrency[currency] ?? 0) + (agentCostTotal?.amountMinor ?? 0)
   const report: ProjectBudgetReport = {
     teamId: input.teamId,
     projectId: input.projectId,
@@ -212,6 +230,14 @@ function measureProjectBudget(
     actualCostByCurrency,
     approvedExpenseByCurrency,
     pendingExpenseByCurrency,
+    ...(input.agentCost && input.budget
+      ? {
+          agentCost: describeProjectAgentCost(
+            input.agentCost,
+            agentCostTotal ?? { byDate: new Map(), amountMinor: 0, estimatedCostMicroUsd: 0, runCount: 0 },
+          ),
+        }
+      : {}),
     ...(input.budget && input.budget.amountMinor > 0
       ? { budgetConsumedPercent: roundRatio((actualCostMinor * 100) / input.budget.amountMinor) }
       : {}),

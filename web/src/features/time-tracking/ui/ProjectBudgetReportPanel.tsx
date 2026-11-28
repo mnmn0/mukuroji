@@ -135,7 +135,9 @@ function ReportContent({ locale, report, t }: { locale: Locale; report: ProjectB
   const otherCurrencies = Object.fromEntries(
     Object.entries(actualByCurrency).filter(([currency]) => currency !== budget?.currency),
   )
-  const budgetCost = budget ? actualByCurrency[budget.currency] ?? 0 : undefined
+  // Agent Run cost is already in the budget currency when the Workspace counts it (ADR 0119).
+  const agentCostMinor = report.agentCost?.status === 'included' ? report.agentCost.amountMinor ?? 0 : 0
+  const budgetCost = budget ? (actualByCurrency[budget.currency] ?? 0) + agentCostMinor : undefined
   const budgetExpense = budget ? report.approvedExpenseByCurrency[budget.currency] ?? 0 : 0
   const formatMoney = (amount: number | undefined) =>
     amount === undefined || !budget ? '—' : formatMinorAmount(amount, budget.currency, locale)
@@ -156,6 +158,9 @@ function ReportContent({ locale, report, t }: { locale: Locale; report: ProjectB
               : interpolate(t('timeTracking.projectBudget.consumed'), { percent: report.budgetConsumedPercent }),
             budgetExpense > 0
               ? interpolate(t('timeTracking.projectBudget.includesExpenses'), { amount: formatMoney(budgetExpense) })
+              : undefined,
+            report.agentCost?.status === 'included'
+              ? interpolate(t('timeTracking.projectBudget.includesAgentCost'), { amount: formatMoney(agentCostMinor) })
               : undefined,
           ].filter((part) => part !== undefined).join(' / ') || undefined}
         >
@@ -225,6 +230,14 @@ function ReportContent({ locale, report, t }: { locale: Locale; report: ProjectB
         {Object.keys(report.pendingExpenseByCurrency).length > 0 ? (
           <li>{interpolate(t('timeTracking.projectBudget.pendingExpenses'), { amounts: formatCostsByCurrency(report.pendingExpenseByCurrency, locale) })}</li>
         ) : null}
+        {report.agentCost?.status === 'missing-exchange-rate' && report.agentCost.runCount > 0 ? (
+          <li data-testid="project-budget-agent-cost-missing-rate">
+            {interpolate(t('timeTracking.projectBudget.agentCostMissingRate'), {
+              amount: formatMinorAmount(Math.round(report.agentCost.estimatedCostMicroUsd / 10_000), 'USD', locale),
+            })}
+          </li>
+        ) : null}
+        {report.agentCost?.truncated ? <li>{t('timeTracking.projectBudget.agentCostTruncated')}</li> : null}
         {budget && Object.keys(otherCurrencies).length > 0 ? (
           <li>{interpolate(t('timeTracking.projectBudget.otherCurrencies'), { amounts: formatCostsByCurrency(otherCurrencies, locale) })}</li>
         ) : null}

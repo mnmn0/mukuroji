@@ -8,6 +8,7 @@ import {
   type TimeEntry,
   type WorkItemEffortFields,
   type WorkItemProgressMode,
+  type WorkspaceAgentCostSettings,
 } from '@mukuroji/contracts'
 import { splitTimeEntryByLocalDate } from '../../time-tracking'
 import {
@@ -18,6 +19,13 @@ import {
   type ProjectBudgetTimeEntry,
   type ProjectBudgetWorkItemProgress,
 } from '../project-budget-report'
+import {
+  MAX_PROJECT_AGENT_COST_RUNS,
+  resolveProjectAgentCostRate,
+  toProjectAgentRunCosts,
+  type ProjectAgentCostInput,
+  type ProjectAgentRunCostReader,
+} from '../project-agent-cost'
 
 /** Milliseconds in one UTC day. */
 const DAY_MS = 86_400_000
@@ -89,6 +97,10 @@ export type ProjectBudgetReportPorts = {
   listExpenses(workspaceId: string, teamId: string, projectId: string): Promise<readonly ProjectExpense[]>
   /** Reads one page of the Team's Work Items, archived ones included. */
   listWorkItems(workspaceId: string, teamId: string, startAfterIssueId: string | undefined): Promise<ProjectBudgetWorkItemPage>
+  /** Reads how the Workspace counts coding agent cost (ADR 0119); undefined when never saved. */
+  readAgentCostSettings?(workspaceId: string): Promise<WorkspaceAgentCostSettings | undefined>
+  /** Reads Agent Run cost; absent when the deployment has no Software factory. */
+  listAgentRunCosts?: ProjectAgentRunCostReader
   /** Returns the current time. */
   now(): Date
 }
@@ -170,8 +182,8 @@ const PROJECT_TO_DATE_FROM = '2000-01-01'
  *
  * Actual time is every minute recorded on the Project through the as-of date. Earned value reads
  * the Work Items' current progress, so the caller measures only at a recent as-of instant
- * (ADR 0110). Expenses are not read, because the figures are in effort. The caller must already
- * have checked that the principal manages the Project.
+ * (ADR 0110). Expenses and Agent Run cost are not read, because the figures are in effort. The
+ * caller must already have checked that the principal manages the Project.
  *
  * @param request - Validated request.
  * @param ports - Team-scoped reads.
@@ -213,7 +225,8 @@ export async function loadProjectEarnedValue(
  * @param budget - Project budget, or `null`.
  * @param baseline - Active schedule baseline, or `null`.
  * @param now - Instant whose local date is the report's today, epoch milliseconds.
- * @param includeExpenses - Whether to read the Project expenses; without them none count.
+ * @param includeMoneyInputs - Whether to read the inputs that count only in money, the Project
+ *   expenses and the Agent Run cost; without them neither counts.
  * @returns The report input.
  * @throws ProjectBudgetReportError when the Team has too many Work Items or a page read stalls.
  */
@@ -224,9 +237,14 @@ async function readReportInput(
   budget: TimeBudget | null,
   baseline: ProjectScheduleBaseline | null,
   now: number,
-  includeExpenses: boolean,
+  includeMoneyInputs: boolean,
 ): Promise<ProjectBudgetReportInput> {
   const { workspaceId, teamId, projectId, timeZone } = request
+  // Agent Run cost counts only in money, so only the report reads it, and only when the Workspace
+  // counts it and the deployment can read Agent Runs (ADR 0119).
+  const agentCostRate = includeMoneyInputs && budget && ports.listAgentRunCosts && ports.readAgentCostSettings
+    ? resolveProjectAgentCostRate(await ports.readAgentCostSettings(workspaceId), budget.currency)
+    : undefined
   const [progressMode, entries, expenses] = await Promise.all([
     ports.getProgressMode(workspaceId, teamId),
     ports.listEntries({
@@ -236,12 +254,28 @@ async function readReportInput(
       from: new Date(Date.parse(`${request.from}T00:00:00Z`) - MAX_TIMEZONE_OFFSET_MS).toISOString(),
       to: new Date(Date.parse(`${request.to}T00:00:00Z`) + DAY_MS + MAX_TIMEZONE_OFFSET_MS).toISOString(),
     }),
-    includeExpenses ? ports.listExpenses(workspaceId, teamId, projectId) : Promise.resolve([]),
+    includeMoneyInputs ? ports.listExpenses(workspaceId, teamId, projectId) : Promise.resolve([]),
   ])
   const baselineIds = new Set((baseline?.entries ?? []).map((entry) => entry.workItemId))
-  const workItems = baselineIds.size === 0
-    ? new Map<string, ProjectBudgetWorkItemProgress>()
+  const { progress: workItems, projectWorkItemIds } = baselineIds.size === 0 && agentCostRate === undefined
+    ? { progress: new Map<string, ProjectBudgetWorkItemProgress>(), projectWorkItemIds: new Set<string>() }
     : await readWorkItemProgress(request, ports, baselineIds, progressMode, workItemLimit)
+  const today = localDateAt(now, timeZone)
+  let agentCost: ProjectAgentCostInput | undefined
+  if (agentCostRate !== undefined && ports.listAgentRunCosts) {
+    const asOf = today < request.to ? today : request.to
+    const read = projectWorkItemIds.size === 0
+      ? { runs: [], truncated: false }
+      : await ports.listAgentRunCosts({
+          workspaceId,
+          teamId,
+          workItemIds: projectWorkItemIds,
+          since: new Date(Date.parse(`${request.from}T00:00:00Z`) - MAX_TIMEZONE_OFFSET_MS).toISOString(),
+          until: new Date(Date.parse(`${asOf}T00:00:00Z`) + DAY_MS + MAX_TIMEZONE_OFFSET_MS).toISOString(),
+          maxRuns: MAX_PROJECT_AGENT_COST_RUNS,
+        })
+    agentCost = { usdExchangeRate: agentCostRate.usdExchangeRate, costs: toProjectAgentRunCosts(read, timeZone) }
+  }
   return {
     teamId,
     projectId,
@@ -249,25 +283,28 @@ async function readReportInput(
     to: request.to,
     timeZone,
     interval: request.interval,
-    today: localDateAt(now, timeZone),
+    today,
     budget,
     baseline,
     workItems,
     entries: entries.flatMap((entry) => toBudgetEntries(entry, timeZone)),
     expenses,
+    ...(agentCost === undefined ? {} : { agentCost }),
   }
 }
 
 /**
  * Reads the current progress of the baseline Work Items, archived ones included, because
- * archiving finished work must not take back what it earned.
+ * archiving finished work must not take back what it earned, and the IDs of every Work Item the
+ * Project holds now, whose Agent Runs the budget may count (ADR 0119).
  *
  * @param request - Report request.
  * @param ports - Team-scoped reads.
  * @param ids - Work Item IDs the baseline holds.
  * @param progressMode - Team progress mode.
  * @param limit - Most Work Items one report may evaluate.
- * @returns Progress keyed by Work Item ID; deleted Work Items are missing.
+ * @returns Progress keyed by Work Item ID, where deleted Work Items are missing, and the Project's
+ *   Work Item IDs.
  * @throws ProjectBudgetReportError when the Team has too many Work Items or a page read stalls.
  */
 async function readWorkItemProgress(
@@ -276,8 +313,9 @@ async function readWorkItemProgress(
   ids: ReadonlySet<string>,
   progressMode: WorkItemProgressMode | undefined,
   limit: number,
-): Promise<Map<string, ProjectBudgetWorkItemProgress>> {
+): Promise<{ progress: Map<string, ProjectBudgetWorkItemProgress>; projectWorkItemIds: Set<string> }> {
   const result = new Map<string, ProjectBudgetWorkItemProgress>()
+  const projectWorkItemIds = new Set<string>()
   let evaluated = 0
   let startAfterIssueId: string | undefined
   do {
@@ -291,6 +329,7 @@ async function readWorkItemProgress(
       )
     }
     for (const issue of page.issues) {
+      if (issue.assignedProjectId === request.projectId) projectWorkItemIds.add(issue.id)
       // A Work Item moved to another Project earns nothing here, like a deleted one, so the report
       // never reads the state of work the Project no longer owns.
       if (!ids.has(issue.id) || issue.assignedProjectId !== request.projectId) continue
@@ -304,7 +343,7 @@ async function readWorkItemProgress(
     }
     startAfterIssueId = page.nextStartAfterIssueId
   } while (startAfterIssueId !== undefined)
-  return result
+  return { progress: result, projectWorkItemIds }
 }
 
 /**

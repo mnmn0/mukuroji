@@ -88,6 +88,37 @@ describe('Project budget report', () => {
     expect(html).toContain('終了日のないタスクの予定工数 4:00')
   })
 
+  test('reads and shows the coding agent cost the budget counts (ADR 0119)', () => {
+    const included = {
+      ...projectBudgetReportFixture,
+      agentCost: { status: 'included' as const, estimatedCostMicroUsd: 80_000_000, amountMinor: 12_000, usdExchangeRate: 150, runCount: 14, truncated: true },
+    }
+    expect(readProjectBudgetReport(JSON.parse(JSON.stringify(included)))).toEqual(included)
+    expect(readProjectBudgetReport({ ...included, agentCost: { ...included.agentCost, amountMinor: -1 } })).toBeUndefined()
+    expect(readProjectBudgetReport({
+      ...included,
+      agentCost: { status: 'missing-exchange-rate', estimatedCostMicroUsd: 1, runCount: 1, truncated: false, amountMinor: 1 },
+    })).toBeUndefined()
+
+    const html = renderToStaticMarkup(
+      <ProjectBudgetReportPanel
+        budgetEditPath="/teams/core-team/timesheet?view=report"
+        locale="ja"
+        range={{ from: '2026-11-02', to: '2026-11-29' }}
+        renderLink={(path, children) => <a href={path}>{children}</a>}
+        report={included}
+        t={createTranslator('ja')}
+        onChangeRange={() => undefined}
+        onExport={() => undefined}
+        onRetry={() => undefined}
+      />,
+    )
+    // Time cost 468,000 plus 12,000 of agent cost.
+    expect(html).toContain('480,000')
+    expect(html).toContain('うち coding agent の推定費用')
+    expect(html).toContain('下限の値です')
+  })
+
   test('explains why earned value is missing without a baseline', () => {
     const html = renderToStaticMarkup(
       <ProjectBudgetReportPanel

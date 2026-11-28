@@ -14,11 +14,15 @@ import type {
   WorkspaceCalendarSettingsResponse,
   WorkspaceFileTypeSettings,
   WorkspaceTimeEntryCategorySettings,
+  WorkspaceAgentCostSettings,
 } from '@mukuroji/contracts'
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   isKnownCurrencyCode,
+  MAX_AGENT_COST_USD_EXCHANGE_RATE,
+  MAX_AGENT_COST_USD_EXCHANGE_RATES,
+  readWorkspaceAgentCostSettings,
   readPlanningUpdateTemplateSettings,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
@@ -386,6 +390,7 @@ function readTenantProfileInput(value: unknown): UpdateTenantProfileInput {
       ? {}
       : { fileTypes: readTenantFileTypeInput(body.fileTypes) }),
     ...(body.defaultCurrency === undefined ? {} : { defaultCurrency: readTenantDefaultCurrencyInput(body.defaultCurrency) }),
+    ...(body.agentCost === undefined ? {} : { agentCost: readTenantAgentCostInput(body.agentCost) }),
     expectedRevision: validateTenantInteger(body.expectedRevision, 1_000_000, 'InvalidTenantRevision'),
   }
 }
@@ -501,6 +506,27 @@ function readTenantDefaultCurrencyInput(value: unknown): string {
     throw new TenantAdministrationError(400, 'InvalidTenantDefaultCurrency', 'Default currency must be an ISO 4217 code such as JPY.')
   }
   return value
+}
+
+/**
+ * Validates the coding agent cost settings of a profile update (ADR 0119).
+ *
+ * @param value - Untrusted `agentCost` field of the request body.
+ * @returns The validated settings.
+ * @throws TenantAdministrationError When the flag is not a boolean, a currency is not a known
+ *   ISO 4217 code other than USD, a rate is not positive with at most six fraction digits, or there
+ *   are too many rates.
+ */
+function readTenantAgentCostInput(value: unknown): WorkspaceAgentCostSettings {
+  const settings = readWorkspaceAgentCostSettings(value)
+  if (!settings || !Object.keys(settings.usdExchangeRates).every((currency) => isKnownCurrencyCode(currency))) {
+    throw new TenantAdministrationError(
+      400,
+      'InvalidTenantAgentCostSettings',
+      `Agent cost settings need a boolean flag and at most ${MAX_AGENT_COST_USD_EXCHANGE_RATES} USD rates keyed by ISO 4217 codes other than USD, each above 0 and at most ${MAX_AGENT_COST_USD_EXCHANGE_RATE} with up to six fraction digits.`,
+    )
+  }
+  return settings
 }
 
 function readTenantGovernanceInput(value: unknown): UpdateTenantGovernanceInput {

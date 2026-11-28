@@ -36,6 +36,43 @@ export const Default: Story = {
   },
 }
 
+/** A Workspace that counts coding agent cost in the budget at 150 JPY per USD (ADR 0119). */
+export const WithAgentCost: Story = {
+  args: {
+    report: {
+      ...projectBudgetReportFixture,
+      agentCost: {
+        status: 'included',
+        estimatedCostMicroUsd: 80_000_000,
+        amountMinor: 12_000,
+        usdExchangeRate: 150,
+        runCount: 14,
+        truncated: false,
+      },
+      budgetConsumedPercent: 40,
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('project-budget-figures')).toHaveTextContent('480,000')
+    await expect(canvas.getByTestId('project-budget-figures')).toHaveTextContent('coding agent')
+  },
+}
+
+/** A Workspace that counts coding agent cost but has no rate for the budget currency. */
+export const AgentCostWithoutRate: Story = {
+  args: {
+    report: {
+      ...projectBudgetReportFixture,
+      agentCost: { status: 'missing-exchange-rate', estimatedCostMicroUsd: 80_000_000, runCount: 14, truncated: true },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('project-budget-agent-cost-missing-rate')).toHaveTextContent('$80.00')
+  },
+}
+
 /** A Project without a budget or baseline yet. */
 export const WithoutBudgetOrBaseline: Story = {
   args: {
